@@ -40,18 +40,18 @@ model Tenant {
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
-  users              User[]
-  agents             Agent[]
-  whatsapp_numbers   WhatsAppNumber[]
-  chatwoot_binding   ChatwootBinding?
-  conversations      Conversation[]
-  wallet             Wallet?
-  wallet_txns        WalletTxn[]
-  usage_meters       UsageMeter[]
-  subscription       Subscription?
-  audit_logs         AuditLog[]
-  consents           Consent[]
-  voicemail_catches  TenantVoicemailCatch[]
+  users             User[]
+  agents            Agent[]
+  whatsapp_numbers  WhatsAppNumber[]
+  chatwoot_binding  ChatwootBinding?
+  conversations     Conversation[]
+  wallet            Wallet?
+  wallet_txns       WalletTxn[]
+  usage_meters      UsageMeter[]
+  subscription      Subscription?
+  audit_logs        AuditLog[]
+  consents          Consent[]
+  voicemail_catches TenantVoicemailCatch[]
 }
 
 // ── Per-tenant voicemail catches (AI missed-call catcher) ────────────────────
@@ -103,7 +103,7 @@ model ConsumerAccount {
   status       String  @default("active") // active | suspended
 
   // ── Voice / PBX provisioning (Magnus) — mirrors Tenant's voice block ──────
-  voice_provisioning_state String  @default("none") // none | pending | completed | failed
+  voice_provisioning_state String  @default("none")
   voice_provisioning_error String?
   magnus_user_id           String?
   magnus_sip_id            String?
@@ -287,6 +287,26 @@ model Message {
   conversation Conversation @relation(fields: [conversation_id], references: [id])
 
   @@index([conversation_id, created_at])
+}
+
+// ── Cross-path inbound dedup (Meta wamid) ─────────────────────────────────────
+//
+// Global idempotency gate keyed ONLY on Meta's message id, independent of
+// any Tenant/Conversation. Exists because Message.wa_message_id and
+// Message.chatwoot_message_id are per-PATH dedup keys (direct WA webhook vs
+// Chatwoot agent-bot) — a message that arrives via BOTH paths (e.g. an A2
+// tenant that also has a stray WhatsAppNumber routing row, or any future
+// dual-delivery scenario) claims two DIFFERENT local ids and both paths
+// independently pass their own dedup check, producing two AI replies for
+// one physical inbound message. This table closes that gap: both
+// lib/agent.ts and app/api/chatwoot/agent-bot/route.ts claim the SAME
+// Meta wamid here, at the earliest possible point, before any reply or
+// side effect. Pattern reused from deepseek /opt/bff-v2
+// app/lib/webhook/ingress.ts checkDedup().
+model InboundDedup {
+  id         String   @id @default(cuid())
+  message_id String   @unique // Meta wamid — the ONLY key; global across all tenants/paths
+  created_at DateTime @default(now())
 }
 
 // ── Wallet + transactions ─────────────────────────────────────────────────────
