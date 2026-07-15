@@ -16,6 +16,14 @@ model Tenant {
   plan           String  @default("starter") // starter | growth | pro
   magnus_user_id String? // linked Magnus account id (shared by wallet + voice)
 
+  // Owner's own WhatsApp number — delivery target for proactive owner
+  // notifications (e.g. the missed-call/voicemail-catch WA alert). Mirrors
+  // Isola Lite's LiteAccount.ownerPhone. E.164, e.g. +17671234567.
+  // Nullable: not every tenant has set this yet; the voicemail poller skips
+  // delivery (but still stores the catch) when unset — see
+  // lib/voicemail-poller.ts deliverCatch().
+  owner_phone String?
+
   // ── Voice / PBX provisioning (Magnus) ────────────────────────────────────
   voice_provisioning_state String  @default("none") // none | pending | completed | failed
   voice_provisioning_error String? // last error detail when state=failed
@@ -32,17 +40,52 @@ model Tenant {
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
-  users            User[]
-  agents           Agent[]
-  whatsapp_numbers WhatsAppNumber[]
-  chatwoot_binding ChatwootBinding?
-  conversations    Conversation[]
-  wallet           Wallet?
-  wallet_txns      WalletTxn[]
-  usage_meters     UsageMeter[]
-  subscription     Subscription?
-  audit_logs       AuditLog[]
-  consents         Consent[]
+  users              User[]
+  agents             Agent[]
+  whatsapp_numbers   WhatsAppNumber[]
+  chatwoot_binding   ChatwootBinding?
+  conversations      Conversation[]
+  wallet             Wallet?
+  wallet_txns        WalletTxn[]
+  usage_meters       UsageMeter[]
+  subscription       Subscription?
+  audit_logs         AuditLog[]
+  consents           Consent[]
+  voicemail_catches  TenantVoicemailCatch[]
+}
+
+// ── Per-tenant voicemail catches (AI missed-call catcher) ────────────────────
+//
+// Port of Isola Lite's LiteCatch (bff-v2 prisma/schema.prisma model
+// LiteCatch, table lite_catches) onto the Foundation multi-tenant Tenant
+// model. liteAccountId → tenant_id; field set is otherwise unchanged.
+// Populated by lib/voicemail-poller.ts polling voice00's Asterisk
+// voicemail spool over read-only SSH, running lib/voicemail-catcher.ts
+// (parse/transcribe/summarize), and delivering a WhatsApp template alert
+// to Tenant.owner_phone when set.
+model TenantVoicemailCatch {
+  id             String   @id @default(cuid())
+  tenant_id      String
+  msgId          String // Asterisk voicemail message id, e.g. "msg0000" — dedup key per tenant
+  callerId       String
+  calledExten    String
+  origtime       Int
+  durationSec    Int
+  transcript     String   @db.Text
+  summary        String   @db.Text
+  intent         String
+  urgency        String   @default("normal")
+  callbackNumber String?
+  confident      Boolean  @default(true)
+  isSpam         Boolean  @default(false)
+  delivered      Boolean  @default(false)
+  created_at     DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+
+  @@unique([tenant_id, msgId])
+  @@index([tenant_id, created_at])
+  @@map("tenant_voicemail_catches")
 }
 
 // ── EMA consumer accounts (slim — NOT a Tenant) ───────────────────────────────
