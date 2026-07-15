@@ -1,0 +1,18 @@
+{
+  "name": "EMA — EPIC Mobile",
+  "short_name": "EMA",
+  "description": "Manage your EMA phone line: softphone setup, wallet top-up, and call settings.",
+  "start_url": "/consumer",
+  "scope": "/consumer",
+  "id": "/consumer",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
+  "theme_color": "#5cb22e",
+  "icons": [
+    { "src": "/consumer/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/consumer/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "/consumer/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/consumer/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

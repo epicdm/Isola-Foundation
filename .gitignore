@@ -47,3 +47,15 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# --- secrets / local artifacts (added 2026-07-15 pre-first-push) ---
+PASTE-ME-TO-APP-SECRETS.txt
+*-SECRETS.txt
+*.secrets
+.env*
+!.env.example
+/1
+# agent memory/skills + local briefs (not app code) — 2026-07-15
+.agents/
+BUILD-BRIEF.md
+WAVEB-SOULS.json

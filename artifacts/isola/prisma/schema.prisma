@@ -1,0 +1,407 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Core tenant/user ─────────────────────────────────────────────────────────
+
+model Tenant {
+  id             String  @id @default(cuid())
+  business_name  String
+  status         String  @default("active") // active | suspended
+  plan           String  @default("starter") // starter | growth | pro
+  magnus_user_id String? // linked Magnus account id (shared by wallet + voice)
+
+  // ── Voice / PBX provisioning (Magnus) ────────────────────────────────────
+  voice_provisioning_state String  @default("none") // none | pending | completed | failed
+  voice_provisioning_error String? // last error detail when state=failed
+  magnus_sip_id            String? // Magnus `sip` table row id
+  magnus_sip_username      String? // SIP registration username
+  magnus_sip_password      String? // SIP registration password (plaintext — shown to owner for softphone setup)
+  magnus_callerid_id       String? // Magnus `callerid` table row id
+  magnus_did_id            String? // Magnus `did` table row id
+  magnus_did_number        String? // the DID phone number, e.g. 1767818xxxx
+  magnus_diddestination_id String? // Magnus `diddestination` table row id (routes the DID)
+  voice_forward_to_cell    Boolean @default(false) // true = DID routes to voice_cell_number instead of the SIP extension
+  voice_cell_number        String? // fallback cell number for forward-to-cell
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  users            User[]
+  agents           Agent[]
+  whatsapp_numbers WhatsAppNumber[]
+  chatwoot_binding ChatwootBinding?
+  conversations    Conversation[]
+  wallet           Wallet?
+  wallet_txns      WalletTxn[]
+  usage_meters     UsageMeter[]
+  subscription     Subscription?
+  audit_logs       AuditLog[]
+  consents         Consent[]
+}
+
+// ── EMA consumer accounts (slim — NOT a Tenant) ───────────────────────────────
+//
+// A ConsumerAccount is a single person with a phone/wallet, provisioned via
+// provisionConsumerVoice() (lib/voice-provisioning-consumer.ts). It is
+// deliberately NOT a Tenant: no business_name, no Agent/WhatsAppNumber/
+// ChatwootBinding/Conversation, no Isola SaaS `plan` (starter/growth/pro).
+// It shares the Wallet/WalletTxn/AuditLog tables with Tenant via a second,
+// optional FK column on each of those models.
+model ConsumerAccount {
+  id           String  @id @default(cuid())
+  phone_number String  @unique // E.164, e.g. +17671234567 — the consumer's own number, not the DID
+  display_name String?
+  status       String  @default("active") // active | suspended
+
+  // ── Voice / PBX provisioning (Magnus) — mirrors Tenant's voice block ──────
+  voice_provisioning_state String  @default("none") // none | pending | completed | failed
+  voice_provisioning_error String?
+  magnus_user_id           String?
+  magnus_sip_id            String?
+  magnus_sip_username      String?
+  magnus_sip_password      String?
+  magnus_callerid_id       String?
+  magnus_did_id            String?
+  magnus_did_number        String?
+  magnus_diddestination_id String?
+  voice_forward_to_cell    Boolean @default(false)
+  voice_cell_number        String?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  wallet      Wallet?
+  wallet_txns WalletTxn[]
+  audit_logs  AuditLog[]
+}
+
+// ── Consumer phone-OTP auth (P2, separate realm from Replit Auth) ─────────────
+//
+// One row per OTP code sent. NOT keyed to ConsumerAccount — the account may
+// not exist yet (first-time signup creates it only after a successful
+// verify). Looked up by phone_number at verify time. Deliberately has no
+// relation to ConsumerAccount/Tenant/User; it is pre-account-creation state.
+model ConsumerOtpRequest {
+  id            String    @id @default(cuid())
+  phone_number  String // E.164, e.g. +17671234567
+  code_hash     String // HMAC-SHA256(phone+code, SESSION_SECRET) — code itself is never stored
+  expires_at    DateTime
+  consumed_at   DateTime?
+  attempt_count Int       @default(0)
+
+  created_at DateTime @default(now())
+
+  @@index([phone_number, created_at])
+}
+
+// NOTE: Prisma's "User" table (capital U) is separate from Drizzle's "users"
+// table (lowercase) used by the Express auth server. PostgreSQL treats them as
+// different identifiers when quoted.
+model User {
+  id                String  @id @default(cuid())
+  tenant_id         String
+  replit_id         String? @unique // from Replit Auth (OIDC sub); null until user signs in for pre-created accounts
+  role              String  @default("owner") // owner | admin
+  email             String?
+  name              String?
+  profile_image_url String?
+  intelligence_tier String  @default("standard") // standard | advanced | expert
+  agent_took_over   Boolean @default(false) // owner paused the AI
+  act_as_tenant_id  String? // admin: currently acting as this tenant
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+}
+
+// ── Agent configuration ───────────────────────────────────────────────────────
+
+model Agent {
+  id                String  @id @default(cuid())
+  tenant_id         String  @unique
+  name              String  @default("Isola Assistant")
+  greeting          String  @default("Hello! How can I help you today?")
+  business_info     String  @default("")
+  knowledge_text    String  @default("")
+  intelligence_tier String  @default("standard")
+  after_hours_start String? // "HH:MM" 24-h local time
+  after_hours_end   String? // "HH:MM" 24-h local time
+  away_message      String  @default("") // sent verbatim during after-hours instead of silence
+  timezone          String  @default("America/Dominica")
+  is_active         Boolean @default(true)
+  brain_provider    String  @default("native") // native | flowise | hermes — which runtime generates replies
+  flowise_flow_id   String? // Flowise chatflow id, required when brain_provider="flowise"
+  // hermes has no dedicated column: HERMES_AGENT_URL is a single shared env var
+  // (not per-tenant), and routing is additionally gated by a hardcoded
+  // phone_number_id allowlist in lib/brain-provider.ts — see HERMES_ALLOWED_PHONE_NUMBER_IDS.
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+}
+
+// ── WhatsApp routing table ────────────────────────────────────────────────────
+
+model WhatsAppNumber {
+  id              String  @id @default(cuid())
+  tenant_id       String
+  phone_number_id String  @unique // Meta phone_number_id — the inbound routing key
+  waba_id         String // Meta WABA id
+  phone_number    String // human-readable e.g. +17678181234
+  display_name    String?
+  access_token    String // per-WABA long-lived token (leave "" when token_env is set)
+  token_env       String? // if set, process.env[token_env] is used instead of access_token
+  coex_mode       Boolean @default(true) // true = coexistence (WA Business app kept)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant        Tenant         @relation(fields: [tenant_id], references: [id])
+  conversations Conversation[]
+}
+
+// ── Chatwoot per-tenant binding ───────────────────────────────────────────────
+
+model ChatwootBinding {
+  id         String  @id @default(cuid())
+  tenant_id  String  @unique
+  base_url   String // e.g. https://inbox.epic.dm
+  account_id String
+  token      String // Chatwoot Application API agent token (set to '' for a2 — bot token used instead)
+  inbox_id   String? // WhatsApp inbox id in Chatwoot
+  mode       String  @default("mirror") // mirror (Wave A: app posts to Chatwoot) | a2 (Chatwoot owns WA, app is AI brain)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+}
+
+// ── Consent (WhatsApp send gate — fail-closed) ────────────────────────────────
+
+model Consent {
+  id           String    @id @default(cuid())
+  tenant_id    String
+  phone        String // E.164 with leading +
+  status       String    @default("opted_in") // opted_in | opted_out
+  opted_in_at  DateTime  @default(now())
+  opted_out_at DateTime?
+  source       String    @default("inbound") // inbound | explicit
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+
+  @@unique([tenant_id, phone])
+}
+
+// ── Conversations + messages (local metadata mirror) ─────────────────────────
+
+model Conversation {
+  id                       String    @id @default(cuid())
+  tenant_id                String
+  whatsapp_number_id       String?
+  chatwoot_conversation_id Int? // mirrored from Chatwoot (unique per tenant)
+  customer_phone           String
+  customer_name            String?
+  status                   String    @default("open") // open | resolved
+  agent_took_over          Boolean   @default(false)
+  human_handling           Boolean   @default(false) // true when a human agent has replied in Chatwoot
+  last_message_at          DateTime?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant          Tenant          @relation(fields: [tenant_id], references: [id])
+  whatsapp_number WhatsAppNumber? @relation(fields: [whatsapp_number_id], references: [id])
+  messages        Message[]
+
+  @@unique([tenant_id, chatwoot_conversation_id])
+  @@index([tenant_id, status])
+  @@index([tenant_id, last_message_at])
+}
+
+model Message {
+  id                  String  @id @default(cuid())
+  conversation_id     String
+  role                String // user | assistant
+  content             String
+  wa_message_id       String? @unique // Meta wamid — dedup key for inbound retries / multi-app delivery
+  chatwoot_message_id Int?    @unique // Chatwoot message id — dedup key for webhook retries
+  tokens_used         Int?
+
+  created_at DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversation_id], references: [id])
+
+  @@index([conversation_id, created_at])
+}
+
+// ── Wallet + transactions ─────────────────────────────────────────────────────
+
+model Wallet {
+  id                  String  @id @default(cuid())
+  tenant_id           String? @unique // exactly one of tenant_id / consumer_account_id is set
+  consumer_account_id String? @unique
+  magnus_user_id      String? // Magnus prepaid user id for balance reads
+  balance_cache       Float   @default(0) // refreshed on view from Magnus
+  currency            String  @default("EC$")
+
+  updated_at DateTime @updatedAt
+
+  tenant           Tenant?          @relation(fields: [tenant_id], references: [id])
+  consumer_account ConsumerAccount? @relation(fields: [consumer_account_id], references: [id])
+  txns             WalletTxn[]
+}
+
+model WalletTxn {
+  id                  String  @id @default(cuid())
+  tenant_id           String? // exactly one of tenant_id / consumer_account_id is set
+  consumer_account_id String?
+  wallet_id           String
+  type                String // topup | debit_minutes | debit_tokens | credit_adjust
+  amount_usd          Float // positive = credit, negative = debit
+  description         String
+  ref                 String? // Fiserv ref or internal ref
+
+  created_at DateTime @default(now())
+
+  tenant           Tenant?          @relation(fields: [tenant_id], references: [id])
+  consumer_account ConsumerAccount? @relation(fields: [consumer_account_id], references: [id])
+  wallet           Wallet           @relation(fields: [wallet_id], references: [id])
+
+  @@index([tenant_id, created_at])
+  @@index([consumer_account_id, created_at])
+}
+
+// ── Usage metering ────────────────────────────────────────────────────────────
+
+model UsageMeter {
+  id           String   @id @default(cuid())
+  tenant_id    String
+  period_start DateTime
+  period_end   DateTime
+  minutes_used Float    @default(0)
+  tokens_used  Int      @default(0)
+  minutes_cost Float    @default(0) // USD
+  tokens_cost  Float    @default(0) // USD
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+
+  @@unique([tenant_id, period_start])
+}
+
+// ── Subscription ──────────────────────────────────────────────────────────────
+
+model Subscription {
+  id        String @id @default(cuid())
+  tenant_id String @unique
+  plan      String @default("starter") // starter=$39 | growth=$89 | pro=$179
+  status    String @default("active")
+
+  started_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+}
+
+// ── Audit log ─────────────────────────────────────────────────────────────────
+
+// ── Marketing funnel (P6 — public EMA landing page) ─────────────────────────
+// Standalone: no FK to ConsumerAccount (a lead is often anonymous — captured
+// before signup). If Odoo CRM is reachable, odoo_lead_id records the mirrored
+// crm.lead id; this table is always the local source of truth regardless.
+model ConsumerLead {
+  id           String  @id @default(cuid())
+  phone_number String? // filled in only if later correlated to a signup
+  utm_source   String?
+  utm_medium   String?
+  utm_campaign String?
+  utm_term     String?
+  utm_content  String?
+  referrer     String?
+  landing_path String?
+  cta          String? // which CTA was clicked: "signup" | "whatsapp" | "view"
+  odoo_lead_id Int? // set only if a real crm.lead was created in Odoo
+
+  created_at DateTime @default(now())
+
+  @@index([created_at])
+  @@index([utm_source, utm_campaign])
+}
+
+model AuditLog {
+  id                  String  @id @default(cuid())
+  tenant_id           String? // exactly one of tenant_id / consumer_account_id is set
+  consumer_account_id String?
+  actor_id            String // User.id, "system", or "agent:<agent_id>" for agent-tool calls
+  action              String // e.g. "agent.update", "wallet.topup", "takeover.enable"
+  entity              String?
+  entity_id           String?
+  request_id          String? // idempotency key for agent-tools.invoke calls (dedup on tenant_id+request_id)
+  meta                Json    @default("{}")
+
+  created_at DateTime @default(now())
+
+  tenant           Tenant?          @relation(fields: [tenant_id], references: [id])
+  consumer_account ConsumerAccount? @relation(fields: [consumer_account_id], references: [id])
+
+  @@index([tenant_id, created_at])
+  @@index([tenant_id, request_id])
+  @@index([consumer_account_id, created_at])
+}
+
+// ── Drizzle-managed auth tables (DO NOT DROP) ────────────────────────────────
+//
+// These two tables are owned by the Express API server (Replit OIDC /
+// connect-pg-simple). They are declared here with @@ignore so that
+// `prisma db push` and `prisma migrate` are aware of them and will never
+// treat them as "unknown" tables to remove.
+//
+// IMPORTANT: never run `prisma db push --force-reset` or accept a
+// "reset the database" prompt — doing so drops ALL tables including these.
+// Use `prisma migrate dev` for schema changes in development, and
+// `prisma migrate deploy` in production.
+//
+// If the tables are ever accidentally dropped, recreate them with:
+//   CREATE TABLE "users" (id varchar PK DEFAULT gen_random_uuid(), email varchar UNIQUE,
+//     first_name varchar, last_name varchar, profile_image_url varchar,
+//     created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+//   CREATE TABLE "sessions" (sid varchar PK, sess jsonb NOT NULL, expire timestamp NOT NULL);
+//   CREATE INDEX "IDX_session_expire" ON "sessions" ("expire");
+
+/// Drizzle-managed Replit Auth user table. Prisma will not modify or drop it.
+model DrizzleUser {
+  id                String   @id @default(dbgenerated("gen_random_uuid()"))
+  email             String?  @unique
+  first_name        String?
+  last_name         String?
+  profile_image_url String?
+  created_at        DateTime @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime @default(now()) @db.Timestamptz(6)
+
+  @@map("users")
+  @@ignore
+}
+
+/// Drizzle-managed connect-pg-simple session store. Prisma will not modify or drop it.
+model DrizzleSession {
+  sid    String   @id
+  sess   Json
+  expire DateTime @db.Timestamp(6)
+
+  @@map("sessions")
+  @@ignore
+}

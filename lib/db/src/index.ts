@@ -13,4 +13,8 @@ if (!process.env.DATABASE_URL) {
 export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 export const db = drizzle(pool, { schema });
 
+// Re-export common drizzle-orm helpers so consumers don't need a separate
+// drizzle-orm dep (avoids peer-dep variant mismatch in TypeScript).
+export { eq, and, or, desc, asc, sql, inArray } from "drizzle-orm";
+
 export * from "./schema";

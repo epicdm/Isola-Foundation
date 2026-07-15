@@ -1,0 +1,32 @@
+kind = "web"
+previewPath = "/"
+title = "Isola"
+version = "1.0.0"
+id = "artifacts/isola"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23359
+
+[services.development]
+run = "pnpm --filter @workspace/isola run dev"
+
+[services.development.env]
+PORT = "23359"
+
+[services.production]
+
+[services.production.build]
+args = ["pnpm", "--filter", "@workspace/isola", "run", "build"]
+
+[services.production.run]
+args = ["pnpm", "--filter", "@workspace/isola", "run", "start"]
+
+[services.production.run.env]
+PORT = "23359"
+NODE_ENV = "production"
+
+[services.production.health.startup]
+path = "/api/healthz"

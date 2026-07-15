@@ -1,0 +1,80 @@
+/*
+label: EPIC
+value: epic
+*/
+
+:root[data-theme-preset="epic"] {
+  --radius: 0.625rem;
+  --card: hsl(0 0% 100%);
+  --card-foreground: hsl(150 15% 12%);
+  --popover: hsl(0 0% 100%);
+  --popover-foreground: hsl(150 15% 12%);
+  /* Canonical EPIC green #5cb22e (hsl(99 59% 44%)) — was hsl(100 58% 44%)
+     (#5bb12f), close but not an exact match to the app/pay-page green. */
+  --primary: hsl(99 59% 44%);
+  --primary-foreground: hsl(0 0% 100%);
+  --secondary: hsl(100 20% 95%);
+  --secondary-foreground: hsl(150 15% 15%);
+  --muted: hsl(150 10% 95.5%);
+  --muted-foreground: hsl(150 8% 45%);
+  --accent: hsl(100 45% 93%);
+  --accent-foreground: hsl(100 58% 22%);
+  --destructive: hsl(0 72% 51%);
+  --border: hsl(150 12% 89%);
+  --input: hsl(150 12% 89%);
+  --ring: hsl(99 59% 44%);
+  --chart-1: hsl(99 59% 44%);
+  --chart-2: hsl(200 70% 50%);
+  --chart-3: hsl(38 92% 50%);
+  --chart-4: hsl(280 60% 60%);
+  --chart-5: hsl(340 70% 55%);
+  --sidebar: hsl(150 20% 98.5%);
+  --sidebar-foreground: hsl(150 15% 22%);
+  --sidebar-primary: hsl(99 59% 44%);
+  --sidebar-primary-foreground: hsl(0 0% 100%);
+  --sidebar-accent: hsl(100 45% 93%);
+  --sidebar-accent-foreground: hsl(100 58% 20%);
+  --sidebar-border: hsl(150 12% 90%);
+  --sidebar-ring: hsl(99 59% 44%);
+  --background: hsl(0 0% 100%);
+  --foreground: hsl(150 15% 12%);
+}
+
+.dark:root[data-theme-preset="epic"] {
+  --background: hsl(150 18% 6.5%);
+  --foreground: hsl(100 15% 94%);
+  --card: hsl(150 16% 9%);
+  --card-foreground: hsl(100 15% 94%);
+  --popover: hsl(150 16% 9%);
+  --popover-foreground: hsl(100 15% 94%);
+  /* Canonical EPIC green #5cb22e (hsl(99 59% 44%)) — was hsl(100 60% 52%)
+     (#6cce3b), a too-bright/too-saturated variant that didn't match the
+     app or pay page. Platform lands in dark mode by default
+     (theme_mode default is 'dark' in lib/preferences/preferences-config.ts),
+     so this dark-mode value is what visitors actually see. */
+  --primary: hsl(99 59% 44%);
+  --primary-foreground: hsl(150 30% 8%);
+  --secondary: hsl(150 14% 15%);
+  --secondary-foreground: hsl(100 15% 94%);
+  --muted: hsl(150 12% 14%);
+  --muted-foreground: hsl(150 8% 62%);
+  --accent: hsl(100 30% 18%);
+  --accent-foreground: hsl(100 55% 78%);
+  --destructive: hsl(0 70% 55%);
+  --border: hsl(150 12% 17%);
+  --input: hsl(150 12% 17%);
+  --ring: hsl(99 59% 44%);
+  --chart-1: hsl(99 59% 44%);
+  --chart-2: hsl(200 70% 55%);
+  --chart-3: hsl(38 92% 55%);
+  --chart-4: hsl(280 60% 65%);
+  --chart-5: hsl(340 70% 60%);
+  --sidebar: hsl(150 18% 7.5%);
+  --sidebar-foreground: hsl(100 12% 88%);
+  --sidebar-primary: hsl(99 59% 44%);
+  --sidebar-primary-foreground: hsl(150 30% 8%);
+  --sidebar-accent: hsl(100 25% 16%);
+  --sidebar-accent-foreground: hsl(100 55% 80%);
+  --sidebar-border: hsl(150 12% 15%);
+  --sidebar-ring: hsl(99 59% 44%);
+}

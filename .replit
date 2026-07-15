@@ -1,4 +1,4 @@
-modules = ["nodejs-24"]
+modules = ["nodejs-24", "python-base-3.13", "postgresql-16"]
 
 [deployment]
 router = "application"
@@ -18,3 +18,33 @@ expertMode = true
 [postMerge]
 path = "scripts/post-merge.sh"
 timeoutMs = 20000
+
+[userenv]
+
+[userenv.shared]
+ADMIN_REPLIT_IDS = "48094983"
+NEXT_PUBLIC_META_APP_ID = "1293246411364782"
+CHATWOOT_ACCOUNT_ID = "5"
+CHATWOOT_URL = "https://inbox.epic.dm"
+FISERV_CHARGE_ENABLED = "false"
+LITE_DOMINICA_RATE_EC_PER_MIN = "0.27"
+LITE_ID_PLAN = "52"
+LITE_NBD_ACCOUNT = "115004377"
+LITE_QR_BASE_URL = "https://bff.epic.dm"
+MAGNUS_URL = "https://voice00.epic.dm/mbilling"
+META_APP_ID = "1293246411364782"
+META_PHONE_ID = "1003873729481088"
+META_WABA_ID = "281225988404808"
+ODOO_DB = "epic-communications-inc"
+ODOO_UID = "2"
+ODOO_URL = "https://epic-communications-inc.odoo.com"
+WHATSAPP_PHONE_ID = "1023804347491554"
+ACCEPT_TEST_WEBHOOK_SECRET = "true"
+FLOWISE_URL = "http://206.53.141.41:3100"
+FLOWISE_AGENT_TOOLS_ENABLED = "true"
+
+[userenv.development]
+EMA_OTP_WHATSAPP_PHONE_NUMBER_ID = "1023804347491554"
+
+[nix]
+channel = "stable-25_05"

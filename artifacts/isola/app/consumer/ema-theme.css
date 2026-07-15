@@ -1,0 +1,240 @@
+/**
+ * EMA consumer app — Phase 1 design-system tokens.
+ *
+ * Scoped under `.ema-scope` (applied on a wrapper div in
+ * app/consumer/layout.tsx) so this restyle never leaks into the Isola B2B
+ * platform, which keeps its own `epic` preset. Overrides the same shadcn
+ * CSS custom properties the B2B side uses (--primary, --card, --radius,
+ * etc.) so every existing shadcn component (Button, Card, Input, Badge...)
+ * picks up the new palette/radii/shadows for free, on every EMA screen
+ * (login, home, wallet, softphone, call, assistant, settings) without
+ * per-component rewrites.
+ *
+ * Fonts are loaded via next/font/google in layout.tsx and exposed as the
+ * --font-display / --font-body CSS variables consumed below.
+ */
+
+.ema-scope {
+  font-family: var(--font-body), system-ui, sans-serif;
+  --ema-orange: #f7941e;
+  --ema-red: #e2372b;
+  --ema-whatsapp: #25d366;
+  --ema-green-deep: #3f7f1f;
+
+  /* Light mode (default palette) */
+  --background: #f6f9f2;
+  --foreground: #1b2416;
+  --card: #ffffff;
+  --card-foreground: #1b2416;
+  --popover: #ffffff;
+  --popover-foreground: #1b2416;
+  --primary: #5cb22e;
+  --primary-foreground: #ffffff;
+  --secondary: #eef4e6;
+  --secondary-foreground: #1b2416;
+  --muted: #eef4e6;
+  --muted-foreground: #6d7a63;
+  --accent: #e7f3dc;
+  --accent-foreground: #2f5c17;
+  --destructive: #e2372b;
+  --destructive-foreground: #ffffff;
+  --success: #5cb22e;
+  --success-foreground: #ffffff;
+  --warning: #f7941e;
+  --warning-foreground: #2a1a05;
+  --border: #e4ecdb;
+  --input: #e4ecdb;
+  --ring: #5cb22e;
+  --chart-1: #5cb22e;
+  --chart-2: #f7941e;
+  --chart-3: #25d366;
+  --chart-4: #e2372b;
+  --chart-5: #3f7f1f;
+  --sidebar: #ffffff;
+  --sidebar-foreground: #1b2416;
+  --sidebar-primary: #5cb22e;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #e7f3dc;
+  --sidebar-accent-foreground: #2f5c17;
+  --sidebar-border: #e4ecdb;
+  --sidebar-ring: #5cb22e;
+
+  --radius: 1.125rem; /* ~18px — card radius baseline; buttons/pills tuned via utility classes below */
+
+  --ema-shadow-soft: 0 20px 45px -18px rgba(63, 127, 31, 0.28), 0 6px 14px -8px rgba(27, 36, 22, 0.12);
+  --ema-glow: radial-gradient(60% 60% at 50% 0%, rgba(92, 178, 46, 0.16) 0%, rgba(92, 178, 46, 0) 70%);
+  --ema-dot: rgba(27, 36, 22, 0.07);
+}
+
+.dark .ema-scope {
+  --background: #0b120c;
+  --foreground: #e9f1e2;
+  --card: #141f16;
+  --card-foreground: #e9f1e2;
+  --popover: #141f16;
+  --popover-foreground: #e9f1e2;
+  --primary: #5cb22e;
+  --primary-foreground: #08110a;
+  --secondary: #1a271c;
+  --secondary-foreground: #e9f1e2;
+  --muted: #1a271c;
+  --muted-foreground: #93a487;
+  --accent: #1d2e1f;
+  --accent-foreground: #a9e28b;
+  --destructive: #e2372b;
+  --destructive-foreground: #ffffff;
+  --success: #5cb22e;
+  --success-foreground: #08110a;
+  --warning: #f7941e;
+  --warning-foreground: #2a1a05;
+  --border: #243528;
+  --input: #243528;
+  --ring: #5cb22e;
+  --chart-1: #5cb22e;
+  --chart-2: #f7941e;
+  --chart-3: #25d366;
+  --chart-4: #e2372b;
+  --chart-5: #93a487;
+  --sidebar: #0f1811;
+  --sidebar-foreground: #e9f1e2;
+  --sidebar-primary: #5cb22e;
+  --sidebar-primary-foreground: #08110a;
+  --sidebar-accent: #1d2e1f;
+  --sidebar-accent-foreground: #a9e28b;
+  --sidebar-border: #243528;
+  --sidebar-ring: #5cb22e;
+
+  --ema-shadow-soft: 0 24px 50px -16px rgba(0, 0, 0, 0.55), 0 8px 18px -8px rgba(92, 178, 46, 0.18);
+  --ema-glow: radial-gradient(60% 60% at 50% 0%, rgba(92, 178, 46, 0.22) 0%, rgba(92, 178, 46, 0) 70%);
+  --ema-dot: rgba(233, 241, 226, 0.07);
+}
+
+/* ── Typography ────────────────────────────────────────────────────── */
+.ema-scope h1,
+.ema-scope h2,
+.ema-scope h3,
+.ema-scope button,
+.ema-scope .font-display,
+.ema-scope .ema-number {
+  font-family: var(--font-display), system-ui, sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.ema-scope .ema-number-xl {
+  font-weight: 800;
+}
+
+/* ── Radii ─────────────────────────────────────────────────────────── */
+.ema-scope .ema-card {
+  border-radius: 1.375rem; /* 22px, within the 18–24 range */
+}
+
+.ema-scope button:not(.ema-pill),
+.ema-scope .ema-btn {
+  border-radius: 0.8125rem; /* 13px */
+}
+
+.ema-scope .ema-pill,
+.ema-scope .rounded-full {
+  border-radius: 999px;
+}
+
+/* ── Shadows ───────────────────────────────────────────────────────── */
+.ema-scope .ema-shadow {
+  box-shadow: var(--ema-shadow-soft);
+}
+
+/* ── Texture: dot-grid + radial brand glow — never a flat background ── */
+.ema-scope .ema-texture {
+  position: relative;
+  background-image:
+    var(--ema-glow),
+    radial-gradient(var(--ema-dot) 1px, transparent 1px);
+  background-size: 100% 100%, 18px 18px;
+  background-position: 0 0, 0 0;
+  background-repeat: no-repeat, repeat;
+  background-color: var(--background);
+}
+
+/* ── Motion ────────────────────────────────────────────────────────── */
+@keyframes ema-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ema-scope .ema-rise {
+  animation: ema-rise 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.ema-scope .ema-rise-1 { animation-delay: 0.05s; }
+.ema-scope .ema-rise-2 { animation-delay: 0.1s; }
+.ema-scope .ema-rise-3 { animation-delay: 0.15s; }
+.ema-scope .ema-rise-4 { animation-delay: 0.19s; }
+.ema-scope .ema-rise-5 { animation-delay: 0.23s; }
+.ema-scope .ema-rise-6 { animation-delay: 0.27s; }
+
+.ema-scope .ema-interactive {
+  transition: transform 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+.ema-scope .ema-interactive:hover {
+  transform: translateY(-2px);
+}
+.ema-scope .ema-interactive:active {
+  transform: translateY(0) scale(0.98);
+}
+
+@keyframes ema-signal-wave {
+  0% {
+    transform: scale(0.85);
+    opacity: 0.55;
+  }
+  70% {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.ema-scope .ema-signal-ring {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  border-radius: 999px;
+  border: 1.5px solid rgba(255, 255, 255, 0.55);
+  animation: ema-signal-wave 2.6s ease-out infinite;
+}
+.ema-scope .ema-signal-ring.ema-signal-ring-2 {
+  animation-delay: 0.9s;
+}
+.ema-scope .ema-signal-ring.ema-signal-ring-3 {
+  animation-delay: 1.8s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ema-scope .ema-rise,
+  .ema-scope .ema-signal-ring,
+  .ema-scope .ema-interactive {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* ── Hero gradient (LINE + BALANCE card) ─────────────────────────────── */
+.ema-scope .ema-hero-gradient {
+  background: linear-gradient(160deg, #5cb22e 0%, #3f7f1f 100%);
+  color: #ffffff;
+}
+
+/* ── WhatsApp continuity pill ─────────────────────────────────────────── */
+.ema-scope .ema-whatsapp-pill {
+  background: color-mix(in srgb, var(--ema-whatsapp) 14%, transparent);
+  color: var(--ema-whatsapp);
+}

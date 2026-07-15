@@ -1,0 +1,182 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Theme preset styles: these override CSS variables based on the selected data-theme-preset.
+   EPIC (Isola's brand green) ships first and is the default preset; the others are ported
+   from Studio Admin (arhamkhnz/next-shadcn-admin-dashboard) and stay available in the switcher. */
+@import "../styles/presets/epic.css";
+@import "../styles/presets/tangerine.css";
+@import "../styles/presets/soft-pop.css";
+@import "../styles/presets/brutalist.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}
+
+/* Default fallback tokens (used only if data-theme-preset is somehow unset). EPIC preset above
+   normally wins via attribute-selector specificity since the boot script always sets the attribute. */
+:root {
+  --radius: 0.625rem;
+  --card: hsl(0 0% 100%);
+  --card-foreground: hsl(150 15% 12%);
+  --popover: hsl(0 0% 100%);
+  --popover-foreground: hsl(150 15% 12%);
+  /* Canonical EPIC green #5cb22e (hsl(99 59% 44%)) — kept in sync with
+     styles/presets/epic.css; was hsl(100 58% 44%) (#5bb12f). */
+  --primary: hsl(99 59% 44%);
+  --primary-foreground: hsl(0 0% 100%);
+  --secondary: hsl(100 20% 95%);
+  --secondary-foreground: hsl(150 15% 15%);
+  --muted: hsl(150 10% 95.5%);
+  --muted-foreground: hsl(150 8% 45%);
+  --accent: hsl(100 45% 93%);
+  --accent-foreground: hsl(100 58% 22%);
+  --destructive: hsl(0 72% 51%);
+  --destructive-foreground: hsl(0 0% 100%);
+  --success: hsl(142 71% 40%);
+  --success-foreground: hsl(0 0% 100%);
+  --warning: hsl(38 92% 50%);
+  --warning-foreground: hsl(30 40% 12%);
+  --border: hsl(150 12% 89%);
+  --input: hsl(150 12% 89%);
+  --ring: hsl(99 59% 44%);
+  --chart-1: hsl(99 59% 44%);
+  --chart-2: hsl(200 70% 50%);
+  --chart-3: hsl(38 92% 50%);
+  --chart-4: hsl(280 60% 60%);
+  --chart-5: hsl(340 70% 55%);
+  --sidebar: hsl(150 20% 98.5%);
+  --sidebar-foreground: hsl(150 15% 22%);
+  --sidebar-primary: hsl(99 59% 44%);
+  --sidebar-primary-foreground: hsl(0 0% 100%);
+  --sidebar-accent: hsl(100 45% 93%);
+  --sidebar-accent-foreground: hsl(100 58% 20%);
+  --sidebar-border: hsl(150 12% 90%);
+  --sidebar-ring: hsl(99 59% 44%);
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'SFMono-Regular', Menlo, Consolas, monospace;
+  --background: hsl(0 0% 100%);
+  --foreground: hsl(150 15% 12%);
+}
+
+.dark {
+  --background: hsl(150 18% 6.5%);
+  --foreground: hsl(100 15% 94%);
+  --card: hsl(150 16% 9%);
+  --card-foreground: hsl(100 15% 94%);
+  --popover: hsl(150 16% 9%);
+  --popover-foreground: hsl(100 15% 94%);
+  /* Canonical EPIC green #5cb22e (hsl(99 59% 44%)) — kept in sync with
+     styles/presets/epic.css; was hsl(100 60% 52%) (#6cce3b). This fallback
+     block only applies if data-theme-preset is somehow unset. */
+  --primary: hsl(99 59% 44%);
+  --primary-foreground: hsl(150 30% 8%);
+  --secondary: hsl(150 14% 15%);
+  --secondary-foreground: hsl(100 15% 94%);
+  --muted: hsl(150 12% 14%);
+  --muted-foreground: hsl(150 8% 62%);
+  --accent: hsl(100 30% 18%);
+  --accent-foreground: hsl(100 55% 78%);
+  --destructive: hsl(0 70% 55%);
+  --destructive-foreground: hsl(0 0% 100%);
+  --success: hsl(142 60% 45%);
+  --success-foreground: hsl(150 30% 8%);
+  --warning: hsl(38 92% 55%);
+  --warning-foreground: hsl(30 40% 10%);
+  --border: hsl(150 12% 17%);
+  --input: hsl(150 12% 17%);
+  --ring: hsl(99 59% 44%);
+  --chart-1: hsl(99 59% 44%);
+  --chart-2: hsl(200 70% 55%);
+  --chart-3: hsl(38 92% 55%);
+  --chart-4: hsl(280 60% 65%);
+  --chart-5: hsl(340 70% 60%);
+  --sidebar: hsl(150 18% 7.5%);
+  --sidebar-foreground: hsl(100 12% 88%);
+  --sidebar-primary: hsl(99 59% 44%);
+  --sidebar-primary-foreground: hsl(150 30% 8%);
+  --sidebar-accent: hsl(100 25% 16%);
+  --sidebar-accent-foreground: hsl(100 55% 80%);
+  --sidebar-border: hsl(150 12% 15%);
+  --sidebar-ring: hsl(99 59% 44%);
+}
+
+/* Isola brand tokens that sit outside the preset system (all presets share these). */
+:root {
+  --success: hsl(142 71% 40%);
+  --success-foreground: hsl(0 0% 100%);
+  --warning: hsl(38 92% 50%);
+  --warning-foreground: hsl(30 40% 12%);
+}
+.dark {
+  --success: hsl(142 60% 45%);
+  --success-foreground: hsl(150 30% 8%);
+  --warning: hsl(38 92% 55%);
+  --warning-foreground: hsl(30 40% 10%);
+}
+
+/* Disables transitions during a theme-mode flip to avoid a color flash (ported from Studio Admin). */
+.disable-transitions,
+.disable-transitions * {
+  transition: none !important;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply font-sans antialiased bg-background text-foreground;
+    font-size: 14px;
+  }
+}
+
+@layer utilities {
+  .badge-success {
+    @apply bg-success/10 text-success border-success/20;
+  }
+  .badge-warning {
+    @apply bg-warning/10 text-amber-600 dark:text-amber-400 border-warning/20;
+  }
+}
