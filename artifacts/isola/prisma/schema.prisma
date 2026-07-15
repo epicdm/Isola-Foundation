@@ -1,1 +1,470 @@
-Z2VuZXJhdG9yIGNsaWVudCB7CiAgcHJvdmlkZXIgPSAicHJpc21hLWNsaWVudC1qcyIKfQoKZGF0YXNvdXJjZSBkYiB7CiAgcHJvdmlkZXIgPSAicG9zdGdyZXNxbCIKICB1cmwgICAgICA9IGVudigiREFUQUJBU0VfVVJMIikKfQoKLy8g4pSA4pSAIENvcmUgdGVuYW50L3VzZXIg4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSAClxc4pSA4pSA4pSAClxlbW9kZWwgVGVuYW50IHsKICBpZCAgICAgICAgICAgICBTdHJpbmcgIEBpZCBAZGVmYXVsdChjdWlkKCkpCiAgYnVzaW5lc3NfbmFtZSAgU3RyaW5nCiAgc3RhdHVzICAgICAgICAgU3RyaW5nICBAZGVmYXVsdCgiYWN0aXZlIikgLy8gYWN0aXZlIHwgc3VzcGVuZGVkCiAgcGxhbiAgICAgICAgICAgU3RyaW5nICBAZGVmYXVsdCgic3RhcnRlciIpIC8vIHN0YXJ0ZXIgfCBncm93dGggfCBwcm8KICBtYWdudXNfdXNlcl9pZCBTdHJpbmc/IC8vIGxpbmtlZCBNYWdudXMgYWNjb3VudCBpZCAoc2hhcmVkIGJ5IHdhbGxldCArIHZvaWNlKQoKICAvLyDilIDilIAgVm9pY2UgLyBQQlggcHJvdmlzaW9uaW5nIChNYWdudXMpIOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgArCoHZvaWNlX3Byb3Zpc2lvbmluZ19zdGF0ZSBTdHJpbmcgIEBkZWZhdWx0KCJub25lIikgLy8gbm9uZSB8IHBlbmRpbmcgfCBjb21wbGV0ZWQgfCBmYWlsZWQKICB2b2ljZV9wcm92aXNpb25pbmdfZXJyb3IgU3RyaW5nPyAvLyBsYXN0IGVycm9yIGRldGFpbCB3aGVuIHN0YXRlPWZhaWxlZAogIG1hZ251c19zaXBfaWQgICAgICAgICAgICBTdHJpbmc/IC8vIE1hZ251cyBgc2lwYCB0YWJsZSByb3cgaWQKICBtYWdudXNfc2lwX3VzZXJuYW1lICAgICAgU3RyaW5nPyAvLyBTSVAgcmVnaXN0cmF0aW9uIHVzZXJuYW1lCiAgbWFnbnVzX3NpcF9wYXNzd29yZCAgICAgIFN0cmluZz8gLy8gU0lQIHJlZ2lzdHJhdGlvbiBwYXNzd29yZCAocGxhaW50ZXh0IOKAlCBzaG93biB0byBvd25lciBmb3Igc29mdHBob25lIHNldHVwKQogIG1hZ251c19jYWxsZXJpZF9pZCAgICAgICBTdHJpbmc/IC8vIE1hZ251cyBgY2FsbGVyaWRgIHRhYmxlIHJvdyBpZAogIG1hZ251c19kaWRfaWQgICAgICAgICAgICBTdHJpbmc/IC8vIE1hZ251cyBgZGlkYCB0YWJsZSByb3cgaWQKICBtYWdudXNfZGlkX251bWJlciAgICAgICAgU3RyaW5nPyAvLyB0aGUgRElEIHBob25lIG51bWJlciwgZS5nLiAxNzY3ODE4eHh4eAogIG1hZ251c19kaWRkZXN0aW5hdGlvbl9pZCBTdHJpbmc/IC8vIE1hZ251cyBgZGlkZGVzdGluYXRpb25gIHRhYmxlIHJvdyBpZCAocm91dGVzIHRoZSBESUQpCiAgdm9pY2VfZm9yd2FyZF90b19jZWxsICAgIEJvb2xlYW4gQGRlZmF1bHQoZmFsc2UpIC8vIHRydWUgPSBESUQgcm91dGVzIHRvIHZvaWNlX2NlbGxfbnVtYmVyIGluc3RlYWQgb2YgdGhlIFNJUCBleHRlbnNpb24KICB2b2ljZV9jZWxsX251bWJlciAgICAgICAgU3RyaW5nPyAvLyBmYWxsYmFjayBjZWxsIG51bWJlciBmb3IgZm9yd2FyZC10by1jZWxsCgogIGNyZWF0ZWRfYXQgRGF0ZVRpbWUgQGRlZmF1bHQobm93KCkpCiAgdXBkYXRlZF9hdCBEYXRlVGltZSBAdXBkYXRlZEF0CgogIHVzZXJzICAgICAgICAgICAgVXNlcltdCiAgYWdlbnRzICAgICAgICAgICBBZ2VudFtdCiAgd2hhdHNhcHBfbnVtYmVycyBXaGF0c0FwcE51bWJlcltdCiAgY2hhdHdvb3RfYmluZGluZyBDaGF0d29vdEJpbmRpbmc/CiAgY29udmVyc2F0aW9ucyAgICBDb252ZXJzYXRpb25bXQogIHdhbGxldCAgICAgICAgICAgV2FsbGV0PwogIHdhbGxldF90eG5zICAgICAgV2FsbGV0VHhuW10KICB1c2FnZV9tZXRlcnMgICAgIFVzYWdlTWV0ZXJbXQogIHN1YnNjcmlwdGlvbiAgICAgU3Vic2NyaXB0aW9uPwogIGF1ZGl0X2xvZ3MgICAgICAgQXVkaXRMb2dbXQogIGNvbnNlbnRzICAgICAgICAgQ29uc2VudFtdCn0KCi8vIOKUgOKUgCBFTUEgY29uc3VtZXIgYWNjb3VudHMgKHNsaW0g4oCUIE5PVCBhIFRlbmFudCkg4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSACi8vCi8vIEEgQ29uc3VtZXJBY2NvdW50IGlzIGEgc2luZ2xlIHBlcnNvbiB3aXRoIGEgcGhvbmUvd2FsbGV0LCBwcm92aXNpb25lZCB2aWEKLy8gcHJvdmlzaW9uQ29uc3VtZXJWb2ljZSgpIChsaWIvdm9pY2UtcHJvdmlzaW9uaW5nLWNvbnN1bWVyLnRzKS4gSXQgaXMKLy8gZGVsaWJlcmF0ZWx5IE5PVCBhIFRlbmFudDogbm8gYnVzaW5lc3NfbmFtZSwgbm8gQWdlbnQvV2hhdHNBcHBOdW1iZXIvCi8vIENoYXR3b290QmluZGluZy9Db252ZXJzYXRpb24sIG5vIElzb2xhIFNhYVMgYHBsYW5gIChzdGFydGVyL2dyb3d0aC9wcm8pLgovLyBJdCBzaGFyZXMgdGhlIFdhbGxldC9XYWxsZXRUeG4vQXVkaXRMb2cgdGFibGVzIHdpdGggVGVuYW50IHZpYSBhIHNlY29uZCwKLy8gb3B0aW9uYWwgRksgY29sdW1uIG9uIGVhY2ggb2YgdGhvc2UgbW9kZWxzLgptb2RlbCBDb25zdW1lckFjY291bnQgewogIGlkICAgICAgICAgICBTdHJpbmcgIEBpZCBAZGVmYXVsdChjdWlkKCkpCiAgcGhvbmVfbnVtYmVyIFN0cmluZyAgQHVuaXF1ZSAvLyBFLjE2NCwgZS5nLiArMTc2NzEyMzQ1Njcg4oCUIHRoZSBjb25zdW1lcidzIG93biBudW1iZXIsIG5vdCB0aGUgRElECiAgZGlzcGxheV9uYW1lIFN0cmluZz8KICBzdGF0dXMgICAgICAgU3RyaW5nICBAZGVmYXVsdCgiYWN0aXZlIikgLy8gYWN0aXZlIHwgc3VzcGVuZGVkCgogIC8vIOKUgOKUgCBWb2ljZSAvIFBCWCBwcm92aXNpb25pbmcgKE1hZ251cykg4oCUIG1pcnJvcnMgVGVuYW50J3Mgdm9pY2UgYmxvY2sg4pSA4pSA4pSA4pSA4pSACiAgdm9pY2VfcHJvdmlzaW9uaW5nX3N0YXRlIFN0cmluZyAgQGRlZmF1bHQoIm5vbmUiKQogIHZvaWNlX3Byb3Zpc2lvbmluZ19lcnJvciBTdHJpbmc/CiAgbWFnbnVzX3VzZXJfaWQgICAgICAgICAgIFN0cmluZz8KICBtYWdudXNfc2lwX2lkICAgICAgICAgICAgU3RyaW5nPwogIG1hZ251c19zaXBfdXNlcm5hbWUgICAgICBTdHJpbmc/CiAgbWFnbnVzX3NpcF9wYXNzd29yZCAgICAgIFN0cmluZz8KICBtYWdudXNfY2FsbGVyaWRfaWQgICAgICAgU3RyaW5nPwogIG1hZ251c19kaWRfaWQgICAgICAgICAgICBTdHJpbmc/CiAgbWFnbnVzX2RpZF9udW1iZXIgICAgICAgIFN0cmluZz8KICBtYWdudXNfZGlkZGVzdGluYXRpb25faWQgU3RyaW5nPwogIHZvaWNlX2ZvcndhcmRfdG9fY2VsbCAgICBCb29sZWFuIEBkZWZhdWx0KGZhbHNlKQogIHZvaWNlX2NlbGxfbnVtYmVyICAgICAgICBTdHJpbmc/CgogIGNyZWF0ZWRfYXQgRGF0ZVRpbWUgQGRlZmF1bHQobm93KCkpCiAgdXBkYXRlZF9hdCBEYXRlVGltZSBAdXBkYXRlZEF0CgogIHdhbGxldCAgICAgIFdhbGxldD8KICB3YWxsZXRfdHhucyBXYWxsZXRUeG5bXQogIGF1ZGl0X2xvZ3MgIEF1ZGl0TG9nW10KfQoKLy8g4pSA4pSAIENvbnN1bWVyIHBob25lLU9UUCBhdXRoIChQMiwgc2VwYXJhdGUgcmVhbG0gZnJvbSBSZXBsaXQgQXV0aCkg4pSA4pSA4pSA4pSA4pSA4pSA4pSACi8vCi8vIE9uZSByb3cgcGVyIE9UUCBjb2RlIHNlbnQuIE5PVCBrZXllZCB0byBDb25zdW1lckFjY291bnQg4oCUIHRoZSBhY2NvdW50IG1heQovLyBub3QgZXhpc3QgeWV0IChmaXJzdC10aW1lIHNpZ251cCBjcmVhdGVzIGl0IG9ubHkgYWZ0ZXIgYSBzdWNjZXNzZnVsCi8vIHZlcmlmeSkuIExvb2tlZCB1cCBieSBwaG9uZV9udW1iZXIgYXQgdmVyaWZ5IHRpbWUuIERlbGliZXJhdGVseSBoYXMgbm8KLy8gcmVsYXRpb24gdG8gQ29uc3VtZXJBY2NvdW50L1RlbmFudC9Vc2VyOyBpdCBpcyBwcmUtYWNjb3VudC1jcmVhdGlvbiBzdGF0ZS4KbW9kZWwgQ29uc3VtZXJPdHBSZXF1ZXN0IHsKICBpZCAgICAgICAgICAgIFN0cmluZyAgICBAaWQgQGRlZmF1bHQoY3VpZCgpKQogIHBob25lX251bWJlciAgU3RyaW5nIC8vIEUuMTY0LCBlLmcuICsxNzY3MTIzNDU2NwogIGNvZGVfaGFzaCAgICAgU3RyaW5nIC8vIEhNQUMtU0hBMjU2KHBob25lK2NvZGUsIFNFU1NJT05fU0VDUkVUKSDigJQgY29kZSBpdHNlbGYgaXMgbmV2ZXIgc3RvcmVkCiAgZXhwaXJlc19hdCAgICBEYXRlVGltZQogIGNvbnN1bWVkX2F0ICAgRGF0ZVRpbWU/CiAgYXR0ZW1wdF9jb3VudCBJbnQgICAgICAgQGRlZmF1bHQoMCkKCiAgY3JlYXRlZF9hdCBEYXRlVGltZSBAZGVmYXVsdChub3coKSkKCiAgQEBpbmRleChbcGhvbmVfbnVtYmVyLCBjcmVhdGVkX2F0XSkKfQoKLy8gTk9URTogUHJpc21hJ3MgIlVzZXIiIHRhYmxlIChjYXBpdGFsIFUpIGlzIHNlcGFyYXRlIGZyb20gRHJpenpsZSdzICJ1c2VycyIKLy8gdGFibGUgKGxvd2VyY2FzZSkgdXNlZCBieSB0aGUgRXhwcmVzcyBhdXRoIHNlcnZlci4gUG9zdGdyZVNRTCB0cmVhdHMgdGhlbSBhcwovLyBkaWZmZXJlbnQgaWRlbnRpZmllcnMgd2hlbiBxdW90ZWQuCm1vZGVsIFVzZXIgewogIGlkICAgICAgICAgICAgICAgIFN0cmluZyAgQGlkIEBkZWZhdWx0KGN1aWQoKSkKICB0ZW5hbnRfaWQgICAgICAgICBTdHJpbmcKICByZXBsaXRfaWQgICAgICAgICBTdHJpbmc/IEB1bmlxdWUgLy8gZnJvbSBSZXBsaXQgQXV0aCAoT0lEQyBzdWIpOyBudWxsIHVudGlsIHVzZXIgc2lnbnMgaW4gZm9yIHByZS1jcmVhdGVkIGFjY291bnRzCiAgcm9sZSAgICAgICAgICAgICAgU3RyaW5nICBAZGVmYXVsdCgib3duZXIiKSAvLyBvd25lciB8IGFkbWluCiAgZW1haWwgICAgICAgICAgICAgU3RyaW5nPwogIG5hbWUgICAgICAgICAgICAgIFN0cmluZz8KICBwcm9maWxlX2ltYWdlX3VybCBTdHJpbmc/CiAgaW50ZWxsaWdlbmNlX3RpZXIgU3RyaW5nICBAZGVmYXVsdCgic3RhbmRhcmQiKSAvLyBzdGFuZGFyZCB8IGFkdmFuY2VkIHwgZXhwZXJ0CiAgYWdlbnRfdG9va19vdmVyICAgQm9vbGVhbiBAZGVmYXVsdChmYWxzZSkgLy8gb3duZXIgcGF1c2VkIHRoZSBBSQogIGFjdF9hc190ZW5hbnRfaWQgIFN0cmluZz8gLy8gYWRtaW46IGN1cnJlbnRseSBhY3RpbmcgYXMgdGhpcyB0ZW5hbnQKCiAgY3JlYXRlZF9hdCBEYXRlVGltZSBAZGVmYXVsdChub3coKSkKICB1cGRhdGVkX2F0IERhdGVUaW1lIEB1cGRhdGVkQXQKCiAgdGVuYW50IFRlbmFudCBAcmVsYXRpb24oZmllbGRzOiBbdGVuYW50X2lkXSwgcmVmZXJlbmNlczogW2lkXSkKfQoKLy8g4pSA4pSAIEFnZW50IGNvbmZpZ3VyYXRpb24g4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSAClxc4pSAClxlbW9kZWwgQWdlbnQgewogIGlkICAgICAgICAgICAgICAgIFN0cmluZyAgQGlkIEBkZWZhdWx0KGN1aWQoKSkKICB0ZW5hbnRfaWQgICAgICAgICBTdHJpbmcgIEB1bmlxdWUKICBuYW1lICAgICAgICAgICAgICBTdHJpbmcgIEBkZWZhdWx0KCJJc29sYSBBc3Npc3RhbnQiKQogIGdyZWV0aW5nICAgICAgICAgIFN0cmluZyAgQGRlZmF1bHQoIkhlbGxvISBIb3cgY2FuIEkgaGVscCB5b3UgdG9kYXk/IikKICBidXNpbmVzc19pbmZvICAgICBTdHJpbmcgIEBkZWZhdWx0KCIiKQogIGtub3dsZWRnZV90ZXh0ICAgIFN0cmluZyAgQGRlZmF1bHQoIiIpCiAgaW50ZWxsaWdlbmNlX3RpZXIgU3RyaW5nICBAZGVmYXVsdCgic3RhbmRhcmQiKQogIGFmdGVyX2hvdXJzX3N0YXJ0IFN0cmluZz8gLy8gIkhIOk1NIiAyNC1oIGxvY2FsIHRpbWUKICBhZnRlcl9ob3Vyc19lbmQgICBTdHJpbmc/IC8vICJISDpNTSIgMjQtaCBsb2NhbCB0aW1lCiAgYXdheV9tZXNzYWdlICAgICAgU3RyaW5nICBAZGVmYXVsdCgiIikgLy8gc2VudCB2ZXJiYXRpbSBkdXJpbmcgYWZ0ZXItaG91cnMgaW5zdGVhZCBvZiBzaWxlbmNlCiAgdGltZXpvbmUgICAgICAgICAgU3RyaW5nICBAZGVmYXVsdCgiQW1lcmljYS9Eb21pbmljYSIpCiAgaXNfYWN0aXZlICAgICAgICAgQm9vbGVhbiBAZGVmYXVsdCh0cnVlKQogIGJyYWluX3Byb3ZpZGVyICAgIFN0cmluZyAgQGRlZmF1bHQoIm5hdGl2ZSIpIC8vIG5hdGl2ZSB8IGZsb3dpc2UgfCBoZXJtZXMg4oCUIHdoaWNoIHJ1bnRpbWUgZ2VuZXJhdGVzIHJlcGxpZXMKICBmbG93aXNlX2Zsb3dfaWQgICBTdHJpbmc/IC8vIEZsb3dpc2UgY2hhdGZsb3cgaWQsIHJlcXVpcmVkIHdoZW4gYnJhaW5fcHJvdmlkZXI9ImZsb3dpc2UiCiAgLy8gaGVybWVzIGhhcyBubyBkZWRpY2F0ZWQgY29sdW1uOiBIRVJNRVNfQUdFTlRfVVJMIGlzIGEgc2luZ2xlIHNoYXJlZCBlbnYgdmFyCiAgLy8gKG5vdCBwZXItdGVuYW50KSwgYW5kIHJvdXRpbmcgaXMgYWRkaXRpb25hbGx5IGdhdGVkIGJ5IGEgaGFyZGNvZGVkCiAgLy8gcGhvbmVfbnVtYmVyX2lkIGFsbG93bGlzdCBpbiBsaWIvYnJhaW4tcHJvdmlkZXIudHMg4oCUIHNlZSBIRVJNRVNfQUxMT1dFRF9QSE9ORV9OVU1CRVJfSURTLgoKICBjcmVhdGVkX2F0IERhdGVUaW1lIEBkZWZhdWx0KG5vdygpKQogIHVwZGF0ZWRfYXQgRGF0ZVRpbWUgQHVwZGF0ZWRBdAoKICB0ZW5hbnQgVGVuYW50IEByZWxhdGlvbihmaWVsZHM6IFt0ZW5hbnRfaWRdLCByZWZlcmVuY2VzOiBbaWRdKQp9CgovLyDilIDilIAgV2hhdHNBcHAgcm91dGluZyB0YWJsZSDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIAKbW9kZWwgV2hhdHNBcHBOdW1iZXIgewogIGlkICAgICAgICAgICAgICBTdHJpbmcgIEBpZCBAZGVmYXVsdChjdWlkKCkpCiAgdGVuYW50X2lkICAgICAgIFN0cmluZwogIHBob25lX251bWJlcl9pZCBTdHJpbmcgIEB1bmlxdWUgLy8gTWV0YSBwaG9uZV9udW1iZXJfaWQg4oCUIHRoZSBpbmJvdW5kIHJvdXRpbmcga2V5CiAgd2FiYV9pZCAgICAgICAgIFN0cmluZyAvLyBNZXRhIFdBQkEgaWQKICBwaG9uZV9udW1iZXIgICAgU3RyaW5nIC8vIGh1bWFuLXJlYWRhYmxlIGUuZy4gKzE3Njc4MTgxMjM0CiAgZGlzcGxheV9uYW1lICAgIFN0cmluZz8KICBhY2Nlc3NfdG9rZW4gICAgU3RyaW5nIC8vIHBlci1XQUJBIGxvbmctbGl2ZWQgdG9rZW4gKGxlYXZlICIiIHdoZW4gdG9rZW5fZW52IGlzIHNldCkKICB0b2tlbl9lbnYgICAgICAgU3RyaW5nPyAvLyBpZiBzZXQsIHByb2Nlc3MuZW52W3Rva2VuX2Vudl0gaXMgdXNlZCBpbnN0ZWFkIG9mIGFjY2Vzc190b2tlbgogIGNvZXhfbW9kZSAgICAgICBCb29sZWFuIEBkZWZhdWx0KHRydWUpIC8vIHRydWUgPSBjb2V4aXN0ZW5jZSAoV0EgQnVzaW5lc3MgYXBwIGtlcHQpCgogIGNyZWF0ZWRfYXQgRGF0ZVRpbWUgQGRlZmF1bHQobm93KCkpCiAgdXBkYXRlZF9hdCBEYXRlVGltZSBAdXBkYXRlZEF0CgogIHRlbmFudCAgICAgICAgVGVuYW50ICAgICAgICAgQHJlbGF0aW9uKGZpZWxkczogW3RlbmFudF9pZF0sIHJlZmVyZW5jZXM6IFtpZF0pCiAgY29udmVyc2F0aW9ucyBDb252ZXJzYXRpb25bXQp9CgovLyDilIDilIAgQ2hhdHdvb3QgcGVyLXRlbmFudCBiaW5kaW5nIOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgArCoG1vZGVsIENoYXR3b290QmluZGluZyB7CiAgaWQgICAgICAgICBTdHJpbmcgIEBpZCBAZGVmYXVsdChjdWlkKCkpCiAgdGVuYW50X2lkICBTdHJpbmcgIEB1bmlxdWUKICBiYXNlX3VybCAgIFN0cmluZyAvLyBlLmcuIGh0dHBzOi8vaW5ib3guZXBpYy5kbQogIGFjY291bnRfaWQgU3RyaW5nCiAgdG9rZW4gICAgICBTdHJpbmcgLy8gQ2hhdHdvb3QgQXBwbGljYXRpb24gQVBJIGFnZW50IHRva2VuIChzZXQgdG8gJycgZm9yIGEyIOKAlCBib3QgdG9rZW4gdXNlZCBpbnN0ZWFkKQogIGluYm94X2lkICAgU3RyaW5nPyAvLyBXaGF0c0FwcCBpbmJveCBpZCBpbiBDaGF0d29vdAogIG1vZGUgICAgICAgU3RyaW5nICBAZGVmYXVsdCgibWlycm9yIikgLy8gbWlycm9yIChXYXZlIEE6IGFwcCBwb3N0cyB0byBDaGF0d29vdCkgfCBhMiAoQ2hhdHdvb3Qgb3ducyBXQSBjaGFubmVsLCBhcHAgaXMgQUkgYnJhaW4pCgogIGNyZWF0ZWRfYXQgRGF0ZVRpbWUgQGRlZmF1bHQobm93KCkpCiAgdXBkYXRlZF9hdCBEYXRlVGltZSBAdXBkYXRlZEF0CgogIHRlbmFudCBUZW5hbnQgQHJlbGF0aW9uKGZpZWxkczogW3RlbmFudF9pZF0sIHJlZmVyZW5jZXM6IFtpZF0pCn0KCi8vIOKUgOKUgCBDb25zZW50IChXaGF0c0FwcCBzZW5kIGdhdGUg4oCUIGZhaWwtY2xvc2VkKSDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIAKbW9kZWwgQ29uc2VudCB7CiAgaWQgICAgICAgICAgIFN0cmluZyAgICBAaWQgQGRlZmF1bHQoY3VpZCgpKQogIHRlbmFudF9pZCAgICBTdHJpbmcKICBwaG9uZSAgICAgICAgU3RyaW5nIC8vIEUuMTY0IHdpdGggbGVhZGluZyArCiAgc3RhdHVzICAgICAgIFN0cmluZyAgICBAZGVmYXVsdCgib3B0ZWRfaW4iKSAvLyBvcHRlZF9pbiB8IG9wdGVkX291dAogIG9wdGVkX2luX2F0ICBEYXRlVGltZSAgQGRlZmF1bHQobm93KCkpCiAgb3B0ZWRfb3V0X2F0IERhdGVUaW1lPwogIHNvdXJjZSAgICAgICBTdHJpbmcgICAgQGRlZmF1bHQoImluYm91bmQiKSAvLyBpbmJvdW5kIHwgZXhwbGljaXQKCiAgY3JlYXRlZF9hdCBEYXRlVGltZSBAZGVmYXVsdChub3coKSkKICB1cGRhdGVkX2F0IERhdGVUaW1lIEB1cGRhdGVkQXQKCiAgdGVuYW50IFRlbmFudCBAcmVsYXRpb24oZmllbGRzOiBbdGVuYW50X2lkXSwgcmVmZXJlbmNlczogW2lkXSkKCiAgQEB1bmlxdWUoW3RlbmFudF9pZCwgcGhvbmVdKQp9CgovLyDilIDilIAgQ29udmVyc2F0aW9ucyArIG1lc3NhZ2VzIChsb2NhbCBtZXRhZGF0YSBtaXJyb3IpIOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgArCoG1vZGVsIENvbnZlcnNhdGlvbiB7CiAgaWQgICAgICAgICAgICAgICAgICAgICAgIFN0cmluZyAgICBAaWQgQGRlZmF1bHQoY3VpZCgpKQogIHRlbmFudF9pZCAgICAgICAgICAgICAgICBTdHJpbmcKICB3aGF0c2FwcF9udW1iZXJfaWQgICAgICAgU3RyaW5nPwogIGNoYXR3b290X2NvbnZlcnNhdGlvbl9pZCBJbnQ/IC8vIG1pcnJvcmVkIGZyb20gQ2hhdHdvb3QgKHVuaXF1ZSBwZXIgdGVuYW50KQogIGN1c3RvbWVyX3Bob25lICAgICAgICAgICBTdHJpbmcKICBjdXN0b21lcl9uYW1lICAgICAgICAgICAgU3RyaW5nPwogIHN0YXR1cyAgICAgICAgICAgICAgICAgICBTdHJpbmcgICAgQGRlZmF1bHQoIm9wZW4iKSAvLyBvcGVuIHwgcmVzb2x2ZWQKICBhZ2VudF90b29rX292ZXIgICAgICAgICAgQm9vbGVhbiAgIEBkZWZhdWx0KGZhbHNlKQogIGh1bWFuX2hhbmRsaW5nICAgICAgICAgICBCb29sZWFuICAgQGRlZmF1bHQoZmFsc2UpIC8vIHRydWUgd2hlbiBhIGh1bWFuIGFnZW50IGhhcyByZXBsaWVkIGluIENoYXR3b290CiAgbGFzdF9tZXNzYWdlX2F0ICAgICAgICAgIERhdGVUaW1lPwoKICBjcmVhdGVkX2F0IERhdGVUaW1lIEBkZWZhdWx0KG5vdygpKQogIHVwZGF0ZWRfYXQgRGF0ZVRpbWUgQHVwZGF0ZWRBdAoKICB0ZW5hbnQgICAgICAgICAgVGVuYW50ICAgICAgICAgIEByZWxhdGlvbihmaWVsZHM6IFt0ZW5hbnRfaWRdLCByZWZlcmVuY2VzOiBbaWRdKQogIHdoYXRzYXBwX251bWJlciBXaGF0c0FwcE51bWJlcj8gQHJlbGF0aW9uKGZpZWxkczogW3doYXRzYXBwX251bWJlcl9pZF0sIHJlZmVyZW5jZXM6IFtpZF0pCiAgbWVzc2FnZXMgICAgICAgIE1lc3NhZ2VbXQoKICBAQHVuaXF1ZShbdGVuYW50X2lkLCBjaGF0d29vdF9jb252ZXJzYXRpb25faWRdKQogIEBAaW5kZXgoW3RlbmFudF9pZCwgc3RhdHVzXSkKICBAQGluZGV4KFt0ZW5hbnRfaWQsIGxhc3RfbWVzc2FnZV9hdF0pCn0KCm1vZGVsIE1lc3NhZ2UgewogIGlkICAgICAgICAgICAgICAgICAgU3RyaW5nICBAaWQgQGRlZmF1bHQoY3VpZCgpKQogIGNvbnZlcnNhdGlvbl9pZCAgICAgU3RyaW5nCiAgcm9sZSAgICAgICAgICAgICAgICBTdHJpbmcgLy8gdXNlciB8IGFzc2lzdGFudAogIGNvbnRlbnQgICAgICAgICAgICAgU3RyaW5nCiAgd2FfbWVzc2FnZV9pZCAgICAgICBTdHJpbmc/IEB1bmlxdWUgLy8gTWV0YSB3YW1pZCDigJQgZGVkdXAga2V5IGZvciBpbmJvdW5kIHJldHJpZXMgLyBtdWx0aS1hcHAgZGVsaXZlcnkKICBjaGF0d29vdF9tZXNzYWdlX2lkIEludD8gICAgQHVuaXF1ZSAvLyBDaGF0d29vdCBtZXNzYWdlIGlkIOKAlCBkZWR1cCBrZXkgZm9yIHdlYmhvb2sgcmV0cmllcwogIHRva2Vuc191c2VkICAgICAgICAgSW50PwoKICBjcmVhdGVkX2F0IERhdGVUaW1lIEBkZWZhdWx0KG5vdygpKQoKICBjb252ZXJzYXRpb24gQ29udmVyc2F0aW9uIEByZWxhdGlvbihmaWVsZHM6IFtjb252ZXJzYXRpb25faWRdLCByZWZlcmVuY2VzOiBbaWRdKQoKICBAQGluZGV4KFtjb252ZXJzYXRpb25faWQsIGNyZWF0ZWRfYXRdKQp9CgovLyDilIDilIAgQ3Jvc3MtcGF0aCBpbmJvdW5kIGRlZHVwIChNZXRhIHdhbWlkKSDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIAKLy8KLy8gR2xvYmFsIGlkZW1wb3RlbmN5IGdhdGUga2V5ZWQgT05MWSBvbiBNZXRhJ3MgbWVzc2FnZSBpZCwgaW5kZXBlbmRlbnQgb2YKLy8gYW55IFRlbmFudC9Db252ZXJzYXRpb24uIEV4aXN0cyBiZWNhdXNlIE1lc3NhZ2Uud2FfbWVzc2FnZV9pZCBhbmQKLy8gTWVzc2FnZS5jaGF0d29vdF9tZXNzYWdlX2lkIGFyZSBwZXItUEFUSCBkZWR1cCBrZXlzIChkaXJlY3QgV0Egd2ViaG9vayB2cwovLyBDaGF0d29vdCBhZ2VudC1ib3QpIOKAlCBhIG1lc3NhZ2UgdGhhdCBhcnJpdmVzIHZpYSBCT1RIIHBhdGhzIChlLmcuIGFuIEEyCi8vIHRlbmFudCB0aGF0IGFsc28gaGFzIGEgc3RyYXkgV2hhdHNBcHBOdW1iZXIgcm91dGluZyByb3csIG9yIGFueSBmdXR1cmUKLy8gZHVhbC1kZWxpdmVyeSBzY2VuYXJpbykgY2xhaW1zIHR3byBESUZGRVJFTlQgbG9jYWwgaWRzIGFuZCBib3RoIHBhdGhzCi8vIGluZGVwZW5kZW50bHkgcGFzcyB0aGVpciBvd24gZGVkdXAgY2hlY2ssIHByb2R1Y2luZyB0d28gQUkgcmVwbGllcyBmb3IKLy8gb25lIHBoeXNpY2FsIGluYm91bmQgbWVzc2FnZS4gVGhpcyB0YWJsZSBjbG9zZXMgdGhhdCBnYXA6IGJvdGgKLy8gbGliL2FnZW50LnRzIGFuZCBhcHAvYXBpL2NoYXR3b290L2FnZW50LWJvdC9yb3V0ZS50cyBjbGFpbSB0aGUgU0FNRQovLyBNZXRhIHdhbWlkIGhlcmUsIGF0IHRoZSBlYXJsaWVzdCBwb3NzaWJsZSBwb2ludCwgYmVmb3JlIGFueSByZXBseSBvcgovLyBzaWRlIGVmZmVjdC4gUGF0dGVybiByZXVzZWQgZnJvbSBkZWVwc2VlayAvb3B0L2JmZi12MgovLyBhcHAvbGliL3dlYmhvb2svaW5ncmVzcy50cyBjaGVja0RlZHVwKCkuCm1vZGVsIEluYm91bmREZWR1cCB7CiAgaWQgICAgICAgICBTdHJpbmcgICBAaWQgQGRlZmF1bHQoY3VpZCgpKQogIG1lc3NhZ2VfaWQgU3RyaW5nICAgQHVuaXF1ZSAvLyBNZXRhIHdhbWlkIOKAlCB0aGUgT05MWSBrZXk7IGdsb2JhbCBhY3Jvc3MgYWxsIHRlbmFudHMvcGF0aHMKICBjcmVhdGVkX2F0IERhdGVUaW1lIEBkZWZhdWx0KG5vdygpKQp9CgovLyDilIDilIAgV2FsbGV0ICsgdHJhbnNhY3Rpb25zIOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgArCoG1vZGVsIFdhbGxldCB7CiAgaWQgICAgICAgICAgICAgICAgICBTdHJpbmcgIEBpZCBAZGVmYXVsdChjdWlkKCkpCiAgdGVuYW50X2lkICAgICAgICAgICBTdHJpbmc/IEB1bmlxdWUgLy8gZXhhY3RseSBvbmUgb2YgdGVuYW50X2lkIC8gY29uc3VtZXJfYWNjb3VudF9pZCBpcyBzZXQKICBjb25zdW1lcl9hY2NvdW50X2lkIFN0cmluZz8gQHVuaXF1ZQogIG1hZ251c191c2VyX2lkICAgICAgU3RyaW5nPyAvLyBNYWdudXMgcHJlcGFpZCB1c2VyIGlkIGZvciBiYWxhbmNlIHJlYWRzCiAgYmFsYW5jZV9jYWNoZSAgICAgICBGbG9hdCAgIEBkZWZhdWx0KDApIC8vIHJlZnJlc2hlZCBvbiB2aWV3IGZyb20gTWFnbnVzCiAgY3VycmVuY3kgICAgICAgICAgICBTdHJpbmcgIEBkZWZhdWx0KCJFQyQiKQoKICB1cGRhdGVkX2F0IERhdGVUaW1lIEB1cGRhdGVkQXQKCiAgdGVuYW50ICAgICAgICAgICBUZW5hbnQ/ICAgICAgICAgIEByZWxhdGlvbihmaWVsZHM6IFt0ZW5hbnRfaWRdLCByZWZlcmVuY2VzOiBbaWRdKQogIGNvbnN1bWVyX2FjY291bnQgQ29uc3VtZXJBY2NvdW50PyBAcmVsYXRpb24oZmllbGRzOiBbY29uc3VtZXJfYWNjb3VudF9pZF0sIHJlZmVyZW5jZXM6IFtpZF0pCiAgdHhucyAgICAgICAgICAgICBXYWxsZXRUeG5bXQp9Cgptb2RlbCBXYWxsZXRUeG4gewogIGlkICAgICAgICAgICAgICAgICAgU3RyaW5nICBAaWQgQGRlZmF1bHQoY3VpZCgpKQogIHRlbmFudF9pZCAgICAgICAgICAgU3RyaW5nPyAvLyBleGFjdGx5IG9uZSBvZiB0ZW5hbnRfaWQgLyBjb25zdW1lcl9hY2NvdW50X2lkIGlzIHNldAogIGNvbnN1bWVyX2FjY291bnRfaWQgU3RyaW5nPwogIHdhbGxldF9pZCAgICAgICAgICAgU3RyaW5nCiAgdHlwZSAgICAgICAgICAgICAgICBTdHJpbmcgLy8gdG9wdXAgfCBkZWJpdF9taW51dGVzIHwgZGViaXRfdG9rZW5zIHwgY3JlZGl0X2FkanVzdAogIGFtb3VudF91c2QgICAgICAgICAgRmxvYXQgLy8gcG9zaXRpdmUgPSBjcmVkaXQsIG5lZ2F0aXZlID0gZGViaXQKICBkZXNjcmlwdGlvbiAgICAgICAgIFN0cmluZwogIHJlZiAgICAgICAgICAgICAgICAgU3RyaW5nPyAvLyBGaXNlcnYgcmVmIG9yIGludGVybmFsIHJlZgoKICBjcmVhdGVkX2F0IERhdGVUaW1lIEBkZWZhdWx0KG5vdygpKQoKICB0ZW5hbnQgICAgICAgICAgIFRlbmFudD8gICAgICAgICAgQHJlbGF0aW9uKGZpZWxkczogW3RlbmFudF9pZF0sIHJlZmVyZW5jZXM6IFtpZF0pCiAgY29uc3VtZXJfYWNjb3VudCBDb25zdW1lckFjY291bnQ/IEByZWxhdGlvbihmaWVsZHM6IFtjb25zdW1lcl9hY2NvdW50X2lkXSwgcmVmZXJlbmNlczogW2lkXSkKICB3YWxsZXQgICAgICAgICAgIFdhbGxldCAgICAgICAgICAgQHJlbGF0aW9uKGZpZWxkczogW3dhbGxldF9pZF0sIHJlZmVyZW5jZXM6IFtpZF0pCgogIEBAaW5kZXgoW3RlbmFudF9pZCwgY3JlYXRlZF9hdF0pCiAgQEBpbmRleChbY29uc3VtZXJfYWNjb3VudF9pZCwgY3JlYXRlZF9hdF0pCn0KCi8vIOKUgOKUgCBVc2FnZSBtZXRlcmluZyDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIAKbW9kZWwgVXNhZ2VNZXRlciB7CiAgaWQgICAgICAgICAgIFN0cmluZyAgIEBpZCBAZGVmYXVsdChjdWlkKCkpCiAgdGVuYW50X2lkICAgIFN0cmluZwogIHBlcmlvZF9zdGFydCBEYXRlVGltZQogIHBlcmlvZF9lbmQgICBEYXRlVGltZQogIG1pbnV0ZXNfdXNlZCBGbG9hdCAgICBAZGVmYXVsdCgwKQogIHRva2Vuc191c2VkICBJbnQgICAgICBAZGVmYXVsdCgwKQogIG1pbnV0ZXNfY29zdCBGbG9hdCAgICBAZGVmYXVsdCgwKSAvLyBVU0QKICB0b2tlbnNfY29zdCAgRmxvYXQgICAgQGRlZmF1bHQoMCkgLy8gVVNECgogIGNyZWF0ZWRfYXQgRGF0ZVRpbWUgQGRlZmF1bHQobm93KCkpCiAgdXBkYXRlZF9hdCBEYXRlVGltZSBAdXBkYXRlZEF0CgogIHRlbmFudCBUZW5hbnQgQHJlbGF0aW9uKGZpZWxkczogW3RlbmFudF9pZF0sIHJlZmVyZW5jZXM6IFtpZF0pCgogIEBAdW5pcXVlKFt0ZW5hbnRfaWQsIHBlcmlvZF9zdGFydF0pCn0KCi8vIOKUgOKUgCBTdWJzY3JpcHRpb24g4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSAClxc4pSAClxlbW9kZWwgU3Vic2NyaXB0aW9uIHsKICBpZCAgICAgICAgU3RyaW5nIEBpZCBAZGVmYXVsdChjdWlkKCkpCiAgdGVuYW50X2lkIFN0cmluZyBAdW5pcXVlCiAgcGxhbiAgICAgIFN0cmluZyBAZGVmYXVsdCgic3RhcnRlciIpIC8vIHN0YXJ0ZXI9JDM5IHwgZ3Jvd3RoPSQ4OSB8IHBybz0kMTc5CiAgc3RhdHVzICAgIFN0cmluZyBAZGVmYXVsdCgiYWN0aXZlIikKCiAgc3RhcnRlZF9hdCBEYXRlVGltZSBAZGVmYXVsdChub3coKSkKICB1cGRhdGVkX2F0IERhdGVUaW1lIEB1cGRhdGVkQXQKCiAgdGVuYW50IFRlbmFudCBAcmVsYXRpb24oZmllbGRzOiBbdGVuYW50X2lkXSwgcmVmZXJlbmNlczogW2lkXSkKfQoKLy8g4pSA4pSAIEF1ZGl0IGxvZyDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIAKCi8vIOKUgOKUgCBNYXJrZXRpbmcgZnVubmVsIChQNiDigJQgcHVibGljIEVNQSBsYW5kaW5nIHBhZ2UpIOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgArCi8vIFN0YW5kYWxvbmU6IG5vIEZLIHRvIENvbnN1bWVyQWNjb3VudCAoYSBsZWFkIGlzIG9mdGVuIGFub255bW91cyDigJQgY2FwdHVyZWQKLy8gYmVmb3JlIHNpZ251cCkuIElmIE9kb28gQ1JNIGlzIHJlYWNoYWJsZSwgb2Rvb19sZWFkX2lkIHJlY29yZHMgdGhlIG1pcnJvcmVkCi8vIGNybS5sZWFkIGlkOyB0aGlzIHRhYmxlIGlzIGFsd2F5cyB0aGUgbG9jYWwgc291cmNlIG9mIHRydXRoIHJlZ2FyZGxlc3MuCm1vZGVsIENvbnN1bWVyTGVhZCB7CiAgaWQgICAgICAgICAgIFN0cmluZyAgQGlkIEBkZWZhdWx0KGN1aWQoKSkKICBwaG9uZV9udW1iZXIgU3RyaW5nPyAvLyBmaWxsZWQgaW4gb25seSBpZiBsYXRlciBjb3JyZWxhdGVkIHRvIGEgc2lnbnVwCiAgdXRtX3NvdXJjZSAgIFN0cmluZz8KICB1dG1fbWVkaXVtICAgU3RyaW5nPwogIHV0bV9jYW1wYWlnbiBTdHJpbmc/CiAgdXRtX3Rlcm0gICAgIFN0cmluZz8KICB1dG1fY29udGVudCAgU3RyaW5nPwogIHJlZmVycmVyICAgICBTdHJpbmc/CiAgbGFuZGluZ19wYXRoIFN0cmluZz8KICBjdGEgICAgICAgICAgU3RyaW5nPyAvLyB3aGljaCBDVEEgd2FzIGNsaWNrZWQ6ICJzaWdudXAiIHwgIndoYXRzYXBwIiB8ICJ2aWV3IgogIG9kb29fbGVhZF9pZCBJbnQ/IC8vIHNldCBvbmx5IGlmIGEgcmVhbCBjcm0ubGVhZCB3YXMgY3JlYXRlZCBpbiBPZG9vCgogIGNyZWF0ZWRfYXQgRGF0ZVRpbWUgQGRlZmF1bHQobm93KCkpCgogIEBAaW5kZXgoW2NyZWF0ZWRfYXRdKQogIEBAaW5kZXgoW3V0bV9zb3VyY2UsIHV0bV9jYW1wYWlnbl0pCn0KCm1vZGVsIEF1ZGl0TG9nIHsKICBpZCAgICAgICAgICAgICAgICAgIFN0cmluZyAgQGlkIEBkZWZhdWx0KGN1aWQoKSkKICB0ZW5hbnRfaWQgICAgICAgICAgIFN0cmluZz8gLy8gZXhhY3RseSBvbmUgb2YgdGVuYW50X2lkIC8gY29uc3VtZXJfYWNjb3VudF9pZCBpcyBzZXQKICBjb25zdW1lcl9hY2NvdW50X2lkIFN0cmluZz8KICBhY3Rvcl9pZCAgICAgICAgICAgIFN0cmluZyAvLyBVc2VyLmlkLCAic3lzdGVtIiwgb3IgImFnZW50OjxhZ2VudF9pZD4iIGZvciBhZ2VudC10b29sIGNhbGxzCiAgYWN0aW9uICAgICAgICAgICAgICBTdHJpbmcgLy8gZS5nLiAiYWdlbnQudXBkYXRlIiwgIndhbGxldC50b3B1cCIsICJ0YWtlb3Zlci5lbmFibGUiCiAgZW50aXR5ICAgICAgICAgICAgICBTdHJpbmc/CiAgZW50aXR5X2lkICAgICAgICAgICBTdHJpbmc/CiAgcmVxdWVzdF9pZCAgICAgICAgICBTdHJpbmc/IC8vIGlkZW1wb3RlbmN5IGtleSBmb3IgYWdlbnQtdG9vbHMuaW52b2tlIGNhbGxzIChkZWR1cCBvbiB0ZW5hbnRfaWQrcmVxdWVzdF9pZCkKICBtZXRhICAgICAgICAgICAgICAgIEpzb24gICAgQGRlZmF1bHQoInt9IikKCiAgY3JlYXRlZF9hdCBEYXRlVGltZSBAZGVmYXVsdChub3coKSkKCiAgdGVuYW50ICAgICAgICAgICBUZW5hbnQ/ICAgICAgICAgIEByZWxhdGlvbihmaWVsZHM6IFt0ZW5hbnRfaWRdLCByZWZlcmVuY2VzOiBbaWRdKQogIGNvbnN1bWVyX2FjY291bnQgQ29uc3VtZXJBY2NvdW50PyBAcmVsYXRpb24oZmllbGRzOiBbY29uc3VtZXJfYWNjb3VudF9pZF0sIHJlZmVyZW5jZXM6IFtpZF0pCgogIEBAaW5kZXgoW3RlbmFudF9pZCwgY3JlYXRlZF9hdF0pCiAgQEBpbmRleChbdGVuYW50X2lkLCByZXF1ZXN0X2lkXSkKICBAQGluZGV4KFtjb25zdW1lcl9hY2NvdW50X2lkLCBjcmVhdGVkX2F0XSkKfQoKLy8g4pSA4pSAIERyaXp6bGUtbWFuYWdlZCBhdXRoIHRhYmxlcyAoRE8gTk9UIERST1ApIOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgArCi8vCi8vIFRoZXNlIHR3byB0YWJsZXMgYXJlIG93bmVkIGJ5IHRoZSBFeHByZXNzIEFQSSBzZXJ2ZXIgKFJlcGxpdCBPSURDIC8KLy8gY29ubmVjdC1wZy1zaW1wbGUpLiBUaGV5IGFyZSBkZWNsYXJlZCBoZXJlIHdpdGggQEBpZ25vcmUgc28gdGhhdAovLyBgcHJpc21hIGRiIHB1c2hgIGFuZCBgcHJpc21hIG1pZ3JhdGVgIGFyZSBhd2FyZSBvZiB0aGVtIGFuZCB3aWxsIG5ldmVyCi8vIHRyZWF0IHRoZW0gYXMgInVua25vd24iIHRhYmxlcyB0byByZW1vdmUuCi8vCi8vIElNUE9SVEFOVDogbmV2ZXIgcnVuIGBwcmlzbWEgZGIgcHVzaCAtLWZvcmNlLXJlc2V0YCBvciBhY2NlcHQgYQovLyAicmVzZXQgdGhlIGRhdGFiYXNlIiBwcm9tcHQg4oCUIGRvaW5nIHNvIGRyb3BzIEFMTCB0YWJsZXMgaW5jbHVkaW5nIHRoZXNlLgovLyBVc2UgYHByaXNtYSBtaWdyYXRlIGRldmAgZm9yIHNjaGVtYSBjaGFuZ2VzIGluIGRldmVsb3BtZW50LCBhbmQKLy8gYHByaXNtYSBtaWdyYXRlIGRlcGxveWAgaW4gcHJvZHVjdGlvbi4KLy8KLy8gSWYgdGhlIHRhYmxlcyBhcmUgZXZlciBhY2NpZGVudGFsbHkgZHJvcHBlZCwgcmVjcmVhdGUgdGhlbSB3aXRoOgovLyAgIENSRUFURSBUQUJMRSAidXNlcnMiIChpZCB2YXJjaGFyIFBLIERFRkFVTFQgZ2VuX3JhbmRvbV91dWlkKCksIGVtYWlsIHZhcmNoYXIgVU5JUVVFLAovLyAgICAgZmlyc3RfbmFtZSB2YXJjaGFyLCBsYXN0X25hbWUgdmFyY2hhciwgcHJvZmlsZV9pbWFnZV91cmwgdmFyY2hhciwKLy8gICAgIGNyZWF0ZWRfYXQgdGltZXN0YW1wdHogTk9UIE5VTEwgREVGQVVMVCBub3coKSwgdXBkYXRlZF9hdCB0aW1lc3RhbXB0eiBOT1QgTlVMTCBERUZBVUxUIG5vdygpKTsKLy8gICBDUkVBVEUgVEFCTEUgInNlc3Npb25zIiAoc2lkIHZhcmNoYXIgUEssIHNlc3MganNvbmIgTk9UIE5VTEwsIGV4cGlyZSB0aW1lc3RhbXAgTk9UIE5VTEwpOwovLyAgIENSRUFURSBJTkRFWCAiSURYX3Nlc3Npb25fZXhwaXJlIiBPTiAic2Vzc2lvbnMiICgiZXhwaXJlIik7CgovLy8gRHJpenpsZS1tYW5hZ2VkIFJlcGxpdCBBdXRoIHVzZXIgdGFibGUuIFByaXNtYSB3aWxsIG5vdCBtb2RpZnkgb3IgZHJvcCBpdC4KbW9kZWwgRHJpenpsZVVzZXIgewogIGlkICAgICAgICAgICAgICAgIFN0cmluZyAgIEBpZCBAZGVmYXVsdChkYmdlbmVyYXRlZCgiZ2VuX3JhbmRvbV91dWlkKCkiKSkKICBlbWFpbCAgICAgICAgICAgICBTdHJpbmc/ICBAdW5pcXVlCiAgZmlyc3RfbmFtZSAgICAgICAgU3RyaW5nPwogIGxhc3RfbmFtZSAgICAgICAgIFN0cmluZz8KICBwcm9maWxlX2ltYWdlX3VybCBTdHJpbmc/CiAgY3JlYXRlZF9hdCAgICAgICAgRGF0ZVRpbWUgQGRlZmF1bHQobm93KCkpIEBkYi5UaW1lc3RhbXB0eig2KQogIHVwZGF0ZWRfYXQgICAgICAgIERhdGVUaW1lIEBkZWZhdWx0KG5vdygpKSBAZGIuVGltZXN0YW1wdHooNikKCiAgQEBtYXAoInVzZXJzIikKICBAQGlnbm9yZQp9CgovLy8gRHJpenpsZS1tYW5hZ2VkIGNvbm5lY3QtcGctc2ltcGxlIHNlc3Npb24gc3RvcmUuIFByaXNtYSB3aWxsIG5vdCBtb2RpZnkgb3IgZHJvcCBpdC4KbW9kZWwgRHJpenpsZVNlc3Npb24gewogIHNpZCAgICBTdHJpbmcgICBAaWQKICBzZXNzICAgSnNvbgogIGV4cGlyZSBEYXRlVGltZSBAZGIuVGltZXN0YW1wKDYpCgogIEBAbWFwKCJzZXNzaW9ucyIpCiAgQEBpZ25vcmUKfQo=
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Core tenant/user ─────────────────────────────────────────────────────────
+
+model Tenant {
+  id             String  @id @default(cuid())
+  business_name  String
+  status         String  @default("active") // active | suspended
+  plan           String  @default("starter") // starter | growth | pro
+  magnus_user_id String? // linked Magnus account id (shared by wallet + voice)
+
+  // Owner's own WhatsApp number — delivery target for proactive owner
+  // notifications (e.g. the missed-call/voicemail-catch WA alert). Mirrors
+  // Isola Lite's LiteAccount.ownerPhone. E.164, e.g. +17671234567.
+  // Nullable: not every tenant has set this yet; the voicemail poller skips
+  // delivery (but still stores the catch) when unset — see
+  // lib/voicemail-poller.ts deliverCatch().
+  owner_phone String?
+
+  // ── Voice / PBX provisioning (Magnus) ────────────────────────────────────
+  voice_provisioning_state String  @default("none") // none | pending | completed | failed
+  voice_provisioning_error String? // last error detail when state=failed
+  magnus_sip_id            String? // Magnus `sip` table row id
+  magnus_sip_username      String? // SIP registration username
+  magnus_sip_password      String? // SIP registration password (plaintext — shown to owner for softphone setup)
+  magnus_callerid_id       String? // Magnus `callerid` table row id
+  magnus_did_id            String? // Magnus `did` table row id
+  magnus_did_number        String? // the DID phone number, e.g. 1767818xxxx
+  magnus_diddestination_id String? // Magnus `diddestination` table row id (routes the DID)
+  voice_forward_to_cell    Boolean @default(false) // true = DID routes to voice_cell_number instead of the SIP extension
+  voice_cell_number        String? // fallback cell number for forward-to-cell
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  users             User[]
+  agents            Agent[]
+  whatsapp_numbers  WhatsAppNumber[]
+  chatwoot_binding  ChatwootBinding?
+  conversations     Conversation[]
+  wallet            Wallet?
+  wallet_txns       WalletTxn[]
+  usage_meters      UsageMeter[]
+  subscription      Subscription?
+  audit_logs        AuditLog[]
+  consents          Consent[]
+  voicemail_catches TenantVoicemailCatch[]
+}
+
+// ── Per-tenant voicemail catches (AI missed-call catcher) ────────────────────
+//
+// Port of Isola Lite's LiteCatch (bff-v2 prisma/schema.prisma model
+// LiteCatch, table lite_catches) onto the Foundation multi-tenant Tenant
+// model. liteAccountId → tenant_id; field set is otherwise unchanged.
+// Populated by lib/voicemail-poller.ts polling voice00's Asterisk
+// voicemail spool over read-only SSH, running lib/voicemail-catcher.ts
+// (parse/transcribe/summarize), and delivering a WhatsApp template alert
+// to Tenant.owner_phone when set.
+model TenantVoicemailCatch {
+  id             String   @id @default(cuid())
+  tenant_id      String
+  msgId          String // Asterisk voicemail message id, e.g. "msg0000" — dedup key per tenant
+  callerId       String
+  calledExten    String
+  origtime       Int
+  durationSec    Int
+  transcript     String   @db.Text
+  summary        String   @db.Text
+  intent         String
+  urgency        String   @default("normal")
+  callbackNumber String?
+  confident      Boolean  @default(true)
+  isSpam         Boolean  @default(false)
+  delivered      Boolean  @default(false)
+  created_at     DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+
+  @@unique([tenant_id, msgId])
+  @@index([tenant_id, created_at])
+  @@map("tenant_voicemail_catches")
+}
+
+// ── EMA consumer accounts (slim — NOT a Tenant) ───────────────────────────────
+//
+// A ConsumerAccount is a single person with a phone/wallet, provisioned via
+// provisionConsumerVoice() (lib/voice-provisioning-consumer.ts). It is
+// deliberately NOT a Tenant: no business_name, no Agent/WhatsAppNumber/
+// ChatwootBinding/Conversation, no Isola SaaS `plan` (starter/growth/pro).
+// It shares the Wallet/WalletTxn/AuditLog tables with Tenant via a second,
+// optional FK column on each of those models.
+model ConsumerAccount {
+  id           String  @id @default(cuid())
+  phone_number String  @unique // E.164, e.g. +17671234567 — the consumer's own number, not the DID
+  display_name String?
+  status       String  @default("active") // active | suspended
+
+  // ── Voice / PBX provisioning (Magnus) — mirrors Tenant's voice block ──────
+  voice_provisioning_state String  @default("none")
+  voice_provisioning_error String?
+  magnus_user_id           String?
+  magnus_sip_id            String?
+  magnus_sip_username      String?
+  magnus_sip_password      String?
+  magnus_callerid_id       String?
+  magnus_did_id            String?
+  magnus_did_number        String?
+  magnus_diddestination_id String?
+  voice_forward_to_cell    Boolean @default(false)
+  voice_cell_number        String?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  wallet      Wallet?
+  wallet_txns WalletTxn[]
+  audit_logs  AuditLog[]
+}
+
+// ── Consumer phone-OTP auth (P2, separate realm from Replit Auth) ─────────────
+//
+// One row per OTP code sent. NOT keyed to ConsumerAccount — the account may
+// not exist yet (first-time signup creates it only after a successful
+// verify). Looked up by phone_number at verify time. Deliberately has no
+// relation to ConsumerAccount/Tenant/User; it is pre-account-creation state.
+model ConsumerOtpRequest {
+  id            String    @id @default(cuid())
+  phone_number  String // E.164, e.g. +17671234567
+  code_hash     String // HMAC-SHA256(phone+code, SESSION_SECRET) — code itself is never stored
+  expires_at    DateTime
+  consumed_at   DateTime?
+  attempt_count Int       @default(0)
+
+  created_at DateTime @default(now())
+
+  @@index([phone_number, created_at])
+}
+
+// NOTE: Prisma's "User" table (capital U) is separate from Drizzle's "users"
+// table (lowercase) used by the Express auth server. PostgreSQL treats them as
+// different identifiers when quoted.
+model User {
+  id                String  @id @default(cuid())
+  tenant_id         String
+  replit_id         String? @unique // from Replit Auth (OIDC sub); null until user signs in for pre-created accounts
+  role              String  @default("owner") // owner | admin
+  email             String?
+  name              String?
+  profile_image_url String?
+  intelligence_tier String  @default("standard") // standard | advanced | expert
+  agent_took_over   Boolean @default(false) // owner paused the AI
+  act_as_tenant_id  String? // admin: currently acting as this tenant
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+}
+
+// ── Agent configuration ───────────────────────────────────────────────────────
+
+model Agent {
+  id                String  @id @default(cuid())
+  tenant_id         String  @unique
+  name              String  @default("Isola Assistant")
+  greeting          String  @default("Hello! How can I help you today?")
+  business_info     String  @default("")
+  knowledge_text    String  @default("")
+  intelligence_tier String  @default("standard")
+  after_hours_start String? // "HH:MM" 24-h local time
+  after_hours_end   String? // "HH:MM" 24-h local time
+  away_message      String  @default("") // sent verbatim during after-hours instead of silence
+  timezone          String  @default("America/Dominica")
+  is_active         Boolean @default(true)
+  brain_provider    String  @default("native") // native | flowise | hermes — which runtime generates replies
+  flowise_flow_id   String? // Flowise chatflow id, required when brain_provider="flowise"
+  // hermes has no dedicated column: HERMES_AGENT_URL is a single shared env var
+  // (not per-tenant), and routing is additionally gated by a hardcoded
+  // phone_number_id allowlist in lib/brain-provider.ts — see HERMES_ALLOWED_PHONE_NUMBER_IDS.
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+}
+
+// ── WhatsApp routing table ────────────────────────────────────────────────────
+
+model WhatsAppNumber {
+  id              String  @id @default(cuid())
+  tenant_id       String
+  phone_number_id String  @unique // Meta phone_number_id — the inbound routing key
+  waba_id         String // Meta WABA id
+  phone_number    String // human-readable e.g. +17678181234
+  display_name    String?
+  access_token    String // per-WABA long-lived token (leave "" when token_env is set)
+  token_env       String? // if set, process.env[token_env] is used instead of access_token
+  coex_mode       Boolean @default(true) // true = coexistence (WA Business app kept)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant        Tenant         @relation(fields: [tenant_id], references: [id])
+  conversations Conversation[]
+}
+
+// ── Chatwoot per-tenant binding ───────────────────────────────────────────────
+
+model ChatwootBinding {
+  id         String  @id @default(cuid())
+  tenant_id  String  @unique
+  base_url   String // e.g. https://inbox.epic.dm
+  account_id String
+  token      String // Chatwoot Application API agent token (set to '' for a2 — bot token used instead)
+  inbox_id   String? // WhatsApp inbox id in Chatwoot
+  mode       String  @default("mirror") // mirror (Wave A: app posts to Chatwoot) | a2 (Chatwoot owns WA channel, app is AI brain)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+}
+
+// ── Consent (WhatsApp send gate — fail-closed) ────────────────────────────────
+
+model Consent {
+  id           String    @id @default(cuid())
+  tenant_id    String
+  phone        String // E.164 with leading +
+  status       String    @default("opted_in") // opted_in | opted_out
+  opted_in_at  DateTime  @default(now())
+  opted_out_at DateTime?
+  source       String    @default("inbound") // inbound | explicit
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+
+  @@unique([tenant_id, phone])
+}
+
+// ── Conversations + messages (local metadata mirror) ─────────────────────────
+
+model Conversation {
+  id                       String    @id @default(cuid())
+  tenant_id                String
+  whatsapp_number_id       String?
+  chatwoot_conversation_id Int? // mirrored from Chatwoot (unique per tenant)
+  customer_phone           String
+  customer_name            String?
+  status                   String    @default("open") // open | resolved
+  agent_took_over          Boolean   @default(false)
+  human_handling           Boolean   @default(false) // true when a human agent has replied in Chatwoot
+  last_message_at          DateTime?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant          Tenant          @relation(fields: [tenant_id], references: [id])
+  whatsapp_number WhatsAppNumber? @relation(fields: [whatsapp_number_id], references: [id])
+  messages        Message[]
+
+  @@unique([tenant_id, chatwoot_conversation_id])
+  @@index([tenant_id, status])
+  @@index([tenant_id, last_message_at])
+}
+
+model Message {
+  id                  String  @id @default(cuid())
+  conversation_id     String
+  role                String // user | assistant
+  content             String
+  wa_message_id       String? @unique // Meta wamid — dedup key for inbound retries / multi-app delivery
+  chatwoot_message_id Int?    @unique // Chatwoot message id — dedup key for webhook retries
+  tokens_used         Int?
+
+  created_at DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversation_id], references: [id])
+
+  @@index([conversation_id, created_at])
+}
+
+// ── Cross-path inbound dedup (Meta wamid) ─────────────────────────────────────
+//
+// Global idempotency gate keyed ONLY on Meta's message id, independent of
+// any Tenant/Conversation. Exists because Message.wa_message_id and
+// Message.chatwoot_message_id are per-PATH dedup keys (direct WA webhook vs
+// Chatwoot agent-bot) — a message that arrives via BOTH paths (e.g. an A2
+// tenant that also has a stray WhatsAppNumber routing row, or any future
+// dual-delivery scenario) claims two DIFFERENT local ids and both paths
+// independently pass their own dedup check, producing two AI replies for
+// one physical inbound message. This table closes that gap: both
+// lib/agent.ts and app/api/chatwoot/agent-bot/route.ts claim the SAME
+// Meta wamid here, at the earliest possible point, before any reply or
+// side effect. Pattern reused from deepseek /opt/bff-v2
+// app/lib/webhook/ingress.ts checkDedup().
+model InboundDedup {
+  id         String   @id @default(cuid())
+  message_id String   @unique // Meta wamid — the ONLY key; global across all tenants/paths
+  created_at DateTime @default(now())
+}
+
+// ── Wallet + transactions ─────────────────────────────────────────────────────
+
+model Wallet {
+  id                  String  @id @default(cuid())
+  tenant_id           String? @unique // exactly one of tenant_id / consumer_account_id is set
+  consumer_account_id String? @unique
+  magnus_user_id      String? // Magnus prepaid user id for balance reads
+  balance_cache       Float   @default(0) // refreshed on view from Magnus
+  currency            String  @default("EC$")
+
+  updated_at DateTime @updatedAt
+
+  tenant           Tenant?          @relation(fields: [tenant_id], references: [id])
+  consumer_account ConsumerAccount? @relation(fields: [consumer_account_id], references: [id])
+  txns             WalletTxn[]
+}
+
+model WalletTxn {
+  id                  String  @id @default(cuid())
+  tenant_id           String? // exactly one of tenant_id / consumer_account_id is set
+  consumer_account_id String?
+  wallet_id           String
+  type                String // topup | debit_minutes | debit_tokens | credit_adjust
+  amount_usd          Float // positive = credit, negative = debit
+  description         String
+  ref                 String? // Fiserv ref or internal ref
+
+  created_at DateTime @default(now())
+
+  tenant           Tenant?          @relation(fields: [tenant_id], references: [id])
+  consumer_account ConsumerAccount? @relation(fields: [consumer_account_id], references: [id])
+  wallet           Wallet           @relation(fields: [wallet_id], references: [id])
+
+  @@index([tenant_id, created_at])
+  @@index([consumer_account_id, created_at])
+}
+
+// ── Usage metering ────────────────────────────────────────────────────────────
+
+model UsageMeter {
+  id           String   @id @default(cuid())
+  tenant_id    String
+  period_start DateTime
+  period_end   DateTime
+  minutes_used Float    @default(0)
+  tokens_used  Int      @default(0)
+  minutes_cost Float    @default(0) // USD
+  tokens_cost  Float    @default(0) // USD
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+
+  @@unique([tenant_id, period_start])
+}
+
+// ── Subscription ──────────────────────────────────────────────────────────────
+
+model Subscription {
+  id        String @id @default(cuid())
+  tenant_id String @unique
+  plan      String @default("starter") // starter=$39 | growth=$89 | pro=$179
+  status    String @default("active")
+
+  started_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+}
+
+// ── Audit log ─────────────────────────────────────────────────────────────────
+
+// ── Marketing funnel (P6 — public EMA landing page) ─────────────────────────
+// Standalone: no FK to ConsumerAccount (a lead is often anonymous — captured
+// before signup). If Odoo CRM is reachable, odoo_lead_id records the mirrored
+// crm.lead id; this table is always the local source of truth regardless.
+model ConsumerLead {
+  id           String  @id @default(cuid())
+  phone_number String? // filled in only if later correlated to a signup
+  utm_source   String?
+  utm_medium   String?
+  utm_campaign String?
+  utm_term     String?
+  utm_content  String?
+  referrer     String?
+  landing_path String?
+  cta          String? // which CTA was clicked: "signup" | "whatsapp" | "view"
+  odoo_lead_id Int? // set only if a real crm.lead was created in Odoo
+
+  created_at DateTime @default(now())
+
+  @@index([created_at])
+  @@index([utm_source, utm_campaign])
+}
+
+model AuditLog {
+  id                  String  @id @default(cuid())
+  tenant_id           String? // exactly one of tenant_id / consumer_account_id is set
+  consumer_account_id String?
+  actor_id            String // User.id, "system", or "agent:<agent_id>" for agent-tool calls
+  action              String // e.g. "agent.update", "wallet.topup", "takeover.enable"
+  entity              String?
+  entity_id           String?
+  request_id          String? // idempotency key for agent-tools.invoke calls (dedup on tenant_id+request_id)
+  meta                Json    @default("{}")
+
+  created_at DateTime @default(now())
+
+  tenant           Tenant?          @relation(fields: [tenant_id], references: [id])
+  consumer_account ConsumerAccount? @relation(fields: [consumer_account_id], references: [id])
+
+  @@index([tenant_id, created_at])
+  @@index([tenant_id, request_id])
+  @@index([consumer_account_id, created_at])
+}
+
+// ── Drizzle-managed auth tables (DO NOT DROP) ────────────────────────────────
+//
+// These two tables are owned by the Express API server (Replit OIDC /
+// connect-pg-simple). They are declared here with @@ignore so that
+// `prisma db push` and `prisma migrate` are aware of them and will never
+// treat them as "unknown" tables to remove.
+//
+// IMPORTANT: never run `prisma db push --force-reset` or accept a
+// "reset the database" prompt — doing so drops ALL tables including these.
+// Use `prisma migrate dev` for schema changes in development, and
+// `prisma migrate deploy` in production.
+//
+// If the tables are ever accidentally dropped, recreate them with:
+//   CREATE TABLE "users" (id varchar PK DEFAULT gen_random_uuid(), email varchar UNIQUE,
+//     first_name varchar, last_name varchar, profile_image_url varchar,
+//     created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+//   CREATE TABLE "sessions" (sid varchar PK, sess jsonb NOT NULL, expire timestamp NOT NULL);
+//   CREATE INDEX "IDX_session_expire" ON "sessions" ("expire");
+
+/// Drizzle-managed Replit Auth user table. Prisma will not modify or drop it.
+model DrizzleUser {
+  id                String   @id @default(dbgenerated("gen_random_uuid()"))
+  email             String?  @unique
+  first_name        String?
+  last_name         String?
+  profile_image_url String?
+  created_at        DateTime @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime @default(now()) @db.Timestamptz(6)
+
+  @@map("users")
+  @@ignore
+}
+
+/// Drizzle-managed connect-pg-simple session store. Prisma will not modify or drop it.
+model DrizzleSession {
+  sid    String   @id
+  sess   Json
+  expire DateTime @db.Timestamp(6)
+
+  @@map("sessions")
+  @@ignore
+}
