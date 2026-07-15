@@ -13,6 +13,7 @@ import { TIER_MODELS } from './ai';
 import { generateReply } from './brain-provider';
 import { getWhatsAppConfig, getChatwootConfig } from './engines';
 import { meterTokens } from './meter';
+import { claimInboundMessageId } from './inbound-dedup';
 import { EPIC_MAIN_PHONE_NUMBER_ID, EPIC_FB_LINKED_PHONE_NUMBER_ID } from './epic-seed-data';
 
 // EPIC's business numbers (3742, 1568) are a 24/7 AI line — the after-hours
@@ -43,6 +44,24 @@ export async function handleInboundWhatsApp(params: {
   waMessageId: string;
 }): Promise<void> {
   const { phoneNumberId, from, body, waMessageId } = params;
+
+  // ── 0. Cross-path idempotency gate — earliest possible point ─────────────
+  // Claims waMessageId in InboundDedup BEFORE any tenant lookup, DB write,
+  // reply, or side effect. This is a GLOBAL gate (not scoped to this path) —
+  // it protects against the SAME Meta wamid also arriving via the Chatwoot
+  // agent-bot path (app/api/chatwoot/agent-bot/route.ts), which independently
+  // claims the same InboundDedup table. That cross-path scenario is the
+  // confirmed root cause of the 2026-07-15 P0 (number 9043, one inbound "Hi"
+  // → two AI replies): the existing Message.wa_message_id unique index only
+  // dedupes retries WITHIN this direct-webhook path, and Message.
+  // chatwoot_message_id only dedupes WITHIN the Chatwoot agent-bot path — a
+  // message hitting both paths claimed two different local ids and both
+  // per-path checks passed independently. See lib/inbound-dedup.ts for the
+  // full rationale and race-safety note.
+  if (await claimInboundMessageId(waMessageId)) {
+    console.log('[agent] Duplicate inbound wamid (cross-path dedup)', waMessageId, '— dropping before any processing');
+    return;
+  }
 
   // ── 1. Route: resolve tenant from phone_number_id ─────────────────────────
   const waNumber = await prisma.whatsAppNumber.findUnique({
@@ -125,6 +144,8 @@ export async function handleInboundWhatsApp(params: {
   // Message.wa_message_id has a UNIQUE index. The first request to insert wins;
   // a concurrent or retry delivery hits P2002 and we return 200 immediately,
   // before the AI is ever called. This is the race-safe dedup gate.
+  // (Kept as defense-in-depth alongside the step-0 InboundDedup gate above —
+  // this one also anchors the Message row for conversation history.)
   try {
     await prisma.message.create({
       data: {
