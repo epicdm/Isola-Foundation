@@ -19,6 +19,8 @@
  * Handled events
  * ──────────────
  * message_created (message_type="incoming", !private)
+ *   • Cross-path dedup by Meta wamid (Chatwoot's `source_id` field) via
+ *     InboundDedup — see the P0 note below and lib/inbound-dedup.ts.
  *   • Dedup by Chatwoot message id (Message.chatwoot_message_id UNIQUE).
  *   • Gate: reply only when Conversation.human_handling === false.
  *   • Governance: consent, active agent, after-hours (→ away message),
@@ -37,12 +39,24 @@
  *
  * Account isolation: looks up ChatwootBinding WHERE mode='a2'; unknown
  * account_ids return 200 immediately so Wave-A tenants are untouched.
+ *
+ * ── P0 (2026-07-15): cross-path double-reply ──────────────────────────────
+ * A single inbound WhatsApp message to number 9043 produced TWO AI replies.
+ * Root cause: this path's dedup (Message.chatwoot_message_id) and the direct
+ * WA webhook path's dedup (lib/agent.ts, Message.wa_message_id) are two
+ * DIFFERENT local keys. If the same physical Meta message reaches BOTH paths,
+ * each claims its own id and both dedup checks pass independently — two AI
+ * replies for one inbound message. Fix: also claim the underlying Meta wamid
+ * (surfaced by Chatwoot as `source_id` on the message payload for
+ * channel-native messages) in the shared InboundDedup table, at the earliest
+ * safe point, before any DB write. See lib/inbound-dedup.ts.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { generateReply } from '@/lib/brain-provider';
 import { meterTokens } from '@/lib/meter';
+import { claimInboundMessageId } from '@/lib/inbound-dedup';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -112,6 +126,29 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
   const content: string = (body.content ?? '').trim();
   // Outgoing handoff does not require content; incoming must have it.
   if (!content && isIncoming) return 200;
+
+  // ── Cross-path idempotency gate (Meta wamid) — earliest safe point ───────
+  // Chatwoot's own WhatsApp Cloud API channel integration surfaces the
+  // ORIGINAL Meta message id in `source_id` on the message payload for
+  // inbound channel messages. If the SAME physical message also arrives (or
+  // has already arrived) via the direct webhook path (lib/agent.ts,
+  // app/api/webhooks/whatsapp), that path claims the identical InboundDedup
+  // row this claims here — so only ONE of the two paths proceeds to reply.
+  // This is ADDITIVE to — not a replacement for — the chatwoot_message_id
+  // dedup below, which still protects against Chatwoot's own webhook retries
+  // independent of any cross-path duplication.
+  //
+  // NOTE (unverified live): `source_id` is Chatwoot's documented field name
+  // for the channel-native message id; confirm against a captured live
+  // payload before merge. If the field name differs, claimInboundMessageId
+  // is called with null and always returns false (safe no-op) — the existing
+  // chatwoot_message_id dedup still applies either way.
+  const metaSourceId: string | null =
+    typeof body.source_id === 'string' && body.source_id ? body.source_id : null;
+  if (isIncoming && (await claimInboundMessageId(metaSourceId))) {
+    console.log('[agent-bot] Duplicate inbound (cross-path dedup) source_id', metaSourceId, '— dropping');
+    return 200;
+  }
 
   // Chatwoot message id — dedup key (incoming only)
   const cwMsgId: number | null = typeof body.id === 'number' ? body.id : null;
