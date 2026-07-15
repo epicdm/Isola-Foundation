@@ -12,7 +12,7 @@
  *
  * Rules:
  *   • Only runs in the Node.js runtime (not edge).
- *   • All operations are idempotent — safe to run on every cold start.
+ *   • All operations are idempotent — safe to re-run on every cold start.
  *   • Errors are logged but never thrown — a seed failure must not crash the app.
  */
 
@@ -100,6 +100,22 @@ async function runMigrations(prisma: any) {
     // at the DB level (P2002) before the AI is called.
     await prisma.$executeRawUnsafe(
       `CREATE UNIQUE INDEX IF NOT EXISTS "Message_wa_message_id_key" ON "Message"(wa_message_id) WHERE wa_message_id IS NOT NULL;`,
+    );
+    // P0 (2026-07-15): cross-path inbound dedup, keyed ONLY on Meta's wamid,
+    // independent of Tenant/Conversation/routing-path. Closes the gap where
+    // Message.wa_message_id (direct WA webhook path) and
+    // Message.chatwoot_message_id (Chatwoot agent-bot path) are different
+    // local keys, so the same physical Meta message reaching both paths
+    // produced two AI replies. See lib/inbound-dedup.ts.
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "InboundDedup" (
+        id         TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL,
+        created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    await prisma.$executeRawUnsafe(
+      `CREATE UNIQUE INDEX IF NOT EXISTS "InboundDedup_message_id_key" ON "InboundDedup"(message_id);`,
     );
     // A2 mode: ChatwootBinding.mode column distinguishes mirror (Wave A) from
     // a2 (Chatwoot owns WA channel, this app is the AI brain).
