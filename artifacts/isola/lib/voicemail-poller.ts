@@ -57,6 +57,7 @@ const SPAM_BLOCKLIST = new Set([
 const VOICE00_SSH_HOST = process.env.VOICE00_SSH_HOST ?? 'voice00';
 const VOICE00_SSH_USER = process.env.VOICE00_SSH_USER ?? 'epicdm';
 const VOICE00_VOICEMAIL_BASE = '/var/spool/asterisk/voicemail/billing';
+const VOICE00_SSH_KEY = process.env.VOICE00_SSH_KEY ?? '';
 
 // Fixture override (testing without real voice00 calls)
 const FIXTURE_DIR = process.env.VOICEMAIL_CATCH_FIXTURE_DIR ?? '';
@@ -81,8 +82,25 @@ export interface PollTenantVoicemailsResult {
 
 // ── SSH helpers (voice00 read-only) — same shape as source ────────────────────
 
+let _v00KeyPath: string | null = null;
+function voice00KeyOpts(): string {
+  if (!VOICE00_SSH_KEY) return '';
+  if (!_v00KeyPath) {
+    let k = VOICE00_SSH_KEY.replace(/\\n/g, '\n').replace(/\r/g, '');
+    if (k.trim().split('\n').length < 3) {
+      const B = '-----BEGIN OPENSSH PRIVATE KEY-----', E = '-----END OPENSSH PRIVATE KEY-----';
+      const body = k.replace(B, '').replace(E, '').replace(/\s+/g, '');
+      k = B + '\n' + (body.match(/.{1,70}/g) ?? []).join('\n') + '\n' + E + '\n';
+    } else if (!k.endsWith('\n')) { k += '\n'; }
+    _v00KeyPath = '/tmp/voice00_ssh_key';
+    fs.writeFileSync(_v00KeyPath, k, { mode: 0o600 });
+    fs.chmodSync(_v00KeyPath, 0o600);
+  }
+  return '-i ' + _v00KeyPath + ' -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null';
+}
+
 function sshVoice00(cmd: string): string {
-  const sshCmd = `ssh -o ConnectTimeout=10 ${VOICE00_SSH_USER}@${VOICE00_SSH_HOST} "${cmd.replace(/"/g, '\\"')}"`;
+  const sshCmd = `ssh ${voice00KeyOpts()} -o ConnectTimeout=10 ${VOICE00_SSH_USER}@${VOICE00_SSH_HOST} "${cmd.replace(/"/g, '\\"')}"`;
   return execSync(sshCmd, { timeout: 30_000, encoding: 'utf8' }).trim();
 }
 
