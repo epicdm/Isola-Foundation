@@ -21,21 +21,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Magnus not configured' }, { status: 503 });
   }
 
-  const tenant = await prisma.tenant.findUnique({
-    where: { id: ctx.effectiveTenantId },
-    select: {
-      magnus_diddestination_id: true,
-      magnus_sip_username: true,
-      voice_provisioning_state: true,
-      voice_cell_number: true,
-    },
+  const voiceLine = await prisma.voiceLine.findFirst({
+    where: { tenant_id: ctx.effectiveTenantId, owner_kind: 'business' },
   });
 
-  if (!tenant?.magnus_diddestination_id || tenant.voice_provisioning_state !== 'completed') {
+  if (!voiceLine?.magnus_diddestination_id || voiceLine.provisioning_state !== 'completed') {
     return NextResponse.json({ error: 'Voice line is not provisioned yet' }, { status: 400 });
   }
 
-  const nextCellNumber = cell_number !== undefined ? cell_number : tenant.voice_cell_number;
+  const nextCellNumber = cell_number !== undefined ? cell_number : voiceLine.voice_cell_number;
 
   if (forward_to_cell && !nextCellNumber) {
     return NextResponse.json({ error: 'A cell number is required to enable forward-to-cell' }, { status: 400 });
@@ -44,14 +38,14 @@ export async function POST(req: NextRequest) {
   try {
     await setDidDestinationRoute(
       getMagnusConfig(),
-      tenant.magnus_diddestination_id,
+      voiceLine.magnus_diddestination_id,
       forward_to_cell
         ? { mode: 'cell', cellNumber: nextCellNumber! }
         : { mode: 'sip' },
     );
 
-    const updated = await prisma.tenant.update({
-      where: { id: ctx.effectiveTenantId },
+    const updated = await prisma.voiceLine.update({
+      where: { id: voiceLine.id },
       data: {
         voice_forward_to_cell: !!forward_to_cell,
         ...(cell_number !== undefined && { voice_cell_number: cell_number }),

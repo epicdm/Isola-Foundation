@@ -26,7 +26,7 @@ import {
   toolSetCallForwarding,
   ConsumerToolError,
 } from './consumer-agent-tools';
-import type { ConsumerAccount } from '@prisma/client';
+import type { ConsumerSessionAccount } from './consumer-session';
 
 const MODEL = TIER_MODELS.standard; // claude-haiku-4-5 — concierge Q&A doesn't need a bigger model
 const MAX_TOOL_ITERATIONS = 4;
@@ -119,7 +119,7 @@ export interface ConsumerChatResult {
  * fetches or re-derives it.
  */
 export async function runConsumerAgentTurn(
-  account: ConsumerAccount,
+  account: ConsumerSessionAccount,
   history: ConsumerChatMessage[],
   userMessage: string,
 ): Promise<ConsumerChatResult> {
@@ -178,7 +178,7 @@ export async function runConsumerAgentTurn(
 // ── Tool dispatch — the only place model tool-call names turn into code ────
 
 async function executeConsumerTool(
-  account: ConsumerAccount,
+  account: ConsumerSessionAccount,
   name: string,
   input: unknown,
 ): Promise<{ output: unknown; isError: boolean; clientAction?: ConsumerChatAction }> {

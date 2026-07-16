@@ -1,10 +1,11 @@
 // scripts/sbl-onboard-epic.ts - SBL cell-forward step for EPIC tenant, reuse-first:
-// sets voice_forward_to_cell + voice_cell_number via Prisma (the only two
-// owner-routing columns that actually exist on Tenant), then re-runs the
-// proven provisionTenantVoice() so its own Step 3b reconciliation logic
-// issues the setDidDestinationRoute cell-mode write (never called directly).
+// sets voice_forward_to_cell + voice_cell_number on the tenant's VoiceLine
+// row (Phase C: these owner-routing columns live on VoiceLine, not Tenant),
+// then re-runs the proven provisionTenantVoice() so its own Step 3b
+// reconciliation logic issues the setDidDestinationRoute cell-mode write
+// (never called directly).
 import { prisma } from '../lib/prisma'
-import { provisionTenantVoice } from '../lib/voice-provisioning'
+import { provisionTenantVoice, getOrCreateBusinessVoiceLine } from '../lib/voice-provisioning'
 import { getMagnusConfig } from '../lib/engines'
 import { readDidDestination } from '../lib/magnus-voice'
 import { getBalance, addCredit } from '../engines/magnus'
@@ -14,11 +15,11 @@ const cell = process.argv[3]
 if (!tenantId || !cell) { console.error('need tenantId cellNumber'); process.exit(2) }
 
 ;(async () => {
-  const before = await prisma.tenant.findUnique({ where: { id: tenantId } })
-  console.log('BEFORE ' + JSON.stringify({ voice_forward_to_cell: before?.voice_forward_to_cell, voice_cell_number: before?.voice_cell_number, magnus_diddestination_id: before?.magnus_diddestination_id, magnus_user_id: before?.magnus_user_id }))
+  const before = await getOrCreateBusinessVoiceLine(tenantId)
+  console.log('BEFORE ' + JSON.stringify({ voice_forward_to_cell: before.voice_forward_to_cell, voice_cell_number: before.voice_cell_number, magnus_diddestination_id: before.magnus_diddestination_id, magnus_user_id: before.magnus_user_id }))
 
-  await prisma.tenant.update({
-    where: { id: tenantId },
+  await prisma.voiceLine.update({
+    where: { id: before.id },
     data: { voice_forward_to_cell: true, voice_cell_number: cell },
   })
 

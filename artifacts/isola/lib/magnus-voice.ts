@@ -190,6 +190,15 @@ export function genMagnusUsername(tenantId: string): string {
   return `ep_${tenantId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 16).toLowerCase()}`;
 }
 
+/** Same naming convention as genMagnusUsername, but for consumer/EMA voice
+ *  lines — kept as a distinct prefix (`ema_` vs `ep_`) so a live Magnus grid
+ *  listing can tell tenants and EMA consumers apart at a glance. Seeded from
+ *  the VoiceLine's identity_id (Phase C: voice lines are identity-anchored
+ *  for the consumer realm), not the ConsumerAccount id. */
+export function genConsumerMagnusUsername(identityId: string): string {
+  return `ema_${identityId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 16).toLowerCase()}`;
+}
+
 function genPassword(len = 12): string {
   return crypto.randomBytes(len).toString('base64url').slice(0, len);
 }

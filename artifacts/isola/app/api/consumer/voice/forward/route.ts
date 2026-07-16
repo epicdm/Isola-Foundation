@@ -22,11 +22,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Magnus not configured' }, { status: 503 });
   }
 
-  if (!account.magnus_diddestination_id || account.voice_provisioning_state !== 'completed') {
+  const voiceLine = await prisma.voiceLine.findFirst({
+    where: { identity_id: account.identityId, owner_kind: 'consumer' },
+  });
+
+  if (!voiceLine?.magnus_diddestination_id || voiceLine.provisioning_state !== 'completed') {
     return NextResponse.json({ error: 'Voice line is not provisioned yet' }, { status: 400 });
   }
 
-  const nextCellNumber = cell_number !== undefined ? cell_number : account.voice_cell_number;
+  const nextCellNumber = cell_number !== undefined ? cell_number : voiceLine.voice_cell_number;
 
   if (forward_to_cell && !nextCellNumber) {
     return NextResponse.json({ error: 'A cell number is required to enable forward-to-cell' }, { status: 400 });
@@ -35,14 +39,14 @@ export async function POST(req: NextRequest) {
   try {
     await setDidDestinationRoute(
       getMagnusConfig(),
-      account.magnus_diddestination_id,
+      voiceLine.magnus_diddestination_id,
       forward_to_cell
         ? { mode: 'cell', cellNumber: nextCellNumber! }
         : { mode: 'sip' },
     );
 
-    const updated = await prisma.consumerAccount.update({
-      where: { id: account.id },
+    const updated = await prisma.voiceLine.update({
+      where: { id: voiceLine.id },
       data: {
         voice_forward_to_cell: !!forward_to_cell,
         ...(cell_number !== undefined && { voice_cell_number: cell_number }),

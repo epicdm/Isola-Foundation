@@ -43,6 +43,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getConsumerSession } from '@/lib/consumer-session';
+import { prisma } from '@/lib/prisma';
 import { getBffConfig, isBffConfigured } from '@/lib/engines';
 import { startTopup, type BffTopupCurrency } from '@/engines/bff';
 import { audit } from '@/lib/audit';
@@ -63,7 +64,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Top-up not configured (BFF_BASE_URL / BFF_INTERNAL_SECRET)' }, { status: 503 });
   }
 
-  if (!account.magnus_sip_username || !account.magnus_sip_password) {
+  const voiceLine = await prisma.voiceLine.findFirst({
+    where: { identity_id: account.identityId, owner_kind: 'consumer' },
+  });
+
+  if (!voiceLine?.magnus_sip_username || !voiceLine.magnus_sip_password) {
     return NextResponse.json({ error: 'Voice account not provisioned yet — try again shortly.' }, { status: 409 });
   }
 
@@ -94,8 +99,8 @@ export async function POST(req: NextRequest) {
   }
 
   const result = await startTopup(getBffConfig(), {
-    username: account.magnus_sip_username,
-    password: account.magnus_sip_password,
+    username: voiceLine.magnus_sip_username,
+    password: voiceLine.magnus_sip_password,
     bundleId,
     method,
     currency: bundleCurrency,

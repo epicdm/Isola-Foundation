@@ -20,6 +20,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getConsumerSession } from '@/lib/consumer-session';
+import { prisma } from '@/lib/prisma';
 import { getBffConfig, isBffConfigured } from '@/lib/engines';
 import { startCallback } from '@/engines/bff';
 import { normalizeCallbackDestination } from '@/lib/dominica-phone';
@@ -33,7 +34,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Calling is not configured (BFF_BASE_URL / BFF_INTERNAL_SECRET)' }, { status: 503 });
   }
 
-  if (!account.magnus_sip_username || !account.magnus_sip_password) {
+  const voiceLine = await prisma.voiceLine.findFirst({
+    where: { identity_id: account.identityId, owner_kind: 'consumer' },
+  });
+
+  if (!voiceLine?.magnus_sip_username || !voiceLine.magnus_sip_password) {
     return NextResponse.json({ error: 'Voice account not provisioned yet \u2014 try again shortly.' }, { status: 409 });
   }
 
@@ -50,8 +55,8 @@ export async function POST(req: NextRequest) {
   }
 
   const result = await startCallback(getBffConfig(), {
-    sipUsername: account.magnus_sip_username,
-    sipPassword: account.magnus_sip_password,
+    sipUsername: voiceLine.magnus_sip_username,
+    sipPassword: voiceLine.magnus_sip_password,
     fromNumber: account.phone_number,
     toDominicaNumber: normalized.e164,
   });
