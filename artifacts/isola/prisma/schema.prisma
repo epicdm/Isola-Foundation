@@ -52,6 +52,8 @@ model Tenant {
   audit_logs        AuditLog[]
   consents          Consent[]
   voicemail_catches TenantVoicemailCatch[]
+  memberships       Membership[]
+  voice_lines       VoiceLine[]
 }
 
 // ── Per-tenant voicemail catches (AI missed-call catcher) ────────────────────
@@ -157,11 +159,13 @@ model User {
   intelligence_tier String  @default("standard") // standard | advanced | expert
   agent_took_over   Boolean @default(false) // owner paused the AI
   act_as_tenant_id  String? // admin: currently acting as this tenant
+  identity_id       String?
 
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
-  tenant Tenant @relation(fields: [tenant_id], references: [id])
+  tenant   Tenant    @relation(fields: [tenant_id], references: [id])
+  identity Identity? @relation(fields: [identity_id], references: [id])
 }
 
 // ── Agent configuration ───────────────────────────────────────────────────────
@@ -318,11 +322,13 @@ model Wallet {
   magnus_user_id      String? // Magnus prepaid user id for balance reads
   balance_cache       Float   @default(0) // refreshed on view from Magnus
   currency            String  @default("EC$")
+  identity_id         String? @unique
 
   updated_at DateTime @updatedAt
 
   tenant           Tenant?          @relation(fields: [tenant_id], references: [id])
   consumer_account ConsumerAccount? @relation(fields: [consumer_account_id], references: [id])
+  identity         Identity?        @relation(fields: [identity_id], references: [id])
   txns             WalletTxn[]
 }
 
@@ -335,12 +341,14 @@ model WalletTxn {
   amount_usd          Float // positive = credit, negative = debit
   description         String
   ref                 String? // Fiserv ref or internal ref
+  identity_id         String?
 
   created_at DateTime @default(now())
 
   tenant           Tenant?          @relation(fields: [tenant_id], references: [id])
   consumer_account ConsumerAccount? @relation(fields: [consumer_account_id], references: [id])
   wallet           Wallet           @relation(fields: [wallet_id], references: [id])
+  identity         Identity?        @relation(fields: [identity_id], references: [id])
 
   @@index([tenant_id, created_at])
   @@index([consumer_account_id, created_at])
@@ -415,11 +423,13 @@ model AuditLog {
   entity_id           String?
   request_id          String? // idempotency key for agent-tools.invoke calls (dedup on tenant_id+request_id)
   meta                Json    @default("{}")
+  identity_id         String?
 
   created_at DateTime @default(now())
 
   tenant           Tenant?          @relation(fields: [tenant_id], references: [id])
   consumer_account ConsumerAccount? @relation(fields: [consumer_account_id], references: [id])
+  identity         Identity?        @relation(fields: [identity_id], references: [id])
 
   @@index([tenant_id, created_at])
   @@index([tenant_id, request_id])
@@ -467,4 +477,67 @@ model DrizzleSession {
 
   @@map("sessions")
   @@ignore
+}
+
+// ── Unify Identity — Phase A (additive; nothing reads these yet) ─────────────
+
+model Identity {
+  id           String  @id @default(cuid())
+  phone        String  @unique // E.164 — the resolve-by-phone anchor
+  display_name String?
+  replit_id    String? @unique // OIDC link, nullable
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  memberships Membership[]
+  voice_lines VoiceLine[]
+  wallets     Wallet[]
+  wallet_txns WalletTxn[]
+  audit_logs  AuditLog[]
+  users       User[]
+}
+
+model Membership {
+  id          String @id @default(cuid())
+  identity_id String
+  tenant_id   String
+  role        String @default("owner") // owner | admin | staff
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  identity Identity @relation(fields: [identity_id], references: [id])
+  tenant   Tenant   @relation(fields: [tenant_id], references: [id])
+
+  @@unique([identity_id, tenant_id])
+  @@index([tenant_id])
+}
+
+model VoiceLine {
+  id                       String  @id @default(cuid())
+  owner_kind               String // 'consumer' | 'business'
+  identity_id              String?
+  tenant_id                String?
+  magnus_user_id           String?
+  magnus_sip_id            String?
+  magnus_sip_username      String?
+  magnus_sip_password      String?
+  magnus_callerid_id       String?
+  magnus_did_id            String?
+  magnus_did_number        String?
+  magnus_diddestination_id String?
+  voice_forward_to_cell    Boolean @default(false)
+  voice_cell_number        String?
+  provisioning_state       String  @default("none")
+  provisioning_error       String?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  identity Identity? @relation(fields: [identity_id], references: [id])
+  tenant   Tenant?   @relation(fields: [tenant_id], references: [id])
+
+  @@index([identity_id])
+  @@index([tenant_id])
 }
