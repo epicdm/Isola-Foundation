@@ -59,3 +59,5 @@ PASTE-ME-TO-APP-SECRETS.txt
 .agents/
 BUILD-BRIEF.md
 WAVEB-SOULS.json
+
+artifacts/isola/.next/
