@@ -24,6 +24,13 @@
  *      `refill` rows (reversals/consolidations already use this exact
  *      pattern) — rather than being blocked, since Magnus does support it
  *      cleanly with no floor-at-zero or rejection behavior observed.
+ *   4. Money-movement human-gate (lib/approval-gate.ts): opt-in via
+ *      PERMISSION_GATES_ENABLED, default OFF, so this route's behavior is
+ *      unchanged until that flag is explicitly flipped on. When enabled, a
+ *      new request_id must be approved via POST /api/admin/approvals
+ *      before the Magnus call fires; the check reuses this route's own
+ *      request_id, so an approved retry and a fresh dispatch never
+ *      diverge.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -31,6 +38,7 @@ import { getSessionFromCookie } from '@/lib/session';
 import { prisma } from '@/lib/prisma';
 import { getMagnusConfig, isMagnusConfigured } from '@/lib/engines';
 import { addCredit, debitCredit } from '@/engines/magnus';
+import { checkGate } from '@/lib/approval-gate';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -81,6 +89,28 @@ export async function POST(req: NextRequest, { params }: Params) {
 
   const wallet = await prisma.wallet.findUnique({ where: { tenant_id: id } });
   if (!wallet) return NextResponse.json({ error: 'Wallet not found for tenant' }, { status: 404 });
+
+  // Human-approval gate — no-op unless PERMISSION_GATES_ENABLED=true.
+  const gate = await checkGate({
+    tenantId: id,
+    actorId: ctx.user.id,
+    action: 'admin.credits.adjust',
+    category: 'money_movement',
+    entity: 'wallet',
+    entityId: wallet.id,
+    requestId: request_id,
+    meta: { amount: amountNum, description: description.trim() },
+  });
+  if (!gate.allowed) {
+    return NextResponse.json(
+      {
+        error: 'This adjustment requires explicit approval before it can proceed.',
+        gate: gate.reason,
+        audit_id: gate.auditId,
+      },
+      { status: 202 },
+    );
+  }
 
   // AUDIT-BEFORE-DISPATCH — the row exists before the Magnus call fires, so an
   // interrupted request is detectable on retry instead of silently re-firing.
