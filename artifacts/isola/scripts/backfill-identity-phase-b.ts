@@ -157,8 +157,8 @@ async function resolveUserIdentity(
       return byPhone.id;
     }
 
-    // Nothing found by either key — safe to create because we have a phone
-    // (Identity.phone is NOT NULL; replit_id alone cannot satisfy that).
+    // Nothing found by either key — safe to create because we have a phone.
+    counts.identity_created++;
     if (!APPLY) return `DRY:${tenantOwnerPhone}`;
     const created = await db.identity.create({
       data: { phone: tenantOwnerPhone, replit_id: user.replit_id, display_name: user.name },
@@ -166,11 +166,23 @@ async function resolveUserIdentity(
     return created.id;
   }
 
-  // No owner_phone on the tenant, and replit_id alone cannot create an
-  // Identity row (phone is required). Do not fabricate — report and skip.
+  // No owner_phone on the tenant. Identity.phone is nullable (spine/identity-
+  // anchor-fix), so anchor by replit_id (login) alone when present — do not
+  // fabricate a phone number.
+  if (user.replit_id) {
+    counts.identity_created++;
+    if (!APPLY) return `DRY:replit:${user.replit_id}`;
+    const created = await db.identity.create({
+      data: { phone: null, replit_id: user.replit_id, display_name: user.name },
+    });
+    return created.id;
+  }
+
+  // Neither a phone anchor nor a login anchor is available. Do not
+  // fabricate — report and skip.
   edges.push({
-    kind: 'NEEDS_PHONE',
-    detail: `User ${user.id} — replit_id=${user.replit_id ? 'set' : 'MISSING'}, tenant owner_phone=MISSING`,
+    kind: 'NEEDS_PHONE_OR_LOGIN',
+    detail: `User ${user.id} — replit_id=MISSING, tenant owner_phone=MISSING`,
   });
   return null;
 }
@@ -263,7 +275,9 @@ async function verify() {
   const identityCount = await prisma.identity.count();
   const membershipCount = await prisma.membership.count();
   const voiceLineCount = await prisma.voiceLine.count();
-  const identityPhones = (await prisma.identity.findMany({ select: { phone: true } })).map((i) => i.phone);
+  const identityPhones = (await prisma.identity.findMany({ select: { phone: true } }))
+    .map((i) => i.phone)
+    .filter((p): p is string => p !== null);
   const consumerAccountsWithoutIdentity = await prisma.consumerAccount.count({
     where: { phone_number: { notIn: identityPhones } },
   });
