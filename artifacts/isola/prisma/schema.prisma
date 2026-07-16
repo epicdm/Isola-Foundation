@@ -483,7 +483,11 @@ model DrizzleSession {
 
 model Identity {
   id           String  @id @default(cuid())
-  phone        String  @unique // E.164 — the resolve-by-phone anchor
+  phone        String? @unique // E.164 — the resolve-by-phone anchor. Nullable:
+  // some Identities (e.g. B2B owners with no phone on file) can only be
+  // anchored by replit_id — see resolveUserIdentity() in
+  // scripts/backfill-identity-phase-b.ts. Unique index still enforced;
+  // Postgres allows multiple NULLs under a unique index.
   display_name String?
   replit_id    String? @unique // OIDC link, nullable
 
