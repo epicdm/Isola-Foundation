@@ -83,7 +83,7 @@ export async function GET(req: NextRequest) {
 
   // Wallet
   await prisma.wallet.create({
-    data: { tenant_id: tenant.id, balance_cache: 0 },
+    data: { tenant_id: tenant.id, balance_cache: 0, balance_minor: 0 },
   });
 
   // Default agent — every tenant gets one, including admin tenants.

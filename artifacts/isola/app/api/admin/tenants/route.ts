@@ -40,7 +40,7 @@ export async function POST(req: NextRequest) {
     data: { tenant_id: tenant.id, plan, status: 'active' },
   });
   await prisma.wallet.create({
-    data: { tenant_id: tenant.id, balance_cache: 0 },
+    data: { tenant_id: tenant.id, balance_cache: 0, balance_minor: 0 },
   });
   const agent = await prisma.agent.create({
     data: {

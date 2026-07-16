@@ -42,14 +42,19 @@ export async function toolGetBalance(account: ConsumerAccount) {
     try {
       const live = await getBalance(getMagnusConfig(), wallet.magnus_user_id);
       if (live) {
-        await prisma.wallet.update({ where: { id: wallet.id }, data: { balance_cache: live.balance } });
+        await prisma.wallet.update({
+          where: { id: wallet.id },
+          data: { balance_cache: live.balance, balance_minor: Math.round(live.balance * 100) },
+        });
         return { configured: true, balance: live.balance, currency: live.currency, live: true };
       }
     } catch (e: any) {
       console.error('[consumer-agent-tools] get_balance Magnus error:', e.message);
     }
   }
-  return { configured: isMagnusConfigured(), balance: wallet.balance_cache, currency: wallet.currency, live: false };
+  // ledger-phase-b read cutover — see app/api/wallet/balance/route.ts.
+  const cachedBalance = wallet.balance_minor != null ? wallet.balance_minor / 100 : wallet.balance_cache;
+  return { configured: isMagnusConfigured(), balance: cachedBalance, currency: wallet.currency, live: false };
 }
 
 // ── get_line_status ──────────────────────────────────────────────────────────

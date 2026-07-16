@@ -113,32 +113,62 @@ export async function POST(req: NextRequest) {
   // amount_usd stores the EC$ amount credited (matches convention elsewhere
   // in this table — see admin credits route / voice-provisioning-consumer —
   // NOT the raw charge amount in whatever currency the card was billed in).
+  //
+  // idempotency_key = result.ref (Fiserv's transaction reference), claimed via
+  // WalletTxn.idempotency_key's UNIQUE constraint (ledger-phase-a) rather than
+  // a check-then-act read — same race-safe pattern as lib/inbound-dedup.ts. A
+  // duplicate delivery of the same successful charge (e.g. a client retry that
+  // Fiserv itself resolves to the same ref) must credit the wallet at most
+  // once. amount_minor is the integer-cents mirror of ecAmount, written
+  // alongside amount_usd/balance_cache (not yet the read path — see L-C).
+  let alreadyCredited = false;
   if (wallet) {
-    await prisma.walletTxn.create({
-      data: {
-        tenant_id: ctx.effectiveTenantId,
-        wallet_id: wallet.id,
-        type: 'topup',
-        amount_usd: ecAmount,
-        description: isUsd
-          ? `Top-up via card — ${amountNum.toFixed(2)} USD → ${ecAmount.toFixed(2)} EC$`
-          : `Top-up via card — ${currency}`,
-        ref: result.ref,
-      },
-    });
-    // Update cached balance (EC$)
-    await prisma.wallet.update({
-      where: { id: wallet.id },
-      data: { balance_cache: { increment: ecAmount } },
-    });
+    const amountMinor = Math.round(ecAmount * 100);
+    try {
+      await prisma.$transaction([
+        prisma.walletTxn.create({
+          data: {
+            tenant_id: ctx.effectiveTenantId,
+            wallet_id: wallet.id,
+            type: 'topup',
+            amount_usd: ecAmount,
+            amount_minor: amountMinor,
+            currency: 'EC$',
+            idempotency_key: result.ref,
+            description: isUsd
+              ? `Top-up via card — ${amountNum.toFixed(2)} USD → ${ecAmount.toFixed(2)} EC$`
+              : `Top-up via card — ${currency}`,
+            ref: result.ref,
+          },
+        }),
+        prisma.wallet.update({
+          where: { id: wallet.id },
+          data: {
+            balance_cache: { increment: ecAmount },
+            balance_minor: { increment: amountMinor },
+          },
+        }),
+      ]);
+    } catch (err: any) {
+      if (err?.code === 'P2002') {
+        // Fiserv ref already recorded — the charge succeeded once already and
+        // was credited then. Do NOT re-credit; the card was charged exactly
+        // once regardless (Fiserv resolved the retry to the same ref), so
+        // crediting again here would be the double-credit this phase closes.
+        alreadyCredited = true;
+        console.error(`[topup] Duplicate Fiserv ref ${result.ref} — wallet already credited, skipping re-credit`);
+      } else {
+        throw err;
+      }
+    }
   }
 
   await audit({
     tenantId: ctx.effectiveTenantId,
     actorId: ctx.user.id,
     action: 'wallet.topup',
-    meta: { amount: amountNum, currency, ec_credited: ecAmount, ref: result.ref, magnus_credited: magnusCredited },
+    meta: { amount: amountNum, currency, ec_credited: ecAmount, ref: result.ref, magnus_credited: magnusCredited, already_credited: alreadyCredited },
   });
 
-  return NextResponse.json({ ok: true, ref: result.ref, status: result.status });
+  return NextResponse.json({ ok: true, ref: result.ref, status: result.status, already_credited: alreadyCredited });
 }
