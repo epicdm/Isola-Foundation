@@ -73,7 +73,7 @@ import {
 import { getBalance, getCalls, addCredit, debitCredit } from '@/engines/magnus';
 import { charge } from '@/engines/fiserv';
 import { sendText, sendTemplate, sendAuthTemplate } from '@/engines/whatsapp';
-import { findCustomerByPhone, createCrmLead } from '@/engines/odoo';
+import { findCustomerByPhone, createCrmLead, findOpenTasksByAssignee } from '@/engines/odoo';
 import {
   upsertContact,
   getContactConversations,
@@ -92,7 +92,7 @@ const ALLOW_LIST = {
   magnus: { getBalance, getCalls, addCredit, debitCredit },
   fiserv: { charge },
   whatsapp: { sendText, sendTemplate, sendAuthTemplate },
-  odoo: { findCustomerByPhone, createCrmLead },
+  odoo: { findCustomerByPhone, createCrmLead, findOpenTasksByAssignee },
   chatwoot: {
     upsertContact,
     getContactConversations,
