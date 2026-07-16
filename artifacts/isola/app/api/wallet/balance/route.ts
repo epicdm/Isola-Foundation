@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/session';
 import { prisma } from '@/lib/prisma';
-import { getMagnusConfig, isMagnusConfigured } from '@/lib/engines';
-import { getBalance } from '@/engines/magnus';
+import { isMagnusConfigured } from '@/lib/engines';
+import { callEngine } from '@/lib/connector';
 
 // ── Resolve import path for the engine client ────────────────────────────────
 // Engine clients live at artifacts/isola/engines/ (imported relative to app/api/wallet/)
@@ -22,8 +22,12 @@ export async function GET(req: NextRequest) {
   // If Magnus is configured + wallet has a magnus_user_id, fetch live balance
   if (isMagnusConfigured() && wallet.magnus_user_id) {
     try {
-      const config = getMagnusConfig();
-      const live = await getBalance(config, wallet.magnus_user_id);
+      const live = await callEngine('magnus', 'getBalance', [wallet.magnus_user_id], {
+        tenant: { tenantId: ctx.effectiveTenantId },
+        actorId: ctx.user.id,
+        entity: 'wallet',
+        entityId: wallet.id,
+      });
       if (live) {
         // Update cached balance
         await prisma.wallet.update({
