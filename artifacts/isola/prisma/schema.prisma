@@ -323,6 +323,7 @@ model Wallet {
   balance_cache       Float   @default(0) // refreshed on view from Magnus
   currency            String  @default("EC$")
   identity_id         String? @unique
+  balance_minor       Int? // ledger-phase-a: minor-unit mirror of balance_cache, backfilled; reads still use balance_cache
 
   updated_at DateTime @updatedAt
 
@@ -342,6 +343,9 @@ model WalletTxn {
   description         String
   ref                 String? // Fiserv ref or internal ref
   identity_id         String?
+  amount_minor        Int? // ledger-phase-a: minor-unit mirror of amount_usd, backfilled; reads still use amount_usd
+  currency            String? // ledger-phase-a: currency for amount_minor (e.g. "USD"); null on pre-existing rows until backfilled
+  idempotency_key     String? @unique // ledger-phase-a: dedup key for future write paths; null on existing rows
 
   created_at DateTime @default(now())
 
