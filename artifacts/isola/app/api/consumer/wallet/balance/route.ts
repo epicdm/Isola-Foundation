@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getConsumerSession } from '@/lib/consumer-session';
 import { prisma } from '@/lib/prisma';
-import { getMagnusConfig, isMagnusConfigured } from '@/lib/engines';
-import { getBalance } from '@/engines/magnus';
+import { isMagnusConfigured } from '@/lib/engines';
+import { callEngine } from '@/lib/connector';
 
 /** GET /api/consumer/wallet/balance — mirrors /api/wallet/balance, scoped to ConsumerAccount. */
 export async function GET(_req: NextRequest) {
@@ -17,8 +17,12 @@ export async function GET(_req: NextRequest) {
 
   if (isMagnusConfigured() && wallet.magnus_user_id) {
     try {
-      const config = getMagnusConfig();
-      const live = await getBalance(config, wallet.magnus_user_id);
+      const live = await callEngine('magnus', 'getBalance', [wallet.magnus_user_id], {
+        tenant: { consumerAccountId: account.id },
+        actorId: account.id,
+        entity: 'wallet',
+        entityId: wallet.id,
+      });
       if (live) {
         await prisma.wallet.update({ where: { id: wallet.id }, data: { balance_cache: live.balance } });
         return NextResponse.json({ balance: live.balance, currency: live.currency, magnus_configured: true });

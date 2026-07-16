@@ -11,10 +11,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/session';
 import { prisma } from '@/lib/prisma';
-import { getFiservConfig, getMagnusConfig, isMagnusConfigured, isFiservConfigured } from '@/lib/engines';
+import { isMagnusConfigured, isFiservConfigured } from '@/lib/engines';
 import { audit } from '@/lib/audit';
-import { charge } from '@/engines/fiserv';
-import { addCredit } from '@/engines/magnus';
+import { callEngine } from '@/lib/connector';
 import { usdToEcd } from '@/lib/currency';
 
 export async function POST(req: NextRequest) {
@@ -60,17 +59,27 @@ export async function POST(req: NextRequest) {
   const isUsd = currency.toUpperCase() === 'USD' || currency === 'US$';
   const ecAmount = isUsd ? usdToEcd(amountNum) : amountNum;
 
-  const fiservConfig = getFiservConfig();
-
   // ── Gate: real charge ──────────────────────────────────────────────────────
-  const result = await charge(fiservConfig, {
-    cardNumber, expMonth, expYear, cvv,
-    amount: amountNum,
-    currency,
-    payerName,
-    payerEmail: payerEmail ?? '',
-    payerAddress: payerAddress ?? '',
-  });
+  const result = await callEngine(
+    'fiserv',
+    'charge',
+    [
+      {
+        cardNumber, expMonth, expYear, cvv,
+        amount: amountNum,
+        currency,
+        payerName,
+        payerEmail: payerEmail ?? '',
+        payerAddress: payerAddress ?? '',
+      },
+    ],
+    {
+      tenant: { tenantId: ctx.effectiveTenantId },
+      actorId: ctx.user.id,
+      entity: 'wallet',
+      meta: { amount: amountNum, currency },
+    },
+  );
 
   if (!result.ok) {
     return NextResponse.json({ error: result.error ?? 'Card declined' }, { status: 402 });
@@ -84,7 +93,13 @@ export async function POST(req: NextRequest) {
   let magnusCredited = false;
   if (wallet?.magnus_user_id && isMagnusConfigured()) {
     try {
-      const magResult = await addCredit(getMagnusConfig(), wallet.magnus_user_id, ecAmount);
+      const magResult = await callEngine('magnus', 'addCredit', [wallet.magnus_user_id, ecAmount], {
+        tenant: { tenantId: ctx.effectiveTenantId },
+        actorId: ctx.user.id,
+        entity: 'wallet',
+        entityId: wallet.id,
+        meta: { ec_amount: ecAmount },
+      });
       magnusCredited = magResult.success;
       if (!magResult.success) {
         console.error('[topup] Magnus credit failed:', magResult.error);
