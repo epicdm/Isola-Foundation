@@ -238,6 +238,73 @@ export async function findOrCreateUtmRecord(
   return created && created.length > 0 ? created[0] : null
 }
 
+// ── Work-queue task lookup (IL-1 workspace work-queue) ──────────────────────
+// Odoo here is a single EPIC-wide instance (see lib/connector.ts resolveConfig
+// — odoo reads global env config, not a per-tenant binding), so there is no
+// tenant dimension to filter project.task on. Callers must always scope by
+// assignee, never "all tasks", or they will leak another tenant's Odoo data.
+
+export interface OdooTask {
+  id: number
+  name: string
+  projectName: string | null
+  stageName: string | null
+  priority: string | null
+  dateDeadline: string | null
+}
+
+interface OdooTaskRow {
+  id: number
+  name: string
+  project_id: unknown
+  stage_id: unknown
+  priority: string | null
+  date_deadline: string | null
+}
+
+/** Odoo many2one fields come back as either an [id, name] tuple (classic) or
+ *  an {id, display_name} object (JSON-2) depending on server version. */
+function displayNameOf(value: unknown): string | null {
+  if (!value) return null
+  if (Array.isArray(value)) return typeof value[1] === 'string' ? value[1] : null
+  if (typeof value === 'object' && 'display_name' in (value as Record<string, unknown>)) {
+    const v = (value as { display_name?: unknown }).display_name
+    return typeof v === 'string' ? v : null
+  }
+  return null
+}
+
+/**
+ * findOpenTasksByAssignee — project.task search_read filtered to active
+ * tasks assigned to `assigneeEmail`, soonest-deadline first. Odoo 17+ uses
+ * the many2many `user_ids` field for task assignees (multiple assignees per
+ * task); matched via `user_ids.login` since Isola has no local Odoo-user-id
+ * mapping, only the signed-in person's email. Returns [] on any failure —
+ * callers treat Odoo as best-effort and must not let a queue page 500 just
+ * because Odoo is unreachable.
+ */
+export async function findOpenTasksByAssignee(
+  config: OdooConfig,
+  assigneeEmail: string,
+  limit = 25,
+): Promise<OdooTask[]> {
+  const rows = (await json2Call(config, 'project.task', 'search_read', {
+    domain: [['user_ids.login', '=', assigneeEmail], ['active', '=', true]],
+    fields: ['id', 'name', 'project_id', 'stage_id', 'priority', 'date_deadline'],
+    order: 'date_deadline asc, priority desc',
+    limit,
+  }, 10000).catch(() => [])) as OdooTaskRow[]
+
+  return (rows ?? []).map((r) => ({
+    id: r.id,
+    name: r.name,
+    projectName: displayNameOf(r.project_id),
+    stageName: displayNameOf(r.stage_id),
+    priority: r.priority ?? null,
+    dateDeadline: r.date_deadline ?? null,
+  }))
+}
+
 export interface CrmLeadInput {
   name: string // opportunity/lead title
   contactName?: string

@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
   LayoutGrid,
+  ListChecks,
   Inbox,
   Bot,
   Phone,
@@ -52,6 +53,7 @@ interface AppSidebarProps {
 const OWNER_NAV: NavGroup = {
   label: 'Workspace',
   items: [
+    { href: '/workspace', label: 'Workspace', icon: ListChecks },
     { href: '/dashboard', label: 'Dashboard', icon: LayoutGrid },
     { href: '/inbox', label: 'Inbox', icon: Inbox },
     { href: '/agent', label: 'AI Agent', icon: Bot },
