@@ -37,6 +37,23 @@ model Tenant {
   voice_forward_to_cell    Boolean @default(false) // true = DID routes to voice_cell_number instead of the SIP extension
   voice_cell_number        String? // fallback cell number for forward-to-cell
 
+  // ── Canonical tenant registry linkage (S1a — additive; not yet seeded) ────
+  // Mirrors BFF's tenant_registry join columns so this Tenant row can become
+  // the single canonical registry entry across the constellation. Nullable:
+  // populated per-integration as each tenant is linked; seeding is S1b.
+  // magnus_sip_id / magnus_did_id / magnus_user_id are NOT repeated here —
+  // Tenant already carries them above (Voice/PBX provisioning block).
+  clawith_tenant_id    String? @unique // Clawith `tenants.id` — nullable-unique enforces the join
+  paperclip_company_id String?
+  odoo_instance_type   String? // hosted_saas | local_docker_clone
+  odoo_db              String?
+  odoo_url             String?
+  waba_id              String? // Meta WABA id (tenant-level; distinct from per-number WhatsAppNumber.waba_id)
+  wa_phone_number_id   String?
+  chatwoot_account_id  String?
+  reseller_id          String?
+  billing              Json?
+
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
