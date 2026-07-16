@@ -4,12 +4,15 @@
  * .../home?username=%account[username]%&password=%account[password]%).
  *
  * Acrobits fills in the signed-in softphone's own SIP username/password as
- * query params. We look up the ConsumerAccount that owns that SIP username,
- * check the password against `magnus_sip_password` (the single-sourced SIP
- * secret — see lib/magnus-voice / memory: magnus-sip-secret-authority), and
- * if it matches, establish the SAME consumer_sid session used by the
- * phone-OTP realm (lib/consumer-session) — one ConsumerAccount, reachable by
- * either auth path.
+ * query params. We look up the VoiceLine that owns that SIP username (Phase
+ * C: SIP creds live on VoiceLine, identity-anchored, not ConsumerAccount),
+ * resolve the owning ConsumerAccount via VoiceLine.identity_id -> Identity.phone
+ * -> ConsumerAccount.phone_number, check the password against
+ * `magnus_sip_password` (the single-sourced SIP secret — see lib/magnus-voice
+ * / memory: magnus-sip-secret-authority), and if it matches, establish the
+ * SAME consumer_sid session used by the phone-OTP realm
+ * (lib/consumer-session) — one ConsumerAccount, reachable by either auth
+ * path.
  *
  * Security: the password arrives in a query string (Acrobits' own template
  * mechanism — not our choice), so it WILL land in server access logs by
@@ -41,14 +44,23 @@ export async function GET(req: NextRequest) {
 
   // magnus_sip_username has no DB-level uniqueness constraint today, so this
   // is findFirst rather than findUnique — in practice each provisioned
-  // account gets its own username (see lib/voice-provisioning-consumer).
-  const account = await prisma.consumerAccount.findFirst({ where: { magnus_sip_username: username } });
+  // line gets its own username (see lib/voice-provisioning-consumer).
+  const voiceLine = await prisma.voiceLine.findFirst({
+    where: { magnus_sip_username: username, owner_kind: 'consumer' },
+  });
+  const identity = voiceLine?.identity_id
+    ? await prisma.identity.findUnique({ where: { id: voiceLine.identity_id } })
+    : null;
+  const account = identity?.phone
+    ? await prisma.consumerAccount.findFirst({ where: { phone_number: identity.phone } })
+    : null;
 
   const authFailed =
+    !voiceLine ||
     !account ||
     account.status !== 'active' ||
-    !account.magnus_sip_password ||
-    account.magnus_sip_password !== password;
+    !voiceLine.magnus_sip_password ||
+    voiceLine.magnus_sip_password !== password;
 
   if (authFailed) {
     // Never log the password itself — username only, and only on failure,

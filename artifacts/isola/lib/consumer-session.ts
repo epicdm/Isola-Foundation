@@ -13,7 +13,10 @@
 import crypto from 'node:crypto';
 import { cookies } from 'next/headers';
 import { prisma } from './prisma';
+import { getOrCreateIdentityByPhone } from './identity';
 import type { ConsumerAccount } from '@prisma/client';
+
+export type ConsumerSessionAccount = ConsumerAccount & { identityId: string };
 
 export const CONSUMER_SESSION_COOKIE = 'consumer_sid';
 
@@ -107,7 +110,7 @@ export function verifyConsumerSessionToken(token: string): ConsumerSessionPayloa
  * the ConsumerAccount fresh from the DB (never trusts stale JWT claims
  * beyond the id) so a suspended/deleted account can't act on an old token.
  */
-export async function getConsumerSession(): Promise<ConsumerAccount | null> {
+export async function getConsumerSession(): Promise<ConsumerSessionAccount | null> {
   const cookieStore = await cookies();
   const token = cookieStore.get(CONSUMER_SESSION_COOKIE)?.value;
   if (!token) return null;
@@ -117,5 +120,7 @@ export async function getConsumerSession(): Promise<ConsumerAccount | null> {
 
   const account = await prisma.consumerAccount.findUnique({ where: { id: payload.sub } });
   if (!account || account.status !== 'active') return null;
-  return account;
+
+  const identity = await getOrCreateIdentityByPhone(account.phone_number, account.display_name);
+  return { ...account, identityId: identity.id };
 }

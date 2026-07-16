@@ -19,6 +19,7 @@
 // "Admin pre-created this user by email" branch) so Eric real Replit
 // identity auto-links on his first real login.
 import { prisma } from "../lib/prisma"
+import { getOrCreateBusinessVoiceLine } from "../lib/voice-provisioning"
 
 const TENANT_ID = "cmreai9ug0000d7y4g6tcl90t"
 const OWNER_EMAIL = "epiccommunicationsinc@gmail.com"
@@ -76,21 +77,28 @@ async function main() {
       business_name: "EPIC Operators",
       status: "active",
       plan: "pro",
-      magnus_did_number: DID,
-      voice_forward_to_cell: true,
-      voice_cell_number: OWNER_CELL,
     },
     create: {
       id: TENANT_ID,
       business_name: "EPIC Operators",
       status: "active",
       plan: "pro",
+    },
+  })
+  console.log("TENANT_UPSERTED " + JSON.stringify(tenant))
+
+  // Phase C: DID + forward-to-cell routing live on the tenant's VoiceLine
+  // row, not directly on Tenant.
+  const voiceLineBase = await getOrCreateBusinessVoiceLine(TENANT_ID)
+  const voiceLine = await prisma.voiceLine.update({
+    where: { id: voiceLineBase.id },
+    data: {
       magnus_did_number: DID,
       voice_forward_to_cell: true,
       voice_cell_number: OWNER_CELL,
     },
   })
-  console.log("TENANT_UPSERTED " + JSON.stringify(tenant))
+  console.log("VOICE_LINE_UPSERTED " + JSON.stringify(voiceLine))
 
   const existingUser = await prisma.user.findFirst({ where: { tenant_id: TENANT_ID, email: OWNER_EMAIL } })
   const user = existingUser

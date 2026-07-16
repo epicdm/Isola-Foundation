@@ -9,6 +9,7 @@
 import { cookies } from 'next/headers';
 import { getAuthUser } from './auth';
 import { prisma } from './prisma';
+import { getOrCreateIdentityForUser } from './identity';
 import type { User, Tenant } from '@prisma/client';
 
 export type DbUser = User;
@@ -23,6 +24,9 @@ export interface SessionCtx {
   effectiveTenant: DbTenant;
   isAdmin: boolean;
   isOwner: boolean;
+  /** Identity.id resolved via getOrCreateIdentityForUser(). Null only for the
+   *  NEEDS_PHONE_OR_LOGIN edge case (no replit_id and no tenant owner_phone). */
+  identityId: string | null;
 }
 
 /**
@@ -86,6 +90,21 @@ async function resolveSession(
     if (t) effectiveTenant = t;
   }
 
+  // Identity resolution always anchors on the user's OWN home tenant
+  // (user.tenant), never the admin act-as effectiveTenant — act-as is a
+  // view override, not a change of who the admin actually is.
+  const identity = await getOrCreateIdentityForUser(
+    {
+      id: user.id,
+      replit_id: user.replit_id,
+      name: user.name,
+      role: user.role,
+      tenant_id: user.tenant_id,
+      identity_id: user.identity_id,
+    },
+    user.tenant.owner_phone,
+  );
+
   return {
     replitId: authUser.id,
     user,
@@ -93,6 +112,7 @@ async function resolveSession(
     effectiveTenant,
     isAdmin,
     isOwner: user.role === 'owner',
+    identityId: identity?.id ?? null,
   };
 }
 

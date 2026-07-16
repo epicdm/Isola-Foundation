@@ -1,9 +1,18 @@
 /**
  * lib/voice-provisioning.ts — idempotent state machine that provisions a
- * tenant's Magnus voice/PBX stack: user → SIP account → DID (draw + claim +
- * route) → caller-ID. Each step only runs if its Magnus id isn't already
- * persisted on the Tenant row, so re-running on an already-provisioned (or
- * partially-provisioned) tenant is always a safe no-op / resume.
+ * Magnus voice/PBX stack: user → SIP account → DID (draw + claim + route) →
+ * caller-ID. Each step only runs if its Magnus id isn't already persisted on
+ * the VoiceLine row, so re-running on an already-provisioned (or
+ * partially-provisioned) line is always a safe no-op / resume.
+ *
+ * Phase C: converged onto ONE path — `provisionVoiceLine()` — shared by both
+ * the business/Tenant realm (this file's `provisionTenantVoice()` wrapper)
+ * and the consumer/EMA realm (voice-provisioning-consumer.ts's
+ * `provisionConsumerVoice()` wrapper). State now persists on the `VoiceLine`
+ * table (found/created by tenant_id for business, identity_id for consumer)
+ * instead of directly on Tenant/ConsumerAccount — Phase D cleanup folded in:
+ * neither model's duplicated `magnus_*`/`voice_*` columns are written by
+ * provisioning anymore.
  *
  * NOTE on step order vs. the original brief: the brief lists "create SIP →
  * create caller-ID → draw DID" — but a caller-ID is only meaningful once a
@@ -18,6 +27,7 @@ import { prisma } from './prisma';
 import { getMagnusConfig, isMagnusConfigured } from './engines';
 import {
   genMagnusUsername,
+  genConsumerMagnusUsername,
   createMagnusUser,
   createSipAccount,
   patchSipCallerId,
@@ -36,6 +46,8 @@ import {
   DOMINICA_LOCAL_PREFIX_RULES,
   enforceSipSecret,
 } from './magnus-voice';
+import type { MagnusConfig } from '@/engines/magnus';
+import type { VoiceLine } from '@prisma/client';
 import crypto from 'node:crypto';
 
 export interface VoiceProvisioningResult {
@@ -50,82 +62,77 @@ export interface VoiceProvisioningResult {
   magnus_callerid_id: string | null;
 }
 
-function toResult(t: {
-  voice_provisioning_state: string;
-  voice_provisioning_error: string | null;
-  magnus_user_id: string | null;
-  magnus_sip_id: string | null;
-  magnus_sip_username: string | null;
-  magnus_did_id: string | null;
-  magnus_did_number: string | null;
-  magnus_diddestination_id: string | null;
-  magnus_callerid_id: string | null;
-}): VoiceProvisioningResult {
+export function toVoiceProvisioningResult(line: VoiceLine): VoiceProvisioningResult {
   return {
-    state: t.voice_provisioning_state,
-    error: t.voice_provisioning_error,
-    magnus_user_id: t.magnus_user_id,
-    magnus_sip_id: t.magnus_sip_id,
-    magnus_sip_username: t.magnus_sip_username,
-    magnus_did_id: t.magnus_did_id,
-    magnus_did_number: t.magnus_did_number,
-    magnus_diddestination_id: t.magnus_diddestination_id,
-    magnus_callerid_id: t.magnus_callerid_id,
+    state: line.provisioning_state,
+    error: line.provisioning_error,
+    magnus_user_id: line.magnus_user_id,
+    magnus_sip_id: line.magnus_sip_id,
+    magnus_sip_username: line.magnus_sip_username,
+    magnus_did_id: line.magnus_did_id,
+    magnus_did_number: line.magnus_did_number,
+    magnus_diddestination_id: line.magnus_diddestination_id,
+    magnus_callerid_id: line.magnus_callerid_id,
   };
 }
 
-export async function provisionTenantVoice(tenantId: string): Promise<VoiceProvisioningResult> {
-  if (!isMagnusConfigured()) {
-    throw new Error('Magnus not configured — set MAGNUS_URL, MAGNUS_API_KEY, MAGNUS_API_SECRET');
-  }
-  const config = getMagnusConfig();
+export interface ProvisionVoiceLineParams {
+  /** Magnus `user.description` — free text, used for at-a-glance ownership on the Magnus grid. */
+  description: string;
+  /** Seed for genMagnusUsername-style naming (tenantId for business, identityId for consumer). */
+  usernameSeed: string;
+  usernamePrefix: 'ep_' | 'ema_';
+  /**
+   * Consumer-only hook: fired once, right after Step 1 resolves/creates the
+   * Magnus user id (persisted onto the VoiceLine row already), before Step 2
+   * (SIP account) runs. Lets the consumer wrapper mirror the id onto the
+   * Wallet and apply the one-time starter grant at the exact point in the
+   * step order the pre-convergence code did.
+   */
+  onMagnusUserResolved?: (magnusUserId: string) => Promise<void>;
+}
 
-  let tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, include: { wallet: true } });
-  if (!tenant) throw new Error('Tenant not found');
+function genUsername(seed: string, prefix: 'ep_' | 'ema_'): string {
+  return prefix === 'ep_' ? genMagnusUsername(seed) : genConsumerMagnusUsername(seed);
+}
 
-  // NOTE: there is deliberately NO "already fully provisioned, return
-  // immediately" short-circuit here anymore. That used to skip Magnus
-  // entirely whenever every *id* column was non-null, which meant it could
-  // never notice (or fix) drift between the Tenant row and live Magnus state
-  // — e.g. an owner-facing password that no longer matches `sip.secret`, or
-  // a DID number left over from an earlier partial/duplicate run instead of
-  // whichever DID is actually wired to the SIP extension today. Every step
-  // below is itself already idempotent (it only *creates* a Magnus record
-  // when the corresponding id is missing; otherwise it only issues read-only
-  // reconciliation lookups), so re-running this on an already-provisioned
-  // tenant is still always safe and duplicate-free — it just now also
-  // backfills/repairs the owner-facing fields instead of trusting stale ones.
+/**
+ * The ONE Magnus voice-line provisioning path. Operates entirely on a
+ * `VoiceLine` row (identified by `voiceLineId`) — callers are responsible for
+ * finding-or-creating that row (by tenant_id or identity_id) before calling
+ * this, and for running any owner-kind-specific steps around it (starter
+ * grant, BFF mirror) via `onMagnusUserResolved` or after this returns.
+ */
+export async function provisionVoiceLine(
+  voiceLineId: string,
+  config: MagnusConfig,
+  params: ProvisionVoiceLineParams,
+): Promise<VoiceLine> {
+  let line = await prisma.voiceLine.findUniqueOrThrow({ where: { id: voiceLineId } });
 
-  await prisma.tenant.update({
-    where: { id: tenantId },
-    data: { voice_provisioning_state: 'pending', voice_provisioning_error: null },
+  line = await prisma.voiceLine.update({
+    where: { id: voiceLineId },
+    data: { provisioning_state: 'pending', provisioning_error: null },
   });
 
   try {
     // Step 1: Magnus user (reuse if already linked, e.g. from wallet setup).
-    let magnusUserId = tenant.magnus_user_id;
+    let magnusUserId = line.magnus_user_id;
     if (!magnusUserId) {
-      const username = genMagnusUsername(tenant.id);
+      const username = genUsername(params.usernameSeed, params.usernamePrefix);
       const password = crypto.randomBytes(9).toString('base64url').slice(0, 12);
       magnusUserId = await createMagnusUser(config, {
         username,
         password,
-        description: `ISOLA_TENANT_PBX:${tenant.business_name}`,
+        description: params.description,
       });
-      tenant = await prisma.tenant.update({
-        where: { id: tenantId },
+      line = await prisma.voiceLine.update({
+        where: { id: voiceLineId },
         data: { magnus_user_id: magnusUserId },
-        include: { wallet: true },
       });
-      // Mirror onto the wallet too if it doesn't have its own Magnus link yet —
-      // they're the same Magnus billing entity, and wallet balance/CDR reads
-      // key off wallet.magnus_user_id.
-      if (tenant.wallet && !tenant.wallet.magnus_user_id) {
-        await prisma.wallet.update({
-          where: { tenant_id: tenantId },
-          data: { magnus_user_id: magnusUserId },
-        });
-      }
+    }
+    if (params.onMagnusUserResolved) {
+      await params.onMagnusUserResolved(magnusUserId!);
     }
 
     // Step 1b: local-dialing prefix rules — verified live: every correctly
@@ -136,8 +143,7 @@ export async function provisionTenantVoice(tenantId: string): Promise<VoiceProvi
     // isn't tracked in our own DB — Magnus's live `user.prefix_local` is the
     // only source of truth — so always reconcile against it, only issuing a
     // write when the live value doesn't already match (idempotent: re-running
-    // provisioning, or this backfill, on an already-correct account is a
-    // pure no-op read).
+    // provisioning on an already-correct account is a pure no-op read).
     const livePrefixLocal = await readUserPrefixLocal(config, magnusUserId!);
     if (livePrefixLocal !== null && livePrefixLocal !== DOMINICA_LOCAL_PREFIX_RULES) {
       await patchUserPrefixLocal(config, magnusUserId!, DOMINICA_LOCAL_PREFIX_RULES);
@@ -145,22 +151,21 @@ export async function provisionTenantVoice(tenantId: string): Promise<VoiceProvi
 
     // Step 2: SIP account — create if missing; if it already exists, always
     // resync the owner-facing username/password from the LIVE Magnus record
-    // rather than trusting whatever is cached on the Tenant row. Magnus's
+    // rather than trusting whatever is cached on the VoiceLine row. Magnus's
     // `sip.secret` is the actual credential the softphone must authenticate
     // with — a locally-cached password that no longer matches it would
     // silently render a QR code the owner's phone can never register with.
-    let sipId = tenant.magnus_sip_id;
-    let sipUsername = tenant.magnus_sip_username;
-    let sipPassword = tenant.magnus_sip_password;
+    let sipId = line.magnus_sip_id;
+    let sipUsername = line.magnus_sip_username;
+    let sipPassword = line.magnus_sip_password;
     let liveSip: Awaited<ReturnType<typeof readSipAccount>> = null;
     if (!sipId) {
-      sipUsername = genMagnusUsername(tenant.id);
+      sipUsername = genUsername(params.usernameSeed, params.usernamePrefix);
       sipPassword = crypto.randomBytes(9).toString('base64url').slice(0, 12);
       sipId = await createSipAccount(config, { id_user: magnusUserId!, name: sipUsername, secret: sipPassword });
-      tenant = await prisma.tenant.update({
-        where: { id: tenantId },
+      line = await prisma.voiceLine.update({
+        where: { id: voiceLineId },
         data: { magnus_sip_id: sipId, magnus_sip_username: sipUsername, magnus_sip_password: sipPassword },
-        include: { wallet: true },
       });
     } else {
       liveSip = await readSipAccount(config, sipId);
@@ -168,18 +173,17 @@ export async function provisionTenantVoice(tenantId: string): Promise<VoiceProvi
         // Username: adopt Magnus's live value only if we don't already have
         // one locally (legacy backfill case) — otherwise the locally-stored
         // value is authoritative, same as the password below.
-        const nextUsername = tenant.magnus_sip_username || liveSip.name || sipUsername;
-        if (nextUsername !== tenant.magnus_sip_username) {
+        const nextUsername = line.magnus_sip_username || liveSip.name || sipUsername;
+        if (nextUsername !== line.magnus_sip_username) {
           sipUsername = nextUsername;
-          tenant = await prisma.tenant.update({
-            where: { id: tenantId },
+          line = await prisma.voiceLine.update({
+            where: { id: voiceLineId },
             data: { magnus_sip_username: sipUsername },
-            include: { wallet: true },
           });
         }
 
         // Password: the Acrobits CSC link already handed to the owner
-        // carries whatever is in tenant.magnus_sip_password — THAT is the
+        // carries whatever is in line.magnus_sip_password — THAT is the
         // single source of truth. If Magnus's live secret has drifted from
         // it, force Magnus back into line rather than adopting Magnus's
         // value, which would silently orphan the credential already in use.
@@ -189,10 +193,9 @@ export async function provisionTenantVoice(tenantId: string): Promise<VoiceProvi
           // No locally-stored password at all (legacy row) — adopt Magnus's
           // as a one-time backfill; there's nothing else to be authoritative.
           sipPassword = liveSip.secret;
-          tenant = await prisma.tenant.update({
-            where: { id: tenantId },
+          line = await prisma.voiceLine.update({
+            where: { id: voiceLineId },
             data: { magnus_sip_password: sipPassword },
-            include: { wallet: true },
           });
         }
       }
@@ -201,13 +204,13 @@ export async function provisionTenantVoice(tenantId: string): Promise<VoiceProvi
     // Step 3: DID — draw/claim/route only if this SIP extension has NOTHING
     // wired up yet. If it already has a DID stamped as its caller-ID (the
     // canonical "currently active" number for that extension, per
-    // `patchSipCallerId`'s convention), reconcile the Tenant row to match
+    // `patchSipCallerId`'s convention), reconcile the VoiceLine row to match
     // that instead of trusting a possibly-stale/duplicate id — this repairs
     // drift left over from any earlier partial or double-run without ever
     // drawing/claiming a brand-new DID or creating a second diddestination.
-    let didId = tenant.magnus_did_id;
-    let didNumber = tenant.magnus_did_number;
-    let diddestinationId = tenant.magnus_diddestination_id;
+    let didId = line.magnus_did_id;
+    let didNumber = line.magnus_did_number;
+    let diddestinationId = line.magnus_diddestination_id;
 
     if (!liveSip) liveSip = await readSipAccount(config, sipId!);
     const canonicalDidNumber = liveSip?.cid_number || liveSip?.callerid || null;
@@ -219,14 +222,13 @@ export async function provisionTenantVoice(tenantId: string): Promise<VoiceProvi
         didId = didRow?.id ?? didId;
         didNumber = didRow?.did ?? canonicalDidNumber;
         diddestinationId = destRow?.id ?? diddestinationId;
-        tenant = await prisma.tenant.update({
-          where: { id: tenantId },
+        line = await prisma.voiceLine.update({
+          where: { id: voiceLineId },
           data: {
             magnus_did_id: didId,
             magnus_did_number: didNumber,
             magnus_diddestination_id: diddestinationId,
           },
-          include: { wallet: true },
         });
       }
     } else if (!didId || !diddestinationId) {
@@ -240,15 +242,14 @@ export async function provisionTenantVoice(tenantId: string): Promise<VoiceProvi
         id_sip: sipId!,
         sipUsername: sipUsername!,
       });
-      tenant = await prisma.tenant.update({
-        where: { id: tenantId },
+      line = await prisma.voiceLine.update({
+        where: { id: voiceLineId },
         data: {
           magnus_did_id: didId,
           magnus_did_number: didNumber,
           magnus_diddestination_id: diddestinationId,
           voice_forward_to_cell: false,
         },
-        include: { wallet: true },
       });
       // Now that the DID is known, stamp it onto the SIP account's caller-ID.
       await patchSipCallerId(config, sipId!, didNumber!);
@@ -256,12 +257,12 @@ export async function provisionTenantVoice(tenantId: string): Promise<VoiceProvi
 
     // Step 3b: EXTENSION-FIRST reconciliation. Ringing the SIP extension is
     // the default; forwarding to the owner's cell is only an opt-in override
-    // (`Tenant.voice_forward_to_cell`), never the default. Magnus's live
+    // (`VoiceLine.voice_forward_to_cell`), never the default. Magnus's live
     // `diddestination.destination` is the actual routing source of truth and
     // can drift from that flag (e.g. a row created before this fix shipped,
     // or an interrupted forward-toggle write) — always reconcile it here,
     // not just at creation time, so re-running provisioning on an
-    // already-provisioned tenant repairs a wrongly-PSTN-routed DID too.
+    // already-provisioned line repairs a wrongly-PSTN-routed DID too.
     if (diddestinationId) {
       const liveDest = await readDidDestination(config, diddestinationId);
       if (liveDest) {
@@ -272,7 +273,7 @@ export async function provisionTenantVoice(tenantId: string): Promise<VoiceProvi
         // 2592 for a live wrong-form example: voip_call='0' + non-empty
         // destination). Both fields must be correct.
         const isCurrentlySip = liveDest.destination === '' && liveDest.voip_call === '1';
-        const wantsCellForward = !!tenant.voice_forward_to_cell && !!tenant.voice_cell_number;
+        const wantsCellForward = !!line.voice_forward_to_cell && !!line.voice_cell_number;
         if (!wantsCellForward && !isCurrentlySip) {
           // Default path: not opted into cell-forward, but Magnus isn't
           // routing to the SIP extension — fix it.
@@ -280,7 +281,7 @@ export async function provisionTenantVoice(tenantId: string): Promise<VoiceProvi
         } else if (wantsCellForward && isCurrentlySip) {
           // Owner has cell-forward enabled but Magnus still rings the SIP
           // extension — bring it in line with their preference.
-          await setDidDestinationRoute(config, diddestinationId, { mode: 'cell', cellNumber: tenant.voice_cell_number! });
+          await setDidDestinationRoute(config, diddestinationId, { mode: 'cell', cellNumber: line.voice_cell_number! });
         }
       }
     }
@@ -290,32 +291,65 @@ export async function provisionTenantVoice(tenantId: string): Promise<VoiceProvi
     // *current* canonical DID (reusing it if found — never creating a
     // duplicate) rather than trusting the previously-cached id, since step 3
     // may have just switched `didNumber` to a different (correct) DID.
-    let calleridId = tenant.magnus_callerid_id;
+    let calleridId = line.magnus_callerid_id;
     const existingCallerId = didNumber ? await findCallerIdByCid(config, didNumber) : null;
     const resolvedCallerId = existingCallerId?.id ?? null;
     if (resolvedCallerId ? resolvedCallerId !== calleridId : !calleridId) {
       calleridId = resolvedCallerId ?? (await createCallerId(config, { id_user: magnusUserId!, cid: didNumber! }));
-      tenant = await prisma.tenant.update({
-        where: { id: tenantId },
+      line = await prisma.voiceLine.update({
+        where: { id: voiceLineId },
         data: { magnus_callerid_id: calleridId },
-        include: { wallet: true },
       });
     }
 
-    tenant = await prisma.tenant.update({
-      where: { id: tenantId },
-      data: { voice_provisioning_state: 'completed', voice_provisioning_error: null },
-      include: { wallet: true },
+    line = await prisma.voiceLine.update({
+      where: { id: voiceLineId },
+      data: { provisioning_state: 'completed', provisioning_error: null },
     });
 
-    return toResult(tenant);
+    return line;
   } catch (e: any) {
     const message = e?.message ?? String(e);
-    tenant = await prisma.tenant.update({
-      where: { id: tenantId },
-      data: { voice_provisioning_state: 'failed', voice_provisioning_error: message },
-      include: { wallet: true },
+    line = await prisma.voiceLine.update({
+      where: { id: voiceLineId },
+      data: { provisioning_state: 'failed', provisioning_error: message },
     });
-    return toResult(tenant);
+    return line;
   }
+}
+
+/** Finds the business VoiceLine for a tenant, creating it if missing. */
+export async function getOrCreateBusinessVoiceLine(tenantId: string): Promise<VoiceLine> {
+  const existing = await prisma.voiceLine.findFirst({ where: { tenant_id: tenantId, owner_kind: 'business' } });
+  if (existing) return existing;
+  return prisma.voiceLine.create({ data: { owner_kind: 'business', tenant_id: tenantId } });
+}
+
+/** Business/Tenant wrapper around provisionVoiceLine() — stable name/signature/result shape for existing call sites. */
+export async function provisionTenantVoice(tenantId: string): Promise<VoiceProvisioningResult> {
+  if (!isMagnusConfigured()) {
+    throw new Error('Magnus not configured — set MAGNUS_URL, MAGNUS_API_KEY, MAGNUS_API_SECRET');
+  }
+  const config = getMagnusConfig();
+
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, include: { wallet: true } });
+  if (!tenant) throw new Error('Tenant not found');
+
+  const voiceLine = await getOrCreateBusinessVoiceLine(tenantId);
+
+  const result = await provisionVoiceLine(voiceLine.id, config, {
+    description: `ISOLA_TENANT_PBX:${tenant.business_name}`,
+    usernameSeed: tenantId,
+    usernamePrefix: 'ep_',
+    onMagnusUserResolved: async (magnusUserId) => {
+      // Mirror onto the wallet too if it doesn't have its own Magnus link yet —
+      // they're the same Magnus billing entity, and wallet balance/CDR reads
+      // key off wallet.magnus_user_id.
+      if (tenant.wallet && !tenant.wallet.magnus_user_id) {
+        await prisma.wallet.update({ where: { tenant_id: tenantId }, data: { magnus_user_id: magnusUserId } });
+      }
+    },
+  });
+
+  return toVoiceProvisioningResult(result);
 }

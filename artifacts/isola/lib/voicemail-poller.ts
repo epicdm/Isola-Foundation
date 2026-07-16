@@ -259,21 +259,28 @@ export async function pollTenantVoicemails(): Promise<PollTenantVoicemailsResult
     errors: [],
   };
 
-  // Only tenants with a provisioned Magnus SIP line have a voicemail spool
-  // to poll. Mirrors source's prisma.liteAccount.findMany() scan-everything
-  // pattern, scoped by the equivalent Foundation column.
-  const tenants = await prisma.tenant.findMany({
-    where: { magnus_sip_username: { not: null } },
+  // Only business VoiceLines with a provisioned Magnus SIP line have a
+  // voicemail spool to poll. Mirrors source's prisma.liteAccount.findMany()
+  // scan-everything pattern, scoped by the equivalent Foundation column —
+  // now living on VoiceLine (Phase C) instead of directly on Tenant.
+  const voiceLines = await prisma.voiceLine.findMany({
+    where: { owner_kind: 'business', magnus_sip_username: { not: null } },
     select: {
-      id: true,
       magnus_sip_username: true,
-      voicemail_catches: { select: { msgId: true } },
+      tenant: {
+        select: {
+          id: true,
+          voicemail_catches: { select: { msgId: true } },
+        },
+      },
     },
   });
 
-  for (const tenant of tenants) {
+  for (const voiceLine of voiceLines) {
+    const tenant = voiceLine.tenant;
+    if (!tenant) continue;
     result.tenantsScanned++;
-    const sipUsername = tenant.magnus_sip_username as string; // non-null per where clause
+    const sipUsername = voiceLine.magnus_sip_username as string; // non-null per where clause
     const processedMsgIds = new Set(tenant.voicemail_catches.map((c) => c.msgId));
 
     const useFixture = Boolean(FIXTURE_DIR);

@@ -29,6 +29,7 @@ import { getMagnusConfig, isMagnusConfigured } from './engines';
 import { getBalance, getCalls } from '@/engines/magnus';
 import { setDidDestinationRoute, MAGNUS_REGISTRATION_SERVER } from './magnus-voice';
 import type { ConsumerAccount } from '@prisma/client';
+import type { ConsumerSessionAccount } from './consumer-session';
 
 export class ConsumerToolError extends Error {}
 
@@ -59,26 +60,42 @@ export async function toolGetBalance(account: ConsumerAccount) {
 
 // ── get_line_status ──────────────────────────────────────────────────────────
 
-export async function toolGetLineStatus(account: ConsumerAccount) {
+export async function toolGetLineStatus(account: ConsumerSessionAccount) {
+  const voiceLine = await prisma.voiceLine.findFirst({
+    where: { identity_id: account.identityId, owner_kind: 'consumer' },
+  });
+  if (!voiceLine) {
+    return {
+      state: 'not_provisioned',
+      error: null,
+      did_number: null,
+      registration_server: MAGNUS_REGISTRATION_SERVER,
+      forward_to_cell: false,
+      cell_number: null,
+    };
+  }
   return {
-    state: account.voice_provisioning_state,
-    error: account.voice_provisioning_error,
-    did_number: account.magnus_did_number,
+    state: voiceLine.provisioning_state,
+    error: voiceLine.provisioning_error,
+    did_number: voiceLine.magnus_did_number,
     registration_server: MAGNUS_REGISTRATION_SERVER,
-    forward_to_cell: account.voice_forward_to_cell,
-    cell_number: account.voice_cell_number,
+    forward_to_cell: voiceLine.voice_forward_to_cell,
+    cell_number: voiceLine.voice_cell_number,
   };
 }
 
 // ── get_recent_calls ─────────────────────────────────────────────────────────
 
-export async function toolGetRecentCalls(account: ConsumerAccount, limit: number) {
+export async function toolGetRecentCalls(account: ConsumerSessionAccount, limit: number) {
   const cappedLimit = Math.max(1, Math.min(limit || 5, 20));
-  if (!isMagnusConfigured() || !account.magnus_user_id) {
+  const voiceLine = await prisma.voiceLine.findFirst({
+    where: { identity_id: account.identityId, owner_kind: 'consumer' },
+  });
+  if (!isMagnusConfigured() || !voiceLine?.magnus_user_id) {
     return { configured: false, calls: [] };
   }
   try {
-    const calls = await getCalls(getMagnusConfig(), account.magnus_user_id, cappedLimit);
+    const calls = await getCalls(getMagnusConfig(), voiceLine.magnus_user_id, cappedLimit);
     return { configured: true, calls };
   } catch (e: any) {
     console.error('[consumer-agent-tools] get_recent_calls error:', e.message);
@@ -122,30 +139,34 @@ export async function toolInitiateTopup(account: ConsumerAccount, amount: number
 // ── set_call_forwarding — real, reversible settings write ──────────────────
 
 export async function toolSetCallForwarding(
-  account: ConsumerAccount,
+  account: ConsumerSessionAccount,
   enabled: boolean,
   cellNumber: string | undefined,
 ) {
   if (!isMagnusConfigured()) {
     throw new ConsumerToolError('Magnus is not configured — cannot change call routing');
   }
-  if (!account.magnus_diddestination_id || account.voice_provisioning_state !== 'completed') {
+  const voiceLine = await prisma.voiceLine.findFirst({
+    where: { identity_id: account.identityId, owner_kind: 'consumer' },
+  });
+
+  if (!voiceLine?.magnus_diddestination_id || voiceLine.provisioning_state !== 'completed') {
     throw new ConsumerToolError('This account\u2019s voice line is not provisioned yet');
   }
 
-  const nextCellNumber = cellNumber !== undefined ? cellNumber : account.voice_cell_number;
+  const nextCellNumber = cellNumber !== undefined ? cellNumber : voiceLine.voice_cell_number;
   if (enabled && !nextCellNumber) {
     throw new ConsumerToolError('A cell number is required to enable forward-to-cell');
   }
 
   await setDidDestinationRoute(
     getMagnusConfig(),
-    account.magnus_diddestination_id,
+    voiceLine.magnus_diddestination_id,
     enabled ? { mode: 'cell', cellNumber: nextCellNumber! } : { mode: 'sip' },
   );
 
-  const updated = await prisma.consumerAccount.update({
-    where: { id: account.id },
+  const updated = await prisma.voiceLine.update({
+    where: { id: voiceLine.id },
     data: {
       voice_forward_to_cell: !!enabled,
       ...(cellNumber !== undefined && { voice_cell_number: cellNumber }),
