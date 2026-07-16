@@ -25,10 +25,11 @@ export async function GET(req: NextRequest) {
       const config = getMagnusConfig();
       const live = await getBalance(config, wallet.magnus_user_id);
       if (live) {
-        // Update cached balance
+        // Update cached balance (both the legacy float mirror and the
+        // ledger-phase-a minor-unit column — see backfill-ledger-minor.ts).
         await prisma.wallet.update({
           where: { id: wallet.id },
-          data: { balance_cache: live.balance },
+          data: { balance_cache: live.balance, balance_minor: Math.round(live.balance * 100) },
         });
         return NextResponse.json({
           balance: live.balance,
@@ -41,8 +42,14 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  // ledger-phase-b read cutover: source the cached balance from balance_minor
+  // (integer cents) rather than the float balance_cache column, falling back
+  // to balance_cache only for the (should-be-unreachable, pre-backfill) case
+  // where balance_minor is still null.
+  const cachedBalance = wallet.balance_minor != null ? wallet.balance_minor / 100 : wallet.balance_cache;
+
   return NextResponse.json({
-    balance: wallet.balance_cache,
+    balance: cachedBalance,
     currency: wallet.currency,
     magnus_configured: isMagnusConfigured(),
     cached: true,

@@ -123,7 +123,7 @@ export async function provisionConsumerVoice(consumerAccountId: string): Promise
     // tenant path does.
     if (!consumer.wallet) {
       await prisma.wallet.create({
-        data: { consumer_account_id: consumerAccountId, balance_cache: 0 },
+        data: { consumer_account_id: consumerAccountId, balance_cache: 0, balance_minor: 0 },
       });
       consumer = await prisma.consumerAccount.findUniqueOrThrow({
         where: { id: consumerAccountId },
@@ -184,6 +184,7 @@ export async function provisionConsumerVoice(consumerAccountId: string): Promise
           'EMA starter grant — 15 free minutes',
         );
         if (grantResult.success) {
+          const grantAmountMinor = Math.round(STARTER_FREE_EC * 100);
           const [, updatedWallet] = await prisma.$transaction([
             prisma.walletTxn.create({
               data: {
@@ -191,13 +192,21 @@ export async function provisionConsumerVoice(consumerAccountId: string): Promise
                 wallet_id: consumer.wallet.id,
                 type: STARTER_GRANT_TXN_TYPE,
                 amount_usd: STARTER_FREE_EC,
+                amount_minor: grantAmountMinor,
+                currency: 'EC$',
+                // Once-per-account-ever key — mirrors the existingGrant guard
+                // above as an additional DB-level (unique constraint) backstop.
+                idempotency_key: `starter_grant:${consumerAccountId}`,
                 description: 'Starter grant — 15 free minutes (launch promo)',
                 ref: 'system:starter_grant',
               },
             }),
             prisma.wallet.update({
               where: { id: consumer.wallet.id },
-              data: { balance_cache: { increment: STARTER_FREE_EC } },
+              data: {
+                balance_cache: { increment: STARTER_FREE_EC },
+                balance_minor: { increment: grantAmountMinor },
+              },
             }),
           ]);
           consumer = await prisma.consumerAccount.findUniqueOrThrow({

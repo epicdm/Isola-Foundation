@@ -117,7 +117,7 @@ async function main() {
   const wallet = await prisma.wallet.upsert({
     where: { tenant_id: TENANT_ID },
     update: {},
-    create: { tenant_id: TENANT_ID, balance_cache: 0 },
+    create: { tenant_id: TENANT_ID, balance_cache: 0, balance_minor: 0 },
   })
   console.log("WALLET " + JSON.stringify(wallet))
 

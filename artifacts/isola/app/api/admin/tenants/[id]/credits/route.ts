@@ -120,6 +120,11 @@ export async function POST(req: NextRequest, { params }: Params) {
 
   // Local ledger — only reached once Magnus succeeded (or there was nothing
   // to sync, e.g. tenant has no linked Magnus account yet).
+  // idempotency_key = request_id — defense-in-depth alongside the AuditLog
+  // dispatch-guard above (ledger-phase-a's UNIQUE constraint on the column
+  // means even a gap in the AuditLog check can never double-write the ledger
+  // for the same request_id).
+  const amountMinor = Math.round(amountNum * 100);
   const [, updatedWallet] = await prisma.$transaction([
     prisma.walletTxn.create({
       data: {
@@ -127,13 +132,19 @@ export async function POST(req: NextRequest, { params }: Params) {
         wallet_id: wallet.id,
         type: 'credit_adjust',
         amount_usd: amountNum,
+        amount_minor: amountMinor,
+        currency: 'EC$',
+        idempotency_key: request_id,
         description: description.trim(),
         ref: `admin:${ctx.user.id}`,
       },
     }),
     prisma.wallet.update({
       where: { id: wallet.id },
-      data: { balance_cache: { increment: amountNum } },
+      data: {
+        balance_cache: { increment: amountNum },
+        balance_minor: { increment: amountMinor },
+      },
     }),
   ]);
 

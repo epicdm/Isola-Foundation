@@ -20,7 +20,10 @@ export async function GET(_req: NextRequest) {
       const config = getMagnusConfig();
       const live = await getBalance(config, wallet.magnus_user_id);
       if (live) {
-        await prisma.wallet.update({ where: { id: wallet.id }, data: { balance_cache: live.balance } });
+        await prisma.wallet.update({
+          where: { id: wallet.id },
+          data: { balance_cache: live.balance, balance_minor: Math.round(live.balance * 100) },
+        });
         return NextResponse.json({ balance: live.balance, currency: live.currency, magnus_configured: true });
       }
     } catch (e: any) {
@@ -28,8 +31,11 @@ export async function GET(_req: NextRequest) {
     }
   }
 
+  // ledger-phase-b read cutover — see app/api/wallet/balance/route.ts.
+  const cachedBalance = wallet.balance_minor != null ? wallet.balance_minor / 100 : wallet.balance_cache;
+
   return NextResponse.json({
-    balance: wallet.balance_cache,
+    balance: cachedBalance,
     currency: wallet.currency,
     magnus_configured: isMagnusConfigured(),
     cached: true,
