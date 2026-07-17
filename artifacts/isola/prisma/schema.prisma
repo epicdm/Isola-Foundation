@@ -72,6 +72,7 @@ model Tenant {
   odoo_binding      OdooBinding?
   fiserv_binding    FiservBinding?
   bff_binding       BffBinding?
+  clawith_binding   ClawithBinding?
   conversations     Conversation[]
   wallet            Wallet?
   wallet_txns       WalletTxn[]
@@ -211,11 +212,13 @@ model Agent {
   away_message      String  @default("") // sent verbatim during after-hours instead of silence
   timezone          String  @default("America/Dominica")
   is_active         Boolean @default(true)
-  brain_provider    String  @default("native") // native | flowise | hermes — which runtime generates replies
+  brain_provider    String  @default("native") // native | flowise | hermes | clawith — which runtime generates replies
   flowise_flow_id   String? // Flowise chatflow id, required when brain_provider="flowise"
   // hermes has no dedicated column: HERMES_AGENT_URL is a single shared env var
   // (not per-tenant), and routing is additionally gated by a hardcoded
   // phone_number_id allowlist in lib/brain-provider.ts — see HERMES_ALLOWED_PHONE_NUMBER_IDS.
+  // clawith has no dedicated column either: the per-tenant identity lives in
+  // ClawithBinding (below), resolved by tenant_id — same pattern as OdooBinding.
 
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
@@ -301,6 +304,26 @@ model BffBinding {
   tenant_id           String @unique
   base_url            String
   internal_secret_enc String // AES-256-GCM envelope-encrypted BFF internal secret
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+}
+
+// ── Clawith per-tenant binding (S3 — additive) ───────────────────────────────
+// Mirrors ChatwootBinding's shape: one row per tenant, resolved by tenant_id
+// in lib/brain-provider.ts's generateReply() when Agent.brain_provider =
+// 'clawith'. No secret fields here — the single CLAWITH_SHARED_SECRET is a
+// platform-level env var (same pattern as HERMES_AGENT_URL), not per-tenant;
+// what IS per-tenant is which Clawith/Paperclip identity this tenant's
+// conversations dispatch to.
+model ClawithBinding {
+  id                    String @id @default(cuid())
+  tenant_id             String @unique
+  clawith_agent_id      String // Clawith's own agent id — the `agent_id` field in the dispatch request body
+  paperclip_agent_id    String
+  paperclip_company_id  String
 
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt

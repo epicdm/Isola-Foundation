@@ -4,13 +4,14 @@
  * Per-tenant choice of reply runtime:
  *   native  (default) → lib/ai.ts chatComplete() — Anthropic Claude, unchanged.
  *   flowise           → external self-hosted Flowise chatflow, called over HTTP.
- *   hermes            → external CC-owned Hermes agent, called over HTTP.
+ *   hermes            → external CC-owned Hermes agent, routed through bff-v2, called over HTTP.
+ *   clawith           → Clawith's dispatch endpoint, called DIRECTLY (no bff-v2 hop) — see tryClawith().
  *
- * Contract: generateReply() ALWAYS resolves — it never throws. Any Flowise
- * or Hermes failure (timeout, non-2xx, empty text, network error) falls back
- * to the native runtime transparently so callers (the agent-bot route, the
- * direct WhatsApp webhook handler) do not need to know which provider
- * actually answered.
+ * Contract: generateReply() ALWAYS resolves — it never throws. Any Flowise,
+ * Hermes, or Clawith failure (timeout, non-2xx, empty text, network error)
+ * falls back to the native runtime transparently so callers (the agent-bot
+ * route, the direct WhatsApp webhook handler) do not need to know which
+ * provider actually answered.
  *
  * This module wraps lib/ai.ts; it does not modify it. lib/engines.ts is
  * untouched — Flowise/Hermes are not "setup checklist" engines, they're a
@@ -57,13 +58,27 @@ export interface BrainReplyResult {
   tokensUsed: number;
   model: string;
   /** Which runtime actually produced the reply — 'native' may be a fallback. */
-  provider: 'native' | 'flowise' | 'hermes';
+  provider: 'native' | 'flowise' | 'hermes' | 'clawith';
+  /** True when the brain flagged this conversation for human review. Only
+   * Clawith emits this today; threaded through generically so callers
+   * (the agent-bot route) can surface it regardless of which provider set it. */
+  needsHandoff?: boolean;
+  /** Opaque action payload some providers may return alongside the reply.
+   * Not acted on by Foundation today — this socket remains text-only I/O. */
+  actions?: unknown;
 }
 
 export interface BrainAgent {
   intelligence_tier: string;
-  brain_provider: string;       // 'native' | 'flowise' | 'hermes'
+  brain_provider: string;       // 'native' | 'flowise' | 'hermes' | 'clawith'
   flowise_flow_id: string | null;
+}
+
+/** Tenant's Clawith identity, resolved from the ClawithBinding table. */
+export interface ClawithBindingInput {
+  clawith_agent_id: string;
+  paperclip_agent_id: string;
+  paperclip_company_id: string;
 }
 
 /**
@@ -78,10 +93,12 @@ export async function generateReply(params: {
   sessionId: string;
   /** Meta phone_number_id this reply is being generated for — required for the hermes per-number gate. */
   phoneNumberId: string;
-  /** E.164 sender phone, forwarded verbatim to Hermes. */
+  /** E.164 sender phone, forwarded verbatim to Hermes/Clawith. */
   senderPhone: string;
+  /** Tenant's Clawith identity — required for brain_provider='clawith'; null/absent falls back to native. */
+  clawithBinding?: ClawithBindingInput | null;
 }): Promise<BrainReplyResult> {
-  const { agent, system, messages, sessionId, phoneNumberId, senderPhone } = params;
+  const { agent, system, messages, sessionId, phoneNumberId, senderPhone, clawithBinding } = params;
   const model = TIER_MODELS[agent.intelligence_tier] ?? TIER_MODELS['standard'];
 
   if (agent.brain_provider === 'flowise' && agent.flowise_flow_id) {
@@ -107,6 +124,27 @@ export async function generateReply(params: {
         return { ...hermesResult, model: 'hermes' };
       }
       console.warn('[brain-provider] Hermes failed — falling back to native for this reply');
+    }
+  }
+
+  if (agent.brain_provider === 'clawith') {
+    if (!clawithBinding) {
+      console.warn(
+        '[brain-provider] brain_provider=clawith but no ClawithBinding for this tenant — falling back to native',
+      );
+    } else {
+      const clawithResult = await tryClawith({
+        agentId: clawithBinding.clawith_agent_id,
+        paperclipAgentId: clawithBinding.paperclip_agent_id,
+        paperclipCompanyId: clawithBinding.paperclip_company_id,
+        messages,
+        sessionId,
+        callerPhone: senderPhone,
+      });
+      if (clawithResult) {
+        return { ...clawithResult, model: 'clawith' };
+      }
+      console.warn('[brain-provider] Clawith failed — falling back to native for this reply');
     }
   }
 
@@ -210,7 +248,7 @@ async function tryHermes(params: {
   sessionId: string;
   phoneNumberId: string;
   senderPhone: string;
-}): Promise<{ text: string; tokensUsed: number; provider: 'hermes' } | null> {
+}): Promise<{ text: string; tokensUsed: number; provider: 'hermes'; needsHandoff?: boolean; actions?: unknown } | null> {
   const baseUrl = process.env.HERMES_AGENT_URL || DEFAULT_HERMES_AGENT_URL;
   const internalSecret = process.env.BFF_INTERNAL_SECRET;
   if (!internalSecret) {
@@ -252,9 +290,110 @@ async function tryHermes(params: {
     }
 
     // Hermes doesn't report token usage — cost is $0 to our meter for this reply.
-    return { text, tokensUsed: 0, provider: 'hermes' };
+    // needs_handoff/actions are read opportunistically — Hermes's documented
+    // contract above doesn't list needs_handoff today, but this plumbing was
+    // previously dead even for the already-live `actions` field; capturing
+    // both here means nothing needs to change in this function again if/when
+    // Hermes starts sending either.
+    return {
+      text,
+      tokensUsed: 0,
+      provider: 'hermes',
+      needsHandoff: data?.needs_handoff === true,
+      actions: data?.actions,
+    };
   } catch (err: any) {
     console.error('[brain-provider] Hermes request error:', err?.message ?? err);
+    return null;
+  }
+}
+
+// ── Clawith implementation ────────────────────────────────────────────────────
+
+/**
+ * Calls Clawith's dispatch endpoint DIRECTLY — this retires the bff-v2 hop
+ * that the hermes path above still goes through. One shared endpoint for
+ * every clawith tenant; the per-tenant identity (clawith_agent_id /
+ * paperclip_agent_id / paperclip_company_id) comes from the caller's
+ * ClawithBinding row, not from any URL configuration.
+ *
+ * Contract (Foundation → Clawith):
+ *   POST https://runtime.epic.dm/api/internal/dispatch
+ *   headers: { Authorization: 'Bearer ' + CLAWITH_SHARED_SECRET } — the same
+ *     shared secret bff-v2 already uses as BFF_CLAWITH_SHARED_SECRET.
+ *   body: { agent_id, paperclip_agent_id, paperclip_company_id, user_text,
+ *     history, session_id, caller_phone } — agent_id/paperclip_agent_id/
+ *     paperclip_company_id are all required by Clawith.
+ *   expects: { draft: string, needs_handoff: boolean, errors?: unknown }
+ *
+ * Clawith fails CLOSED on its own downstream outage (503 when Paperclip is
+ * unreachable) — any non-2xx here is therefore treated exactly like a
+ * network error: return null so the caller falls back to native. Never throws.
+ */
+const CLAWITH_DISPATCH_URL = 'https://runtime.epic.dm/api/internal/dispatch';
+// No published SLA for Clawith's round-trip; mirrors Hermes's generous
+// timeout so a slow-but-healthy reply isn't mistaken for a dead endpoint.
+const CLAWITH_TIMEOUT_MS = 45_000;
+
+async function tryClawith(params: {
+  agentId: string;
+  paperclipAgentId: string;
+  paperclipCompanyId: string;
+  messages: { role: 'user' | 'assistant'; content: string }[];
+  sessionId: string;
+  callerPhone: string;
+}): Promise<{ text: string; tokensUsed: number; provider: 'clawith'; needsHandoff: boolean } | null> {
+  const sharedSecret = process.env.CLAWITH_SHARED_SECRET;
+  if (!sharedSecret) {
+    console.warn('[brain-provider] CLAWITH_SHARED_SECRET not configured — cannot use clawith provider');
+    return null;
+  }
+
+  const lastUserMessage = [...params.messages].reverse().find((m) => m.role === 'user');
+  const userText = lastUserMessage?.content ?? '';
+  if (!userText) return null;
+
+  try {
+    const res = await fetch(CLAWITH_DISPATCH_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sharedSecret}`,
+      },
+      body: JSON.stringify({
+        agent_id: params.agentId,
+        paperclip_agent_id: params.paperclipAgentId,
+        paperclip_company_id: params.paperclipCompanyId,
+        user_text: userText,
+        history: params.messages.map((m) => ({ role: m.role, content: m.content })),
+        session_id: params.sessionId,
+        caller_phone: params.callerPhone,
+        sandbox: false,
+      }),
+      signal: AbortSignal.timeout(CLAWITH_TIMEOUT_MS),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      console.error(`[brain-provider] Clawith dispatch failed (${res.status}): ${errText}`);
+      return null;
+    }
+
+    const data: any = await res.json().catch(() => null);
+    const text: string = typeof data?.draft === 'string' ? data.draft.trim() : '';
+    if (!text) {
+      console.error('[brain-provider] Clawith response had no usable draft field');
+      return null;
+    }
+
+    return {
+      text,
+      tokensUsed: 0,
+      provider: 'clawith',
+      needsHandoff: data?.needs_handoff === true,
+    };
+  } catch (err: any) {
+    console.error('[brain-provider] Clawith request error:', err?.message ?? err);
     return null;
   }
 }
