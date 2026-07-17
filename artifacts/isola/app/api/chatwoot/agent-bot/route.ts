@@ -412,6 +412,7 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
     //      Exactly the current behaviour when no per-agent row exists.
     const brainProvider: string = (agent as any).brain_provider ?? 'native';
     let clawithBindingRow: { clawith_agent_id: string; paperclip_agent_id: string; paperclip_company_id: string } | null = null;
+    let odooBindingRow: { url: string; db: string; login: string | null; api_key_enc: string } | null = null;
     if (brainProvider === 'clawith') {
       // 1. Agent-specific binding (new)
       clawithBindingRow = await prisma.clawithBinding.findUnique({
@@ -423,6 +424,27 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
           where: { tenant_id: tenantId, agent_id: null },
         });
       }
+
+      // Resolve the tenant's Odoo binding so Clawith uses the tenant's own
+      // Odoo connection instead of its hardcoded sandbox credentials.
+      // Omitted entirely when no binding exists — Clawith falls back to sandbox.
+      odooBindingRow = await prisma.odooBinding.findUnique({
+        where: { tenant_id: tenantId },
+        select: { url: true, db: true, login: true, api_key_enc: true },
+      });
+    }
+
+    // Decrypt the Odoo API key outside the try/catch so a decryption failure
+    // surfaces clearly rather than being swallowed as an AI error.
+    let odooBindingInput: import('@/lib/brain-provider').OdooBindingInput | null = null;
+    if (odooBindingRow) {
+      const { decryptSecret } = await import('@/lib/tenant-secrets');
+      odooBindingInput = {
+        url:      odooBindingRow.url,
+        db:       odooBindingRow.db,
+        login:    odooBindingRow.login,
+        password: decryptSecret(odooBindingRow.api_key_enc),
+      };
     }
 
     let needsHandoff = false;
@@ -446,6 +468,7 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
               paperclip_company_id: clawithBindingRow.paperclip_company_id,
             }
           : null,
+        odooBinding: odooBindingInput,
       });
       reply       = result.text;
       tokensUsed  = result.tokensUsed;

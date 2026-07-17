@@ -28,6 +28,8 @@
  */
 
 import { chatComplete, TIER_MODELS } from './ai';
+import { decryptSecret } from './tenant-secrets';
+import { prisma } from './prisma';
 
 const FLOWISE_TIMEOUT_MS = 20_000;
 // Hermes agent replies in ~10-45s; 50s gives headroom before falling back to
@@ -81,6 +83,17 @@ export interface ClawithBindingInput {
   paperclip_company_id: string;
 }
 
+/** Tenant's Odoo connection, resolved from the OdooBinding table.
+ *  When present, passed to Clawith so it uses the tenant's own Odoo
+ *  instead of its hardcoded sandbox credentials. */
+export interface OdooBindingInput {
+  url: string;
+  db: string;
+  login: string | null;
+  /** Plaintext API key — caller must decrypt before passing here. */
+  password: string;
+}
+
 /**
  * Generate a reply for one incoming message, honoring the agent's configured
  * brain_provider with strict fallback-to-native on any Flowise/Hermes failure.
@@ -97,8 +110,10 @@ export async function generateReply(params: {
   senderPhone: string;
   /** Tenant's Clawith identity — required for brain_provider='clawith'; null/absent falls back to native. */
   clawithBinding?: ClawithBindingInput | null;
+  /** Tenant's Odoo connection — when present, Clawith uses the tenant's own Odoo instead of its sandbox. */
+  odooBinding?: OdooBindingInput | null;
 }): Promise<BrainReplyResult> {
-  const { agent, system, messages, sessionId, phoneNumberId, senderPhone, clawithBinding } = params;
+  const { agent, system, messages, sessionId, phoneNumberId, senderPhone, clawithBinding, odooBinding } = params;
   const model = TIER_MODELS[agent.intelligence_tier] ?? TIER_MODELS['standard'];
 
   if (agent.brain_provider === 'flowise' && agent.flowise_flow_id) {
@@ -140,6 +155,7 @@ export async function generateReply(params: {
         messages,
         sessionId,
         callerPhone: senderPhone,
+        odooBinding: odooBinding ?? null,
       });
       if (clawithResult) {
         return { ...clawithResult, model: 'clawith' };
@@ -342,6 +358,8 @@ async function tryClawith(params: {
   messages: { role: 'user' | 'assistant'; content: string }[];
   sessionId: string;
   callerPhone: string;
+  /** When present, Clawith overrides its sandbox Odoo with the tenant's own connection. */
+  odooBinding: OdooBindingInput | null;
 }): Promise<{ text: string; tokensUsed: number; provider: 'clawith'; needsHandoff: boolean } | null> {
   const sharedSecret = process.env.CLAWITH_SHARED_SECRET;
   if (!sharedSecret) {
@@ -369,6 +387,14 @@ async function tryClawith(params: {
         session_id: params.sessionId,
         caller_phone: params.callerPhone,
         sandbox: false,
+        // Tenant-owned Odoo credentials — only included when a binding exists.
+        // Clawith ignores these fields when absent, using its own sandbox creds.
+        ...(params.odooBinding && {
+          odoo_url: params.odooBinding.url,
+          odoo_db: params.odooBinding.db,
+          odoo_login: params.odooBinding.login,
+          odoo_password: params.odooBinding.password,
+        }),
       }),
       signal: AbortSignal.timeout(CLAWITH_TIMEOUT_MS),
     });

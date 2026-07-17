@@ -286,6 +286,7 @@ model OdooBinding {
   tenant_id     String  @unique
   url           String // Odoo base URL, e.g. https://epic-communications-inc.odoo.com
   db            String // Odoo database name
+  login         String? // Odoo cloud login email (the human user whose API key is stored below)
   api_key_enc   String // AES-256-GCM envelope-encrypted Odoo API key — see lib/tenant-secrets.ts
   instance_type String? // hosted_saas | local_docker_clone — mirrors Tenant.odoo_instance_type
 
