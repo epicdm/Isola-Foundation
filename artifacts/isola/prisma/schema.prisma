@@ -16,6 +16,14 @@ model Tenant {
   plan           String  @default("starter") // starter | growth | pro
   magnus_user_id String? // linked Magnus account id (shared by wallet + voice)
 
+  // Registry classification tag (S1c-2 — additive; nullable, no default).
+  // Distinguishes genuine business tenants from test/duplicate/merged rows
+  // accumulated during onboarding experiments, so downstream consumers
+  // (e.g. the cockpit's tenant list) can filter to tenant_kind = 'real'.
+  // Untagged (null) rows are neither included nor excluded by convention —
+  // tagging is a one-time backfill (S1c-2 Part B), not enforced at write time.
+  tenant_kind String? // real | test | duplicate | merged
+
   // Owner's own WhatsApp number — delivery target for proactive owner
   // notifications (e.g. the missed-call/voicemail-catch WA alert). Mirrors
   // Isola Lite's LiteAccount.ownerPhone. E.164, e.g. +17671234567.
