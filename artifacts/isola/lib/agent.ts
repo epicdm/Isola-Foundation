@@ -70,7 +70,7 @@ export async function handleInboundWhatsApp(params: {
       tenant: {
         include: {
           agents: true,
-          chatwoot_binding: true,
+          chatwoot_bindings: true,
         },
       },
     },
@@ -266,8 +266,8 @@ export async function handleInboundWhatsApp(params: {
   // Use effectiveCwConvId (returned from step 8) so we mirror even on the first
   // turn of a conversation, when conversation.chatwoot_conversation_id was still
   // null in memory but mirrorInbound has since created and persisted the conv id.
-  if (effectiveCwConvId !== null && tenant.chatwoot_binding) {
-    const cwConfig = getChatwootConfig(tenant.chatwoot_binding);
+  if (effectiveCwConvId !== null && tenant.chatwoot_bindings[0]) {
+    const cwConfig = getChatwootConfig(tenant.chatwoot_bindings[0]);
     await addMessage(
       cwConfig,
       effectiveCwConvId,
@@ -365,12 +365,12 @@ async function getOrCreateConversation(params: {
 async function mirrorInbound(
   tenant: {
     id: string;
-    chatwoot_binding: {
+    chatwoot_bindings: {
       base_url: string;
       account_id: string;
       token: string;
       inbox_id: string | null;
-    } | null;
+    }[];
   },
   waNumber: { phone_number_id: string },
   customerPhone: string,
@@ -378,8 +378,12 @@ async function mirrorInbound(
   _waMessageId: string,
   existingChatwootConvId: number | null,
 ): Promise<number | null> {
-  if (!tenant.chatwoot_binding) return null;
-  const cwConfig = getChatwootConfig(tenant.chatwoot_binding);
+  // Wave-A mirror uses the first (and historically only) ChatwootBinding for
+  // the tenant. Multi-binding tenants (S4) route via the A2 agentbot path
+  // which has its own inbox-specific resolution; this fallback is Wave-A only.
+  const chatwootBinding = tenant.chatwoot_bindings[0] ?? null;
+  if (!chatwootBinding) return null;
+  const cwConfig = getChatwootConfig(chatwootBinding);
 
   // Tracked outside try/catch so it can be returned to the caller even if
   // addMessage fails — the conv id is still valid for the AI-reply mirror.
@@ -388,8 +392,8 @@ async function mirrorInbound(
   try {
     const chatwootContactId = await upsertContact(cwConfig, customerPhone);
 
-    if (!effectiveConvId && tenant.chatwoot_binding.inbox_id) {
-      const inboxId = parseInt(tenant.chatwoot_binding.inbox_id, 10);
+    if (!effectiveConvId && chatwootBinding.inbox_id) {
+      const inboxId = parseInt(chatwootBinding.inbox_id, 10);
       const existing = await getContactConversations(cwConfig, chatwootContactId);
       const open = existing.find((c) => c.inbox_id === inboxId && c.status === 'open');
       if (open) {

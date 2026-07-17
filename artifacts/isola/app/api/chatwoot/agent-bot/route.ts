@@ -216,6 +216,9 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
       tenant: {
         include: { agents: true, users: { where: { agent_took_over: true } } },
       },
+      // Per-inbox agent override (S4): when agent_id is set on the binding,
+      // use that specific agent instead of tenant.agents[0]. Null → unchanged behaviour.
+      agent: true,
     },
   });
   if (!binding) {
@@ -317,8 +320,10 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
   }
 
   // ── Agent config ──────────────────────────────────────────────────────────
-  const agent = tenant.agents[0];
-  if (!agent?.is_active) {
+  // S4: if this inbox has a pinned agent_id, use that agent directly;
+  // otherwise fall back to the tenant's first agent (existing behaviour).
+  const agent = (binding as any).agent ?? tenant.agents[0];
+  if (!agent || !agent.is_active) {
     console.log('[agent-bot] No active agent for tenant', tenantId);
     return 200;
   }
@@ -399,15 +404,26 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
       select: { phone_number_id: true },
     });
 
-    // Resolve the tenant's Clawith identity only when actually needed —
-    // ClawithBinding is looked up by unique tenant_id (cheap), but there's
-    // no reason to pay that query for the majority of tenants still on
-    // brain_provider='native'/'flowise'/'hermes'.
+    // Resolve the Clawith identity only when actually needed.
+    // S4 two-level lookup:
+    //   1. Per-agent binding — ClawithBinding WHERE agent_id = agent.id (unique index).
+    //      Lets two agents on the same tenant dispatch to different Clawith identities.
+    //   2. Per-tenant fallback — ClawithBinding WHERE tenant_id = tenantId AND agent_id IS NULL.
+    //      Exactly the current behaviour when no per-agent row exists.
     const brainProvider: string = (agent as any).brain_provider ?? 'native';
-    const clawithBindingRow =
-      brainProvider === 'clawith'
-        ? await prisma.clawithBinding.findUnique({ where: { tenant_id: tenantId } })
-        : null;
+    let clawithBindingRow: { clawith_agent_id: string; paperclip_agent_id: string; paperclip_company_id: string } | null = null;
+    if (brainProvider === 'clawith') {
+      // 1. Agent-specific binding (new)
+      clawithBindingRow = await prisma.clawithBinding.findUnique({
+        where: { agent_id: agent.id },
+      });
+      // 2. Tenant-level fallback (existing behaviour — agent_id IS NULL rows)
+      if (!clawithBindingRow) {
+        clawithBindingRow = await prisma.clawithBinding.findFirst({
+          where: { tenant_id: tenantId, agent_id: null },
+        });
+      }
+    }
 
     let needsHandoff = false;
 

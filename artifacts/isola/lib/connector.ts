@@ -278,7 +278,7 @@ async function resolveConfig(
           'callEngine: chatwoot requires tenant.tenantId (per-tenant ChatwootBinding) — consumerAccountId scope is not supported for this engine',
         );
       }
-      const binding = await prisma.chatwootBinding.findUnique({ where: { tenant_id: tenant.tenantId } });
+      const binding = await prisma.chatwootBinding.findFirst({ where: { tenant_id: tenant.tenantId } });
       if (!binding) {
         throw new Error(`callEngine: no ChatwootBinding configured for tenant ${tenant.tenantId}`);
       }

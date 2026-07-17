@@ -161,7 +161,7 @@ async function main() {
 
   const verify = await prisma.tenant.findUnique({
     where: { id: TENANT_ID },
-    include: { agents: true, whatsapp_numbers: true, chatwoot_binding: true, users: true },
+    include: { agents: true, whatsapp_numbers: true, chatwoot_bindings: true, users: true },
   })
   console.log("VERIFY " + JSON.stringify(verify, null, 2))
 }

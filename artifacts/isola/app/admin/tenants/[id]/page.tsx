@@ -30,7 +30,7 @@ export default async function TenantDetailPage({
         wallet: true,
         agents: true,
         whatsapp_numbers: true,
-        chatwoot_binding: true,
+        chatwoot_bindings: true,
         users: true,
         _count: { select: { conversations: true, wallet_txns: true, audit_logs: true } },
       },

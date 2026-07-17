@@ -19,7 +19,7 @@ export async function GET(req: NextRequest, { params }: Params) {
         wallet: true,
         agents: true,
         whatsapp_numbers: true,
-        chatwoot_binding: true,
+        chatwoot_bindings: true,
         _count: { select: { users: true, conversations: true, wallet_txns: true } },
       },
     }),
