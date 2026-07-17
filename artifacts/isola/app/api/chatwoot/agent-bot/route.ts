@@ -399,22 +399,42 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
       select: { phone_number_id: true },
     });
 
+    // Resolve the tenant's Clawith identity only when actually needed —
+    // ClawithBinding is looked up by unique tenant_id (cheap), but there's
+    // no reason to pay that query for the majority of tenants still on
+    // brain_provider='native'/'flowise'/'hermes'.
+    const brainProvider: string = (agent as any).brain_provider ?? 'native';
+    const clawithBindingRow =
+      brainProvider === 'clawith'
+        ? await prisma.clawithBinding.findUnique({ where: { tenant_id: tenantId } })
+        : null;
+
+    let needsHandoff = false;
+
     try {
       const result = await generateReply({
         agent: {
           intelligence_tier: agent.intelligence_tier,
-          brain_provider:    (agent as any).brain_provider ?? 'native',
+          brain_provider:    brainProvider,
           flowise_flow_id:   (agent as any).flowise_flow_id ?? null,
         },
         system:    buildSystemPrompt(agent),
         messages:  aiMessages,
-        sessionId: conversation.id, // stable per-conversation key for Flowise memory
+        sessionId: conversation.id, // stable per-conversation key for Flowise/Clawith memory
         phoneNumberId: waNumberForHermesGate?.phone_number_id ?? '',
         senderPhone: customerPhone,
+        clawithBinding: clawithBindingRow
+          ? {
+              clawith_agent_id:     clawithBindingRow.clawith_agent_id,
+              paperclip_agent_id:   clawithBindingRow.paperclip_agent_id,
+              paperclip_company_id: clawithBindingRow.paperclip_company_id,
+            }
+          : null,
       });
-      reply      = result.text;
-      tokensUsed = result.tokensUsed;
-      model      = result.model;
+      reply       = result.text;
+      tokensUsed  = result.tokensUsed;
+      model       = result.model;
+      needsHandoff = result.needsHandoff === true;
     } catch (err: any) {
       console.error('[agent-bot] AI error:', err?.message ?? err);
       return 200; // do not reply with an error message
@@ -452,6 +472,15 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
       // Don't return error — the dedup row is already claimed; avoid retrigger
     } else {
       console.log(`[agent-bot] Reply posted to conv cw#${cwConvId} for account ${accountId}`);
+    }
+
+    // ── Surface handoff (Clawith needs_handoff) — INTO Chatwoot, not a separate ping ──
+    // Conversation.human_handling remains the ONLY gate on whether the bot may
+    // keep replying (set true exclusively by an actual human reply, above).
+    // This is a visibility signal for a human to look, not a silence switch —
+    // the bot still answers subsequent messages unless/until a human replies.
+    if (needsHandoff && botToken) {
+      await surfaceHandoff(baseUrl, accountId, cwConvId, botToken);
     }
 
     // ── Meter tokens ─────────────────────────────────────────────────────────
@@ -525,6 +554,76 @@ async function toggleConvStatus(
   } catch (e: any) {
     console.warn('[agent-bot] toggle_status error:', e?.message);
   }
+}
+
+/**
+ * Surfaces a brain's needs_handoff signal (currently only Clawith emits this)
+ * INTO Chatwoot for a human to notice — never a separate owner ping. Three
+ * best-effort actions, each independently caught so one failing never blocks
+ * the others or the caller: a private note (visible to human agents only,
+ * never sent to the customer), a label, and a status toggle to 'open' — the
+ * SAME status value the outgoing-reply handler above uses when a human
+ * actually takes over, i.e. "needs a human's eyes". This never touches
+ * Conversation.human_handling; that flag stays the single authority for
+ * whether the bot may keep replying (see file header).
+ */
+const HANDOFF_LABEL = 'ai-handoff';
+
+async function surfaceHandoff(
+  baseUrl:   string,
+  accountId: string,
+  cwConvId:  number,
+  botToken:  string,
+): Promise<void> {
+  try {
+    const noteRes = await fetch(
+      `${baseUrl}/api/v1/accounts/${accountId}/conversations/${cwConvId}/messages`,
+      {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', api_access_token: botToken },
+        body:    JSON.stringify({
+          content:      '🤖 Clawith flagged this conversation for human review.',
+          message_type: 'outgoing',
+          private:      true,
+        }),
+        signal: AbortSignal.timeout(10000),
+      },
+    );
+    if (!noteRes.ok) {
+      console.warn(`[agent-bot] handoff private note failed (${noteRes.status}):`, await noteRes.text().catch(() => ''));
+    }
+  } catch (e: any) {
+    console.warn('[agent-bot] handoff private note error:', e?.message);
+  }
+
+  try {
+    // Chatwoot's label endpoint REPLACES the conversation's full label set —
+    // fetch the existing set first so this only adds, never clobbers.
+    const getRes = await fetch(
+      `${baseUrl}/api/v1/accounts/${accountId}/conversations/${cwConvId}/labels`,
+      { headers: { api_access_token: botToken }, signal: AbortSignal.timeout(10000) },
+    );
+    const existing: string[] = getRes.ok ? ((await getRes.json().catch(() => ({})))?.payload ?? []) : [];
+    if (!existing.includes(HANDOFF_LABEL)) {
+      const labelRes = await fetch(
+        `${baseUrl}/api/v1/accounts/${accountId}/conversations/${cwConvId}/labels`,
+        {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json', api_access_token: botToken },
+          body:    JSON.stringify({ labels: [...existing, HANDOFF_LABEL] }),
+          signal:  AbortSignal.timeout(10000),
+        },
+      );
+      if (!labelRes.ok) {
+        console.warn(`[agent-bot] handoff label failed (${labelRes.status}):`, await labelRes.text().catch(() => ''));
+      }
+    }
+  } catch (e: any) {
+    console.warn('[agent-bot] handoff label error:', e?.message);
+  }
+
+  await toggleConvStatus(baseUrl, accountId, cwConvId, 'open', botToken);
+  console.log(`[agent-bot] Handoff surfaced for conv cw#${cwConvId}`);
 }
 
 /**
