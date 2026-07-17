@@ -69,6 +69,9 @@ model Tenant {
   agents            Agent[]
   whatsapp_numbers  WhatsAppNumber[]
   chatwoot_binding  ChatwootBinding?
+  odoo_binding      OdooBinding?
+  fiserv_binding    FiservBinding?
+  bff_binding       BffBinding?
   conversations     Conversation[]
   wallet            Wallet?
   wallet_txns       WalletTxn[]
@@ -250,6 +253,54 @@ model ChatwootBinding {
   token      String // Chatwoot Application API agent token (set to '' for a2 — bot token used instead)
   inbox_id   String? // WhatsApp inbox id in Chatwoot
   mode       String  @default("mirror") // mirror (Wave A: app posts to Chatwoot) | a2 (Chatwoot owns WA channel, app is AI brain)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+}
+
+// ── Odoo / Fiserv / BFF per-tenant bindings (S2 — additive) ──────────────────
+// Mirror the WhatsAppNumber/ChatwootBinding shape: one row per tenant,
+// resolveConfig() in lib/connector.ts merges these over the platform-default
+// env config when present, falling back to the env config when absent (see
+// lib/engine-bindings.ts). Secret fields (suffixed _enc) are AES-256-GCM
+// envelope-encrypted with TENANT_MASTER_KEY via lib/tenant-secrets.ts — never
+// stored in plaintext. Magnus intentionally has no binding table here: its
+// per-tenant identity already lives on Tenant.magnus_* / VoiceLine, and its
+// connection (baseUrl/apiKey/apiSecret) is genuine shared platform infra.
+
+model OdooBinding {
+  id            String  @id @default(cuid())
+  tenant_id     String  @unique
+  url           String // Odoo base URL, e.g. https://epic-communications-inc.odoo.com
+  db            String // Odoo database name
+  api_key_enc   String // AES-256-GCM envelope-encrypted Odoo API key — see lib/tenant-secrets.ts
+  instance_type String? // hosted_saas | local_docker_clone — mirrors Tenant.odoo_instance_type
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+}
+
+model FiservBinding {
+  id          String  @id @default(cuid())
+  tenant_id   String  @unique
+  api_key_enc String // AES-256-GCM envelope-encrypted Fiserv API key
+  base_url    String? // optional override; defaults to platform FISERV_BASE_URL when unset
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+}
+
+model BffBinding {
+  id                  String @id @default(cuid())
+  tenant_id           String @unique
+  base_url            String
+  internal_secret_enc String // AES-256-GCM envelope-encrypted BFF internal secret
 
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt

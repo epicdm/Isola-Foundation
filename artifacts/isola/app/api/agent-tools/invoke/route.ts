@@ -239,9 +239,9 @@ export async function POST(req: NextRequest) {
   try {
     let result: unknown;
     if (tool === 'odoo.read') {
-      result = await executeOdooRead(validatedArgs);
+      result = await executeOdooRead(trustedTenantId, validatedArgs);
     } else if (tool === 'odoo.create_lead') {
-      result = await executeOdooCreateLead(validatedArgs);
+      result = await executeOdooCreateLead(trustedTenantId, validatedArgs);
     } else {
       result = await executeWaSend(trustedTenantId, validatedArgs);
     }

@@ -11,7 +11,8 @@
 import { prisma } from './prisma';
 import { TIER_MODELS } from './ai';
 import { generateReply } from './brain-provider';
-import { getWhatsAppConfig, getChatwootConfig } from './engines';
+import { getChatwootConfig } from './engines';
+import { callEngine } from './connector';
 import { meterTokens } from './meter';
 import { claimInboundMessageId } from './inbound-dedup';
 import { EPIC_MAIN_PHONE_NUMBER_ID, EPIC_FB_LINKED_PHONE_NUMBER_ID } from './epic-seed-data';
@@ -27,7 +28,6 @@ const ALWAYS_ON_PHONE_NUMBER_IDS: ReadonlySet<string> = new Set([
 ]);
 
 // Engine clients — imported as-is, not modified
-import { sendText } from '@/engines/whatsapp';
 import {
   upsertContact,
   getContactConversations,
@@ -237,37 +237,29 @@ export async function handleInboundWhatsApp(params: {
     },
   });
 
-  // ── 12. Send WhatsApp reply — engine client used as-is ────────────────────
-  // Resolve the outbound token: if token_env is set on the number row, use the
-  // env var it names — but ONLY if the name matches the strict allowlist prefix
-  // (META_* or WHATSAPP_*). This prevents an attacker-controlled token_env value
-  // from reading unrelated process secrets (e.g. SESSION_SECRET, DATABASE_URL).
-  const waConfig = getWhatsAppConfig();
-  const TOKEN_ENV_ALLOWLIST = /^(META_|WHATSAPP_)/;
-  let effectiveToken: string;
-  if (waNumber.token_env) {
-    if (!TOKEN_ENV_ALLOWLIST.test(waNumber.token_env)) {
-      console.error(`[agent] token_env "${waNumber.token_env}" rejected — must start with META_ or WHATSAPP_`);
-      return; // fail-closed: do not send with wrong credentials
+  // ── 12. Send WhatsApp reply — routed through callEngine ───────────────────
+  // resolveConfig() (lib/connector.ts) resolves this tenant's WhatsAppNumber
+  // and its token_env/access_token — the allowlisted-env-var-name check that
+  // used to live here directly now lives there, as the one place every
+  // caller (this file, lib/agent-tools.ts) shares.
+  try {
+    const sendResult = await callEngine(
+      'whatsapp',
+      'sendText',
+      [{ to: from, body: reply }], // Meta expects `to` without leading +
+      {
+        tenant: { tenantId: tenant.id },
+        actorId: `agent:${agent.id}`,
+        whatsappNumberId: waNumber.id,
+        entity: 'conversation',
+        entityId: conversation.id,
+      },
+    );
+    if (!sendResult.ok) {
+      console.error('[agent] WhatsApp send failed:', sendResult.error);
     }
-    const resolved = process.env[waNumber.token_env];
-    if (!resolved) {
-      console.error(`[agent] token_env "${waNumber.token_env}" is set but env var is empty or missing — aborting send`);
-      return; // fail fast rather than send with no token
-    }
-    effectiveToken = resolved;
-  } else {
-    effectiveToken = waNumber.access_token;
-  }
-  const sendResult = await sendText(waConfig, {
-    phoneId: waNumber.phone_number_id,
-    token: effectiveToken,
-    to: from, // Meta expects without leading +
-    body: reply,
-  });
-
-  if (!sendResult.ok) {
-    console.error('[agent] WhatsApp send failed:', sendResult.error);
+  } catch (err: any) {
+    console.error('[agent] WhatsApp send failed:', err?.message ?? err);
   }
 
   // ── 13. Mirror AI reply in Chatwoot ───────────────────────────────────────
