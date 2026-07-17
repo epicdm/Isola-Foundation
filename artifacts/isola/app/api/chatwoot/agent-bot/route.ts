@@ -37,8 +37,12 @@
  *
  * All other events: 200 no-op.
  *
- * Account isolation: looks up ChatwootBinding WHERE mode='a2'; unknown
- * account_ids return 200 immediately so Wave-A tenants are untouched.
+ * Inbox isolation: looks up ChatwootBinding WHERE mode='a2' by inbox_id (not
+ * account_id — Chatwoot inbox ids are unique platform-wide, and multiple A2
+ * tenants can share one Chatwoot account, so account-only lookup is
+ * ambiguous — see the resolution block below for the 2026-07-01 incident
+ * this mirrors from bff-v2). Unknown inbox_ids return 200 immediately so
+ * Wave-A tenants and unrelated inboxes are untouched.
  *
  * ── P0 (2026-07-15): cross-path double-reply ──────────────────────────────
  * A single inbound WhatsApp message to number 9043 produced TWO AI replies.
@@ -191,8 +195,23 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
   }
 
   // ── Resolve A2 tenant via ChatwootBinding ─────────────────────────────────
+  // Resolve by the SPECIFIC Chatwoot inbox this event came from — not by
+  // account id alone. Multiple tenants can share one Chatwoot account (e.g.
+  // several A2 tenants live on account 5), so accountId-only lookup is
+  // ambiguous and can silently resolve to the wrong tenant's agent/token.
+  // Matches the fix bff-v2 already shipped after a live incident (2026-07-01:
+  // 295-6737 and EMA shared account 5; accountId-only resolution there picked
+  // the wrong tenant's stale token). Chatwoot inbox ids are unique platform-
+  // wide, so inbox_id alone is a safe, unambiguous lookup key.
+  const inboxId: string | null =
+    conv.inbox_id != null ? String(conv.inbox_id) :
+    body.inbox_id != null  ? String(body.inbox_id)  : null;
+  if (!inboxId) {
+    console.warn('[agent-bot] message_created missing inbox_id — cannot safely resolve tenant, ignoring');
+    return 200;
+  }
   const binding = await prisma.chatwootBinding.findFirst({
-    where: { account_id: accountId, mode: 'a2' },
+    where: { inbox_id: inboxId, mode: 'a2' },
     include: {
       tenant: {
         include: { agents: true, users: { where: { agent_took_over: true } } },
@@ -200,8 +219,8 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
     },
   });
   if (!binding) {
-    // Not an A2 account we manage — ack and ignore (isolation guarantee)
-    console.log('[agent-bot] No A2 binding for account', accountId, '— no-op');
+    // Not an A2 inbox we manage — ack and ignore (isolation guarantee)
+    console.log('[agent-bot] No A2 binding for inbox', inboxId, '(account', accountId + ') — no-op');
     return 200;
   }
 
