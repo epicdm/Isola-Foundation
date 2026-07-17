@@ -201,7 +201,7 @@ model User {
 
 model Agent {
   id                String  @id @default(cuid())
-  tenant_id         String  @unique
+  tenant_id         String
   name              String  @default("Isola Assistant")
   greeting          String  @default("Hello! How can I help you today?")
   business_info     String  @default("")
@@ -226,6 +226,8 @@ model Agent {
   tenant            Tenant            @relation(fields: [tenant_id], references: [id])
   chatwoot_bindings ChatwootBinding[] @relation("ChatwootBindingAgent")
   clawith_binding   ClawithBinding?   @relation("ClawithBindingAgent")
+
+  @@index([tenant_id])
 }
 
 // ── WhatsApp routing table ────────────────────────────────────────────────────

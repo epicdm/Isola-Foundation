@@ -87,18 +87,20 @@ export async function GET(req: NextRequest) {
   });
 
   // Default agent — every tenant gets one, including admin tenants.
-  // Idempotent: upsert so re-running provision (edge case) never duplicates.
-  await prisma.agent.upsert({
-    where: { tenant_id: tenant.id },
-    create: {
-      tenant_id: tenant.id,
-      name: 'Isola Assistant',
-      greeting: 'Hello! How can I help you today?',
-      intelligence_tier: 'standard',
-      is_active: true,
-    },
-    update: {}, // no-op if one already exists
-  });
+  // Idempotent: create only when none exists, so re-running provision never duplicates.
+  // (tenant_id is no longer @unique after S4 multi-agent; upsert on it is gone.)
+  const existingAgent = await prisma.agent.findFirst({ where: { tenant_id: tenant.id } });
+  if (!existingAgent) {
+    await prisma.agent.create({
+      data: {
+        tenant_id: tenant.id,
+        name: 'Isola Assistant',
+        greeting: 'Hello! How can I help you today?',
+        intelligence_tier: 'standard',
+        is_active: true,
+      },
+    });
+  }
 
   // Audit
   await prisma.auditLog.create({

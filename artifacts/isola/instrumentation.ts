@@ -574,9 +574,9 @@ async function seedEpicWhatsAppNumbers(prisma: any, adminTenantId: string | null
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function flipEmaSalesToHermesOnce(prisma: any, adminTenantId: string | null) {
   try {
-    const agent = await prisma.agent.findUnique({
+    const agent = await prisma.agent.findFirst({
       where: { tenant_id: EMA_SALES_TENANT_ID },
-      select: { brain_provider: true },
+      select: { id: true, brain_provider: true },
     });
     if (!agent) {
       console.warn('[instrumentation] EMA sales agent not found — hermes flip deferred');
@@ -587,7 +587,7 @@ async function flipEmaSalesToHermesOnce(prisma: any, adminTenantId: string | nul
     }
 
     await prisma.agent.update({
-      where: { tenant_id: EMA_SALES_TENANT_ID },
+      where: { id: agent.id },
       data: { brain_provider: 'hermes' },
     });
 
@@ -622,9 +622,9 @@ async function flipEmaSalesToHermesOnce(prisma: any, adminTenantId: string | nul
 async function flipEpicToHermesOnce(prisma: any, adminTenantId: string | null) {
   if (!adminTenantId) return;
   try {
-    const agent = await prisma.agent.findUnique({
+    const agent = await prisma.agent.findFirst({
       where: { tenant_id: adminTenantId },
-      select: { brain_provider: true },
+      select: { id: true, brain_provider: true },
     });
     if (!agent) {
       console.warn('[instrumentation] EPIC (admin tenant) agent not found — hermes flip deferred');
@@ -635,7 +635,7 @@ async function flipEpicToHermesOnce(prisma: any, adminTenantId: string | null) {
     }
 
     await prisma.agent.update({
-      where: { tenant_id: adminTenantId },
+      where: { id: agent.id },
       data: { brain_provider: 'hermes' },
     });
 

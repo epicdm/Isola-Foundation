@@ -61,7 +61,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   // flow id — that would silently no-op back to native inside generateReply().
   if (brain_provider !== undefined || flowise_flow_id !== undefined) {
     if (brain_provider === 'flowise') {
-      const nextFlowId = flowise_flow_id ?? (await prisma.agent.findUnique({
+      const nextFlowId = flowise_flow_id ?? (await prisma.agent.findFirst({
         where: { tenant_id: id },
         select: { flowise_flow_id: true },
       }))?.flowise_flow_id;
@@ -72,7 +72,9 @@ export async function PATCH(req: NextRequest, { params }: Params) {
         );
       }
     }
-    await prisma.agent.update({
+    // tenant_id is no longer @unique (S4 multi-agent); updateMany targets all
+    // agents under the tenant, which matches the intended blanket admin flip.
+    await prisma.agent.updateMany({
       where: { tenant_id: id },
       data: {
         ...(brain_provider !== undefined && { brain_provider }),

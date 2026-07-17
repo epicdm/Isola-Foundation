@@ -129,34 +129,24 @@ async function main() {
   })
   console.log("WALLET " + JSON.stringify(wallet))
 
-  const agent = await prisma.agent.upsert({
-    where: { tenant_id: TENANT_ID },
-    update: {
-      name: "EPIC Assistant",
-      greeting: GREETING,
-      business_info: BUSINESS_INFO,
-      knowledge_text: KNOWLEDGE_TEXT,
-      intelligence_tier: "standard",
-      after_hours_start: "16:00",
-      after_hours_end: "08:00",
-      away_message: AWAY_MESSAGE,
-      timezone: "America/Dominica",
-      is_active: true,
-    },
-    create: {
-      tenant_id: TENANT_ID,
-      name: "EPIC Assistant",
-      greeting: GREETING,
-      business_info: BUSINESS_INFO,
-      knowledge_text: KNOWLEDGE_TEXT,
-      intelligence_tier: "standard",
-      after_hours_start: "16:00",
-      after_hours_end: "08:00",
-      away_message: AWAY_MESSAGE,
-      timezone: "America/Dominica",
-      is_active: true,
-    },
-  })
+  // tenant_id is no longer @unique (S4 multi-agent); upsert on it is gone.
+  // Script targets the EPIC tenant's first (and currently only) agent by id.
+  const agentPayload = {
+    name: "EPIC Assistant",
+    greeting: GREETING,
+    business_info: BUSINESS_INFO,
+    knowledge_text: KNOWLEDGE_TEXT,
+    intelligence_tier: "standard",
+    after_hours_start: "16:00",
+    after_hours_end: "08:00",
+    away_message: AWAY_MESSAGE,
+    timezone: "America/Dominica",
+    is_active: true,
+  }
+  const existingAgent = await prisma.agent.findFirst({ where: { tenant_id: TENANT_ID } })
+  const agent = existingAgent
+    ? await prisma.agent.update({ where: { id: existingAgent.id }, data: agentPayload })
+    : await prisma.agent.create({ data: { tenant_id: TENANT_ID, ...agentPayload } })
   console.log("AGENT_UPSERTED " + JSON.stringify(agent))
 
   const verify = await prisma.tenant.findUnique({
