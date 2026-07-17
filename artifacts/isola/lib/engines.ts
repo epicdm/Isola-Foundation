@@ -46,12 +46,12 @@ export function isMagnusConfigured(): boolean {
 
 // ── Fiserv ───────────────────────────────────────────────────────────────────
 
-export function getFiservConfig(): FiservConfig {
-  const apiKey = process.env.FISERV_API_KEY;
+export function getFiservConfig(overrides?: Partial<FiservConfig>): FiservConfig {
+  const apiKey = overrides?.apiKey ?? process.env.FISERV_API_KEY;
   if (!apiKey) {
-    throw new Error('Fiserv not configured — set FISERV_API_KEY');
+    throw new Error('Fiserv not configured — set FISERV_API_KEY (or provide a tenant FiservBinding)');
   }
-  return { apiKey, baseUrl: process.env.FISERV_BASE_URL };
+  return { apiKey, baseUrl: overrides?.baseUrl ?? process.env.FISERV_BASE_URL };
 }
 
 export function isFiservConfigured(): boolean {
@@ -60,11 +60,11 @@ export function isFiservConfigured(): boolean {
 
 // ── BFF Lite (payment rails: mirror-account, top-up options/start) ──────────
 
-export function getBffConfig(): BffConfig {
-  const baseUrl = process.env.BFF_BASE_URL;
-  const internalSecret = process.env.BFF_INTERNAL_SECRET;
+export function getBffConfig(overrides?: Partial<BffConfig>): BffConfig {
+  const baseUrl = overrides?.baseUrl ?? process.env.BFF_BASE_URL;
+  const internalSecret = overrides?.internalSecret ?? process.env.BFF_INTERNAL_SECRET;
   if (!baseUrl || !internalSecret) {
-    throw new Error('BFF not configured — set BFF_BASE_URL, BFF_INTERNAL_SECRET');
+    throw new Error('BFF not configured — set BFF_BASE_URL, BFF_INTERNAL_SECRET (or provide a tenant BffBinding)');
   }
   return { baseUrl, internalSecret };
 }
@@ -135,12 +135,12 @@ export function getChatwootConfig(binding: {
 
 // ── Odoo ──────────────────────────────────────────────────────────────────────
 
-export function getOdooConfig(): OdooConfig {
-  const url = process.env.ODOO_URL;
-  const apiKey = process.env.ODOO_API_KEY;
-  const db = process.env.ODOO_DB;
+export function getOdooConfig(overrides?: Partial<OdooConfig>): OdooConfig {
+  const url = overrides?.url ?? process.env.ODOO_URL;
+  const apiKey = overrides?.apiKey ?? process.env.ODOO_API_KEY;
+  const db = overrides?.db ?? process.env.ODOO_DB;
   if (!url || !apiKey || !db) {
-    throw new Error('Odoo not configured — set ODOO_URL, ODOO_API_KEY, ODOO_DB');
+    throw new Error('Odoo not configured — set ODOO_URL, ODOO_API_KEY, ODOO_DB (or provide a tenant OdooBinding)');
   }
   return { url, apiKey, db };
 }

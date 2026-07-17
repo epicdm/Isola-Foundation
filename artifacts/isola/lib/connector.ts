@@ -27,10 +27,25 @@
  *
  * CONFIG RESOLUTION
  *   Callers never build/pass a `config` object — `resolveConfig()` below
- *   wires each engine's config the same way `lib/engines.ts` already does:
- *   magnus/fiserv/odoo/whatsapp/bff read process.env (via the existing
- *   getXConfig() factories); chatwoot is per-tenant, so it requires
- *   `tenant.tenantId` and looks up that tenant's ChatwootBinding row.
+ *   wires each engine's config as: platform-default env config (via the
+ *   existing getXConfig() factories in lib/engines.ts), merged with the
+ *   tenant's binding row when one exists, decrypting secrets with
+ *   TENANT_MASTER_KEY (lib/tenant-secrets.ts). A tenant with no binding row
+ *   falls through to the platform default unchanged — additive, non-breaking.
+ *     - magnus: no binding table — genuinely global infra; per-tenant
+ *       identity flows through Tenant.magnus_* / VoiceLine as call args, not
+ *       config (see engines/magnus.ts).
+ *     - fiserv/odoo/bff: FiservBinding/OdooBinding/BffBinding (tenant_id-keyed,
+ *       see lib/engine-bindings.ts) merged over env when tenant.tenantId is
+ *       set; consumerAccountId-scoped calls always use the platform default
+ *       (these bindings are tenant-keyed only).
+ *     - whatsapp: requires tenant.tenantId; resolves the tenant's
+ *       WhatsAppNumber row (opts.whatsappNumberId picks a specific number
+ *       when a tenant has more than one, else the oldest) — this replaces the
+ *       side-channel token_env/access_token resolution that used to live
+ *       directly in lib/agent.ts and lib/agent-tools.ts.
+ *     - chatwoot: requires tenant.tenantId; looks up that tenant's
+ *       ChatwootBinding row (no env fallback — always fully tenant-sourced).
  *
  * NOT WRAPPED (flagged, not silently dropped — see engines/README.md for the
  * same discipline applied to the extraction itself)
@@ -50,29 +65,42 @@
  *     other engine-module functions (`createCrmLead`, `upsertContact`), not
  *     by any app call site directly; nothing to migrate.
  *
- * MIGRATION STATUS (2026-07-16)
+ * MIGRATION STATUS (2026-07-16, S2)
  *   Call sites migrate to callEngine() incrementally, one PR-reviewable
- *   change at a time, with no behavior change beyond the added AuditLog
- *   row. Migrated so far: app/api/wallet/balance/route.ts,
- *   app/api/wallet/topup/route.ts, app/api/consumer/wallet/balance/route.ts.
- *   Everything else importing directly from `@/engines/*` still works
- *   unchanged — this module is additive, not a breaking rename.
+ *   change at a time, with no behavior change beyond the added AuditLog row
+ *   (and, as of S2, real per-tenant credential resolution where a binding
+ *   exists). Migrated so far: app/api/wallet/balance/route.ts,
+ *   app/api/wallet/topup/route.ts, app/api/consumer/wallet/balance/route.ts,
+ *   lib/workspace-queue.ts, lib/workspace-item-detail.ts,
+ *   app/api/crm/customer/route.ts, lib/agent.ts (WhatsApp reply send),
+ *   lib/agent-tools.ts (wa.send — odoo.read/odoo.create_lead still call
+ *   json2Call directly per "NOT WRAPPED" above, but now resolve tenant-aware
+ *   config via lib/engine-bindings.ts). Remaining direct `@/engines/*`
+ *   importers still work unchanged — this module is additive, not a
+ *   breaking rename. Known remaining debt: lib/agent.ts's Chatwoot mirror
+ *   calls (mirrorInbound, step 13) still call engines/chatwoot.ts directly
+ *   — left alone in S2 because they're already tenant-correct (sourced from
+ *   ChatwootBinding) and their non-throwing catch-and-log error handling
+ *   doesn't map cleanly onto callEngine's throw-on-failure contract; folding
+ *   them in is audit-log completeness work, not a multi-tenancy fix.
  */
 
 import { prisma } from './prisma';
 import { audit } from './audit';
-import {
-  getMagnusConfig,
-  getFiservConfig,
-  getOdooConfig,
-  getWhatsAppConfig,
-  getBffConfig,
-  getChatwootConfig,
-} from './engines';
+import { getMagnusConfig, getWhatsAppConfig, getChatwootConfig } from './engines';
+import { resolveOdooConfigForTenant, resolveFiservConfigForTenant, resolveBffConfigForTenant } from './engine-bindings';
 
 import { getBalance, getCalls, addCredit, debitCredit } from '@/engines/magnus';
 import { charge } from '@/engines/fiserv';
-import { sendText, sendTemplate, sendAuthTemplate } from '@/engines/whatsapp';
+import {
+  sendText,
+  sendTemplate,
+  sendAuthTemplate,
+  type WhatsAppConfig,
+  type WhatsAppSendTextInput,
+  type WhatsAppSendTemplateInput,
+  type WhatsAppSendAuthTemplateInput,
+} from '@/engines/whatsapp';
 import { findCustomerByPhone, createCrmLead, findOpenTasksByAssignee } from '@/engines/odoo';
 import {
   upsertContact,
@@ -83,6 +111,44 @@ import {
 } from '@/engines/chatwoot';
 import { mirrorAccount, getTopupOptions, startTopup, startCallback } from '@/engines/bff';
 
+// ── WhatsApp adapters ─────────────────────────────────────────────────────────
+// sendText/sendTemplate/sendAuthTemplate take phoneId/token as part of their
+// `input` (not `config` — see engines/whatsapp.ts), because they vary per
+// send. resolveConfig() below resolves the tenant's default phoneId/token
+// onto the config object it returns; these adapters splice them in as
+// defaults so callEngine callers can omit them, while an explicit
+// phoneId/token in the call args still wins (e.g. a tenant with more than
+// one WhatsAppNumber sending from a non-default number).
+
+type ResolvedWhatsAppConfig = WhatsAppConfig & { phoneId: string; token: string };
+
+function whatsappSendText(
+  config: ResolvedWhatsAppConfig,
+  input: Omit<WhatsAppSendTextInput, 'phoneId' | 'token'> & Partial<Pick<WhatsAppSendTextInput, 'phoneId' | 'token'>>,
+) {
+  return sendText(config, { ...input, phoneId: input.phoneId ?? config.phoneId, token: input.token ?? config.token });
+}
+
+function whatsappSendTemplate(
+  config: ResolvedWhatsAppConfig,
+  input: Omit<WhatsAppSendTemplateInput, 'phoneId' | 'token'> &
+    Partial<Pick<WhatsAppSendTemplateInput, 'phoneId' | 'token'>>,
+) {
+  return sendTemplate(config, { ...input, phoneId: input.phoneId ?? config.phoneId, token: input.token ?? config.token });
+}
+
+function whatsappSendAuthTemplate(
+  config: ResolvedWhatsAppConfig,
+  input: Omit<WhatsAppSendAuthTemplateInput, 'phoneId' | 'token'> &
+    Partial<Pick<WhatsAppSendAuthTemplateInput, 'phoneId' | 'token'>>,
+) {
+  return sendAuthTemplate(config, {
+    ...input,
+    phoneId: input.phoneId ?? config.phoneId,
+    token: input.token ?? config.token,
+  });
+}
+
 // ── Allow-list — the ONLY operations callEngine can invoke ──────────────────
 // Adding an op here is what makes it callable through callEngine at all; the
 // generic types below are derived FROM this object, so there is exactly one
@@ -91,7 +157,7 @@ import { mirrorAccount, getTopupOptions, startTopup, startCallback } from '@/eng
 const ALLOW_LIST = {
   magnus: { getBalance, getCalls, addCredit, debitCredit },
   fiserv: { charge },
-  whatsapp: { sendText, sendTemplate, sendAuthTemplate },
+  whatsapp: { sendText: whatsappSendText, sendTemplate: whatsappSendTemplate, sendAuthTemplate: whatsappSendAuthTemplate },
   odoo: { findCustomerByPhone, createCrmLead, findOpenTasksByAssignee },
   chatwoot: {
     upsertContact,
@@ -102,6 +168,8 @@ const ALLOW_LIST = {
   },
   bff: { mirrorAccount, getTopupOptions, startTopup, startCallback },
 } as const;
+
+const TOKEN_ENV_ALLOWLIST = /^(META_|WHATSAPP_)/;
 
 export type EngineName = keyof typeof ALLOW_LIST;
 export type OpName<E extends EngineName> = keyof (typeof ALLOW_LIST)[E];
@@ -127,6 +195,9 @@ export interface CallEngineOptions {
   /** Pre-redacted, safe-to-log metadata merged into the AuditLog row. Never
    *  pass raw call args/results here — see module header. */
   meta?: Record<string, unknown>;
+  /** whatsapp only: pick a specific WhatsAppNumber when the tenant has more
+   *  than one. Defaults to the tenant's oldest-created number. */
+  whatsappNumberId?: string;
 }
 
 export class EngineOpNotAllowedError extends Error {
@@ -153,18 +224,54 @@ function assertTenantScope(tenant: TenantScope): void {
   }
 }
 
-async function resolveConfig(engine: EngineName, tenant: TenantScope): Promise<unknown> {
+async function resolveConfig(
+  engine: EngineName,
+  tenant: TenantScope,
+  opts: CallEngineOptions,
+): Promise<unknown> {
   switch (engine) {
     case 'magnus':
       return getMagnusConfig();
     case 'fiserv':
-      return getFiservConfig();
+      return resolveFiservConfigForTenant(tenant.tenantId);
     case 'odoo':
-      return getOdooConfig();
-    case 'whatsapp':
-      return getWhatsAppConfig();
+      return resolveOdooConfigForTenant(tenant.tenantId);
     case 'bff':
-      return getBffConfig();
+      return resolveBffConfigForTenant(tenant.tenantId);
+    case 'whatsapp': {
+      if (!tenant.tenantId) {
+        throw new EngineTenantScopeError(
+          'callEngine: whatsapp requires tenant.tenantId (per-tenant WhatsAppNumber) — consumerAccountId scope is not supported for this engine',
+        );
+      }
+      const waNumber = opts.whatsappNumberId
+        ? await prisma.whatsAppNumber.findUnique({ where: { id: opts.whatsappNumberId } })
+        : await prisma.whatsAppNumber.findFirst({
+            where: { tenant_id: tenant.tenantId },
+            orderBy: { created_at: 'asc' },
+          });
+      if (!waNumber || waNumber.tenant_id !== tenant.tenantId) {
+        throw new Error(`callEngine: no WhatsAppNumber configured for tenant ${tenant.tenantId}`);
+      }
+      let token: string;
+      if (waNumber.token_env) {
+        if (!TOKEN_ENV_ALLOWLIST.test(waNumber.token_env)) {
+          throw new Error(
+            `callEngine: token_env "${waNumber.token_env}" rejected — must start with META_ or WHATSAPP_`,
+          );
+        }
+        const resolved = process.env[waNumber.token_env];
+        if (!resolved) {
+          throw new Error(
+            `callEngine: token_env "${waNumber.token_env}" is set but env var is empty or missing`,
+          );
+        }
+        token = resolved;
+      } else {
+        token = waNumber.access_token;
+      }
+      return { ...getWhatsAppConfig(), phoneId: waNumber.phone_number_id, token };
+    }
     case 'chatwoot': {
       if (!tenant.tenantId) {
         throw new EngineTenantScopeError(
@@ -198,7 +305,7 @@ export async function callEngine<E extends EngineName, O extends OpName<E>>(
     throw new EngineOpNotAllowedError(engine, String(op));
   }
 
-  const config = await resolveConfig(engine, opts.tenant);
+  const config = await resolveConfig(engine, opts.tenant, opts);
   const actorId = opts.actorId ?? 'system';
   const action = `${engine}.${String(op)}`;
   const auditBase = {

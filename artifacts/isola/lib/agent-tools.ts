@@ -2,18 +2,21 @@
  * Agent-tools governance layer — the ONLY code that executes a tool call
  * accepted by POST /api/agent-tools/invoke.
  *
- * This module does NOT talk to the network directly for Odoo/WhatsApp: it
- * calls the existing engine clients (engines/odoo.ts, engines/whatsapp.ts)
- * exactly as they are used elsewhere in the app (lib/agent.ts,
- * app/api/crm/customer/route.ts). Nothing here duplicates those clients —
- * it only adds the write-policy / consent / tenant-scope decisions that sit
- * in front of them.
+ * odoo.read / odoo.create_lead call json2Call (engines/odoo.ts) directly —
+ * that raw model/method primitive is deliberately outside callEngine's
+ * ALLOW_LIST (see lib/connector.ts module header, "NOT WRAPPED"). Per-tenant
+ * credential resolution (OdooBinding merged over the platform default) is
+ * still shared with callEngine's resolveConfig() via
+ * lib/engine-bindings.ts, so a tenant with its own Odoo instance is honored
+ * here too. wa.send routes through callEngine('whatsapp', 'sendText', ...)
+ * so its token_env/access_token resolution has exactly one implementation
+ * (lib/connector.ts), not a second copy duplicated in this file.
  */
 
 import { prisma } from './prisma';
-import { getOdooConfig, getWhatsAppConfig } from './engines';
-import { json2Call, OdooApiError, OdooNoApiError } from '@/engines/odoo';
-import { sendText } from '@/engines/whatsapp';
+import { json2Call } from '@/engines/odoo';
+import { resolveOdooConfigForTenant } from './engine-bindings';
+import { callEngine } from './connector';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -106,7 +109,7 @@ export function validateOdooReadArgs(args: any): OdooReadArgs {
   };
 }
 
-export async function executeOdooRead(args: OdooReadArgs): Promise<unknown> {
+export async function executeOdooRead(tenantId: string, args: OdooReadArgs): Promise<unknown> {
   // Policy check runs BEFORE the method-shape check so a caller trying to
   // sneak `unlink` / `account.payment` through odoo.read is held over
   // policy, not merely rejected as malformed.
@@ -114,16 +117,12 @@ export async function executeOdooRead(args: OdooReadArgs): Promise<unknown> {
   if (args.method !== 'search_read') {
     throw new MalformedArgsError('odoo.read only supports method "search_read"');
   }
-  try {
-    return await json2Call(getOdooConfig(), args.model, 'search_read', {
-      domain: args.domain ?? [],
-      fields: args.fields,
-      limit: args.limit,
-    });
-  } catch (e) {
-    if (e instanceof OdooApiError || e instanceof OdooNoApiError) throw e;
-    throw e;
-  }
+  const config = await resolveOdooConfigForTenant(tenantId);
+  return json2Call(config, args.model, 'search_read', {
+    domain: args.domain ?? [],
+    fields: args.fields,
+    limit: args.limit,
+  });
 }
 
 // ── odoo.create_lead ───────────────────────────────────────────────────────────
@@ -153,9 +152,10 @@ export function validateOdooCreateLeadArgs(args: any): OdooCreateLeadArgs {
   };
 }
 
-export async function executeOdooCreateLead(args: OdooCreateLeadArgs): Promise<unknown> {
+export async function executeOdooCreateLead(tenantId: string, args: OdooCreateLeadArgs): Promise<unknown> {
   checkOdooPolicy('crm.lead', 'create'); // always passes — kept for defense-in-depth symmetry
-  return json2Call(getOdooConfig(), 'crm.lead', 'create', {
+  const config = await resolveOdooConfigForTenant(tenantId);
+  return json2Call(config, 'crm.lead', 'create', {
     values: {
       name: args.name,
       contact_name: args.contact_name,
@@ -174,7 +174,6 @@ export interface WaSendArgs {
 }
 
 const WA_SEND_WINDOW_MS = 24 * 60 * 60 * 1000; // Meta's 24h customer-service window
-const TOKEN_ENV_ALLOWLIST = /^(META_|WHATSAPP_)/;
 
 /**
  * 2026-04-11 BFF policy: EPIC's FB-linked number (1568, phone_number_id
@@ -252,27 +251,19 @@ export async function executeWaSend(tenantId: string, args: WaSendArgs): Promise
     throw new Error(`no WhatsAppNumber configured for tenant ${tenantId}`);
   }
 
-  let effectiveToken: string;
-  if (waNumber.token_env) {
-    if (!TOKEN_ENV_ALLOWLIST.test(waNumber.token_env)) {
-      throw new Error(`token_env "${waNumber.token_env}" rejected — must start with META_ or WHATSAPP_`);
-    }
-    const resolved = process.env[waNumber.token_env];
-    if (!resolved) {
-      throw new Error(`token_env "${waNumber.token_env}" is set but env var is empty or missing`);
-    }
-    effectiveToken = resolved;
-  } else {
-    effectiveToken = waNumber.access_token;
-  }
-
   const phoneDigits = toE164(args.to).slice(1); // Meta expects digits only, no '+'
-  const result = await sendText(getWhatsAppConfig(), {
-    phoneId: waNumber.phone_number_id,
-    token: effectiveToken,
-    to: phoneDigits,
-    body: args.text,
-  });
+  const result = await callEngine(
+    'whatsapp',
+    'sendText',
+    [{ to: phoneDigits, body: args.text }],
+    {
+      tenant: { tenantId },
+      actorId: 'agent-tools:wa.send',
+      whatsappNumberId: waNumber.id,
+      entity: 'whatsapp_number',
+      entityId: waNumber.id,
+    },
+  );
   if (!result.ok) {
     throw new Error(result.error ?? 'WhatsApp send failed');
   }
