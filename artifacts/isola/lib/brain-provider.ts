@@ -60,7 +60,7 @@ export const HERMES_ALLOWED_PHONE_NUMBER_IDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Only these Meta phone_number_ids may ever be routed to the new v1.11.0
+ * The always-on floor of Meta phone_number_ids routed to the new v1.11.0
  * Isola bridge (tryIsolaBridge). Every other clawith-provider number falls
  * through to tryClawithLegacy (the original runtime.epic.dm/api/internal/
  * dispatch contract) unchanged — this is the per-number cutover gate so
@@ -68,8 +68,21 @@ export const HERMES_ALLOWED_PHONE_NUMBER_IDS: ReadonlySet<string> = new Set([
  * already-working clawith integration (mirrors HERMES_ALLOWED_PHONE_NUMBER_IDS
  * above, same rationale).
  */
+const _BRIDGE_ALLOWED_HARDCODED: readonly string[] = [
+  '1023804347491554', // EMA sales / onboarding number, +17678180001 — v1.11.0 cutover
+  '278390858690809',  // EPIC 295-6737, +17672956737 — v1.11.0 contained cutover (2026-07-18)
+];
+
+/**
+ * Additional Meta phone_number_ids may be added at runtime via the
+ * ISOLA_BRIDGE_ALLOWED_PNIDS env var (comma-separated) so a future number
+ * goes live on the contained bridge with only a Replit Secret + restart —
+ * no code deploy. The hardcoded list above is the always-on floor; env
+ * entries are additive and never remove a hardcoded one.
+ */
 export const ISOLA_BRIDGE_ALLOWED_PHONE_NUMBER_IDS: ReadonlySet<string> = new Set([
-  '1023804347491554', // EMA sales / onboarding number, +17678180001 — v1.11.0 cutover target
+  ..._BRIDGE_ALLOWED_HARDCODED,
+  ...(process.env.ISOLA_BRIDGE_ALLOWED_PNIDS?.split(',').map((s) => s.trim()).filter(Boolean) ?? []),
 ]);
 
 export interface BrainReplyResult {
