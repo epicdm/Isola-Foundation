@@ -5,7 +5,11 @@
  *   native  (default) → lib/ai.ts chatComplete() — Anthropic Claude, unchanged.
  *   flowise           → external self-hosted Flowise chatflow, called over HTTP.
  *   hermes            → external CC-owned Hermes agent, routed through bff-v2, called over HTTP.
- *   clawith           → Clawith's dispatch endpoint, called DIRECTLY (no bff-v2 hop) — see tryClawith().
+ *   clawith           → Clawith, called DIRECTLY (no bff-v2 hop). Per-number gated between two
+ *                       implementations — see ISOLA_BRIDGE_ALLOWED_PHONE_NUMBER_IDS below,
+ *                       tryIsolaBridge() (new v1.11.0 bridge) and tryClawithLegacy() (original
+ *                       runtime.epic.dm/api/internal/dispatch contract, still live for every
+ *                       clawith number not on that allowlist).
  *
  * Contract: generateReply() ALWAYS resolves — it never throws. Any Flowise,
  * Hermes, or Clawith failure (timeout, non-2xx, empty text, network error)
@@ -53,6 +57,19 @@ export const HERMES_ALLOWED_PHONE_NUMBER_IDS: ReadonlySet<string> = new Set([
   '1023804347491554', // EMA sales / onboarding number, +17678180001
   '975632242309171',  // EPIC main, +17678183742
   '294957850360835',  // EPIC FB-linked, +17672851568 — inbound-reply only, see epic-seed-data.ts
+]);
+
+/**
+ * Only these Meta phone_number_ids may ever be routed to the new v1.11.0
+ * Isola bridge (tryIsolaBridge). Every other clawith-provider number falls
+ * through to tryClawithLegacy (the original runtime.epic.dm/api/internal/
+ * dispatch contract) unchanged — this is the per-number cutover gate so
+ * flipping the bridge live for one number can never affect another tenant's
+ * already-working clawith integration (mirrors HERMES_ALLOWED_PHONE_NUMBER_IDS
+ * above, same rationale).
+ */
+export const ISOLA_BRIDGE_ALLOWED_PHONE_NUMBER_IDS: ReadonlySet<string> = new Set([
+  '1023804347491554', // EMA sales / onboarding number, +17678180001 — v1.11.0 cutover target
 ]);
 
 export interface BrainReplyResult {
@@ -147,8 +164,19 @@ export async function generateReply(params: {
       console.warn(
         '[brain-provider] brain_provider=clawith but no ClawithBinding for this tenant — falling back to native',
       );
+    } else if (ISOLA_BRIDGE_ALLOWED_PHONE_NUMBER_IDS.has(phoneNumberId)) {
+      const clawithResult = await tryIsolaBridge({
+        agentId: clawithBinding.clawith_agent_id,
+        messages,
+        sessionId,
+        callerPhone: senderPhone,
+      });
+      if (clawithResult) {
+        return { ...clawithResult, model: 'clawith' };
+      }
+      console.warn('[brain-provider] Isola bridge failed — falling back to native for this reply');
     } else {
-      const clawithResult = await tryClawith({
+      const clawithResult = await tryClawithLegacy({
         agentId: clawithBinding.clawith_agent_id,
         paperclipAgentId: clawithBinding.paperclip_agent_id,
         paperclipCompanyId: clawithBinding.paperclip_company_id,
@@ -160,7 +188,7 @@ export async function generateReply(params: {
       if (clawithResult) {
         return { ...clawithResult, model: 'clawith' };
       }
-      console.warn('[brain-provider] Clawith failed — falling back to native for this reply');
+      console.warn('[brain-provider] Clawith (legacy) failed — falling back to native for this reply');
     }
   }
 
@@ -325,13 +353,90 @@ async function tryHermes(params: {
 }
 
 // ── Clawith implementation ────────────────────────────────────────────────────
+//
+// Two implementations, gated per-number by ISOLA_BRIDGE_ALLOWED_PHONE_NUMBER_IDS
+// above: tryIsolaBridge() (new v1.11.0 stack) for allowlisted numbers, and
+// tryClawithLegacy() (original contract) for every other clawith tenant. This
+// keeps the v1.11.0 cutover scoped to one number without disturbing tenants
+// already live on the legacy endpoint with old clawith_agent_ids.
 
 /**
- * Calls Clawith's dispatch endpoint DIRECTLY — this retires the bff-v2 hop
- * that the hermes path above still goes through. One shared endpoint for
- * every clawith tenant; the per-tenant identity (clawith_agent_id /
- * paperclip_agent_id / paperclip_company_id) comes from the caller's
- * ClawithBinding row, not from any URL configuration.
+ * Calls the Isola bridge on the v1.11.0 Clawith stack DIRECTLY — this
+ * retires the bff-v2 hop that the hermes path above still goes through, and
+ * supersedes the old runtime.epic.dm/api/internal/dispatch contract (which
+ * required paperclip_agent_id/paperclip_company_id). One shared endpoint for
+ * every clawith tenant; the per-tenant identity (clawith_agent_id) comes
+ * from the caller's ClawithBinding row, not from any URL configuration.
+ *
+ * Contract (Foundation → Isola bridge):
+ *   POST https://agents.epic.dm/api/isola/bridge/message
+ *   headers: { 'X-Isola-Secret': CLAWITH_SHARED_SECRET }
+ *   body: { agent_id, phone, text, external_conversation_id }
+ *   expects: { reply: string, run_id, status, matched_session, needs_handoff?: boolean }
+ *
+ * Any non-2xx, network error, or empty reply is treated identically: return
+ * null so the caller falls back to native. Never throws.
+ */
+const ISOLA_BRIDGE_URL =
+  process.env.ISOLA_BRIDGE_URL || 'https://agents.epic.dm/api/isola/bridge/message';
+// No published SLA for the bridge's round-trip; mirrors Hermes's generous
+// timeout so a slow-but-healthy reply isn't mistaken for a dead endpoint.
+const CLAWITH_TIMEOUT_MS = 45_000;
+
+async function tryIsolaBridge(params: {
+  agentId: string;
+  messages: { role: 'user' | 'assistant'; content: string }[];
+  sessionId: string;
+  callerPhone: string;
+}): Promise<{ text: string; tokensUsed: number; provider: 'clawith'; needsHandoff: boolean } | null> {
+  const secret = process.env.CLAWITH_SHARED_SECRET;
+  if (!secret) {
+    console.warn('[brain-provider] CLAWITH_SHARED_SECRET not configured — cannot use clawith provider');
+    return null;
+  }
+
+  const lastUser = [...params.messages].reverse().find((m) => m.role === 'user');
+  const userText = lastUser?.content ?? '';
+  if (!userText) return null;
+
+  try {
+    const res = await fetch(ISOLA_BRIDGE_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Isola-Secret': secret },
+      body: JSON.stringify({
+        agent_id: params.agentId,
+        phone: params.callerPhone,
+        text: userText,
+        external_conversation_id: params.sessionId,
+      }),
+      signal: AbortSignal.timeout(CLAWITH_TIMEOUT_MS),
+    });
+
+    if (!res.ok) {
+      console.error(`[brain-provider] Isola bridge failed (${res.status}): ${await res.text().catch(() => '')}`);
+      return null; // falls back to native
+    }
+
+    const data: any = await res.json().catch(() => null);
+    const text: string = typeof data?.reply === 'string' ? data.reply.trim() : '';
+    if (!text) {
+      console.error('[brain-provider] Isola bridge: no reply text');
+      return null;
+    }
+
+    return { text, tokensUsed: 0, provider: 'clawith', needsHandoff: data?.needs_handoff === true };
+  } catch (err: any) {
+    console.error('[brain-provider] Isola bridge error:', err?.message ?? err);
+    return null;
+  }
+}
+
+/**
+ * Calls Clawith's ORIGINAL dispatch endpoint DIRECTLY — this retires the
+ * bff-v2 hop that the hermes path above still goes through. One shared
+ * endpoint for every legacy clawith tenant; the per-tenant identity
+ * (clawith_agent_id / paperclip_agent_id / paperclip_company_id) comes from
+ * the caller's ClawithBinding row, not from any URL configuration.
  *
  * Contract (Foundation → Clawith):
  *   POST https://runtime.epic.dm/api/internal/dispatch
@@ -347,11 +452,8 @@ async function tryHermes(params: {
  * network error: return null so the caller falls back to native. Never throws.
  */
 const CLAWITH_DISPATCH_URL = 'https://runtime.epic.dm/api/internal/dispatch';
-// No published SLA for Clawith's round-trip; mirrors Hermes's generous
-// timeout so a slow-but-healthy reply isn't mistaken for a dead endpoint.
-const CLAWITH_TIMEOUT_MS = 45_000;
 
-async function tryClawith(params: {
+async function tryClawithLegacy(params: {
   agentId: string;
   paperclipAgentId: string;
   paperclipCompanyId: string;

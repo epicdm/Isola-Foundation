@@ -59,6 +59,10 @@ export const EMA_CHATWOOT_INBOX_ID = '3';
 
 export const EMA_SIGNUP_URL = 'https://ema.epic.dm/consumer/login';
 
+/** v1.11.0 Clawith stack agent id for EMA, reached via the Isola bridge
+ * (see ISOLA_BRIDGE_ALLOWED_PHONE_NUMBER_IDS in lib/brain-provider.ts). */
+export const EMA_CLAWITH_AGENT_ID = '81b38cd6-9fba-4cc8-8f87-1bce1a4aa162';
+
 export const EMA_SALES_GREETING =
   "Hi! 👋 I'm EMA, from EPIC. I help people get their own real Dominica (1-767) number that works right on your phone — call in, call out, top up like a calling card, no landline needed. Want to hear how it works, or ready to sign up?";
 
