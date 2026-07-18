@@ -201,8 +201,27 @@ export async function handleInboundWhatsApp(params: {
     }));
 
   // ── 10. Generate reply via the brain-provider socket ──────────────────────
-  // Honors agent.brain_provider (native | flowise | hermes). generateReply()
-  // never throws — any flowise/hermes failure falls back to native inside it.
+  // Honors agent.brain_provider (native | flowise | hermes | clawith). generateReply()
+  // never throws — any flowise/hermes/clawith failure falls back to native inside it.
+  //
+  // Resolve the Clawith identity only when actually needed — same S4 two-level
+  // lookup as the A2 path (app/api/chatwoot/agent-bot/route.ts): per-agent
+  // binding first (ClawithBinding.agent_id, unique), then per-tenant fallback
+  // (ClawithBinding.tenant_id WHERE agent_id IS NULL). Without this, a
+  // direct-webhook tenant flipped to brain_provider='clawith' would call
+  // generateReply() with no clawithBinding and silently fall back to native.
+  let clawithBindingRow: { clawith_agent_id: string; paperclip_agent_id: string; paperclip_company_id: string } | null = null;
+  if (agent.brain_provider === 'clawith') {
+    clawithBindingRow = await prisma.clawithBinding.findUnique({
+      where: { agent_id: agent.id },
+    });
+    if (!clawithBindingRow) {
+      clawithBindingRow = await prisma.clawithBinding.findFirst({
+        where: { tenant_id: tenant.id, agent_id: null },
+      });
+    }
+  }
+
   let reply = '';
   let tokensUsed = 0;
   let replyModel = TIER_MODELS[agent.intelligence_tier] ?? TIER_MODELS['standard'];
@@ -215,6 +234,13 @@ export async function handleInboundWhatsApp(params: {
       sessionId: conversation.id,
       phoneNumberId: waNumber.phone_number_id,
       senderPhone: customerPhone,
+      clawithBinding: clawithBindingRow
+        ? {
+            clawith_agent_id: clawithBindingRow.clawith_agent_id,
+            paperclip_agent_id: clawithBindingRow.paperclip_agent_id,
+            paperclip_company_id: clawithBindingRow.paperclip_company_id,
+          }
+        : null,
     });
     reply = result.text;
     tokensUsed = result.tokensUsed;
