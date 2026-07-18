@@ -5,11 +5,13 @@
  *   native  (default) → lib/ai.ts chatComplete() — Anthropic Claude, unchanged.
  *   flowise           → external self-hosted Flowise chatflow, called over HTTP.
  *   hermes            → external CC-owned Hermes agent, routed through bff-v2, called over HTTP.
- *   clawith           → Clawith, called DIRECTLY (no bff-v2 hop). Per-number gated between two
- *                       implementations — see ISOLA_BRIDGE_ALLOWED_PHONE_NUMBER_IDS below,
- *                       tryIsolaBridge() (new v1.11.0 bridge) and tryClawithLegacy() (original
- *                       runtime.epic.dm/api/internal/dispatch contract, still live for every
- *                       clawith number not on that allowlist).
+ *   clawith           → Clawith, called DIRECTLY (no bff-v2 hop). The contained v1.11.0
+ *                       tryIsolaBridge() is the DEFAULT for every clawith number
+ *                       (2026-07-18 legacy retirement). tryClawithLegacy() (original
+ *                       runtime.epic.dm/api/internal/dispatch contract) is retained ONLY as an
+ *                       env-gated rollback (ISOLA_LEGACY_CLAWITH_FALLBACK=1) and is never
+ *                       reached by default. ISOLA_BRIDGE_ALLOWED_PHONE_NUMBER_IDS documents the
+ *                       always-on contained floor (allowlisted numbers can never regress to legacy).
  *
  * Contract: generateReply() ALWAYS resolves — it never throws. Any Flowise,
  * Hermes, or Clawith failure (timeout, non-2xx, empty text, network error)
@@ -177,18 +179,14 @@ export async function generateReply(params: {
       console.warn(
         '[brain-provider] brain_provider=clawith but no ClawithBinding for this tenant — falling back to native',
       );
-    } else if (ISOLA_BRIDGE_ALLOWED_PHONE_NUMBER_IDS.has(phoneNumberId)) {
-      const clawithResult = await tryIsolaBridge({
-        agentId: clawithBinding.clawith_agent_id,
-        messages,
-        sessionId,
-        callerPhone: senderPhone,
-      });
-      if (clawithResult) {
-        return { ...clawithResult, model: 'clawith' };
-      }
-      console.warn('[brain-provider] Isola bridge failed — falling back to native for this reply');
-    } else {
+    } else if (
+      process.env.ISOLA_LEGACY_CLAWITH_FALLBACK === '1' &&
+      !ISOLA_BRIDGE_ALLOWED_PHONE_NUMBER_IDS.has(phoneNumberId)
+    ) {
+      // Rollback-only path, OFF by default (legacy runtime.epic.dm dispatch retired
+      // 2026-07-18). Set ISOLA_LEGACY_CLAWITH_FALLBACK=1 to temporarily restore the legacy
+      // path for a NON-allowlisted number during an incident. Allowlisted numbers (the
+      // contained floor) never take this path and can never regress to legacy.
       const clawithResult = await tryClawithLegacy({
         agentId: clawithBinding.clawith_agent_id,
         paperclipAgentId: clawithBinding.paperclip_agent_id,
@@ -201,7 +199,21 @@ export async function generateReply(params: {
       if (clawithResult) {
         return { ...clawithResult, model: 'clawith' };
       }
-      console.warn('[brain-provider] Clawith (legacy) failed — falling back to native for this reply');
+      console.warn('[brain-provider] Clawith (legacy rollback) failed — falling back to native for this reply');
+    } else {
+      // DEFAULT: the contained v1.11.0 Isola bridge for every clawith number. A missing
+      // agent/binding or any bridge error returns null → native fallback (contained,
+      // tenant-scoped) — it never falls through to the legacy runtime.
+      const clawithResult = await tryIsolaBridge({
+        agentId: clawithBinding.clawith_agent_id,
+        messages,
+        sessionId,
+        callerPhone: senderPhone,
+      });
+      if (clawithResult) {
+        return { ...clawithResult, model: 'clawith' };
+      }
+      console.warn('[brain-provider] Isola bridge failed — falling back to native for this reply');
     }
   }
 
