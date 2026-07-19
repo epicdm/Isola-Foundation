@@ -1,72 +1,50 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getConsumerSession } from '@/lib/consumer-session';
-import { prisma } from '@/lib/prisma';
-import { audit } from '@/lib/audit';
-import { getMagnusConfig, isMagnusConfigured } from '@/lib/engines';
-import { setDidDestinationRoute } from '@/lib/magnus-voice';
+import { isMagnusConfigured } from '@/lib/engines';
+import { setVoiceRouteMode, VoiceRouteError, routeErrorResponseFor } from '@/lib/voice-routing-service';
 
 /**
- * POST /api/consumer/voice/forward — flip the signed-in consumer's DID
- * between routing to their SIP extension and forwarding to a cell number.
- * Mirrors /api/voice/forward (operator) but scoped to ConsumerAccount.
- * Body: { forward_to_cell: boolean, cell_number?: string }
+ * POST /api/consumer/voice/forward — DEPRECATED compatibility adapter over
+ * the central S5 routing service. Mirrors /api/voice/forward (operator) —
+ * see that file's header for the exact preserved contract and the
+ * forward_to_cell -> mode mapping / dial_timeout behavior-shape note.
  */
 export async function POST(req: NextRequest) {
   const account = await getConsumerSession();
   if (!account) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const body = await req.json();
+  const body = await req.json().catch(() => ({}));
   const { forward_to_cell, cell_number } = body;
 
   if (!isMagnusConfigured()) {
     return NextResponse.json({ error: 'Magnus not configured' }, { status: 503 });
   }
 
-  const voiceLine = await prisma.voiceLine.findFirst({
-    where: { identity_id: account.identityId, owner_kind: 'consumer' },
-  });
-
-  if (!voiceLine?.magnus_diddestination_id || voiceLine.provisioning_state !== 'completed') {
-    return NextResponse.json({ error: 'Voice line is not provisioned yet' }, { status: 400 });
-  }
-
-  const nextCellNumber = cell_number !== undefined ? cell_number : voiceLine.voice_cell_number;
-
-  if (forward_to_cell && !nextCellNumber) {
-    return NextResponse.json({ error: 'A cell number is required to enable forward-to-cell' }, { status: 400 });
-  }
-
   try {
-    await setDidDestinationRoute(
-      getMagnusConfig(),
-      voiceLine.magnus_diddestination_id,
-      forward_to_cell
-        ? { mode: 'cell', cellNumber: nextCellNumber! }
-        : { mode: 'sip' },
+    const result = await setVoiceRouteMode(
+      { kind: 'consumer', session: account },
+      {
+        mode: forward_to_cell ? 'cell' : 'app',
+        forwardNumber: cell_number,
+        sourceSurface: 'consumer.forward_compat',
+      },
     );
 
-    const updated = await prisma.voiceLine.update({
-      where: { id: voiceLine.id },
-      data: {
-        voice_forward_to_cell: !!forward_to_cell,
-        ...(cell_number !== undefined && { voice_cell_number: cell_number }),
-      },
-    });
-
-    await audit({
-      consumerAccountId: account.id,
-      actorId: 'system',
-      action: 'consumer.voice.forward_toggle',
-      entity: 'consumer_account',
-      entityId: account.id,
-      meta: { forward_to_cell: updated.voice_forward_to_cell },
-    });
+    if (!result.ok) {
+      // See /api/voice/forward for why this mirrors that status mapping.
+      const { status: structuredStatus, body } = routeErrorResponseFor(result);
+      let status = 502;
+      if (result.outcome === 'critical_degraded') status = structuredStatus;
+      else if (/required/i.test(result.error ?? '')) status = 400;
+      return NextResponse.json(body, { status });
+    }
 
     return NextResponse.json({
-      forward_to_cell: updated.voice_forward_to_cell,
-      cell_number: updated.voice_cell_number,
+      forward_to_cell: result.mode === 'cell',
+      cell_number: result.forwardToCellNumber ?? null,
     });
-  } catch (e: any) {
-    return NextResponse.json({ error: e?.message ?? 'Failed to update routing' }, { status: 502 });
+  } catch (e) {
+    if (e instanceof VoiceRouteError) return NextResponse.json({ error: e.message }, { status: e.status });
+    return NextResponse.json({ error: 'Failed to update routing' }, { status: 502 });
   }
 }

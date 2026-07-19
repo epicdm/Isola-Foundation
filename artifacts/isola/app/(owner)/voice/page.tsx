@@ -2,14 +2,14 @@
 
 import { useState, useEffect } from 'react';
 import QRCode from 'qrcode';
-import { Phone, PhoneIncoming, PhoneOutgoing, PhoneOff, Smartphone, QrCode } from 'lucide-react';
+import { Phone, PhoneIncoming, PhoneOutgoing, PhoneOff, Smartphone, QrCode, ShieldAlert } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Switch } from '@/components/ui/switch';
-import { Alert, AlertDescription } from '@/components/ui/alert';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Separator } from '@/components/ui/separator';
 import {
@@ -42,6 +42,64 @@ interface LineInfo {
   cell_number: string | null;
 }
 
+/** Wire shape for GET/POST /api/voice/routing — the canonical S5 routing
+ *  control API. Mirrors lib/voice-routing-service.ts's response shapes but is
+ *  hand-declared (not imported) to keep this client component decoupled from
+ *  server-only modules, matching this file's existing LineInfo convention. */
+type RoutingMode = 'app' | 'app_then_cell' | 'cell';
+type RoutingReadMode = RoutingMode | 'degraded' | 'unknown';
+
+interface RoutingState {
+  mode: RoutingReadMode;
+  forward_to_cell_number: string | null;
+  reason?: string;
+}
+
+interface RoutingCritical {
+  voiceLineId: string;
+  did: string;
+  requestedMode: RoutingMode;
+  beforeMode: RoutingReadMode;
+  observedAfterMode: RoutingReadMode;
+  rollbackAttempted: boolean;
+  rollbackVerified: boolean;
+  operatorActionRequired: true;
+}
+
+interface RoutingErrorBody {
+  error: string;
+  outcome?: string;
+  critical?: RoutingCritical;
+  rollbackAttempted?: boolean;
+  rollbackVerified?: boolean;
+  operatorActionRequired?: true;
+}
+
+interface RoutingResult {
+  ok: boolean;
+  message: string;
+  rollbackAttempted?: boolean;
+  rollbackVerified?: boolean;
+  critical?: RoutingCritical;
+}
+
+const ROUTING_MODE_OPTIONS: { value: RoutingMode; label: string; description: string }[] = [
+  { value: 'app', label: 'App only', description: 'Rings your SIP softphone. No fallback.' },
+  { value: 'app_then_cell', label: 'App, then cell', description: 'Rings SIP first, falls back to your cell after the ring timeout.' },
+  { value: 'cell', label: 'Cell only', description: 'Rings your cell number immediately.' },
+];
+
+function modeLabel(mode: RoutingReadMode): string {
+  return ROUTING_MODE_OPTIONS.find((o) => o.value === mode)?.label ?? (mode === 'degraded' ? 'Degraded' : 'Unknown');
+}
+
+function maskFallbackNumber(num: string | null): string {
+  if (!num) return '—';
+  const digits = num.replace(/\D/g, '');
+  if (digits.length < 4) return '••••';
+  return `•••-•••-${digits.slice(-4)}`;
+}
+
 function formatDuration(secs: number): string {
   const m = Math.floor(secs / 60);
   const s = secs % 60;
@@ -64,8 +122,12 @@ export default function VoicePage() {
   const [lineLoading, setLineLoading] = useState(true);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [cellNumber, setCellNumber] = useState('');
-  const [forwardLoading, setForwardLoading] = useState(false);
-  const [forwardError, setForwardError] = useState('');
+
+  const [routing, setRouting] = useState<RoutingState | null>(null);
+  const [routingLoading, setRoutingLoading] = useState(true);
+  const [routingLoadError, setRoutingLoadError] = useState('');
+  const [routingSaving, setRoutingSaving] = useState(false);
+  const [routingResult, setRoutingResult] = useState<RoutingResult | null>(null);
 
   useEffect(() => {
     fetch('/api/voice/calls?limit=50')
@@ -81,10 +143,23 @@ export default function VoicePage() {
       .then((r) => r.json())
       .then((d: LineInfo) => {
         setLine(d);
-        setCellNumber(d.cell_number ?? '');
+        setCellNumber((prev) => prev || (d.cell_number ?? ''));
       })
       .catch(console.error)
       .finally(() => setLineLoading(false));
+
+    fetch('/api/voice/routing')
+      .then(async (r) => {
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error ?? 'Failed to load routing state');
+        return d as RoutingState;
+      })
+      .then((d) => {
+        setRouting(d);
+        setCellNumber((prev) => prev || (d.forward_to_cell_number ?? ''));
+      })
+      .catch((e: unknown) => setRoutingLoadError(e instanceof Error ? e.message : 'Failed to load routing state'))
+      .finally(() => setRoutingLoading(false));
   }, []);
 
   useEffect(() => {
@@ -96,29 +171,37 @@ export default function VoicePage() {
     }
   }, [line?.sip_username, line?.sip_password]);
 
-  async function toggleForward(nextForward: boolean) {
-    setForwardError('');
-    if (nextForward && !cellNumber.trim()) {
-      setForwardError('Enter a cell number before enabling forward-to-cell.');
+  async function setRoutingMode(mode: RoutingMode) {
+    setRoutingResult(null);
+    if (mode !== 'app' && !cellNumber.trim()) {
+      setRoutingResult({ ok: false, message: 'Enter a fallback cell number before selecting this mode.' });
       return;
     }
-    setForwardLoading(true);
+    setRoutingSaving(true);
     try {
-      const res = await fetch('/api/voice/forward', {
+      const res = await fetch('/api/voice/routing', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ forward_to_cell: nextForward, cell_number: cellNumber.trim() || undefined }),
+        body: JSON.stringify({ mode, forward_number: cellNumber.trim() || undefined }),
       });
       const data = await res.json();
       if (!res.ok) {
-        setForwardError(data.error ?? 'Failed to update routing');
+        const body = data as RoutingErrorBody;
+        setRoutingResult({
+          ok: false,
+          message: body.error ?? 'Failed to update routing',
+          rollbackAttempted: body.rollbackAttempted,
+          rollbackVerified: body.rollbackVerified,
+          critical: body.critical,
+        });
         return;
       }
-      setLine((prev) => (prev ? { ...prev, forward_to_cell: data.forward_to_cell, cell_number: data.cell_number } : prev));
+      setRouting((prev) => (prev ? { ...prev, mode: data.mode, forward_to_cell_number: data.forward_to_cell_number } : prev));
+      setRoutingResult({ ok: true, message: `Routing set to ${modeLabel(data.mode)}.` });
     } catch (e: unknown) {
-      setForwardError(e instanceof Error ? e.message : 'Failed to update routing');
+      setRoutingResult({ ok: false, message: e instanceof Error ? e.message : 'Failed to update routing' });
     } finally {
-      setForwardLoading(false);
+      setRoutingSaving(false);
     }
   }
 
@@ -187,37 +270,81 @@ export default function VoicePage() {
 
                 <Separator />
 
-                {/* Forward to cell */}
+                {/* Routing (S5 canonical control — /api/voice/routing) */}
                 <div className="flex flex-col gap-3">
-                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Forward to Cell</p>
-                  <div className="flex flex-col gap-1.5">
-                    <Label htmlFor="cellNumber">Fallback cell number</Label>
-                    <Input
-                      id="cellNumber"
-                      value={cellNumber}
-                      onChange={(e) => setCellNumber(e.target.value)}
-                      placeholder="+1767xxxxxxx"
-                    />
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Routing</p>
+                    {!routingLoading && routing && <RouteHealthBadge mode={routing.mode} />}
                   </div>
-                  {forwardError && (
+
+                  {routingLoading ? (
+                    <Skeleton className="h-16 w-full" />
+                  ) : routingLoadError ? (
                     <Alert variant="destructive">
-                      <AlertDescription>{forwardError}</AlertDescription>
+                      <AlertDescription>{routingLoadError}</AlertDescription>
                     </Alert>
-                  )}
-                  <div className="flex items-center gap-3">
-                    <Switch
-                      id="forwardToggle"
-                      checked={line.forward_to_cell}
-                      disabled={forwardLoading}
-                      onCheckedChange={(checked) => toggleForward(checked)}
-                    />
-                    <Label htmlFor="forwardToggle" className="cursor-pointer">
-                      {line.forward_to_cell ? 'Forwarding to cell' : 'Ringing SIP phone'}
-                    </Label>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Currently routing to: <strong>{line.forward_to_cell ? (line.cell_number || 'cell') : 'SIP extension'}</strong>
-                  </p>
+                  ) : routing ? (
+                    <>
+                      <ToggleGroup
+                        type="single"
+                        variant="outline"
+                        value={ROUTING_MODE_OPTIONS.some((o) => o.value === routing.mode) ? routing.mode : undefined}
+                        onValueChange={(v) => v && setRoutingMode(v as RoutingMode)}
+                        disabled={routingSaving}
+                        className="flex-wrap"
+                      >
+                        {ROUTING_MODE_OPTIONS.map((opt) => (
+                          <ToggleGroupItem key={opt.value} value={opt.value} aria-label={opt.label} title={opt.description}>
+                            {opt.label}
+                          </ToggleGroupItem>
+                        ))}
+                      </ToggleGroup>
+
+                      <div className="flex flex-col gap-1.5">
+                        <Label htmlFor="cellNumber">Fallback cell number</Label>
+                        <Input
+                          id="cellNumber"
+                          value={cellNumber}
+                          onChange={(e) => setCellNumber(e.target.value)}
+                          placeholder="+1767xxxxxxx"
+                        />
+                      </div>
+
+                      <p className="text-xs text-muted-foreground">
+                        Current mode: <strong>{modeLabel(routing.mode)}</strong> · Fallback: <strong>{maskFallbackNumber(routing.forward_to_cell_number)}</strong>
+                        {routing.reason && <> · {routing.reason}</>}
+                      </p>
+
+                      {routingResult?.critical && (
+                        <Alert variant="destructive" className="border-2">
+                          <ShieldAlert className="size-4" />
+                          <AlertTitle>Operator action required</AlertTitle>
+                          <AlertDescription>
+                            <p>
+                              The routing change to <strong>{modeLabel(routingResult.critical.requestedMode)}</strong> could not be
+                              completed or safely rolled back. Contact support before making further routing changes on this line.
+                            </p>
+                            <p className="mt-1 text-xs">
+                              Before: {modeLabel(routingResult.critical.beforeMode)} · Observed after: {modeLabel(routingResult.critical.observedAfterMode)} ·
+                              Rollback attempted: {routingResult.critical.rollbackAttempted ? 'yes' : 'no'} · Rollback verified:{' '}
+                              {routingResult.critical.rollbackVerified ? 'yes' : 'no'}
+                            </p>
+                          </AlertDescription>
+                        </Alert>
+                      )}
+
+                      {routingResult && !routingResult.critical && (
+                        <Alert variant={routingResult.ok ? 'default' : 'destructive'}>
+                          <AlertDescription>
+                            {routingResult.message}
+                            {routingResult.rollbackAttempted && (
+                              <> — {routingResult.rollbackVerified ? 'the line was safely restored to its previous state.' : 'rollback could not be verified.'}</>
+                            )}
+                          </AlertDescription>
+                        </Alert>
+                      )}
+                    </>
+                  ) : null}
                 </div>
               </div>
 
@@ -317,4 +444,10 @@ function InfoRow({ label, value, mono }: { label: string; value: string; mono?: 
       <span className={mono ? 'font-mono text-xs text-right break-all' : 'text-right break-all'}>{value}</span>
     </div>
   );
+}
+
+function RouteHealthBadge({ mode }: { mode: RoutingReadMode }) {
+  if (mode === 'degraded') return <Badge variant="destructive">Degraded</Badge>;
+  if (mode === 'unknown') return <Badge variant="outline">Unknown</Badge>;
+  return <Badge variant="secondary">Healthy</Badge>;
 }
