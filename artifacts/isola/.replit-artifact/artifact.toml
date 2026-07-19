@@ -22,7 +22,7 @@ PORT = "23359"
 args = ["pnpm", "--filter", "@workspace/isola", "run", "build"]
 
 [services.production.run]
-args = ["pnpm", "--filter", "@workspace/isola", "run", "start"]
+args = ["pnpm", "--filter", "@workspace/isola", "run", "start:prod"]
 
 [services.production.run.env]
 PORT = "23359"
