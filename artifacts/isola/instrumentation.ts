@@ -142,18 +142,25 @@ async function seedDefaultAgent(prisma: any, adminTenantId: string | null) {
   }
 
   try {
-    await prisma.agent.upsert({
+    // NOT prisma.agent.upsert({where:{tenant_id}}) — Agent.tenant_id lost its
+    // unique constraint in 9b1b9f7 (S4: one tenant can own multiple agents).
+    // See seedEmaSalesAgent below for the full rationale.
+    const existingDefaultAgent = await prisma.agent.findFirst({
       where: { tenant_id: adminTenantId },
-      create: {
-        tenant_id:         adminTenantId,
-        name:              'Isola Assistant',
-        greeting:          'Hello! How can I help you today?',
-        business_info:     'EPIC Communications — multi-tenant WhatsApp AI platform serving Dominica.',
-        intelligence_tier: 'advanced',  // claude-sonnet for admin/test tenant
-        is_active:         true,
-      },
-      update: {}, // idempotent — don't overwrite if owner has customised it
+      select: { id: true },
     });
+    if (!existingDefaultAgent) {
+      await prisma.agent.create({
+        data: {
+          tenant_id:         adminTenantId,
+          name:              'Isola Assistant',
+          greeting:          'Hello! How can I help you today?',
+          business_info:     'EPIC Communications — multi-tenant WhatsApp AI platform serving Dominica.',
+          intelligence_tier: 'advanced',  // claude-sonnet for admin/test tenant
+          is_active:         true,
+        },
+      });
+    } // idempotent — don't overwrite if owner has customised it
     console.log('[instrumentation] Default agent ensured for tenant', adminTenantId);
   } catch (err) {
     console.error('[instrumentation] Default agent seed error:', err);
@@ -224,51 +231,74 @@ async function seedWaveBTenants(prisma: any) {
       // intelligence_tier, brain_provider) are only set on create so an operator
       // override persists. flowise_flow_id is synced from source (it's a fixed
       // test-fixture reference, not something an operator hand-edits per tenant).
-      await prisma.agent.upsert({
-        where:  { tenant_id: soul.tenantId },
-        create: {
-          tenant_id:         soul.tenantId,
-          name:              soul.agentName,
-          greeting:          soul.greeting,
-          business_info:     soul.businessInfo,
-          knowledge_text:    soul.knowledgeText,
-          away_message:      soul.awayMessage,
-          intelligence_tier: 'standard',
-          after_hours_start: soul.afterHoursStart,
-          after_hours_end:   soul.afterHoursEnd,
-          timezone:          soul.timezone,
-          is_active:         true,
-          brain_provider:    'native',
-          flowise_flow_id:   soul.flowiseFlowId ?? null,
-        },
-        update: {
-          // Soul-derived fields: always sync from source so typo-fixes and content
-          // updates propagate automatically on next cold start.
-          name:              soul.agentName,
-          greeting:          soul.greeting,
-          business_info:     soul.businessInfo,
-          knowledge_text:    soul.knowledgeText,
-          away_message:      soul.awayMessage,
-          after_hours_start: soul.afterHoursStart,
-          after_hours_end:   soul.afterHoursEnd,
-          timezone:          soul.timezone,
-          flowise_flow_id:   soul.flowiseFlowId ?? null,
-        },
+      // NOT prisma.agent.upsert({where:{tenant_id}}) — Agent.tenant_id lost
+      // its unique constraint in 9b1b9f7 (S4: one tenant can own multiple
+      // agents). See seedEmaSalesAgent below for the full rationale.
+      const existingWaveBAgent = await prisma.agent.findFirst({
+        where: { tenant_id: soul.tenantId },
+        select: { id: true },
       });
+      if (!existingWaveBAgent) {
+        await prisma.agent.create({
+          data: {
+            tenant_id:         soul.tenantId,
+            name:              soul.agentName,
+            greeting:          soul.greeting,
+            business_info:     soul.businessInfo,
+            knowledge_text:    soul.knowledgeText,
+            away_message:      soul.awayMessage,
+            intelligence_tier: 'standard',
+            after_hours_start: soul.afterHoursStart,
+            after_hours_end:   soul.afterHoursEnd,
+            timezone:          soul.timezone,
+            is_active:         true,
+            brain_provider:    'native',
+            flowise_flow_id:   soul.flowiseFlowId ?? null,
+          },
+        });
+      } else {
+        await prisma.agent.update({
+          where: { id: existingWaveBAgent.id },
+          data: {
+            // Soul-derived fields: always sync from source so typo-fixes and content
+            // updates propagate automatically on next cold start.
+            name:              soul.agentName,
+            greeting:          soul.greeting,
+            business_info:     soul.businessInfo,
+            knowledge_text:    soul.knowledgeText,
+            away_message:      soul.awayMessage,
+            after_hours_start: soul.afterHoursStart,
+            after_hours_end:   soul.afterHoursEnd,
+            timezone:          soul.timezone,
+            flowise_flow_id:   soul.flowiseFlowId ?? null,
+          },
+        });
+      }
 
       // 3. ChatwootBinding (mode='a2') — the ONLY routing key for A2 tenants
-      await prisma.chatwootBinding.upsert({
-        where:  { tenant_id: soul.tenantId },
-        create: {
-          tenant_id:  soul.tenantId,
-          base_url:   'https://inbox.epic.dm',
-          account_id: soul.chatwootAccountId,
-          token:      '',                   // A2: uses CHATWOOT_AGENTBOT_TOKEN env var
-          inbox_id:   soul.chatwootInboxId,
-          mode:       'a2',
-        },
-        update: { mode: 'a2' }, // ensure mode is always 'a2' on re-run
+      // NOT prisma.chatwootBinding.upsert({where:{tenant_id}}) —
+      // ChatwootBinding.tenant_id is not unique either (same S4 change).
+      const existingWaveBBinding = await prisma.chatwootBinding.findFirst({
+        where: { tenant_id: soul.tenantId },
+        select: { id: true },
       });
+      if (!existingWaveBBinding) {
+        await prisma.chatwootBinding.create({
+          data: {
+            tenant_id:  soul.tenantId,
+            base_url:   'https://inbox.epic.dm',
+            account_id: soul.chatwootAccountId,
+            token:      '',                   // A2: uses CHATWOOT_AGENTBOT_TOKEN env var
+            inbox_id:   soul.chatwootInboxId,
+            mode:       'a2',
+          },
+        });
+      } else {
+        await prisma.chatwootBinding.update({
+          where: { id: existingWaveBBinding.id },
+          data: { mode: 'a2' }, // ensure mode is always 'a2' on re-run
+        });
+      }
 
       console.log(`[instrumentation] Wave B tenant seeded: ${soul.agentName} (${soul.tenantId})`);
     } catch (err) {
@@ -402,26 +432,38 @@ async function seedEmaSalesChatwootBinding(prisma: any) {
   }
 
   try {
-    await prisma.chatwootBinding.upsert({
+    // NOT prisma.chatwootBinding.upsert({where:{tenant_id}}) —
+    // ChatwootBinding.tenant_id is not unique (S4 change, see
+    // seedEmaSalesAgent above for the full rationale).
+    const existingEmaBinding = await prisma.chatwootBinding.findFirst({
       where: { tenant_id: EMA_SALES_TENANT_ID },
-      create: {
-        tenant_id: EMA_SALES_TENANT_ID,
-        base_url: EMA_CHATWOOT_BASE_URL,
-        account_id: EMA_CHATWOOT_ACCOUNT_ID,
-        token,
-        inbox_id: EMA_CHATWOOT_INBOX_ID,
-        mode: 'a2',
-      },
-      update: {
-        // Resync from env/secret on every cold start — e.g. if the token
-        // rotates — no manual DB patch needed.
-        base_url: EMA_CHATWOOT_BASE_URL,
-        account_id: EMA_CHATWOOT_ACCOUNT_ID,
-        token,
-        inbox_id: EMA_CHATWOOT_INBOX_ID,
-        mode: 'a2',
-      },
+      select: { id: true },
     });
+    if (!existingEmaBinding) {
+      await prisma.chatwootBinding.create({
+        data: {
+          tenant_id: EMA_SALES_TENANT_ID,
+          base_url: EMA_CHATWOOT_BASE_URL,
+          account_id: EMA_CHATWOOT_ACCOUNT_ID,
+          token,
+          inbox_id: EMA_CHATWOOT_INBOX_ID,
+          mode: 'a2',
+        },
+      });
+    } else {
+      await prisma.chatwootBinding.update({
+        where: { id: existingEmaBinding.id },
+        data: {
+          // Resync from env/secret on every cold start — e.g. if the token
+          // rotates — no manual DB patch needed.
+          base_url: EMA_CHATWOOT_BASE_URL,
+          account_id: EMA_CHATWOOT_ACCOUNT_ID,
+          token,
+          inbox_id: EMA_CHATWOOT_INBOX_ID,
+          mode: 'a2',
+        },
+      });
+    }
     console.log(
       '[instrumentation] EMA Chatwoot binding active — tenant',
       EMA_SALES_TENANT_ID,
