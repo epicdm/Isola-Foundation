@@ -109,6 +109,12 @@ export interface LiveSipAccount {
   secret: string;
   callerid: string;
   cid_number: string;
+  /** Ring timeout (seconds, as a string) Magnus applies before falling
+   *  through to a diddestination row's forward target. S5: the field that
+   *  differentiates `app_then_cell` (normal ring duration) from `cell`
+   *  (sentinel value '1' — near-instant fallback while remaining
+   *  structurally SIP-first). Empty string if unset on the live row. */
+  dial_timeout: string;
 }
 
 /** Read-only: fetch the live Magnus `sip` row for an existing SIP account id. */
@@ -121,7 +127,19 @@ export async function readSipAccount(config: MagnusConfig, sipId: string): Promi
     secret: String(row.secret ?? ''),
     callerid: String(row.callerid ?? ''),
     cid_number: String(row.cid_number ?? ''),
+    dial_timeout: row.dial_timeout === null || row.dial_timeout === undefined ? '' : String(row.dial_timeout),
   };
+}
+
+/**
+ * Patch a SIP account's `dial_timeout`. S5 routing-mode primitive — never
+ * called by legacy binary provisioning (`setDidDestinationRoute` below),
+ * only by the new lib/voice-routing.ts mutation path. Idempotent: callers
+ * should skip the call entirely when the live value already matches
+ * (minimal-mutation principle — see lib/voice-routing.ts).
+ */
+export async function patchSipDialTimeout(config: MagnusConfig, sipId: string, dialTimeout: string): Promise<void> {
+  await magnusRequest(config, 'sip', 'save', { id: sipId, dial_timeout: dialTimeout });
 }
 
 /** Read-only: find an existing `did` row by its number (never draws/claims). */
@@ -151,7 +169,7 @@ export async function findDidDestinationForSip(
 export async function readDidDestination(
   config: MagnusConfig,
   diddestinationId: string,
-): Promise<{ id: string; destination: string; context: string; voip_call: string } | null> {
+): Promise<{ id: string; destination: string; context: string; voip_call: string; id_sip: string } | null> {
   const row = await findOneByField(config, 'diddestination', 'id', diddestinationId);
   if (!row) return null;
   return {
@@ -163,6 +181,31 @@ export async function readDidDestination(
     // (verified live: 2592 had voip_call='0' alongside a non-empty
     // destination; the fix must check both, not destination alone).
     voip_call: String(row.voip_call ?? ''),
+    // S5: needed to join to the `sip` row for dial_timeout. Empty string when
+    // the diddestination row has no SIP account wired at all — a structural
+    // shape lib/voice-routing.ts must treat as non-SIP-first-safe (degraded).
+    id_sip: row.id_sip === null || row.id_sip === undefined || row.id_sip === '' ? '' : String(row.id_sip),
+  };
+}
+
+/** Read-only: find the `diddestination` row for a given DID id — never
+ *  creates one. Distinct from `findDidDestinationForSip` (which looks up by
+ *  SIP extension); this looks up by the DID side of the relationship, which
+ *  is what S5 routing-state reads start from (a VoiceLine's own DID). Single
+ *  read returns the full routing-relevant shape (destination/voip_call/
+ *  id_sip) — no follow-up `readDidDestination` call needed. */
+export async function findDidDestinationForDid(
+  config: MagnusConfig,
+  didId: string,
+): Promise<{ id: string; id_did: string; destination: string; voip_call: string; id_sip: string } | null> {
+  const row = await findOneByField(config, 'diddestination', 'id_did', didId);
+  if (!row) return null;
+  return {
+    id: String(row.id),
+    id_did: String(row.id_did),
+    destination: String(row.destination ?? ''),
+    voip_call: String(row.voip_call ?? ''),
+    id_sip: row.id_sip === null || row.id_sip === undefined || row.id_sip === '' ? '' : String(row.id_sip),
   };
 }
 
