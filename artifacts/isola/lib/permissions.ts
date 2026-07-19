@@ -37,7 +37,8 @@ export type Action =
   | 'tenant.act_as'
   | 'tenant.provision_voice'
   | 'agent.update'
-  | 'agent.takeover_toggle';
+  | 'agent.takeover_toggle'
+  | 'voice.route_change';
 
 const ACTION_MIN_ROLE: Partial<Record<Action, Role>> = {
   'agent.update': 'staff',
