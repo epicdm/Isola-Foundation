@@ -7,6 +7,7 @@ import {
   validateForwardTarget,
   normalizeForwardNumber,
   isValidRingTimeoutSeconds,
+  formatSipForward,
   CELL_ONLY_DIAL_TIMEOUT_SENTINEL,
   type VoiceRoutingSnapshot,
 } from './voice-routing';
@@ -34,6 +35,7 @@ function snap(overrides: Partial<VoiceRoutingSnapshot> = {}): VoiceRoutingSnapsh
     voipCall: '1',
     sipId: 'sip-1',
     dialTimeout: '25',
+    sipForward: null,
     ...overrides,
   };
 }
@@ -47,18 +49,62 @@ describe('deriveVoiceRoutingMode — state derivation', () => {
     expect(result.forwardToCellNumber).toBeNull();
   });
 
-  it('SIP + forward + normal timeout -> app_then_cell', () => {
-    const result = deriveVoiceRoutingMode(snap({ destination: '9715551234', voipCall: '1', dialTimeout: '25' }));
+  it('SIP + forward + normal timeout + matching sip.forward -> app_then_cell', () => {
+    const result = deriveVoiceRoutingMode(
+      snap({ destination: '9715551234', voipCall: '1', dialTimeout: '25', sipForward: formatSipForward('9715551234') }),
+    );
     expect(result.mode).toBe('app_then_cell');
     expect(result.forwardToCellNumber).toBe('9715551234');
   });
 
-  it("SIP + forward + dial_timeout='1' -> cell", () => {
+  it("SIP + forward + dial_timeout='1' + matching sip.forward -> cell", () => {
     const result = deriveVoiceRoutingMode(
-      snap({ destination: '9715551234', voipCall: '1', dialTimeout: CELL_ONLY_DIAL_TIMEOUT_SENTINEL }),
+      snap({
+        destination: '9715551234',
+        voipCall: '1',
+        dialTimeout: CELL_ONLY_DIAL_TIMEOUT_SENTINEL,
+        sipForward: formatSipForward('9715551234'),
+      }),
     );
     expect(result.mode).toBe('cell');
     expect(result.forwardToCellNumber).toBe('9715551234');
+  });
+
+  it('diddestination forward target present but sip.forward unset -> degraded (the S5 non-forwarding defect)', () => {
+    const result = deriveVoiceRoutingMode(
+      snap({ destination: '9715551234', voipCall: '1', dialTimeout: '25', sipForward: '' }),
+    );
+    expect(result.mode).toBe('degraded');
+    expect(result.reason).toMatch(/sip\.forward/i);
+    expect(result.forwardToCellNumber).toBe('9715551234');
+  });
+
+  it('diddestination forward target present but sip.forward points at a different number -> degraded', () => {
+    const result = deriveVoiceRoutingMode(
+      snap({ destination: '9715551234', voipCall: '1', dialTimeout: '25', sipForward: formatSipForward('9715559999') }),
+    );
+    expect(result.mode).toBe('degraded');
+    expect(result.reason).toMatch(/sip\.forward/i);
+  });
+
+  it("dial_timeout='1' sentinel present but sip.forward unset -> degraded, never reported as cell", () => {
+    const result = deriveVoiceRoutingMode(
+      snap({ destination: '9715551234', voipCall: '1', dialTimeout: CELL_ONLY_DIAL_TIMEOUT_SENTINEL, sipForward: '' }),
+    );
+    expect(result.mode).toBe('degraded');
+  });
+
+  it('no diddestination forward target but a stale sip.forward is still set -> degraded, never reported as app', () => {
+    const result = deriveVoiceRoutingMode(
+      snap({ destination: '', voipCall: '1', dialTimeout: '25', sipForward: formatSipForward('9715551234') }),
+    );
+    expect(result.mode).toBe('degraded');
+    expect(result.reason).toMatch(/sip\.forward/i);
+  });
+
+  it('no diddestination forward target and sip.forward empty -> clean app', () => {
+    const result = deriveVoiceRoutingMode(snap({ destination: '', voipCall: '1', dialTimeout: '25', sipForward: '' }));
+    expect(result.mode).toBe('app');
   });
 
   it('legacy binary hard-bypass shape (voip_call=0) still reads as cell (backward-compat, no migration)', () => {
@@ -79,13 +125,17 @@ describe('deriveVoiceRoutingMode — state derivation', () => {
   });
 
   it('unexpected dial_timeout (e.g. "0") with forward + voip_call=1 -> degraded with an explicit reason', () => {
-    const result = deriveVoiceRoutingMode(snap({ destination: '9715551234', voipCall: '1', dialTimeout: '0' }));
+    const result = deriveVoiceRoutingMode(
+      snap({ destination: '9715551234', voipCall: '1', dialTimeout: '0', sipForward: formatSipForward('9715551234') }),
+    );
     expect(result.mode).toBe('degraded');
     expect(result.reason).toBeTruthy();
   });
 
   it('non-numeric dial_timeout -> degraded with an explicit reason', () => {
-    const result = deriveVoiceRoutingMode(snap({ destination: '9715551234', voipCall: '1', dialTimeout: 'garbage' }));
+    const result = deriveVoiceRoutingMode(
+      snap({ destination: '9715551234', voipCall: '1', dialTimeout: 'garbage', sipForward: formatSipForward('9715551234') }),
+    );
     expect(result.mode).toBe('degraded');
     expect(result.reason).toBeTruthy();
   });
@@ -195,6 +245,54 @@ describe('planRouteMutation — mode transitions', () => {
   it('throws when a forward number is required for the mode but not supplied', () => {
     const current = snap({ destination: '', voipCall: '1', dialTimeout: '25' });
     expect(() => planRouteMutation('cell', current)).toThrow();
+  });
+});
+
+// ── sip.forward: the field SipCallAgi.php::callForward() actually gates on ─
+
+describe('planRouteMutation — sip.forward (the field that actually gates Magnus call-forwarding)', () => {
+  it('app -> app_then_cell: writes sip.forward alongside the diddestination forward target', () => {
+    const current = snap({ destination: '', voipCall: '1', dialTimeout: '25', sipForward: '' });
+    const plan = planRouteMutation('app_then_cell', current, '9715551234');
+    expect(plan.forwardWrite).toBe(formatSipForward('9715551234'));
+  });
+
+  it('app -> cell: writes sip.forward alongside the sentinel dial_timeout', () => {
+    const current = snap({ destination: '', voipCall: '1', dialTimeout: '25', sipForward: '' });
+    const plan = planRouteMutation('cell', current, '9715551234');
+    expect(plan.forwardWrite).toBe(formatSipForward('9715551234'));
+  });
+
+  it('cell -> app: clears sip.forward', () => {
+    const current = snap({ destination: '9715551234', voipCall: '1', dialTimeout: '1', sipForward: formatSipForward('9715551234') });
+    const plan = planRouteMutation('app', current, undefined, '40');
+    expect(plan.forwardWrite).toBe('');
+  });
+
+  it('app_then_cell -> cell (same number): sip.forward already correct, no rewrite needed', () => {
+    const current = snap({ destination: '9715551234', voipCall: '1', dialTimeout: '25', sipForward: formatSipForward('9715551234') });
+    const plan = planRouteMutation('cell', current, '9715551234');
+    expect(plan.forwardWrite).toBeNull();
+  });
+
+  it('changing the forward number while already in cell/app_then_cell rewrites sip.forward to the new target', () => {
+    const current = snap({ destination: '9715551234', voipCall: '1', dialTimeout: '25', sipForward: formatSipForward('9715551234') });
+    const plan = planRouteMutation('app_then_cell', current, '9715559999');
+    expect(plan.forwardWrite).toBe(formatSipForward('9715559999'));
+  });
+
+  it('detects and repairs today\'s live defect: diddestination already shows app_then_cell but sip.forward was never set', () => {
+    const current = snap({ destination: '9715551234', voipCall: '1', dialTimeout: '25', sipForward: '' });
+    const plan = planRouteMutation('app_then_cell', current, '9715551234');
+    // diddestination itself needs no rewrite (already correct shape) — but sip.forward does.
+    expect(plan.diddestinationWrite).toBeNull();
+    expect(plan.forwardWrite).toBe(formatSipForward('9715551234'));
+  });
+
+  it('app -> app: already clear, no forward rewrite needed', () => {
+    const current = snap({ destination: '', voipCall: '1', dialTimeout: '25', sipForward: '' });
+    const plan = planRouteMutation('app', current);
+    expect(plan.forwardWrite).toBeNull();
   });
 });
 
@@ -309,10 +407,29 @@ describe('planRestoreMutation — exact snapshot restore', () => {
   });
 
   it('returns a no-op plan when the DID had no diddestination row before the mutation was attempted', () => {
-    const captured = snap({ diddestinationId: null, destination: null, voipCall: null, sipId: null, dialTimeout: null });
+    const captured = snap({ diddestinationId: null, destination: null, voipCall: null, sipId: null, dialTimeout: null, sipForward: null });
     const plan = planRestoreMutation(captured);
     expect(plan.diddestinationWrite).toBeNull();
     expect(plan.dialTimeoutWrite).toBeNull();
+    expect(plan.forwardWrite).toBeNull();
+  });
+
+  it('restores sip.forward exactly from the captured before-snapshot', () => {
+    const captured = snap({ destination: '9715551234', voipCall: '1', dialTimeout: '25', sipForward: formatSipForward('9715551234') });
+    const plan = planRestoreMutation(captured);
+    expect(plan.forwardWrite).toBe(formatSipForward('9715551234'));
+  });
+
+  it('restores a cleared sip.forward exactly (captured before-state was app mode)', () => {
+    const captured = snap({ destination: '', voipCall: '1', dialTimeout: '25', sipForward: '' });
+    const plan = planRestoreMutation(captured);
+    expect(plan.forwardWrite).toBe('');
+  });
+
+  it('never guesses sip.forward when the captured snapshot could not read it (unknown before-state)', () => {
+    const captured = snap({ destination: '9715551234', voipCall: '1', sipId: 'sip-1', dialTimeout: null, sipForward: null });
+    const plan = planRestoreMutation(captured);
+    expect(plan.forwardWrite).toBeNull();
   });
 });
 
