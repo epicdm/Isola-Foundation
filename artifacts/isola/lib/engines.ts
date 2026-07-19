@@ -44,6 +44,16 @@ export function isMagnusConfigured(): boolean {
   );
 }
 
+/** Deployment-configured ring timeout (seconds, as a raw string) for the S5
+ *  voice-routing app/app_then_cell modes. Raw plumbing only — validating that
+ *  the value is a sane bounded positive integer is lib/voice-routing.ts's job
+ *  (isValidRingTimeoutSeconds), not this factory's. Returns null when unset —
+ *  callers must not invent a hardcoded fallback for a missing/invalid value. */
+export function getVoiceRoutingRingTimeoutSeconds(): string | null {
+  const raw = process.env.VOICE_ROUTING_RING_TIMEOUT_SECONDS;
+  return raw && raw.trim() !== '' ? raw.trim() : null;
+}
+
 // ── Fiserv ───────────────────────────────────────────────────────────────────
 
 export function getFiservConfig(overrides?: Partial<FiservConfig>): FiservConfig {

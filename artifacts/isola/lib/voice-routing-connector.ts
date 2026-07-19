@@ -23,13 +23,15 @@
  * this adapter only after both have already passed.
  */
 
-import { getMagnusConfig } from './engines';
+import { getMagnusConfig, getVoiceRoutingRingTimeoutSeconds } from './engines';
 import type { TenantScope } from './connector';
 import {
   deriveVoiceRoutingMode,
   readVoiceRoutingSnapshot,
   planRouteMutation,
   applyRouteMutation,
+  planRestoreMutation,
+  applyRestoreMutation,
   type VoiceRoutingMode,
   type VoiceRoutingState,
 } from './voice-routing';
@@ -71,14 +73,31 @@ export async function voiceRoutingRead(
   }
 }
 
+/** Distinct outcomes voiceRoutingSet can report. `success` is the only
+ *  outcome where the requested change actually took effect — every other
+ *  outcome is a failed route-change request, even `mutation_failed_rolled_back`
+ *  / `unverified_rolled_back` where the line is confirmed restored. */
+export type VoiceRoutingSetOutcome =
+  | 'success'
+  | 'mutation_failed_rolled_back'
+  | 'unverified_rolled_back'
+  | 'critical_degraded';
+
 export interface VoiceRoutingSetResult {
+  outcome: VoiceRoutingSetOutcome;
   before: VoiceRoutingState;
+  /** Best-known after-state: the post-rollback-attempt read when a rollback
+   *  was attempted, otherwise the original post-mutation read. */
   after: VoiceRoutingState;
-  /** True only when the post-write derived mode actually matches
-   *  `targetMode`. A caller must treat verified=false as a failed operation
-   *  even though the Magnus writes themselves returned without error — see
-   *  lib/voice-routing-service.ts Section 7 (before/after verification). */
+  /** True only for outcome==='success' — the post-write derived mode
+   *  actually matched `targetMode`. A caller must treat verified=false as a
+   *  failed operation even though the Magnus writes themselves returned
+   *  without error — see lib/voice-routing-service.ts (before/after
+   *  verification). */
   verified: boolean;
+  rollbackAttempted: boolean;
+  /** null when no rollback was attempted (outcome==='success'). */
+  rollbackVerified: boolean | null;
 }
 
 /**
@@ -90,8 +109,21 @@ export interface VoiceRoutingSetResult {
  * those all run in lib/voice-routing-service.ts BEFORE this is ever called,
  * per "rejection must happen before any Magnus mutation" (Section 6). This
  * adapter's only contract is: given a target mode and (when required) an
- * already-validated forward number, make the minimal Magnus write and verify
- * it took effect.
+ * already-validated forward number, make the minimal Magnus write, verify it
+ * took effect, and — if it didn't, or if the write itself threw — attempt
+ * exactly ONE bounded compensating rollback to the captured before-state
+ * before reporting a result. Never retries the requested mutation, never
+ * recurses through setVoiceRouteMode/voiceRoutingSet, never retries the
+ * rollback itself.
+ *
+ * Flow: read before → plan (fails closed before any write if the plan can't
+ * be safely computed, e.g. a conflicting-rows DID or no safe ring timeout) →
+ * attempt the write → attempt an after-read → verify. On mutation-throw,
+ * after-read-failure, or after-state-mismatch: build a restore plan from the
+ * captured before-snapshot, attempt exactly one restore write, attempt one
+ * verification read, and report one of mutation_failed_rolled_back /
+ * unverified_rolled_back / critical_degraded (rollback couldn't be verified —
+ * worst case, needs operator attention) — never a false success.
  */
 export async function voiceRoutingSet(
   tenant: TenantScope,
@@ -109,23 +141,73 @@ export async function voiceRoutingSet(
     throw new VoiceRoutingConnectorError(`voice.routing.set: before-state read failed: ${message}`);
   }
 
-  const plan = planRouteMutation(params.targetMode, before.snapshot, params.forwardNumber);
-
+  let plan;
   try {
-    await applyRouteMutation(config, before.snapshot, plan);
+    plan = planRouteMutation(params.targetMode, before.snapshot, params.forwardNumber, getVoiceRoutingRingTimeoutSeconds());
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'unknown Magnus error';
-    throw new VoiceRoutingConnectorError(`voice.routing.set: Magnus mutation failed: ${message}`);
+    // Nothing was ever attempted against Magnus — no rollback is needed.
+    const message = err instanceof Error ? err.message : 'unknown planning error';
+    throw new VoiceRoutingConnectorError(`voice.routing.set: refusing to mutate — ${message}`);
   }
 
-  let after: VoiceRoutingState;
+  let mutationThrew = false;
+  try {
+    await applyRouteMutation(config, before.snapshot, plan);
+  } catch {
+    // An HTTP-level failure here does not tell us whether the write actually
+    // landed server-side before the error — treat the state as potentially
+    // changed and fall through to the rollback path below rather than
+    // assuming nothing happened.
+    mutationThrew = true;
+  }
+
+  let after: VoiceRoutingState | null = null;
   try {
     const afterSnapshot = await readVoiceRoutingSnapshot(config, params.didId, params.did);
     after = deriveVoiceRoutingMode(afterSnapshot);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'unknown Magnus error';
-    throw new VoiceRoutingConnectorError(`voice.routing.set: after-state read failed: ${message}`);
+  } catch {
+    after = null;
   }
 
-  return { before, after, verified: after.mode === params.targetMode };
+  const verified = !mutationThrew && after !== null && after.mode === params.targetMode;
+
+  if (verified) {
+    return { outcome: 'success', before, after: after!, verified: true, rollbackAttempted: false, rollbackVerified: null };
+  }
+
+  // One bounded compensating rollback attempt to the captured before-state.
+  // Never recurse through voiceRoutingSet/setVoiceRouteMode, never repeat the
+  // requested mutation, never retry beyond this single attempt.
+  const restorePlan = planRestoreMutation(before.snapshot);
+
+  let rollbackWriteThrew = false;
+  try {
+    await applyRestoreMutation(config, before.snapshot, restorePlan);
+  } catch {
+    rollbackWriteThrew = true;
+  }
+
+  let rollbackAfter: VoiceRoutingState | null = null;
+  try {
+    const rollbackSnapshot = await readVoiceRoutingSnapshot(config, params.didId, params.did);
+    rollbackAfter = deriveVoiceRoutingMode(rollbackSnapshot);
+  } catch {
+    rollbackAfter = null;
+  }
+
+  const rollbackVerified = !rollbackWriteThrew && rollbackAfter !== null && rollbackAfter.mode === before.mode;
+  const finalAfter = rollbackAfter ?? after ?? before;
+
+  if (!rollbackVerified) {
+    return { outcome: 'critical_degraded', before, after: finalAfter, verified: false, rollbackAttempted: true, rollbackVerified: false };
+  }
+
+  return {
+    outcome: mutationThrew ? 'mutation_failed_rolled_back' : 'unverified_rolled_back',
+    before,
+    after: finalAfter,
+    verified: false,
+    rollbackAttempted: true,
+    rollbackVerified: true,
+  };
 }

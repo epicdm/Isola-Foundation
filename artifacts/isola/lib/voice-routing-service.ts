@@ -60,11 +60,32 @@ export interface SetVoiceRouteModeParams {
   requestId?: string;
 }
 
+/** Safe-identifiers-only payload for the worst-case outcome: a rollback
+ *  attempt that could not itself be verified. Contains no secrets and no raw
+ *  Magnus payloads — only identifiers already known to the caller (their own
+ *  tenant/consumer id, their own VoiceLine, their own DID) plus mode/rollback
+ *  status, so it's safe to surface directly in an API response. */
+export interface VoiceRouteCriticalDegraded {
+  tenantId?: string;
+  consumerAccountId?: string;
+  voiceLineId: string;
+  did: string;
+  requestedMode: VoiceRoutingMode;
+  beforeMode: VoiceRoutingReadMode;
+  observedAfterMode: VoiceRoutingReadMode;
+  rollbackAttempted: boolean;
+  rollbackVerified: boolean;
+  operatorActionRequired: true;
+}
+
 export interface VoiceRouteMutationResult {
   ok: boolean;
   mode?: VoiceRoutingReadMode;
   forwardToCellNumber?: string | null;
   error?: string;
+  rollbackAttempted?: boolean;
+  rollbackVerified?: boolean;
+  critical?: VoiceRouteCriticalDegraded;
 }
 
 // ── VoiceLine resolution (owner_kind-specific; never cross-account) ─────────
@@ -186,7 +207,10 @@ export async function setVoiceRouteMode(source: VoiceRouteSource, params: SetVoi
     normalizedForward = validation.normalized;
   }
 
-  // Section 3/7: governed connector write + before/after verification.
+  // Section 3/7: governed connector write + before/after verification. The
+  // connector itself (voiceRoutingSet) owns the bounded compensating-rollback
+  // attempt when the write fails/can't be verified — this service layer only
+  // interprets the resulting outcome and audits/reports it.
   let setResult;
   try {
     setResult = await voiceRoutingSet(tenant, {
@@ -196,6 +220,9 @@ export async function setVoiceRouteMode(source: VoiceRouteSource, params: SetVoi
       forwardNumber: normalizedForward,
     });
   } catch (err) {
+    // Nothing was attempted against Magnus at all (before-read failed, or the
+    // mutation was refused before any write — e.g. conflicting diddestination
+    // rows or no safe ring timeout available) — nothing to roll back.
     const message = err instanceof VoiceRoutingConnectorError ? err.message : 'Voice routing mutation failed';
     await audit({
       ...auditBase,
@@ -205,22 +232,68 @@ export async function setVoiceRouteMode(source: VoiceRouteSource, params: SetVoi
     return { ok: false, error: message };
   }
 
-  if (!setResult.verified) {
-    // Do NOT report success merely because Magnus returned HTTP 200 — the
-    // after-state read didn't derive to the mode we asked for.
+  if (setResult.outcome === 'critical_degraded') {
+    // Worst case: the requested mutation could not be confirmed AND the
+    // compensating rollback could not be verified either. Never report
+    // success; surface only safe identifiers and flag for operator action.
+    const critical: VoiceRouteCriticalDegraded = {
+      ...tenant,
+      voiceLineId: voiceLine.id,
+      did: voiceLine.magnus_did_number!,
+      requestedMode: params.mode,
+      beforeMode: setResult.before.mode,
+      observedAfterMode: setResult.after.mode,
+      rollbackAttempted: setResult.rollbackAttempted,
+      rollbackVerified: !!setResult.rollbackVerified,
+      operatorActionRequired: true,
+    };
     await audit({
       ...auditBase,
-      action: 'voice.routing.set_unverified',
+      action: 'voice.routing.critical_degraded',
       meta: {
         ok: false,
         requested_mode: params.mode,
         source_surface: params.sourceSurface,
         before_mode: setResult.before.mode,
         after_mode: setResult.after.mode,
-        error: 'post-write state did not match the requested mode',
+        rollback_attempted: setResult.rollbackAttempted,
+        rollback_verified: setResult.rollbackVerified,
       },
     });
-    return { ok: false, error: 'Voice routing change could not be verified — the line may be in its previous state' };
+    return {
+      ok: false,
+      error: 'Voice routing change could not be completed or safely rolled back — this line requires operator attention',
+      rollbackAttempted: setResult.rollbackAttempted,
+      rollbackVerified: !!setResult.rollbackVerified,
+      critical,
+    };
+  }
+
+  if (setResult.outcome !== 'success') {
+    // 'mutation_failed_rolled_back' or 'unverified_rolled_back' — the
+    // requested change did not take effect, but the connector's compensating
+    // rollback was verified: the line is confirmed back in its pre-mutation
+    // state. Still a failed route-change request.
+    const action =
+      setResult.outcome === 'mutation_failed_rolled_back' ? 'voice.routing.set_failed_rolled_back' : 'voice.routing.set_unverified_rolled_back';
+    await audit({
+      ...auditBase,
+      action,
+      meta: {
+        ok: false,
+        requested_mode: params.mode,
+        source_surface: params.sourceSurface,
+        before_mode: setResult.before.mode,
+        after_mode: setResult.after.mode,
+        rollback_verified: true,
+      },
+    });
+    return {
+      ok: false,
+      error: 'Voice routing change could not be verified — the line has been safely restored to its previous state',
+      rollbackAttempted: true,
+      rollbackVerified: true,
+    };
   }
 
   // Keep the pre-existing (schema-existing, non-S5) VoiceLine columns in

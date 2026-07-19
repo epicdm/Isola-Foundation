@@ -1,13 +1,29 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   deriveVoiceRoutingMode,
+  readVoiceRoutingSnapshot,
   planRouteMutation,
+  planRestoreMutation,
   validateForwardTarget,
   normalizeForwardNumber,
+  isValidRingTimeoutSeconds,
   CELL_ONLY_DIAL_TIMEOUT_SENTINEL,
-  DEFAULT_RING_TIMEOUT_SECONDS,
   type VoiceRoutingSnapshot,
 } from './voice-routing';
+import { ConflictingDidDestinationsError } from './magnus-voice';
+
+const { findDidDestinationForDidMock } = vi.hoisted(() => ({ findDidDestinationForDidMock: vi.fn() }));
+
+vi.mock('./magnus-voice', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./magnus-voice')>();
+  return { ...actual, findDidDestinationForDid: findDidDestinationForDidMock };
+});
+
+const MAGNUS_CONFIG = { baseUrl: 'https://example.magnus', apiKey: 'k', apiSecret: 's' } as any;
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 function snap(overrides: Partial<VoiceRoutingSnapshot> = {}): VoiceRoutingSnapshot {
   return {
@@ -107,11 +123,11 @@ describe('planRouteMutation — mode transitions', () => {
     expect(plan.dialTimeoutWrite).toBe(CELL_ONLY_DIAL_TIMEOUT_SENTINEL);
   });
 
-  it('cell -> app: clears the forward target and restores a sane ring timeout from the sentinel', () => {
+  it('cell -> app: clears the forward target and uses the explicitly configured ring timeout', () => {
     const current = snap({ destination: '9715551234', voipCall: '1', dialTimeout: '1' });
-    const plan = planRouteMutation('app', current);
+    const plan = planRouteMutation('app', current, undefined, '40');
     expect(plan.diddestinationWrite).toEqual({ destination: '', context: '', voip_call: '1', id_ivr: '', id_queue: '' });
-    expect(plan.dialTimeoutWrite).toBe(DEFAULT_RING_TIMEOUT_SECONDS);
+    expect(plan.dialTimeoutWrite).toBe('40');
   });
 
   it('app -> cell: sets the forward target and the sentinel timeout together', () => {
@@ -121,11 +137,39 @@ describe('planRouteMutation — mode transitions', () => {
     expect(plan.dialTimeoutWrite).toBe(CELL_ONLY_DIAL_TIMEOUT_SENTINEL);
   });
 
-  it('cell -> app_then_cell: same destination, dial_timeout restored from the sentinel', () => {
+  it('cell -> app_then_cell: same destination, dial_timeout restored from the configured value', () => {
     const current = snap({ destination: '9715551234', voipCall: '1', dialTimeout: '1' });
-    const plan = planRouteMutation('app_then_cell', current, '9715551234');
+    const plan = planRouteMutation('app_then_cell', current, '9715551234', '30');
     expect(plan.diddestinationWrite).toBeNull();
-    expect(plan.dialTimeoutWrite).toBe(DEFAULT_RING_TIMEOUT_SECONDS);
+    expect(plan.dialTimeoutWrite).toBe('30');
+  });
+
+  it('preserves an existing valid timeout even when no ring-timeout is configured', () => {
+    const current = snap({ destination: '', voipCall: '1', dialTimeout: '25' });
+    const plan = planRouteMutation('app_then_cell', current, '9715551234');
+    expect(plan.dialTimeoutWrite).toBeNull();
+  });
+
+  it('fails closed (throws) when leaving cell mode with no preserved timeout and no configured timeout', () => {
+    const current = snap({ destination: '9715551234', voipCall: '1', dialTimeout: '1' });
+    expect(() => planRouteMutation('app_then_cell', current, '9715551234')).toThrow(/refusing to guess/i);
+  });
+
+  it('fails closed (throws) BEFORE any mutation when the configured timeout is invalid', () => {
+    const current = snap({ destination: '9715551234', voipCall: '1', dialTimeout: '1' });
+    expect(() => planRouteMutation('app_then_cell', current, '9715551234', '0')).toThrow();
+    expect(() => planRouteMutation('app_then_cell', current, '9715551234', 'garbage')).toThrow();
+  });
+
+  it('ensures cell continues to use the "1" sentinel regardless of any configured ring timeout', () => {
+    const current = snap({ destination: '9715551234', voipCall: '1', dialTimeout: '25' });
+    const plan = planRouteMutation('cell', current, '9715551234', '40');
+    expect(plan.dialTimeoutWrite).toBe(CELL_ONLY_DIAL_TIMEOUT_SENTINEL);
+  });
+
+  it('fails closed (throws) when the DID has conflicting diddestination rows, before any mutation', () => {
+    const current = snap({ conflictingDestinationRows: 2 });
+    expect(() => planRouteMutation('app', current)).toThrow(/conflicting_did_destinations/);
   });
 
   it('same-mode transition is idempotent — no writes planned when already in the target shape', () => {
@@ -205,5 +249,102 @@ describe('validateForwardTarget — guards', () => {
 describe('normalizeForwardNumber', () => {
   it('strips non-digit characters', () => {
     expect(normalizeForwardNumber('+1 (767) 818-5000')).toBe('17678185000');
+  });
+});
+
+// ── Corrective patch: timeout configuration policy ──────────────────────────
+
+describe('isValidRingTimeoutSeconds', () => {
+  it('accepts a sane positive integer', () => {
+    expect(isValidRingTimeoutSeconds('25')).toBe(true);
+    expect(isValidRingTimeoutSeconds('40')).toBe(true);
+  });
+
+  it('rejects the cell-only sentinel value', () => {
+    expect(isValidRingTimeoutSeconds('1')).toBe(false);
+  });
+
+  it('rejects zero and negative-looking strings', () => {
+    expect(isValidRingTimeoutSeconds('0')).toBe(false);
+    expect(isValidRingTimeoutSeconds('-5')).toBe(false);
+  });
+
+  it('rejects non-numeric input', () => {
+    expect(isValidRingTimeoutSeconds('garbage')).toBe(false);
+    expect(isValidRingTimeoutSeconds('25.5')).toBe(false);
+    expect(isValidRingTimeoutSeconds('')).toBe(false);
+  });
+
+  it('rejects a value above the sanity ceiling', () => {
+    expect(isValidRingTimeoutSeconds('99999')).toBe(false);
+  });
+});
+
+// ── Corrective patch: bounded compensating rollback (pure restore planning) ─
+
+describe('planRestoreMutation — exact snapshot restore', () => {
+  it('restores destination/voip_call/dial_timeout exactly from the captured before-snapshot', () => {
+    const captured = snap({ destination: '9715551234', voipCall: '1', dialTimeout: '25' });
+    const plan = planRestoreMutation(captured);
+    expect(plan.diddestinationWrite).toEqual({ destination: '9715551234', context: '', voip_call: '1', id_ivr: '', id_queue: '' });
+    expect(plan.dialTimeoutWrite).toBe('25');
+  });
+
+  it('never restores a bare-PSTN voip_call=0 shape, even if that was the captured legacy value', () => {
+    const captured = snap({ destination: '9715551234', voipCall: '0', dialTimeout: '' });
+    const plan = planRestoreMutation(captured);
+    expect(plan.diddestinationWrite?.voip_call).toBe('1');
+  });
+
+  it('restores the cell-only sentinel exactly when that was the captured before-state', () => {
+    const captured = snap({ destination: '9715551234', voipCall: '1', dialTimeout: CELL_ONLY_DIAL_TIMEOUT_SENTINEL });
+    const plan = planRestoreMutation(captured);
+    expect(plan.dialTimeoutWrite).toBe(CELL_ONLY_DIAL_TIMEOUT_SENTINEL);
+  });
+
+  it('never guesses a dial_timeout when the captured snapshot could not read one (unknown before-state)', () => {
+    const captured = snap({ destination: '9715551234', voipCall: '1', sipId: 'sip-1', dialTimeout: null });
+    const plan = planRestoreMutation(captured);
+    expect(plan.dialTimeoutWrite).toBeNull();
+  });
+
+  it('returns a no-op plan when the DID had no diddestination row before the mutation was attempted', () => {
+    const captured = snap({ diddestinationId: null, destination: null, voipCall: null, sipId: null, dialTimeout: null });
+    const plan = planRestoreMutation(captured);
+    expect(plan.diddestinationWrite).toBeNull();
+    expect(plan.dialTimeoutWrite).toBeNull();
+  });
+});
+
+// ── Corrective patch: conflicting DID-destination rows ──────────────────────
+
+describe('deriveVoiceRoutingMode — conflicting destination rows', () => {
+  it('classifies a conflicting-rows snapshot as degraded, never a healthy mode', () => {
+    const result = deriveVoiceRoutingMode(snap({ conflictingDestinationRows: 2 }));
+    expect(result.mode).toBe('degraded');
+    expect(result.reason).toMatch(/conflicting_did_destinations/);
+  });
+
+  it('never mislabels a conflicting-rows snapshot as app/app_then_cell/cell', () => {
+    const result = deriveVoiceRoutingMode(snap({ conflictingDestinationRows: 3 }));
+    expect(['app', 'app_then_cell', 'cell']).not.toContain(result.mode);
+  });
+});
+
+describe('readVoiceRoutingSnapshot — conflicting destination rows', () => {
+  it('translates a ConflictingDidDestinationsError from Magnus into a degraded-classifiable snapshot instead of throwing', async () => {
+    findDidDestinationForDidMock.mockRejectedValue(new ConflictingDidDestinationsError('did-1', 2));
+
+    const snapshot = await readVoiceRoutingSnapshot(MAGNUS_CONFIG, 'did-1', '17678185000');
+    expect(snapshot.conflictingDestinationRows).toBe(2);
+
+    const state = deriveVoiceRoutingMode(snapshot);
+    expect(state.mode).toBe('degraded');
+    expect(state.reason).toMatch(/conflicting_did_destinations/);
+  });
+
+  it('propagates any other Magnus error unchanged (not swallowed as a conflict)', async () => {
+    findDidDestinationForDidMock.mockRejectedValue(new Error('network timeout'));
+    await expect(readVoiceRoutingSnapshot(MAGNUS_CONFIG, 'did-1', '17678185000')).rejects.toThrow('network timeout');
   });
 });

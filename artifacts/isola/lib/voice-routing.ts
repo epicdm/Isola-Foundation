@@ -29,7 +29,7 @@
 
 import type { MagnusConfig } from '@/engines/magnus';
 import { magnusRequest } from '@/engines/magnus';
-import { findDidDestinationForDid, readSipAccount, patchSipDialTimeout } from './magnus-voice';
+import { findDidDestinationForDid, readSipAccount, patchSipDialTimeout, ConflictingDidDestinationsError } from './magnus-voice';
 
 // ── Section 1: code-level routing model ─────────────────────────────────────
 
@@ -54,16 +54,21 @@ export function isVoiceRoutingMode(value: unknown): value is VoiceRoutingMode {
 export const CELL_ONLY_DIAL_TIMEOUT_SENTINEL = '1';
 
 /**
- * Traced default ring timeout (seconds) for `app`/`app_then_cell`. Best
- * available evidence: dial_timeout=25 observed live on a bff-v2-provisioned
- * SIP account on this SAME Magnus instance (PR #55 precedent) — NOT
- * independently re-verified against a live Foundation-provisioned SIP row in
- * this environment (no Magnus credentials available locally; see PR RISKS).
- * Mutation logic PRESERVES any existing valid (non-sentinel, numeric > 1)
- * dial_timeout rather than overwriting it — this constant is only written
- * when the current value is the '1' sentinel, missing, or otherwise invalid.
+ * Upper bound for a configured ring timeout — a sanity ceiling for input
+ * validation, not a traced/verified "correct" ring duration. Guards against a
+ * pathological deployment value (e.g. a typo'd extra zero) rather than
+ * asserting any particular timeout is right for a given account. Chosen
+ * generously above realistic PBX ring durations (typically well under a
+ * minute) while still catching obviously-wrong configuration.
  */
-export const DEFAULT_RING_TIMEOUT_SECONDS = '25';
+export const MAX_RING_TIMEOUT_SECONDS = 300;
+
+/** A safe ring timeout must be a positive integer greater than the `'1'`
+ *  cell-only sentinel (so it can never collide with it) and no larger than
+ *  MAX_RING_TIMEOUT_SECONDS. */
+export function isValidRingTimeoutSeconds(value: string): boolean {
+  return /^\d+$/.test(value) && Number(value) > 1 && Number(value) <= MAX_RING_TIMEOUT_SECONDS;
+}
 
 // ── snapshot shape ───────────────────────────────────────────────────────────
 
@@ -80,6 +85,12 @@ export interface VoiceRoutingSnapshot {
   sipId: string | null;
   /** sip.dial_timeout. Null when no SIP account is wired, or its row/field could not be read. */
   dialTimeout: string | null;
+  /** Set only when Magnus has more than one `diddestination` row for this
+   *  DID — an ambiguous/conflicting routing-truth shape. When present, every
+   *  other field above is meaningless (all null) and
+   *  deriveVoiceRoutingMode/planRouteMutation must refuse to proceed rather
+   *  than inspect them. */
+  conflictingDestinationRows?: number;
 }
 
 export interface VoiceRoutingState {
@@ -122,6 +133,18 @@ function tenDigitEquivalent(digits: string): string {
  */
 export function deriveVoiceRoutingMode(snapshot: VoiceRoutingSnapshot): VoiceRoutingState {
   const { destination, voipCall, sipId, dialTimeout } = snapshot;
+
+  // More than one diddestination row exists for this DID — routing truth is
+  // ambiguous. Never guess which row is "the" route; this must never be
+  // classified as one of the three healthy modes.
+  if (snapshot.conflictingDestinationRows && snapshot.conflictingDestinationRows > 1) {
+    return {
+      mode: 'degraded',
+      forwardToCellNumber: null,
+      reason: `conflicting_did_destinations: ${snapshot.conflictingDestinationRows} diddestination rows exist for this DID — routing truth is ambiguous, refusing to guess`,
+      snapshot,
+    };
+  }
 
   // No diddestination row at all — DID has never been routed to anything.
   if (snapshot.diddestinationId === null || destination === null || voipCall === null) {
@@ -214,7 +237,24 @@ export async function readVoiceRoutingSnapshot(
   didId: string,
   did: string,
 ): Promise<VoiceRoutingSnapshot> {
-  const diddest = await findDidDestinationForDid(config, didId);
+  let diddest;
+  try {
+    diddest = await findDidDestinationForDid(config, didId);
+  } catch (err) {
+    if (err instanceof ConflictingDidDestinationsError) {
+      return {
+        did,
+        didId,
+        diddestinationId: null,
+        destination: null,
+        voipCall: null,
+        sipId: null,
+        dialTimeout: null,
+        conflictingDestinationRows: err.rowCount,
+      };
+    }
+    throw err;
+  }
   if (!diddest) {
     return { did, didId, diddestinationId: null, destination: null, voipCall: null, sipId: null, dialTimeout: null };
   }
@@ -342,7 +382,13 @@ export function planRouteMutation(
   targetMode: VoiceRoutingMode,
   snapshot: VoiceRoutingSnapshot,
   forwardNumber?: string,
+  configuredRingTimeoutSeconds?: string | null,
 ): RouteMutationPlan {
+  if (snapshot.conflictingDestinationRows && snapshot.conflictingDestinationRows > 1) {
+    throw new Error(
+      `cannot plan a route mutation: conflicting_did_destinations — ${snapshot.conflictingDestinationRows} diddestination rows exist for this DID, routing truth is ambiguous`,
+    );
+  }
   if (!snapshot.sipId) {
     throw new Error('cannot plan a route mutation: this DID has no SIP account wired — provisioning is incomplete');
   }
@@ -368,13 +414,21 @@ export function planRouteMutation(
     }
   } else {
     // app / app_then_cell both need a sane ring timeout — SIP must actually
-    // ring in both. Restore the traced default only when the current value
-    // is the cell sentinel, missing, or otherwise not a usable positive
-    // timeout; otherwise preserve whatever is already configured (minimal
-    // mutation — never overwrite a legitimately-configured value we haven't
-    // traced against a live account).
+    // ring in both. Preserve whatever is already configured (minimal
+    // mutation — never overwrite a legitimately-configured value). Only when
+    // the current value is the cell sentinel, missing, or otherwise not a
+    // usable positive timeout do we need a replacement — and there is no
+    // verified universal default for that: use the deployment-configured
+    // VOICE_ROUTING_RING_TIMEOUT_SECONDS value if it's valid, otherwise fail
+    // closed BEFORE any Magnus mutation rather than guess one.
     if (!isPositiveTimeout(currentDialTimeout)) {
-      dialTimeoutWrite = DEFAULT_RING_TIMEOUT_SECONDS;
+      if (configuredRingTimeoutSeconds && isValidRingTimeoutSeconds(configuredRingTimeoutSeconds)) {
+        dialTimeoutWrite = configuredRingTimeoutSeconds;
+      } else {
+        throw new Error(
+          'cannot plan a route mutation: no existing valid dial_timeout is present for this DID, and VOICE_ROUTING_RING_TIMEOUT_SECONDS is not configured (or is invalid) — refusing to guess a ring timeout before any Magnus mutation',
+        );
+      }
     }
   }
 
@@ -386,6 +440,25 @@ export function planRouteMutation(
   };
 }
 
+type DiddestinationWrite = { destination: string; context: string; voip_call: string; id_ivr: string; id_queue: string };
+
+async function writeDiddestinationAndTimeout(
+  config: MagnusConfig,
+  snapshot: VoiceRoutingSnapshot,
+  diddestinationWrite: DiddestinationWrite | null,
+  dialTimeoutWrite: string | null,
+): Promise<void> {
+  if (diddestinationWrite && snapshot.diddestinationId) {
+    await magnusRequest(config, 'diddestination', 'save', {
+      id: snapshot.diddestinationId,
+      ...diddestinationWrite,
+    });
+  }
+  if (dialTimeoutWrite !== null && snapshot.sipId) {
+    await patchSipDialTimeout(config, snapshot.sipId, dialTimeoutWrite);
+  }
+}
+
 /** Impure: executes a plan against Magnus. Issues only the writes the plan
  *  actually calls for (both can be no-ops — see planRouteMutation). */
 export async function applyRouteMutation(
@@ -393,13 +466,67 @@ export async function applyRouteMutation(
   snapshot: VoiceRoutingSnapshot,
   plan: RouteMutationPlan,
 ): Promise<void> {
-  if (plan.diddestinationWrite && snapshot.diddestinationId) {
-    await magnusRequest(config, 'diddestination', 'save', {
-      id: snapshot.diddestinationId,
-      ...plan.diddestinationWrite,
-    });
+  await writeDiddestinationAndTimeout(config, snapshot, plan.diddestinationWrite, plan.dialTimeoutWrite);
+}
+
+// ── Section 4: bounded compensating rollback ────────────────────────────────
+
+export interface RouteRestorePlan {
+  diddestinationWrite: DiddestinationWrite | null;
+  dialTimeoutWrite: string | null;
+}
+
+/**
+ * Pure function — no I/O. Builds an UNCONDITIONAL write plan that restores a
+ * diddestination/sip pair to exactly the raw field values captured in
+ * `capturedSnapshot` — typically the before-state read prior to a mutation
+ * attempt whose outcome could not be confirmed (it threw, the after-read
+ * failed, or the after-state didn't match the requested mode).
+ *
+ * Unlike planRouteMutation, this never diffs against a "current" reading
+ * (which may itself be unreadable after a failed/ambiguous write) — it always
+ * re-issues both writes so the DID's Magnus row is driven back to the
+ * captured shape regardless of what state the failed mutation left it in.
+ * This is a distinct, lower-level operation from planRouteMutation/
+ * applyRouteMutation on purpose: those are keyed on a target VoiceRoutingMode,
+ * but the snapshot being restored to may itself have been degraded/unknown
+ * and have no such mode to re-derive from.
+ *
+ * Always forces voip_call='1' (SIP-first-safe, matching every other write
+ * this file makes) — never restores a bare-PSTN voip_call='0' shape even if
+ * that happened to be what the legacy before-state carried. Never repoints
+ * id_sip. Never guesses a dial_timeout the captured snapshot didn't actually
+ * have (e.g. an `unknown`-mode before-state whose timeout was unreadable).
+ * Returns a no-op plan only when the DID had no diddestination row before the
+ * mutation was attempted — rollback never fabricates one.
+ */
+export function planRestoreMutation(capturedSnapshot: VoiceRoutingSnapshot): RouteRestorePlan {
+  if (capturedSnapshot.diddestinationId === null) {
+    return { diddestinationWrite: null, dialTimeoutWrite: null };
   }
-  if (plan.dialTimeoutWrite !== null && snapshot.sipId) {
-    await patchSipDialTimeout(config, snapshot.sipId, plan.dialTimeoutWrite);
-  }
+
+  const diddestinationWrite: DiddestinationWrite = {
+    destination: capturedSnapshot.destination ?? '',
+    context: '',
+    voip_call: '1',
+    id_ivr: '',
+    id_queue: '',
+  };
+
+  const dialTimeoutWrite =
+    capturedSnapshot.sipId && capturedSnapshot.dialTimeout !== null ? capturedSnapshot.dialTimeout : null;
+
+  return { diddestinationWrite, dialTimeoutWrite };
+}
+
+/** Impure: executes a restore plan against Magnus, targeting the row
+ *  identified by `capturedSnapshot`'s own ids (the row being restored is
+ *  identified by primary key — it doesn't move even though its field values
+ *  do). Issues only the writes the plan actually calls for. */
+export async function applyRestoreMutation(
+  config: MagnusConfig,
+  capturedSnapshot: VoiceRoutingSnapshot,
+  plan: RouteRestorePlan,
+): Promise<void> {
+  await writeDiddestinationAndTimeout(config, capturedSnapshot, plan.diddestinationWrite, plan.dialTimeoutWrite);
 }

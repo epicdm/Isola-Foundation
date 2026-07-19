@@ -78,6 +78,43 @@ function routeState(mode: string, forwardToCellNumber: string | null = null) {
   return { mode, forwardToCellNumber, snapshot: {} as any } as any;
 }
 
+function setSuccess(before: string, after: string, forwardToCellNumber: string | null = null) {
+  return {
+    outcome: 'success',
+    before: routeState(before),
+    after: routeState(after, forwardToCellNumber),
+    verified: true,
+    rollbackAttempted: false,
+    rollbackVerified: null,
+  };
+}
+
+function setRolledBack(
+  outcome: 'mutation_failed_rolled_back' | 'unverified_rolled_back',
+  before: string,
+  after: string,
+) {
+  return {
+    outcome,
+    before: routeState(before),
+    after: routeState(after),
+    verified: false,
+    rollbackAttempted: true,
+    rollbackVerified: true,
+  };
+}
+
+function setCriticalDegraded(before: string, after: string) {
+  return {
+    outcome: 'critical_degraded' as const,
+    before: routeState(before),
+    after: routeState(after),
+    verified: false,
+    rollbackAttempted: true,
+    rollbackVerified: false,
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
@@ -89,11 +126,7 @@ describe('setVoiceRouteMode — authorization', () => {
     const voiceLine = operatorVoiceLine();
     prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
     prismaMock.voiceLine.update.mockResolvedValue(voiceLine);
-    voiceRoutingSetMock.mockResolvedValue({
-      before: routeState('app'),
-      after: routeState('app'),
-      verified: true,
-    });
+    voiceRoutingSetMock.mockResolvedValue(setSuccess('app', 'app'));
 
     const result = await setVoiceRouteMode(
       { kind: 'operator', session: operatorSession({ isOwner: true }) },
@@ -107,11 +140,7 @@ describe('setVoiceRouteMode — authorization', () => {
     const voiceLine = operatorVoiceLine();
     prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
     prismaMock.voiceLine.update.mockResolvedValue(voiceLine);
-    voiceRoutingSetMock.mockResolvedValue({
-      before: routeState('app'),
-      after: routeState('app'),
-      verified: true,
-    });
+    voiceRoutingSetMock.mockResolvedValue(setSuccess('app', 'app'));
 
     const result = await setVoiceRouteMode(
       { kind: 'operator', session: operatorSession({ isAdmin: true }) },
@@ -136,11 +165,7 @@ describe('setVoiceRouteMode — authorization', () => {
     prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
     prismaMock.voiceLine.update.mockResolvedValue(voiceLine);
     prismaMock.membership.findUnique.mockResolvedValue({ role: 'admin' });
-    voiceRoutingSetMock.mockResolvedValue({
-      before: routeState('app'),
-      after: routeState('app'),
-      verified: true,
-    });
+    voiceRoutingSetMock.mockResolvedValue(setSuccess('app', 'app'));
 
     const result = await setVoiceRouteMode(
       { kind: 'operator', session: operatorSession() },
@@ -176,11 +201,7 @@ describe('setVoiceRouteMode — authorization', () => {
     const voiceLine = operatorVoiceLine({ owner_kind: 'consumer', tenant_id: null, identity_id: 'identity-c1' });
     prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
     prismaMock.voiceLine.update.mockResolvedValue(voiceLine);
-    voiceRoutingSetMock.mockResolvedValue({
-      before: routeState('app'),
-      after: routeState('app'),
-      verified: true,
-    });
+    voiceRoutingSetMock.mockResolvedValue(setSuccess('app', 'app'));
 
     const result = await setVoiceRouteMode(
       { kind: 'consumer', session: consumerSession() },
@@ -209,11 +230,7 @@ describe('setVoiceRouteMode — before/after verification', () => {
     prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
     prismaMock.voiceLine.findMany.mockResolvedValue([{ magnus_did_number: OWN_DID }]);
     prismaMock.voiceLine.update.mockResolvedValue(voiceLine);
-    voiceRoutingSetMock.mockResolvedValue({
-      before: routeState('app'),
-      after: routeState('app_then_cell', '9715551234'),
-      verified: true,
-    });
+    voiceRoutingSetMock.mockResolvedValue(setSuccess('app', 'app_then_cell', '9715551234'));
 
     const result = await setVoiceRouteMode(
       { kind: 'operator', session: operatorSession({ isOwner: true }) },
@@ -228,14 +245,54 @@ describe('setVoiceRouteMode — before/after verification', () => {
     expect(auditMock).toHaveBeenCalledWith(expect.objectContaining({ action: 'voice.routing.set', meta: expect.objectContaining({ ok: true }) }));
   });
 
-  it('does NOT report success merely because Magnus returned 200 — after-state mismatch fails the request', async () => {
+  it('does NOT report success merely because Magnus returned 200 — after-state mismatch triggers a verified rollback and fails the request', async () => {
     const voiceLine = operatorVoiceLine();
     prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
-    voiceRoutingSetMock.mockResolvedValue({
-      before: routeState('app'),
-      after: routeState('app'),
-      verified: false,
-    });
+    voiceRoutingSetMock.mockResolvedValue(setRolledBack('unverified_rolled_back', 'app', 'app'));
+
+    const result = await setVoiceRouteMode(
+      { kind: 'operator', session: operatorSession({ isOwner: true }) },
+      { mode: 'app_then_cell', forwardNumber: '9715551234', sourceSurface: 'operator.routing' },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.rollbackAttempted).toBe(true);
+    expect(result.rollbackVerified).toBe(true);
+    expect(prismaMock.voiceLine.update).not.toHaveBeenCalled();
+    expect(auditMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'voice.routing.set_unverified_rolled_back',
+        meta: expect.objectContaining({ ok: false, before_mode: 'app', after_mode: 'app', rollback_verified: true }),
+      }),
+    );
+  });
+
+  it('when the write itself throws (not merely unverified), the rollback is reported as set_failed_rolled_back', async () => {
+    const voiceLine = operatorVoiceLine();
+    prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
+    voiceRoutingSetMock.mockResolvedValue(setRolledBack('mutation_failed_rolled_back', 'app', 'app'));
+
+    const result = await setVoiceRouteMode(
+      { kind: 'operator', session: operatorSession({ isOwner: true }) },
+      { mode: 'app_then_cell', forwardNumber: '9715551234', sourceSurface: 'operator.routing' },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.rollbackAttempted).toBe(true);
+    expect(result.rollbackVerified).toBe(true);
+    expect(prismaMock.voiceLine.update).not.toHaveBeenCalled();
+    expect(auditMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'voice.routing.set_failed_rolled_back',
+        meta: expect.objectContaining({ ok: false, before_mode: 'app', after_mode: 'app', rollback_verified: true }),
+      }),
+    );
+  });
+
+  it('critical_degraded (rollback itself could not be verified) returns a safe-identifiers-only critical payload and never a false success', async () => {
+    const voiceLine = operatorVoiceLine();
+    prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
+    voiceRoutingSetMock.mockResolvedValue(setCriticalDegraded('app', 'degraded'));
 
     const result = await setVoiceRouteMode(
       { kind: 'operator', session: operatorSession({ isOwner: true }) },
@@ -244,15 +301,63 @@ describe('setVoiceRouteMode — before/after verification', () => {
 
     expect(result.ok).toBe(false);
     expect(prismaMock.voiceLine.update).not.toHaveBeenCalled();
+    expect(result.rollbackAttempted).toBe(true);
+    expect(result.rollbackVerified).toBe(false);
+    expect(result.critical).toEqual({
+      tenantId: 'tenant-1',
+      voiceLineId: 'vl-1',
+      did: OWN_DID,
+      requestedMode: 'app_then_cell',
+      beforeMode: 'app',
+      observedAfterMode: 'degraded',
+      rollbackAttempted: true,
+      rollbackVerified: false,
+      operatorActionRequired: true,
+    });
+    // Safe-identifiers-only: no secret/raw-Magnus-payload keys anywhere on the critical object.
+    expect(Object.keys(result.critical!).sort()).toEqual(
+      [
+        'tenantId',
+        'voiceLineId',
+        'did',
+        'requestedMode',
+        'beforeMode',
+        'observedAfterMode',
+        'rollbackAttempted',
+        'rollbackVerified',
+        'operatorActionRequired',
+      ].sort(),
+    );
     expect(auditMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        action: 'voice.routing.set_unverified',
-        meta: expect.objectContaining({ ok: false, before_mode: 'app', after_mode: 'app' }),
+        action: 'voice.routing.critical_degraded',
+        meta: expect.objectContaining({
+          ok: false,
+          before_mode: 'app',
+          after_mode: 'degraded',
+          rollback_attempted: true,
+          rollback_verified: false,
+        }),
       }),
     );
   });
 
-  it('a connector/Magnus write failure never produces a false success', async () => {
+  it('critical_degraded for a consumer-owned line scopes the critical payload to consumerAccountId, never tenantId', async () => {
+    const voiceLine = operatorVoiceLine({ owner_kind: 'consumer', tenant_id: null, identity_id: 'identity-c1' });
+    prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
+    voiceRoutingSetMock.mockResolvedValue(setCriticalDegraded('app', 'unknown'));
+
+    const result = await setVoiceRouteMode(
+      { kind: 'consumer', session: consumerSession() },
+      { mode: 'app_then_cell', forwardNumber: '9715551234', sourceSurface: 'consumer.routing' },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.critical).toMatchObject({ consumerAccountId: 'acct-1' });
+    expect(result.critical?.tenantId).toBeUndefined();
+  });
+
+  it('a connector/Magnus write failure that never even attempted a mutation (before-read or planning failed) never produces a false success', async () => {
     const voiceLine = operatorVoiceLine();
     prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
     voiceRoutingSetMock.mockRejectedValue(new VoiceRoutingConnectorError('voice.routing.set: Magnus mutation failed: timeout'));

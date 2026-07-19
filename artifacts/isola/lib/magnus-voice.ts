@@ -57,6 +57,21 @@ export class VoiceProvisioningError extends Error {
   }
 }
 
+/** Thrown by findDidDestinationForDid when more than one `diddestination` row
+ *  exists for the same DID — routing truth is ambiguous and callers must fail
+ *  closed rather than silently picking one row. See lib/voice-routing.ts,
+ *  which classifies this as a `degraded` read and refuses to plan a mutation
+ *  while it stands. */
+export class ConflictingDidDestinationsError extends Error {
+  constructor(
+    public didId: string,
+    public rowCount: number,
+  ) {
+    super(`conflicting_did_destinations: ${rowCount} diddestination rows found for DID id ${didId} — routing truth is ambiguous`);
+    this.name = 'ConflictingDidDestinationsError';
+  }
+}
+
 // ── generic grid-read helper (mirrors the private findRowByField in
 //    engines/magnus.ts, which is not exported — duplicated here in app
 //    code rather than touching the engine file) ─────────────────────────────
@@ -193,13 +208,25 @@ export async function readDidDestination(
  *  SIP extension); this looks up by the DID side of the relationship, which
  *  is what S5 routing-state reads start from (a VoiceLine's own DID). Single
  *  read returns the full routing-relevant shape (destination/voip_call/
- *  id_sip) — no follow-up `readDidDestination` call needed. */
+ *  id_sip) — no follow-up `readDidDestination` call needed.
+ *
+ *  Deliberately does NOT reuse `findOneByField` (limit=1) — routing truth
+ *  requires knowing whether MORE THAN ONE diddestination row exists for this
+ *  DID, and a limit=1 read would silently pick an arbitrary one and hide that
+ *  conflict. Fetches a small bounded page of exact id_did matches instead and
+ *  fails closed (throws ConflictingDidDestinationsError) when more than one
+ *  is found, rather than ever guessing which row is "the" route. */
 export async function findDidDestinationForDid(
   config: MagnusConfig,
   didId: string,
 ): Promise<{ id: string; id_did: string; destination: string; voip_call: string; id_sip: string } | null> {
-  const row = await findOneByField(config, 'diddestination', 'id_did', didId);
-  if (!row) return null;
+  const rows = await readRows(config, 'diddestination', [{ type: 'numeric', field: 'id_did', value: didId, comparison: 'eq' }], 10);
+  const exact = rows.filter((r) => String(r.id_did) === String(didId));
+  if (exact.length === 0) return null;
+  if (exact.length > 1) {
+    throw new ConflictingDidDestinationsError(didId, exact.length);
+  }
+  const row = exact[0];
   return {
     id: String(row.id),
     id_did: String(row.id_did),
