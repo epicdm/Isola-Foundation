@@ -130,6 +130,13 @@ export interface LiveSipAccount {
    *  (sentinel value '1' — near-instant fallback while remaining
    *  structurally SIP-first). Empty string if unset on the live row. */
   dial_timeout: string;
+  /** `pkg_sip.forward` — the field Magnus's realtime AGI dialplan
+   *  (`SipCallAgi.php`'s `processCall()`) actually gates on before calling
+   *  `callForward()`: only fires when this is a non-trivial `type|value`
+   *  string (e.g. `'number|17672958382'`); a `diddestination.destination`
+   *  forward target alone does NOT make Magnus forward anywhere on SIP
+   *  no-answer/timeout. Empty string if unset on the live row. */
+  forward: string;
 }
 
 /** Read-only: fetch the live Magnus `sip` row for an existing SIP account id. */
@@ -143,6 +150,7 @@ export async function readSipAccount(config: MagnusConfig, sipId: string): Promi
     callerid: String(row.callerid ?? ''),
     cid_number: String(row.cid_number ?? ''),
     dial_timeout: row.dial_timeout === null || row.dial_timeout === undefined ? '' : String(row.dial_timeout),
+    forward: row.forward === null || row.forward === undefined ? '' : String(row.forward),
   };
 }
 
@@ -155,6 +163,19 @@ export async function readSipAccount(config: MagnusConfig, sipId: string): Promi
  */
 export async function patchSipDialTimeout(config: MagnusConfig, sipId: string, dialTimeout: string): Promise<void> {
   await magnusRequest(config, 'sip', 'save', { id: sipId, dial_timeout: dialTimeout });
+}
+
+/**
+ * Patch a SIP account's `forward` (`pkg_sip.forward`) — the field that
+ * actually gates Magnus's `SipCallAgi.php::callForward()` on SIP no-answer/
+ * timeout. Convention: `'number|<bare-digit forward target>'`, or `''` to
+ * clear (no forward). S5 routing-mode primitive alongside
+ * `patchSipDialTimeout` — only called by lib/voice-routing.ts's mutation
+ * path. Idempotent: callers should skip the call when the live value already
+ * matches (minimal-mutation principle — see lib/voice-routing.ts).
+ */
+export async function patchSipForward(config: MagnusConfig, sipId: string, forward: string): Promise<void> {
+  await magnusRequest(config, 'sip', 'save', { id: sipId, forward });
 }
 
 /** Read-only: find an existing `did` row by its number (never draws/claims). */
