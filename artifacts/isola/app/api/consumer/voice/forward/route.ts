@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getConsumerSession } from '@/lib/consumer-session';
 import { isMagnusConfigured } from '@/lib/engines';
-import { setVoiceRouteMode, VoiceRouteError } from '@/lib/voice-routing-service';
+import { setVoiceRouteMode, VoiceRouteError, routeErrorResponseFor } from '@/lib/voice-routing-service';
 
 /**
  * POST /api/consumer/voice/forward — DEPRECATED compatibility adapter over
@@ -31,8 +31,12 @@ export async function POST(req: NextRequest) {
     );
 
     if (!result.ok) {
-      const status = /required/i.test(result.error ?? '') ? 400 : 502;
-      return NextResponse.json({ error: result.error ?? 'Failed to update routing' }, { status });
+      // See /api/voice/forward for why this mirrors that status mapping.
+      const { status: structuredStatus, body } = routeErrorResponseFor(result);
+      let status = 502;
+      if (result.outcome === 'critical_degraded') status = structuredStatus;
+      else if (/required/i.test(result.error ?? '')) status = 400;
+      return NextResponse.json(body, { status });
     }
 
     return NextResponse.json({

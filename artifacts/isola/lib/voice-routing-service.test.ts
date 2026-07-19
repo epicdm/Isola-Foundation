@@ -237,7 +237,7 @@ describe('setVoiceRouteMode — before/after verification', () => {
       { mode: 'app_then_cell', forwardNumber: '9715551234', sourceSurface: 'operator.routing' },
     );
 
-    expect(result).toEqual({ ok: true, mode: 'app_then_cell', forwardToCellNumber: '9715551234' });
+    expect(result).toEqual({ ok: true, mode: 'app_then_cell', forwardToCellNumber: '9715551234', outcome: 'success' });
     expect(prismaMock.voiceLine.update).toHaveBeenCalledWith({
       where: { id: 'vl-1' },
       data: { voice_forward_to_cell: true, voice_cell_number: '9715551234' },

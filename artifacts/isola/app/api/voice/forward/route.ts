@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionFromCookie } from '@/lib/session';
 import { isMagnusConfigured } from '@/lib/engines';
-import { setVoiceRouteMode, VoiceRouteError } from '@/lib/voice-routing-service';
+import { setVoiceRouteMode, VoiceRouteError, routeErrorResponseFor } from '@/lib/voice-routing-service';
 
 /**
  * POST /api/voice/forward — DEPRECATED compatibility adapter over the
@@ -45,8 +45,17 @@ export async function POST(req: NextRequest) {
     );
 
     if (!result.ok) {
-      const status = /required/i.test(result.error ?? '') ? 400 : 502;
-      return NextResponse.json({ error: result.error ?? 'Failed to update routing' }, { status });
+      // Preserve the legacy boolean-contract failure shape ({ error }) — the
+      // extra fields below are additive and safe for old callers to ignore.
+      // A required-field rejection keeps its pre-existing 400; critical_degraded
+      // gets its own server-error status so it's never silently reported the
+      // same way as an ordinary validation rejection or Magnus-unavailable
+      // error (which keep this route's pre-existing 502).
+      const { status: structuredStatus, body } = routeErrorResponseFor(result);
+      let status = 502;
+      if (result.outcome === 'critical_degraded') status = structuredStatus;
+      else if (/required/i.test(result.error ?? '')) status = 400;
+      return NextResponse.json(body, { status });
     }
 
     return NextResponse.json({

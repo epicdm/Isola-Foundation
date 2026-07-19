@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getConsumerSession } from '@/lib/consumer-session';
 import { isMagnusConfigured } from '@/lib/engines';
-import { getVoiceRouteState, setVoiceRouteMode, VoiceRouteError } from '@/lib/voice-routing-service';
+import { getVoiceRouteState, setVoiceRouteMode, VoiceRouteError, routeErrorResponseFor } from '@/lib/voice-routing-service';
 
 /**
  * GET /api/consumer/voice/routing — the signed-in consumer's current
@@ -43,7 +43,8 @@ export async function POST(req: NextRequest) {
       { mode, forwardNumber: forward_number, sourceSurface: 'consumer.routing' },
     );
     if (!result.ok) {
-      return NextResponse.json({ error: result.error ?? 'Failed to update routing' }, { status: 422 });
+      const { status, body } = routeErrorResponseFor(result);
+      return NextResponse.json(body, { status });
     }
     return NextResponse.json({ mode: result.mode, forward_to_cell_number: result.forwardToCellNumber });
   } catch (e) {

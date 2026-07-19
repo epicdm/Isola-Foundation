@@ -23,7 +23,7 @@ import { audit } from './audit';
 import type { SessionCtx } from './session';
 import type { ConsumerSessionAccount } from './consumer-session';
 import { can } from './permissions';
-import { voiceRoutingRead, voiceRoutingSet, VoiceRoutingConnectorError } from './voice-routing-connector';
+import { voiceRoutingRead, voiceRoutingSet, VoiceRoutingConnectorError, type VoiceRoutingSetOutcome } from './voice-routing-connector';
 import { validateForwardTarget, isVoiceRoutingMode, type VoiceRoutingMode, type VoiceRoutingReadMode } from './voice-routing';
 import type { VoiceLine } from '@prisma/client';
 
@@ -78,14 +78,59 @@ export interface VoiceRouteCriticalDegraded {
   operatorActionRequired: true;
 }
 
+/** Distinguishes an ordinary pre-mutation validation rejection (bad/self/
+ *  protected forward target, missing required field, nothing ever attempted
+ *  against Magnus) from the connector-level outcomes, so route handlers can
+ *  tell a plain client input error apart from a degraded-line condition that
+ *  needs an appropriate server-error status. Mirrors VoiceRoutingSetOutcome
+ *  plus the 'rejected' case that never reaches the connector at all. */
+export type VoiceRouteOutcome = 'success' | 'rejected' | VoiceRoutingSetOutcome;
+
 export interface VoiceRouteMutationResult {
   ok: boolean;
   mode?: VoiceRoutingReadMode;
   forwardToCellNumber?: string | null;
   error?: string;
+  outcome?: VoiceRouteOutcome;
   rollbackAttempted?: boolean;
   rollbackVerified?: boolean;
   critical?: VoiceRouteCriticalDegraded;
+}
+
+/** Safe-to-serialize failure body for a route handler: no SIP passwords, no
+ *  Magnus credentials/headers, no raw Magnus request/response bodies, no
+ *  protected-DID inventory — only the fields already defined on
+ *  VoiceRouteMutationResult/VoiceRouteCriticalDegraded, which are themselves
+ *  restricted to identifiers the caller already owns plus outcome metadata. */
+export interface VoiceRouteErrorBody {
+  error: string;
+  outcome?: VoiceRouteOutcome;
+  critical?: VoiceRouteCriticalDegraded;
+  rollbackAttempted?: boolean;
+  rollbackVerified?: boolean;
+  operatorActionRequired?: true;
+}
+
+/** Maps a failed VoiceRouteMutationResult to a safe response body + HTTP
+ *  status. critical_degraded gets a server-error status (this is never the
+ *  caller's fault and needs operator attention) — every other failure
+ *  (ordinary validation rejection, or a mutation that failed but was verified
+ *  rolled back) stays a normal, non-critical error status so a
+ *  critical_degraded outcome can never be mistaken for routine client input
+ *  rejection. Only call with result.ok === false. */
+export function routeErrorResponseFor(result: VoiceRouteMutationResult): { status: number; body: VoiceRouteErrorBody } {
+  const isCritical = result.outcome === 'critical_degraded';
+  return {
+    status: isCritical ? 503 : 422,
+    body: {
+      error: result.error ?? 'Failed to update routing',
+      outcome: result.outcome,
+      critical: result.critical,
+      rollbackAttempted: result.rollbackAttempted,
+      rollbackVerified: result.rollbackVerified,
+      operatorActionRequired: isCritical ? true : undefined,
+    },
+  };
 }
 
 // ── VoiceLine resolution (owner_kind-specific; never cross-account) ─────────
@@ -202,7 +247,7 @@ export async function setVoiceRouteMode(source: VoiceRouteSource, params: SetVoi
           error: validation.error,
         },
       });
-      return { ok: false, error: validation.error };
+      return { ok: false, error: validation.error, outcome: 'rejected' };
     }
     normalizedForward = validation.normalized;
   }
@@ -229,7 +274,7 @@ export async function setVoiceRouteMode(source: VoiceRouteSource, params: SetVoi
       action: 'voice.routing.set_failed',
       meta: { ok: false, requested_mode: params.mode, source_surface: params.sourceSurface, error: message },
     });
-    return { ok: false, error: message };
+    return { ok: false, error: message, outcome: 'rejected' };
   }
 
   if (setResult.outcome === 'critical_degraded') {
@@ -263,6 +308,7 @@ export async function setVoiceRouteMode(source: VoiceRouteSource, params: SetVoi
     return {
       ok: false,
       error: 'Voice routing change could not be completed or safely rolled back — this line requires operator attention',
+      outcome: 'critical_degraded',
       rollbackAttempted: setResult.rollbackAttempted,
       rollbackVerified: !!setResult.rollbackVerified,
       critical,
@@ -291,6 +337,7 @@ export async function setVoiceRouteMode(source: VoiceRouteSource, params: SetVoi
     return {
       ok: false,
       error: 'Voice routing change could not be verified — the line has been safely restored to its previous state',
+      outcome: setResult.outcome,
       rollbackAttempted: true,
       rollbackVerified: true,
     };
@@ -320,5 +367,5 @@ export async function setVoiceRouteMode(source: VoiceRouteSource, params: SetVoi
     },
   });
 
-  return { ok: true, mode: setResult.after.mode, forwardToCellNumber: setResult.after.forwardToCellNumber };
+  return { ok: true, mode: setResult.after.mode, forwardToCellNumber: setResult.after.forwardToCellNumber, outcome: 'success' };
 }
