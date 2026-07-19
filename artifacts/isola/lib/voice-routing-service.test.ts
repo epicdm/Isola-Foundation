@@ -13,6 +13,11 @@ const { prismaMock, auditMock, voiceRoutingReadMock, voiceRoutingSetMock } = vi.
     membership: {
       findUnique: vi.fn(),
     },
+    approvalRequest: {
+      create: vi.fn(),
+      findUnique: vi.fn(),
+      updateMany: vi.fn(),
+    },
   },
   auditMock: vi.fn(),
   voiceRoutingReadMock: vi.fn(),
@@ -115,6 +120,30 @@ function setCriticalDegraded(before: string, after: string) {
   };
 }
 
+const APPROVAL_TOKEN = 'test-approval-token';
+
+/** Seeds prismaMock.approvalRequest so a redeem call with APPROVAL_TOKEN
+ *  succeeds — mirrors an already-approved, unexpired, params-matching row. */
+function seedApprovedApproval(overrides: {
+  tenantId?: string;
+  targetId?: string;
+  did?: string;
+  mode?: string;
+  forwardNumber?: string | null;
+  expiresAt?: Date;
+  status?: string;
+} = {}) {
+  prismaMock.approvalRequest.findUnique.mockResolvedValue({
+    tenant_id: overrides.tenantId ?? 'tenant-1',
+    action: 'voice.route.set',
+    target_id: overrides.targetId ?? 'vl-1',
+    status: overrides.status ?? 'approved',
+    expires_at: overrides.expiresAt ?? new Date(Date.now() + 60_000),
+    payload: { did: overrides.did ?? OWN_DID, mode: overrides.mode, forwardNumber: overrides.forwardNumber ?? null },
+  });
+  prismaMock.approvalRequest.updateMany.mockResolvedValue({ count: 1 });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
@@ -127,10 +156,11 @@ describe('setVoiceRouteMode — authorization', () => {
     prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
     prismaMock.voiceLine.update.mockResolvedValue(voiceLine);
     voiceRoutingSetMock.mockResolvedValue(setSuccess('app', 'app'));
+    seedApprovedApproval({ mode: 'app', forwardNumber: null });
 
     const result = await setVoiceRouteMode(
       { kind: 'operator', session: operatorSession({ isOwner: true }) },
-      { mode: 'app', sourceSurface: 'operator.routing' },
+      { mode: 'app', approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
     );
 
     expect(result.ok).toBe(true);
@@ -141,10 +171,11 @@ describe('setVoiceRouteMode — authorization', () => {
     prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
     prismaMock.voiceLine.update.mockResolvedValue(voiceLine);
     voiceRoutingSetMock.mockResolvedValue(setSuccess('app', 'app'));
+    seedApprovedApproval({ mode: 'app', forwardNumber: null });
 
     const result = await setVoiceRouteMode(
       { kind: 'operator', session: operatorSession({ isAdmin: true }) },
-      { mode: 'app', sourceSurface: 'operator.routing' },
+      { mode: 'app', approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
     );
 
     expect(result.ok).toBe(true);
@@ -166,10 +197,11 @@ describe('setVoiceRouteMode — authorization', () => {
     prismaMock.voiceLine.update.mockResolvedValue(voiceLine);
     prismaMock.membership.findUnique.mockResolvedValue({ role: 'admin' });
     voiceRoutingSetMock.mockResolvedValue(setSuccess('app', 'app'));
+    seedApprovedApproval({ mode: 'app', forwardNumber: null });
 
     const result = await setVoiceRouteMode(
       { kind: 'operator', session: operatorSession() },
-      { mode: 'app', sourceSurface: 'operator.routing' },
+      { mode: 'app', approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
     );
     expect(result.ok).toBe(true);
   });
@@ -231,10 +263,11 @@ describe('setVoiceRouteMode — before/after verification', () => {
     prismaMock.voiceLine.findMany.mockResolvedValue([{ magnus_did_number: OWN_DID }]);
     prismaMock.voiceLine.update.mockResolvedValue(voiceLine);
     voiceRoutingSetMock.mockResolvedValue(setSuccess('app', 'app_then_cell', '9715551234'));
+    seedApprovedApproval({ mode: 'app_then_cell', forwardNumber: '9715551234' });
 
     const result = await setVoiceRouteMode(
       { kind: 'operator', session: operatorSession({ isOwner: true }) },
-      { mode: 'app_then_cell', forwardNumber: '9715551234', sourceSurface: 'operator.routing' },
+      { mode: 'app_then_cell', forwardNumber: '9715551234', approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
     );
 
     expect(result).toEqual({ ok: true, mode: 'app_then_cell', forwardToCellNumber: '9715551234', outcome: 'success' });
@@ -249,10 +282,11 @@ describe('setVoiceRouteMode — before/after verification', () => {
     const voiceLine = operatorVoiceLine();
     prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
     voiceRoutingSetMock.mockResolvedValue(setRolledBack('unverified_rolled_back', 'app', 'app'));
+    seedApprovedApproval({ mode: 'app_then_cell', forwardNumber: '9715551234' });
 
     const result = await setVoiceRouteMode(
       { kind: 'operator', session: operatorSession({ isOwner: true }) },
-      { mode: 'app_then_cell', forwardNumber: '9715551234', sourceSurface: 'operator.routing' },
+      { mode: 'app_then_cell', forwardNumber: '9715551234', approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
     );
 
     expect(result.ok).toBe(false);
@@ -271,10 +305,11 @@ describe('setVoiceRouteMode — before/after verification', () => {
     const voiceLine = operatorVoiceLine();
     prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
     voiceRoutingSetMock.mockResolvedValue(setRolledBack('mutation_failed_rolled_back', 'app', 'app'));
+    seedApprovedApproval({ mode: 'app_then_cell', forwardNumber: '9715551234' });
 
     const result = await setVoiceRouteMode(
       { kind: 'operator', session: operatorSession({ isOwner: true }) },
-      { mode: 'app_then_cell', forwardNumber: '9715551234', sourceSurface: 'operator.routing' },
+      { mode: 'app_then_cell', forwardNumber: '9715551234', approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
     );
 
     expect(result.ok).toBe(false);
@@ -293,10 +328,11 @@ describe('setVoiceRouteMode — before/after verification', () => {
     const voiceLine = operatorVoiceLine();
     prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
     voiceRoutingSetMock.mockResolvedValue(setCriticalDegraded('app', 'degraded'));
+    seedApprovedApproval({ mode: 'app_then_cell', forwardNumber: '9715551234' });
 
     const result = await setVoiceRouteMode(
       { kind: 'operator', session: operatorSession({ isOwner: true }) },
-      { mode: 'app_then_cell', forwardNumber: '9715551234', sourceSurface: 'operator.routing' },
+      { mode: 'app_then_cell', forwardNumber: '9715551234', approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
     );
 
     expect(result.ok).toBe(false);
@@ -361,10 +397,11 @@ describe('setVoiceRouteMode — before/after verification', () => {
     const voiceLine = operatorVoiceLine();
     prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
     voiceRoutingSetMock.mockRejectedValue(new VoiceRoutingConnectorError('voice.routing.set: Magnus mutation failed: timeout'));
+    seedApprovedApproval({ mode: 'app_then_cell', forwardNumber: '9715551234' });
 
     const result = await setVoiceRouteMode(
       { kind: 'operator', session: operatorSession({ isOwner: true }) },
-      { mode: 'app_then_cell', forwardNumber: '9715551234', sourceSurface: 'operator.routing' },
+      { mode: 'app_then_cell', forwardNumber: '9715551234', approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
     );
 
     expect(result.ok).toBe(false);
@@ -376,10 +413,11 @@ describe('setVoiceRouteMode — before/after verification', () => {
     const voiceLine = operatorVoiceLine();
     prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
     prismaMock.voiceLine.findMany.mockResolvedValue([{ magnus_did_number: OWN_DID }]);
+    seedApprovedApproval({ mode: 'cell', forwardNumber: OWN_DID });
 
     const result = await setVoiceRouteMode(
       { kind: 'operator', session: operatorSession({ isOwner: true }) },
-      { mode: 'cell', forwardNumber: OWN_DID, sourceSurface: 'operator.routing' },
+      { mode: 'cell', forwardNumber: OWN_DID, approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
     );
 
     expect(result.ok).toBe(false);
@@ -394,5 +432,213 @@ describe('setVoiceRouteMode — before/after verification', () => {
     await expect(getVoiceRouteState({ kind: 'operator', session: operatorSession({ isOwner: true }) })).rejects.toMatchObject({
       status: 502,
     });
+  });
+});
+
+// ── S6: approval gate (mint → approve → redeem) ─────────────────────────────
+
+describe('setVoiceRouteMode — S6 approval gate', () => {
+  it('mint: no token ⇒ returns approval_required, mints a pending ApprovalRequest, and attempts no Magnus write', async () => {
+    const voiceLine = operatorVoiceLine();
+    prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
+    prismaMock.approvalRequest.create.mockResolvedValue({ id: 'appr-1', expires_at: new Date('2026-07-19T12:15:00.000Z') });
+
+    const result = await setVoiceRouteMode(
+      { kind: 'operator', session: operatorSession({ isOwner: true }) },
+      { mode: 'app', sourceSurface: 'operator.routing' },
+    );
+
+    expect(result).toMatchObject({ ok: false, outcome: 'approval_required', approvalRequestId: 'appr-1' });
+    expect(result.approvalExpiresAt).toBe('2026-07-19T12:15:00.000Z');
+    expect(prismaMock.approvalRequest.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          tenant_id: 'tenant-1',
+          action: 'voice.route.set',
+          target_entity: 'voice_line',
+          target_id: 'vl-1',
+          payload: { did: OWN_DID, mode: 'app', forwardNumber: null },
+          status: 'pending',
+          requested_by: 'user-1',
+        }),
+      }),
+    );
+    expect(voiceRoutingSetMock).not.toHaveBeenCalled();
+    expect(prismaMock.voiceLine.update).not.toHaveBeenCalled();
+    expect(auditMock).toHaveBeenCalledWith(expect.objectContaining({ action: 'voice.route.approval_requested' }));
+  });
+
+  it('redeem: a valid approved, params-matching token proceeds and consumes the token', async () => {
+    const voiceLine = operatorVoiceLine();
+    prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
+    prismaMock.voiceLine.update.mockResolvedValue(voiceLine);
+    voiceRoutingSetMock.mockResolvedValue(setSuccess('app', 'app'));
+    seedApprovedApproval({ mode: 'app', forwardNumber: null });
+
+    const result = await setVoiceRouteMode(
+      { kind: 'operator', session: operatorSession({ isOwner: true }) },
+      { mode: 'app', approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(prismaMock.approvalRequest.updateMany).toHaveBeenCalledWith({
+      where: { token: APPROVAL_TOKEN, status: 'approved', expires_at: { gt: expect.any(Date) } },
+      data: { status: 'consumed', consumed_at: expect.any(Date) },
+    });
+  });
+
+  it('redeem: reusing an already-consumed token is rejected (single-use)', async () => {
+    const voiceLine = operatorVoiceLine();
+    prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
+    seedApprovedApproval({ mode: 'app', forwardNumber: null, status: 'consumed' });
+
+    const result = await setVoiceRouteMode(
+      { kind: 'operator', session: operatorSession({ isOwner: true }) },
+      { mode: 'app', approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe('rejected');
+    expect(voiceRoutingSetMock).not.toHaveBeenCalled();
+    expect(prismaMock.approvalRequest.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('redeem: an expired token is rejected', async () => {
+    const voiceLine = operatorVoiceLine();
+    prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
+    seedApprovedApproval({ mode: 'app', forwardNumber: null, expiresAt: new Date(Date.now() - 1000) });
+
+    const result = await setVoiceRouteMode(
+      { kind: 'operator', session: operatorSession({ isOwner: true }) },
+      { mode: 'app', approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe('rejected');
+    expect(voiceRoutingSetMock).not.toHaveBeenCalled();
+  });
+
+  it('redeem: a still-pending (never approved) token is rejected', async () => {
+    const voiceLine = operatorVoiceLine();
+    prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
+    seedApprovedApproval({ mode: 'app', forwardNumber: null, status: 'pending' });
+
+    const result = await setVoiceRouteMode(
+      { kind: 'operator', session: operatorSession({ isOwner: true }) },
+      { mode: 'app', approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe('rejected');
+    expect(voiceRoutingSetMock).not.toHaveBeenCalled();
+  });
+
+  it('redeem: a token approved for a different tenant is rejected', async () => {
+    const voiceLine = operatorVoiceLine();
+    prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
+    seedApprovedApproval({ mode: 'app', forwardNumber: null, tenantId: 'tenant-OTHER' });
+
+    const result = await setVoiceRouteMode(
+      { kind: 'operator', session: operatorSession({ isOwner: true }) },
+      { mode: 'app', approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe('rejected');
+    expect(voiceRoutingSetMock).not.toHaveBeenCalled();
+  });
+
+  it('redeem: a token approved for a different voice line is rejected', async () => {
+    const voiceLine = operatorVoiceLine();
+    prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
+    seedApprovedApproval({ mode: 'app', forwardNumber: null, targetId: 'vl-OTHER' });
+
+    const result = await setVoiceRouteMode(
+      { kind: 'operator', session: operatorSession({ isOwner: true }) },
+      { mode: 'app', approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe('rejected');
+    expect(voiceRoutingSetMock).not.toHaveBeenCalled();
+  });
+
+  it('redeem: a token approved for a different mode is rejected and NOT consumed', async () => {
+    const voiceLine = operatorVoiceLine();
+    prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
+    seedApprovedApproval({ mode: 'cell', forwardNumber: '9715551234' }); // approved for 'cell', requesting 'app'
+
+    const result = await setVoiceRouteMode(
+      { kind: 'operator', session: operatorSession({ isOwner: true }) },
+      { mode: 'app', approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe('rejected');
+    expect(voiceRoutingSetMock).not.toHaveBeenCalled();
+    expect(prismaMock.approvalRequest.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('redeem: a token approved for a different forwardNumber is rejected and NOT consumed', async () => {
+    const voiceLine = operatorVoiceLine();
+    prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
+    seedApprovedApproval({ mode: 'app_then_cell', forwardNumber: '9715551234' });
+
+    const result = await setVoiceRouteMode(
+      { kind: 'operator', session: operatorSession({ isOwner: true }) },
+      { mode: 'app_then_cell', forwardNumber: '9715559999', approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe('rejected');
+    expect(voiceRoutingSetMock).not.toHaveBeenCalled();
+    expect(prismaMock.approvalRequest.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('redeem: a token approved for a different DID (different voice line target) is rejected', async () => {
+    const voiceLine = operatorVoiceLine();
+    prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
+    seedApprovedApproval({ mode: 'app', forwardNumber: null, did: '19995551234' });
+
+    const result = await setVoiceRouteMode(
+      { kind: 'operator', session: operatorSession({ isOwner: true }) },
+      { mode: 'app', approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe('rejected');
+    expect(voiceRoutingSetMock).not.toHaveBeenCalled();
+  });
+
+  it('redeem: a lost claim race (already consumed between read and atomic claim) is rejected', async () => {
+    const voiceLine = operatorVoiceLine();
+    prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
+    seedApprovedApproval({ mode: 'app', forwardNumber: null });
+    prismaMock.approvalRequest.updateMany.mockResolvedValue({ count: 0 });
+
+    const result = await setVoiceRouteMode(
+      { kind: 'operator', session: operatorSession({ isOwner: true }) },
+      { mode: 'app', approvalToken: APPROVAL_TOKEN, sourceSurface: 'operator.routing' },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe('rejected');
+    expect(voiceRoutingSetMock).not.toHaveBeenCalled();
+  });
+
+  it('a consumer changing their own line is never gated — no token needed, no ApprovalRequest touched', async () => {
+    const voiceLine = operatorVoiceLine({ owner_kind: 'consumer', tenant_id: null, identity_id: 'identity-c1' });
+    prismaMock.voiceLine.findFirst.mockResolvedValue(voiceLine);
+    prismaMock.voiceLine.update.mockResolvedValue(voiceLine);
+    voiceRoutingSetMock.mockResolvedValue(setSuccess('app', 'app'));
+
+    const result = await setVoiceRouteMode(
+      { kind: 'consumer', session: consumerSession() },
+      { mode: 'app', sourceSurface: 'consumer.routing' },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(prismaMock.approvalRequest.create).not.toHaveBeenCalled();
+    expect(prismaMock.approvalRequest.findUnique).not.toHaveBeenCalled();
   });
 });
