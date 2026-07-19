@@ -15,8 +15,28 @@
 -- writes. Idempotent from either starting shape (partial [neon] or already
 -- full [helium]) — same end state either way.
 --
--- CONCURRENTLY cannot run inside a transaction; Prisma Migrate detects this
--- keyword and applies the migration outside its default transaction wrapper.
+-- ┌─────────────────────────────────────────────────────────────────────────┐
+-- │ DO NOT `prisma migrate deploy` THIS MIGRATION DIRECTLY.                 │
+-- │                                                                         │
+-- │ Confirmed empirically on Prisma 6.19.3 (helium, 2026-07-19): `migrate   │
+-- │ deploy` wraps each migration.sql in a transaction with no bypass for    │
+-- │ CONCURRENTLY, and fails with P3018 / Postgres 25001 ("CREATE INDEX      │
+-- │ CONCURRENTLY cannot run inside a transaction block"). The failed        │
+-- │ attempt applies zero steps (safe, no partial index left behind), but it│
+-- │ leaves a failed row in _prisma_migrations that blocks all further      │
+-- │ `migrate deploy` runs until resolved.                                  │
+-- │                                                                         │
+-- │ Apply this migration by hand instead, in this exact order:              │
+-- │   1. psql "$DATABASE_URL" -c '<statement 1 below>'                     │
+-- │   2. psql "$DATABASE_URL" -c '<statement 2 below>'                     │
+-- │   3. psql "$DATABASE_URL" -c '<statement 3 below>'                     │
+-- │   4. prisma migrate resolve --applied                                   │
+-- │        20260719180000_fix_message_wa_message_id_full_unique_index      │
+-- │ (bookkeeping only — tells Prisma this migration is done without asking │
+-- │ it to execute the SQL). If `migrate deploy` was already attempted and   │
+-- │ failed first, clear it with `migrate resolve --rolled-back <name>`      │
+-- │ before running the manual steps.                                       │
+-- └─────────────────────────────────────────────────────────────────────────┘
 
 CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "Message_wa_message_id_key_v2" ON "Message"("wa_message_id");
 
