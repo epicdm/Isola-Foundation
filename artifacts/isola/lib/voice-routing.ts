@@ -29,7 +29,7 @@
 
 import type { MagnusConfig } from '@/engines/magnus';
 import { magnusRequest } from '@/engines/magnus';
-import { findDidDestinationForDid, readSipAccount, patchSipDialTimeout, ConflictingDidDestinationsError } from './magnus-voice';
+import { findDidDestinationForDid, readSipAccount, patchSipDialTimeout, patchSipForward, ConflictingDidDestinationsError } from './magnus-voice';
 
 // ── Section 1: code-level routing model ─────────────────────────────────────
 
@@ -52,6 +52,17 @@ export function isVoiceRoutingMode(value: unknown): value is VoiceRoutingMode {
  *  instead of disabling SIP routing outright the way the legacy
  *  `voip_call='0'` convention did. */
 export const CELL_ONLY_DIAL_TIMEOUT_SENTINEL = '1';
+
+/** Magnus `pkg_sip.forward` convention consumed by `SipCallAgi.php`'s
+ *  `callForward()` — a `type|value` string. This is the ONLY field that
+ *  actually gates whether Magnus forwards a call on SIP no-answer/timeout;
+ *  `diddestination.destination` alone does not (see LiveSipAccount.forward
+ *  in lib/magnus-voice.ts). Never write/compare a forward value without
+ *  going through this formatter — a bare digit string here is silently
+ *  inert to Magnus, not an error. */
+export function formatSipForward(forwardNumber: string): string {
+  return `number|${forwardNumber}`;
+}
 
 /**
  * Upper bound for a configured ring timeout — a sanity ceiling for input
@@ -85,6 +96,10 @@ export interface VoiceRoutingSnapshot {
   sipId: string | null;
   /** sip.dial_timeout. Null when no SIP account is wired, or its row/field could not be read. */
   dialTimeout: string | null;
+  /** sip.forward (`pkg_sip.forward`) — the field that actually gates
+   *  Magnus's SIP no-answer/timeout forward (see formatSipForward). Null
+   *  when no SIP account is wired, or its row/field could not be read. */
+  sipForward: string | null;
   /** Set only when Magnus has more than one `diddestination` row for this
    *  DID — an ambiguous/conflicting routing-truth shape. When present, every
    *  other field above is meaningless (all null) and
@@ -185,6 +200,19 @@ export function deriveVoiceRoutingMode(snapshot: VoiceRoutingSnapshot): VoiceRou
 
   if (!hasForward) {
     if (voipCall === '1') {
+      // A stale sip.forward left over from a prior app_then_cell/cell
+      // configuration is not cosmetic: SipCallAgi.php's callForward() gates
+      // purely on pkg_sip.forward, independent of diddestination.destination
+      // — an "app" mode with a leftover forward would still silently forward
+      // calls on SIP no-answer/timeout.
+      if (snapshot.sipForward) {
+        return {
+          mode: 'degraded',
+          forwardToCellNumber: null,
+          reason: `no diddestination forward target is set but sip.forward=${JSON.stringify(snapshot.sipForward)} is still populated — Magnus will still forward on SIP no-answer/timeout despite this looking like a plain SIP-only route`,
+          snapshot,
+        };
+      }
       return { mode: 'app', forwardToCellNumber: null, snapshot };
     }
     return {
@@ -203,11 +231,28 @@ export function deriveVoiceRoutingMode(snapshot: VoiceRoutingSnapshot): VoiceRou
     // backward-compatible read as `cell`. New S5 writes never produce this
     // shape (see planRouteMutation, which always keeps voip_call='1'); this
     // branch exists solely to correctly interpret pre-existing tenant data
-    // without requiring a migration or write-back.
+    // without requiring a migration or write-back. This shape bypasses SIP
+    // entirely (dials the PSTN destination directly), so it never goes
+    // through SipCallAgi.php's callForward() gate — sip.forward is
+    // irrelevant here and deliberately not checked.
     return { mode: 'cell', forwardToCellNumber, snapshot };
   }
 
   if (voipCall === '1') {
+    // S5's SIP-first-safe shape only actually forwards on SIP no-answer/
+    // timeout if pkg_sip.forward is ALSO wired to match — this is the field
+    // SipCallAgi.php::callForward() gates on. A diddestination forward
+    // target with no matching sip.forward is exactly the S5 defect this
+    // check exists to surface instead of leaving invisible.
+    const expectedSipForward = formatSipForward(forwardToCellNumber);
+    if (snapshot.sipForward !== expectedSipForward) {
+      return {
+        mode: 'degraded',
+        forwardToCellNumber,
+        reason: `diddestination has a forward target configured but sip.forward=${JSON.stringify(snapshot.sipForward)} does not match the expected ${JSON.stringify(expectedSipForward)} — Magnus will NOT actually forward on SIP no-answer/timeout`,
+        snapshot,
+      };
+    }
     if (dialTimeout === CELL_ONLY_DIAL_TIMEOUT_SENTINEL) {
       return { mode: 'cell', forwardToCellNumber, snapshot };
     }
@@ -250,13 +295,14 @@ export async function readVoiceRoutingSnapshot(
         voipCall: null,
         sipId: null,
         dialTimeout: null,
+        sipForward: null,
         conflictingDestinationRows: err.rowCount,
       };
     }
     throw err;
   }
   if (!diddest) {
-    return { did, didId, diddestinationId: null, destination: null, voipCall: null, sipId: null, dialTimeout: null };
+    return { did, didId, diddestinationId: null, destination: null, voipCall: null, sipId: null, dialTimeout: null, sipForward: null };
   }
   if (!diddest.id_sip) {
     return {
@@ -267,6 +313,7 @@ export async function readVoiceRoutingSnapshot(
       voipCall: diddest.voip_call,
       sipId: null,
       dialTimeout: null,
+      sipForward: null,
     };
   }
   const sip = await readSipAccount(config, diddest.id_sip);
@@ -278,6 +325,7 @@ export async function readVoiceRoutingSnapshot(
     voipCall: diddest.voip_call,
     sipId: diddest.id_sip,
     dialTimeout: sip ? sip.dial_timeout : null,
+    sipForward: sip ? sip.forward : null,
   };
 }
 
@@ -366,6 +414,10 @@ export interface RouteMutationPlan {
   diddestinationWrite: { destination: string; context: string; voip_call: string; id_ivr: string; id_queue: string } | null;
   /** null when the current dial_timeout already matches what this mode needs. */
   dialTimeoutWrite: string | null;
+  /** null when sip.forward already matches what this mode needs. The field
+   *  SipCallAgi.php::callForward() actually gates on — see formatSipForward.
+   *  '' clears it (app mode); non-empty is `formatSipForward(destination)`. */
+  forwardWrite: string | null;
   forwardToCellNumber: string | null;
 }
 
@@ -432,10 +484,18 @@ export function planRouteMutation(
     }
   }
 
+  // sip.forward is the field SipCallAgi.php::callForward() actually gates on
+  // — a diddestination forward target with no matching sip.forward is
+  // exactly the S5 defect this write closes (see deriveVoiceRoutingMode).
+  const desiredSipForward = targetMode === 'app' ? '' : formatSipForward(destination);
+  const currentSipForward = snapshot.sipForward ?? '';
+  const forwardWrite = currentSipForward !== desiredSipForward ? desiredSipForward : null;
+
   return {
     targetMode,
     diddestinationWrite: diddestinationChanged ? desiredDiddestination : null,
     dialTimeoutWrite,
+    forwardWrite,
     forwardToCellNumber: targetMode === 'app' ? null : destination,
   };
 }
@@ -447,6 +507,7 @@ async function writeDiddestinationAndTimeout(
   snapshot: VoiceRoutingSnapshot,
   diddestinationWrite: DiddestinationWrite | null,
   dialTimeoutWrite: string | null,
+  forwardWrite: string | null,
 ): Promise<void> {
   if (diddestinationWrite && snapshot.diddestinationId) {
     await magnusRequest(config, 'diddestination', 'save', {
@@ -457,16 +518,19 @@ async function writeDiddestinationAndTimeout(
   if (dialTimeoutWrite !== null && snapshot.sipId) {
     await patchSipDialTimeout(config, snapshot.sipId, dialTimeoutWrite);
   }
+  if (forwardWrite !== null && snapshot.sipId) {
+    await patchSipForward(config, snapshot.sipId, forwardWrite);
+  }
 }
 
 /** Impure: executes a plan against Magnus. Issues only the writes the plan
- *  actually calls for (both can be no-ops — see planRouteMutation). */
+ *  actually calls for (all three can be no-ops — see planRouteMutation). */
 export async function applyRouteMutation(
   config: MagnusConfig,
   snapshot: VoiceRoutingSnapshot,
   plan: RouteMutationPlan,
 ): Promise<void> {
-  await writeDiddestinationAndTimeout(config, snapshot, plan.diddestinationWrite, plan.dialTimeoutWrite);
+  await writeDiddestinationAndTimeout(config, snapshot, plan.diddestinationWrite, plan.dialTimeoutWrite, plan.forwardWrite);
 }
 
 // ── Section 4: bounded compensating rollback ────────────────────────────────
@@ -474,6 +538,9 @@ export async function applyRouteMutation(
 export interface RouteRestorePlan {
   diddestinationWrite: DiddestinationWrite | null;
   dialTimeoutWrite: string | null;
+  /** null when the captured snapshot's sip.forward could not be read
+   *  (mirrors dialTimeoutWrite's never-guess rule) — never fabricated. */
+  forwardWrite: string | null;
 }
 
 /**
@@ -495,14 +562,14 @@ export interface RouteRestorePlan {
  * Always forces voip_call='1' (SIP-first-safe, matching every other write
  * this file makes) — never restores a bare-PSTN voip_call='0' shape even if
  * that happened to be what the legacy before-state carried. Never repoints
- * id_sip. Never guesses a dial_timeout the captured snapshot didn't actually
- * have (e.g. an `unknown`-mode before-state whose timeout was unreadable).
- * Returns a no-op plan only when the DID had no diddestination row before the
- * mutation was attempted — rollback never fabricates one.
+ * id_sip. Never guesses a dial_timeout or sip.forward the captured snapshot
+ * didn't actually have (e.g. an `unknown`-mode before-state whose fields were
+ * unreadable). Returns a no-op plan only when the DID had no diddestination
+ * row before the mutation was attempted — rollback never fabricates one.
  */
 export function planRestoreMutation(capturedSnapshot: VoiceRoutingSnapshot): RouteRestorePlan {
   if (capturedSnapshot.diddestinationId === null) {
-    return { diddestinationWrite: null, dialTimeoutWrite: null };
+    return { diddestinationWrite: null, dialTimeoutWrite: null, forwardWrite: null };
   }
 
   const diddestinationWrite: DiddestinationWrite = {
@@ -516,7 +583,10 @@ export function planRestoreMutation(capturedSnapshot: VoiceRoutingSnapshot): Rou
   const dialTimeoutWrite =
     capturedSnapshot.sipId && capturedSnapshot.dialTimeout !== null ? capturedSnapshot.dialTimeout : null;
 
-  return { diddestinationWrite, dialTimeoutWrite };
+  const forwardWrite =
+    capturedSnapshot.sipId && capturedSnapshot.sipForward !== null ? capturedSnapshot.sipForward : null;
+
+  return { diddestinationWrite, dialTimeoutWrite, forwardWrite };
 }
 
 /** Impure: executes a restore plan against Magnus, targeting the row
@@ -528,5 +598,5 @@ export async function applyRestoreMutation(
   capturedSnapshot: VoiceRoutingSnapshot,
   plan: RouteRestorePlan,
 ): Promise<void> {
-  await writeDiddestinationAndTimeout(config, capturedSnapshot, plan.diddestinationWrite, plan.dialTimeoutWrite);
+  await writeDiddestinationAndTimeout(config, capturedSnapshot, plan.diddestinationWrite, plan.dialTimeoutWrite, plan.forwardWrite);
 }

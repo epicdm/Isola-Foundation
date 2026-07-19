@@ -4,7 +4,7 @@ const { magnusRequestMock } = vi.hoisted(() => ({ magnusRequestMock: vi.fn() }))
 
 vi.mock('@/engines/magnus', () => ({ magnusRequest: magnusRequestMock }));
 
-import { findDidDestinationForDid, ConflictingDidDestinationsError } from './magnus-voice';
+import { findDidDestinationForDid, ConflictingDidDestinationsError, readSipAccount, patchSipForward } from './magnus-voice';
 
 const config = { baseUrl: 'https://example.magnus', apiKey: 'k', apiSecret: 's' } as any;
 
@@ -65,5 +65,35 @@ describe('findDidDestinationForDid — uniqueness / conflict detection', () => {
     });
     const result = await findDidDestinationForDid(config, 'did-1');
     expect(result?.id).toBe('5');
+  });
+});
+
+// ── sip.forward: the field SipCallAgi.php::callForward() actually gates on ─
+
+describe('readSipAccount — sip.forward field', () => {
+  it('reads a populated sip.forward value verbatim', async () => {
+    magnusRequestMock.mockResolvedValue({ rows: [{ id: 'sip-1', forward: 'number|9715551234', dial_timeout: '25' }] });
+    const sip = await readSipAccount(config, 'sip-1');
+    expect(sip?.forward).toBe('number|9715551234');
+  });
+
+  it('normalizes a null/undefined sip.forward to an empty string', async () => {
+    magnusRequestMock.mockResolvedValue({ rows: [{ id: 'sip-1', forward: null, dial_timeout: '25' }] });
+    const sip = await readSipAccount(config, 'sip-1');
+    expect(sip?.forward).toBe('');
+  });
+});
+
+describe('patchSipForward', () => {
+  it('issues a sip/save write with the given forward value', async () => {
+    magnusRequestMock.mockResolvedValue({ success: true });
+    await patchSipForward(config, 'sip-1', 'number|9715551234');
+    expect(magnusRequestMock).toHaveBeenCalledWith(config, 'sip', 'save', { id: 'sip-1', forward: 'number|9715551234' });
+  });
+
+  it('can clear sip.forward with an empty string', async () => {
+    magnusRequestMock.mockResolvedValue({ success: true });
+    await patchSipForward(config, 'sip-1', '');
+    expect(magnusRequestMock).toHaveBeenCalledWith(config, 'sip', 'save', { id: 'sip-1', forward: '' });
   });
 });
