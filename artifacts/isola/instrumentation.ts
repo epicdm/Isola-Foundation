@@ -99,15 +99,15 @@ async function runMigrations(prisma: any) {
     await prisma.$executeRawUnsafe(
       `ALTER TABLE "Message" ADD COLUMN IF NOT EXISTS chatwoot_message_id INTEGER;`,
     );
-    // Add unique index separately so IF NOT EXISTS works on older Postgres versions
-    await prisma.$executeRawUnsafe(
-      `CREATE UNIQUE INDEX IF NOT EXISTS "Message_chatwoot_message_id_key" ON "Message"(chatwoot_message_id) WHERE chatwoot_message_id IS NOT NULL;`,
-    );
-    // Inbound dedup: unique index on Meta wamid so duplicate deliveries are caught
-    // at the DB level (P2002) before the AI is called.
-    await prisma.$executeRawUnsafe(
-      `CREATE UNIQUE INDEX IF NOT EXISTS "Message_wa_message_id_key" ON "Message"(wa_message_id) WHERE wa_message_id IS NOT NULL;`,
-    );
+    // Message_chatwoot_message_id_key and Message_wa_message_id_key (both
+    // full/non-partial unique indexes, dedup keys for the Chatwoot and direct
+    // WA webhook paths respectively) are now owned by tracked Prisma
+    // migrations (20260712031920_baseline, 20260719180000_fix_message_wa_
+    // message_id_full_unique_index) instead of being created here as raw
+    // SQL — see bt-neon-schema-reconciliation-campaign Phase 0c. Creating
+    // them here too, even with IF NOT EXISTS, previously let a partial
+    // (WHERE ... IS NOT NULL) index win the name on any DB where this ran
+    // before the migration did, causing neon to drift from schema.prisma.
     // P0 (2026-07-15): cross-path inbound dedup, keyed ONLY on Meta's wamid,
     // independent of Tenant/Conversation/routing-path. Closes the gap where
     // Message.wa_message_id (direct WA webhook path) and
