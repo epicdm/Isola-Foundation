@@ -18,6 +18,7 @@
  * re-provisioning run. The true mode is always re-derived live from Magnus.
  */
 
+import { randomBytes } from 'crypto';
 import { prisma } from './prisma';
 import { audit } from './audit';
 import type { SessionCtx } from './session';
@@ -26,6 +27,8 @@ import { can } from './permissions';
 import { voiceRoutingRead, voiceRoutingSet, VoiceRoutingConnectorError, type VoiceRoutingSetOutcome } from './voice-routing-connector';
 import { validateForwardTarget, isVoiceRoutingMode, type VoiceRoutingMode, type VoiceRoutingReadMode } from './voice-routing';
 import type { VoiceLine } from '@prisma/client';
+
+const APPROVAL_TTL_MS = 15 * 60 * 1000; // 15 min
 
 export class VoiceRouteError extends Error {
   constructor(public status: number, message: string) {
@@ -58,6 +61,10 @@ export interface SetVoiceRouteModeParams {
   forwardNumber?: string;
   sourceSurface: VoiceRouteSourceSurface;
   requestId?: string;
+  /** S6: approval redemption token. Operator source only. Absent ⇒ mint a
+   *  pending ApprovalRequest and return outcome:'approval_required'. Present ⇒
+   *  must be an approved, unexpired, params-matching, unconsumed token. */
+  approvalToken?: string;
 }
 
 /** Safe-identifiers-only payload for the worst-case outcome: a rollback
@@ -84,7 +91,7 @@ export interface VoiceRouteCriticalDegraded {
  *  tell a plain client input error apart from a degraded-line condition that
  *  needs an appropriate server-error status. Mirrors VoiceRoutingSetOutcome
  *  plus the 'rejected' case that never reaches the connector at all. */
-export type VoiceRouteOutcome = 'success' | 'rejected' | VoiceRoutingSetOutcome;
+export type VoiceRouteOutcome = 'success' | 'rejected' | 'approval_required' | VoiceRoutingSetOutcome;
 
 export interface VoiceRouteMutationResult {
   ok: boolean;
@@ -95,6 +102,8 @@ export interface VoiceRouteMutationResult {
   rollbackAttempted?: boolean;
   rollbackVerified?: boolean;
   critical?: VoiceRouteCriticalDegraded;
+  approvalRequestId?: string;
+  approvalExpiresAt?: string; // ISO
 }
 
 /** Safe-to-serialize failure body for a route handler: no SIP passwords, no
@@ -215,6 +224,91 @@ export async function setVoiceRouteMode(source: VoiceRouteSource, params: SetVoi
   const tenant = tenantScopeFor(source, voiceLine);
   const actorId = auditActorFor(source);
   const auditBase = { ...tenant, actorId, entity: 'voice_line', entityId: voiceLine.id, requestId: params.requestId };
+
+  // ── S6 approval gate — operator/business voice routing only (v1) ──────────
+  // Deny-by-default. mint → approve (elsewhere) → redeem here. Single-use,
+  // TTL'd, tenant-scoped, params-bound. Consumer source is intentionally NOT
+  // gated in v1. The guard sits before any Magnus mutation so an ungoverned
+  // change can never reach the connector.
+  if (source.kind === 'operator') {
+    const bindDid = voiceLine.magnus_did_number!;
+    const bindForward = params.mode === 'app' ? null : (params.forwardNumber ?? null);
+
+    if (!params.approvalToken) {
+      const token = randomBytes(32).toString('base64url'); // 256-bit secret
+      const expiresAt = new Date(Date.now() + APPROVAL_TTL_MS);
+      const reqRow = await prisma.approvalRequest.create({
+        data: {
+          tenant_id: source.session.effectiveTenantId,
+          token,
+          action: 'voice.route.set',
+          target_entity: 'voice_line',
+          target_id: voiceLine.id,
+          payload: { did: bindDid, mode: params.mode, forwardNumber: bindForward },
+          status: 'pending',
+          requested_by: actorId,
+          expires_at: expiresAt,
+        },
+        select: { id: true, expires_at: true },
+      });
+      await audit({
+        ...auditBase,
+        action: 'voice.route.approval_requested',
+        meta: { ok: false, requested_mode: params.mode, source_surface: params.sourceSurface, approval_request_id: reqRow.id },
+      });
+      // NOTE: token is deliberately NOT returned here — only the authenticated
+      // approver receives it (POST /api/approvals/[id]).
+      return {
+        ok: false,
+        outcome: 'approval_required',
+        error: 'This routing change requires approval',
+        approvalRequestId: reqRow.id,
+        approvalExpiresAt: reqRow.expires_at.toISOString(),
+      };
+    }
+
+    // Redeem. Validate (read) first so a params mismatch does NOT burn the
+    // token, THEN claim atomically (single-use guaranteed by count===1).
+    const now = new Date();
+    const pending = await prisma.approvalRequest.findUnique({
+      where: { token: params.approvalToken },
+      select: { tenant_id: true, action: true, target_id: true, status: true, expires_at: true, payload: true },
+    });
+    const p = (pending?.payload ?? {}) as { did?: string; mode?: string; forwardNumber?: string | null };
+    const valid =
+      !!pending &&
+      pending.status === 'approved' &&
+      pending.expires_at > now &&
+      pending.tenant_id === source.session.effectiveTenantId &&
+      pending.action === 'voice.route.set' &&
+      pending.target_id === voiceLine.id &&
+      p.did === bindDid &&
+      p.mode === params.mode &&
+      (p.forwardNumber ?? null) === bindForward;
+
+    if (!valid) {
+      await audit({
+        ...auditBase,
+        action: 'voice.route.approval_rejected',
+        meta: { ok: false, requested_mode: params.mode, source_surface: params.sourceSurface, reason: 'invalid_expired_mismatch_or_wrong_status' },
+      });
+      return { ok: false, outcome: 'rejected', error: 'Approval is invalid, expired, already used, or does not match this change' };
+    }
+
+    const claim = await prisma.approvalRequest.updateMany({
+      where: { token: params.approvalToken, status: 'approved', expires_at: { gt: now } },
+      data: { status: 'consumed', consumed_at: now },
+    });
+    if (claim.count !== 1) {
+      await audit({
+        ...auditBase,
+        action: 'voice.route.approval_rejected',
+        meta: { ok: false, requested_mode: params.mode, source_surface: params.sourceSurface, reason: 'claim_lost_race' },
+      });
+      return { ok: false, outcome: 'rejected', error: 'Approval could not be claimed (already used)' };
+    }
+    // Fall through: token consumed, proceed with the actual routing mutation.
+  }
 
   // Section 6: forward-target validation — rejection happens BEFORE any
   // Magnus mutation is attempted.

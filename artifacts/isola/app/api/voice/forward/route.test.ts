@@ -126,4 +126,33 @@ describe('POST /api/voice/forward (legacy compat)', () => {
     expect(raw).not.toContain('password');
     expect(raw).not.toContain('secret');
   });
+
+  it('S6: approval_required outcome returns 202, not the legacy { error } shape', async () => {
+    setVoiceRouteModeMock.mockResolvedValue({
+      ok: false,
+      outcome: 'approval_required',
+      error: 'This routing change requires approval',
+      approvalRequestId: 'appr-1',
+      approvalExpiresAt: '2026-07-19T12:15:00.000Z',
+    } satisfies VoiceRouteMutationResult);
+    const res = await POST(postRequest({ forward_to_cell: true, cell_number: '17678182220' }));
+    const body = await res.json();
+
+    expect(res.status).toBe(202);
+    expect(body).toEqual({
+      approval_required: true,
+      approval_request_id: 'appr-1',
+      expires_at: '2026-07-19T12:15:00.000Z',
+    });
+  });
+
+  it('S6: forwards approval_token from the request body into setVoiceRouteMode', async () => {
+    setVoiceRouteModeMock.mockResolvedValue({ ok: true, mode: 'cell', forwardToCellNumber: '17678182220', outcome: 'success' } satisfies VoiceRouteMutationResult);
+    await POST(postRequest({ forward_to_cell: true, cell_number: '17678182220', approval_token: 'tok-123' }));
+
+    expect(setVoiceRouteModeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'operator' }),
+      expect.objectContaining({ approvalToken: 'tok-123' }),
+    );
+  });
 });

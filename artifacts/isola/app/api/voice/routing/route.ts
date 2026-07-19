@@ -38,13 +38,19 @@ export async function POST(req: NextRequest) {
   if (!isMagnusConfigured()) return NextResponse.json({ error: 'Magnus not configured' }, { status: 503 });
 
   const body = await req.json().catch(() => ({}));
-  const { mode, forward_number } = body;
+  const { mode, forward_number, approval_token } = body;
 
   try {
     const result = await setVoiceRouteMode(
       { kind: 'operator', session: ctx },
-      { mode, forwardNumber: forward_number, sourceSurface: 'operator.routing' },
+      { mode, forwardNumber: forward_number, approvalToken: approval_token, sourceSurface: 'operator.routing' },
     );
+    if (!result.ok && result.outcome === 'approval_required') {
+      return NextResponse.json(
+        { approval_required: true, approval_request_id: result.approvalRequestId, expires_at: result.approvalExpiresAt },
+        { status: 202 },
+      );
+    }
     if (!result.ok) {
       const { status, body } = routeErrorResponseFor(result);
       return NextResponse.json(body, { status });
