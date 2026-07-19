@@ -49,10 +49,6 @@ export async function register() {
 
   const { default: prisma } = await import('@/lib/prisma');
 
-  // Schema migrations first — idempotent ALTER TABLE statements so production
-  // (neondb) stays in sync without a separate migration runner.
-  await runMigrations(prisma);
-
   // Resolve admin tenant once; both seeds need it
   const adminTenantId = await resolveAdminTenantId(prisma);
 
@@ -83,92 +79,6 @@ export async function register() {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-/**
- * Idempotent schema migrations using raw SQL. Runs on every cold start so
- * production (neondb) stays in sync with schema.prisma without a separate
- * migration runner or CI step. ADD COLUMN IF NOT EXISTS is always safe to
- * re-run; it is a no-op when the column already exists.
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function runMigrations(prisma: any) {
-  try {
-    await prisma.$executeRawUnsafe(
-      `ALTER TABLE "Conversation" ADD COLUMN IF NOT EXISTS human_handling BOOLEAN NOT NULL DEFAULT FALSE;`,
-    );
-    await prisma.$executeRawUnsafe(
-      `ALTER TABLE "Message" ADD COLUMN IF NOT EXISTS chatwoot_message_id INTEGER;`,
-    );
-    // Message_chatwoot_message_id_key and Message_wa_message_id_key (both
-    // full/non-partial unique indexes, dedup keys for the Chatwoot and direct
-    // WA webhook paths respectively) are now owned by tracked Prisma
-    // migrations (20260712031920_baseline, 20260719180000_fix_message_wa_
-    // message_id_full_unique_index) instead of being created here as raw
-    // SQL — see bt-neon-schema-reconciliation-campaign Phase 0c. Creating
-    // them here too, even with IF NOT EXISTS, previously let a partial
-    // (WHERE ... IS NOT NULL) index win the name on any DB where this ran
-    // before the migration did, causing neon to drift from schema.prisma.
-    // P0 (2026-07-15): cross-path inbound dedup, keyed ONLY on Meta's wamid,
-    // independent of Tenant/Conversation/routing-path. Closes the gap where
-    // Message.wa_message_id (direct WA webhook path) and
-    // Message.chatwoot_message_id (Chatwoot agent-bot path) are different
-    // local keys, so the same physical Meta message reaching both paths
-    // produced two AI replies. See lib/inbound-dedup.ts.
-    await prisma.$executeRawUnsafe(`
-      CREATE TABLE IF NOT EXISTS "InboundDedup" (
-        id         TEXT PRIMARY KEY,
-        message_id TEXT NOT NULL,
-        created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    await prisma.$executeRawUnsafe(
-      `CREATE UNIQUE INDEX IF NOT EXISTS "InboundDedup_message_id_key" ON "InboundDedup"(message_id);`,
-    );
-    // A2 mode: ChatwootBinding.mode column distinguishes mirror (Wave A) from
-    // a2 (Chatwoot owns WA channel, this app is the AI brain).
-    await prisma.$executeRawUnsafe(
-      `ALTER TABLE "ChatwootBinding" ADD COLUMN IF NOT EXISTS mode VARCHAR(20) NOT NULL DEFAULT 'mirror';`,
-    );
-    // After-hours away message: sent verbatim instead of silence during off-hours.
-    await prisma.$executeRawUnsafe(
-      `ALTER TABLE "Agent" ADD COLUMN IF NOT EXISTS away_message TEXT NOT NULL DEFAULT '';`,
-    );
-    // Brain-provider abstraction: per-agent choice of reply runtime (native Claude
-    // vs external self-hosted Flowise flow). Default 'native' for every existing row.
-    await prisma.$executeRawUnsafe(
-      `ALTER TABLE "Agent" ADD COLUMN IF NOT EXISTS brain_provider VARCHAR(20) NOT NULL DEFAULT 'native';`,
-    );
-    await prisma.$executeRawUnsafe(
-      `ALTER TABLE "Agent" ADD COLUMN IF NOT EXISTS flowise_flow_id TEXT;`,
-    );
-    // P6: EMA landing page funnel attribution — standalone table, no FKs.
-    await prisma.$executeRawUnsafe(`
-      CREATE TABLE IF NOT EXISTS "ConsumerLead" (
-        id            TEXT PRIMARY KEY,
-        phone_number  TEXT,
-        utm_source    TEXT,
-        utm_medium    TEXT,
-        utm_campaign  TEXT,
-        utm_term      TEXT,
-        utm_content   TEXT,
-        referrer      TEXT,
-        landing_path  TEXT,
-        cta           TEXT,
-        odoo_lead_id  INTEGER,
-        created_at    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    await prisma.$executeRawUnsafe(
-      `CREATE INDEX IF NOT EXISTS "ConsumerLead_created_at_idx" ON "ConsumerLead"(created_at);`,
-    );
-    await prisma.$executeRawUnsafe(
-      `CREATE INDEX IF NOT EXISTS "ConsumerLead_utm_source_utm_campaign_idx" ON "ConsumerLead"(utm_source, utm_campaign);`,
-    );
-    console.log('[instrumentation] Schema migrations applied');
-  } catch (err) {
-    console.error('[instrumentation] Migration error:', err);
-  }
-}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function resolveAdminTenantId(prisma: any): Promise<string | null> {
