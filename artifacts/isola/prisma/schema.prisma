@@ -83,6 +83,7 @@ model Tenant {
   voicemail_catches TenantVoicemailCatch[]
   memberships       Membership[]
   voice_lines       VoiceLine[]
+  approval_requests ApprovalRequest[]
 }
 
 // ── Per-tenant voicemail catches (AI missed-call catcher) ────────────────────
@@ -553,6 +554,37 @@ model AuditLog {
   @@index([tenant_id, created_at])
   @@index([tenant_id, request_id])
   @@index([consumer_account_id, created_at])
+}
+
+// ── S6: governance — approval gate (mint → approve → redeem) ────────────────
+//
+// First gated action: operator voice-routing changes ("voice.route.set").
+// Deny-by-default: an operator write is blocked until a pending
+// ApprovalRequest for the exact same params is approved by a tenant
+// owner/admin (self-approve allowed in v1), then redeemed with its
+// single-use `token` before the underlying mutation is attempted. tenant_id
+// is required — v1 gating is always tenant-scoped.
+model ApprovalRequest {
+  id            String    @id @default(cuid())
+  tenant_id     String
+  token         String    @unique // 256-bit redemption secret; single-use; only ever returned to the authenticated approver
+  action        String // v1: "voice.route.set"
+  target_entity String? // "voice_line"
+  target_id     String? // VoiceLine.id — binds the approval to one line
+  payload       Json      @default("{}") // exact approved params: { did, mode, forwardNumber } — binds the token to these params
+  status        String    @default("pending") // pending | approved | denied | consumed | expired  (deny-by-default)
+  requested_by  String // User.id (or "agent:<id>" in future)
+  decided_by    String? // approver User.id
+  decided_at    DateTime?
+  consumed_at   DateTime? // single-use marker (set atomically on redeem)
+  expires_at    DateTime // TTL
+  created_at    DateTime  @default(now())
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+
+  @@index([tenant_id, status])
+  @@index([tenant_id, created_at])
+  @@index([expires_at])
 }
 
 // ── Drizzle-managed auth tables (DO NOT DROP) ────────────────────────────────

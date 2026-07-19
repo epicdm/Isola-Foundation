@@ -28,7 +28,7 @@ export async function POST(req: NextRequest) {
   if (!ctx) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const body = await req.json().catch(() => ({}));
-  const { forward_to_cell, cell_number } = body;
+  const { forward_to_cell, cell_number, approval_token } = body;
 
   if (!isMagnusConfigured()) {
     return NextResponse.json({ error: 'Magnus not configured' }, { status: 503 });
@@ -40,9 +40,17 @@ export async function POST(req: NextRequest) {
       {
         mode: forward_to_cell ? 'cell' : 'app',
         forwardNumber: cell_number,
+        approvalToken: approval_token,
         sourceSurface: 'operator.forward_compat',
       },
     );
+
+    if (!result.ok && result.outcome === 'approval_required') {
+      return NextResponse.json(
+        { approval_required: true, approval_request_id: result.approvalRequestId, expires_at: result.approvalExpiresAt },
+        { status: 202 },
+      );
+    }
 
     if (!result.ok) {
       // Preserve the legacy boolean-contract failure shape ({ error }) — the
