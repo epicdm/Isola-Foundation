@@ -70,6 +70,8 @@ import { meterTokens } from '@/lib/meter';
 import { claimInboundMessageId } from '@/lib/inbound-dedup';
 import { toggleConvStatus, surfaceHandoff } from '@/lib/chatwoot-handoff';
 import { resolveActiveBinding } from '@/lib/chatwoot-binding-resolution';
+import { stampLeadContext } from '@/lib/chatwoot-lead-context';
+import { SALES_TENANT_IDS } from '@/lib/claim-guard';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -294,6 +296,14 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
         human_handling:          false,
       },
     });
+    // Lead-pipeline context capture (Lane 1 Task 3) — stamp once, on the
+    // first inbound message of a brand-new conversation. Scoped to the sales
+    // tenants only: this webhook is the single chokepoint for ALL A2 tenant
+    // traffic, and pilot_stage/source only mean something for the founding-
+    // pilot sales pipeline on Chatwoot account 5.
+    if (SALES_TENANT_IDS.has(tenantId) && botToken) {
+      await stampLeadContext(baseUrl, accountId, cwConvId, botToken, content);
+    }
   }
 
   // ── Atomic dedup claim (before any processing) ────────────────────────────
