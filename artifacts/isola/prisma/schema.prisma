@@ -684,7 +684,7 @@ model VoiceLine {
   magnus_diddestination_id String?
   voice_forward_to_cell    Boolean @default(false)
   voice_cell_number        String?
-  provisioning_state       String  @default("none")
+  provisioning_state       String  @default("none") // none | pending | completed | failed | retired (soft-decommissioned — sub-resource ids nulled, magnus_user_id/magnus_did_number kept for the record; see Voice Health's RETIRED status)
   provisioning_error       String?
 
   created_at DateTime @default(now())

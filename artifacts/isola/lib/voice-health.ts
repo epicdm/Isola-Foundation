@@ -16,19 +16,24 @@ import { magnusRequest, type MagnusConfig } from '@/engines/magnus';
 import { readSipAccount, readDidDestination } from './magnus-voice';
 import { readVoiceRoutingSnapshot, deriveVoiceRoutingMode } from './voice-routing';
 
-export type HealthStatus = 'OK' | 'DEGRADED' | 'MISMATCH' | 'MISSING';
-export type HealthColor = 'green' | 'amber' | 'red';
+export type HealthStatus = 'OK' | 'DEGRADED' | 'MISMATCH' | 'MISSING' | 'LEGACY_DUP' | 'RETIRED';
+export type HealthColor = 'green' | 'amber' | 'red' | 'gray';
 
 const STATUS_COLOR: Record<HealthStatus, HealthColor> = {
   OK: 'green',
   DEGRADED: 'amber',
   MISMATCH: 'red',
   MISSING: 'red',
+  LEGACY_DUP: 'amber',
+  RETIRED: 'gray',
 };
 
 // Precedence for escalating status when multiple issues are found on one line
 // — most severe wins. Mirrors scripts/voice-health-audit.ts's addIssue().
-const PRECEDENCE: HealthStatus[] = ['MISMATCH', 'MISSING', 'DEGRADED', 'OK'];
+// RETIRED is never reached through escalate() (classifyVoiceLineHealth
+// short-circuits to it before any addIssue call) — it's listed last only for
+// type completeness.
+const PRECEDENCE: HealthStatus[] = ['MISMATCH', 'MISSING', 'DEGRADED', 'LEGACY_DUP', 'OK', 'RETIRED'];
 
 export interface VoiceLineRecord {
   id: string;
@@ -71,8 +76,26 @@ function escalate(current: HealthStatus, next: HealthStatus): HealthStatus {
  * Pure classification — given a VoiceLine's stored fields and a resolution of
  * those fields against live Magnus state, derive a single health verdict.
  * No network/DB access here; safe to unit test directly.
+ *
+ * `legacyDuplicateAccountIds` — ids of legacy ConsumerAccount rows that share
+ * this line's magnus_sip_id/magnus_did_number (a pre-VoiceLine-model
+ * duplicate of the same underlying Magnus resource; see Task A's retirement
+ * of +17672859610 for the canonical example).
  */
-export function classifyVoiceLineHealth(line: VoiceLineRecord, resolution: MagnusResolution): VoiceLineHealth {
+export function classifyVoiceLineHealth(
+  line: VoiceLineRecord,
+  resolution: MagnusResolution,
+  legacyDuplicateAccountIds: string[] = [],
+): VoiceLineHealth {
+  // Terminal state — a soft-retired line intentionally has no live Magnus
+  // resources anymore. Short-circuit before any other check so it never
+  // shows up as a false OK/green (it isn't healthy) or a false MISSING/red
+  // (its missing resources are expected, not a bug) — it just drops off the
+  // problem list entirely.
+  if (line.provisioningState === 'retired') {
+    return { status: 'RETIRED', color: STATUS_COLOR.RETIRED, mode: 'retired', issues: [] };
+  }
+
   let status: HealthStatus = 'OK';
   const issues: string[] = [];
 
@@ -81,9 +104,19 @@ export function classifyVoiceLineHealth(line: VoiceLineRecord, resolution: Magnu
     status = escalate(status, next);
   }
 
-  // ASSIGNMENT / DID presence.
-  if (line.provisioningState === 'completed' && !line.did) {
-    addIssue('MISSING', 'provisioning_state=completed but no DID number is stored');
+  // ASSIGNMENT — a completed line is expected to have every resource id a
+  // working line needs. A null id here means it was never stored in the
+  // first place, distinct from a stored-but-unresolvable id (handled by the
+  // DB<->MAGNUS resolution checks below). Missing this generalization was
+  // the false-green class of bug: a completed line missing e.g.
+  // magnus_sip_id read as OK because resolution.sip was simply `null`
+  // ("not applicable") rather than "found: false".
+  if (line.provisioningState === 'completed') {
+    if (!line.did) addIssue('MISSING', 'provisioning_state=completed but no DID number is stored');
+    if (!line.magnusSipId) addIssue('MISSING', 'provisioning_state=completed but magnus_sip_id is not stored');
+    if (!line.magnusCallerIdId) addIssue('MISSING', 'provisioning_state=completed but magnus_callerid_id is not stored');
+    if (!line.magnusDidDestinationId) addIssue('MISSING', 'provisioning_state=completed but magnus_diddestination_id is not stored');
+    if (!line.magnusDidId) addIssue('MISSING', 'provisioning_state=completed but magnus_did_id is not stored — cannot evaluate live routing');
   }
 
   // DB<->MAGNUS resolution — each stored magnus_*_id must resolve to a live row.
@@ -128,8 +161,13 @@ export function classifyVoiceLineHealth(line: VoiceLineRecord, resolution: Magnu
         addIssue('DEGRADED', `routing mode=${resolution.routing.mode}${resolution.routing.reason ? ` — ${resolution.routing.reason}` : ''}`);
       }
     }
-  } else if (line.provisioningState === 'completed') {
-    addIssue('MISSING', 'provisioning_state=completed but magnus_did_id/DID missing — cannot evaluate live routing');
+  }
+
+  // LEGACY_DUP — this line's Magnus resource is also referenced by an
+  // older, pre-VoiceLine-model ConsumerAccount row (see Task A's retirement
+  // of +17672859610 for the canonical example of this dup class).
+  for (const consumerAccountId of legacyDuplicateAccountIds) {
+    addIssue('LEGACY_DUP', `legacy ConsumerAccount duplicate (${consumerAccountId})`);
   }
 
   return { status, color: STATUS_COLOR[status], mode, issues };
@@ -177,10 +215,19 @@ export async function resolveVoiceLineAgainstMagnus(config: MagnusConfig, line: 
   return { sip, did, callerId, didDestination, routing };
 }
 
-/** Impure: full compute for one VoiceLine — fetch + classify. */
-export async function computeVoiceLineHealth(config: MagnusConfig, line: VoiceLineRecord): Promise<VoiceLineHealth> {
+/** Impure: full compute for one VoiceLine — fetch + classify. Retired lines
+ *  skip the live Magnus round-trip entirely (classifyVoiceLineHealth would
+ *  discard the resolution anyway, and their sub-resource ids are gone). */
+export async function computeVoiceLineHealth(
+  config: MagnusConfig,
+  line: VoiceLineRecord,
+  legacyDuplicateAccountIds: string[] = [],
+): Promise<VoiceLineHealth> {
+  if (line.provisioningState === 'retired') {
+    return classifyVoiceLineHealth(line, { sip: null, did: null, callerId: null, didDestination: null, routing: null });
+  }
   const resolution = await resolveVoiceLineAgainstMagnus(config, line);
-  return classifyVoiceLineHealth(line, resolution);
+  return classifyVoiceLineHealth(line, resolution, legacyDuplicateAccountIds);
 }
 
 export interface VoiceHealthSummary {
@@ -188,10 +235,11 @@ export interface VoiceHealthSummary {
   green: number;
   amber: number;
   red: number;
+  gray: number;
 }
 
 export function summarize(results: VoiceLineHealth[]): VoiceHealthSummary {
-  const summary: VoiceHealthSummary = { total: results.length, green: 0, amber: 0, red: 0 };
+  const summary: VoiceHealthSummary = { total: results.length, green: 0, amber: 0, red: 0, gray: 0 };
   for (const r of results) summary[r.color]++;
   return summary;
 }
