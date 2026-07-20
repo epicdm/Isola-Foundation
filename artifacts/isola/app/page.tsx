@@ -11,7 +11,7 @@ import { redirect } from 'next/navigation';
 import { getSession } from '@/lib/session';
 import { getAuthUser } from '@/lib/auth';
 import { cookies } from 'next/headers';
-import { Bot, MessageCircle, LayoutDashboard, Check, ArrowRight } from 'lucide-react';
+import { MessageCircle, ClipboardCheck, Wrench, ArrowRight } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -38,33 +38,55 @@ export default async function RootPage() {
   redirect('/dashboard');
 }
 
-const FEATURES = [
-  {
-    icon: Bot,
-    title: 'AI agent, your voice',
-    desc: 'Train the agent with your business info and knowledge base. It handles WhatsApp 24/7.',
-  },
+// Founding-pilot WhatsApp entry point — same number already used by the
+// EMA consumer funnel (app/ema/page.tsx, app/consumer/landing/page.tsx);
+// the prefilled text is what distinguishes a business pilot inquiry from a
+// personal Dominica-number request once it lands with the sales agent.
+const APPLY_URL =
+  'https://wa.me/17678180001?text=' +
+  encodeURIComponent("Hi, I'd like to apply for the founding pilot for my business.");
+
+const HOW_IT_WORKS = [
   {
     icon: MessageCircle,
-    title: 'WhatsApp native',
-    desc: 'Connect via Meta Embedded Signup in minutes. Coexistence mode — keep using the WA Business app.',
+    title: 'Apply on WhatsApp',
+    desc: 'Tell us about your business. A person on our team reviews every application.',
   },
   {
-    icon: LayoutDashboard,
-    title: 'Full operator view',
-    desc: 'EPIC operators manage all tenants from one admin panel, adjust credits, and act as any tenant.',
+    icon: Wrench,
+    title: 'We build it with you',
+    desc: 'Our team sets up and trains your WhatsApp concierge on your business — nothing to self-configure.',
+  },
+  {
+    icon: ClipboardCheck,
+    title: 'Go live, managed',
+    desc: 'We launch the pilot alongside you and stay hands-on for support and tuning.',
   },
 ];
 
-const PLANS = [
-  { name: 'Starter', price: 39, features: ['AI Agent', '500 AI turns/mo', '100 call mins/mo', 'WhatsApp inbox'] },
+// The three ratified founding-pilot offers. Prices must stay in sync with
+// the approved Claim Register enforced by lib/claim-guard.ts — do not add
+// or change a figure here without updating RATIFIED_EC_AMOUNTS there too.
+const OFFERS = [
   {
-    name: 'Growth',
-    price: 89,
-    features: ['2 000 AI turns/mo', '500 call mins/mo', 'CRM integration', 'Priority queue'],
-    highlight: true,
+    name: 'Managed SBL',
+    setup: 'EC$750 setup',
+    setupNote: 'billed as two EC$375 installments — before work, then on acceptance',
+    monthly: 'EC$249/mo',
+    desc: 'A fully managed WhatsApp Business Line, set up and supported by our team end to end.',
   },
-  { name: 'Pro', price: 179, features: ['Unlimited AI turns', '2 000 call mins/mo', 'Multi-agent', 'Dedicated support'] },
+  {
+    name: 'WA-Receptionist',
+    setup: 'EC$250 setup',
+    monthly: 'EC$149/mo',
+    desc: 'A trained WhatsApp concierge that greets your customers and routes them to the right place.',
+  },
+  {
+    name: 'PBX-Upgrade',
+    setup: 'EC$250 setup',
+    monthly: 'EC$99/mo',
+    desc: "A managed upgrade to your business's existing phone system.",
+  },
 ];
 
 function LandingPage() {
@@ -87,31 +109,31 @@ function LandingPage() {
       <section className="flex flex-1 flex-col items-center justify-center px-6 py-20 text-center">
         <div className="max-w-2xl">
           <Badge variant="secondary" className="mb-6">
-            Multi-tenant AI business platform
+            Founding pilot · by application
           </Badge>
           <h1 className="mb-6 text-4xl font-extrabold leading-[1.05] tracking-tighter sm:text-6xl">
-            WhatsApp AI that
+            A WhatsApp concierge for your business
             <br />
-            <span className="text-primary">actually converts</span>
+            <span className="text-primary">built and run by our team</span>
           </h1>
           <p className="mx-auto mb-10 max-w-lg text-lg leading-relaxed text-muted-foreground">
-            Isola gives every business on your network an AI agent trained on their knowledge
-            base — deployed on WhatsApp in minutes.
+            Isola's founding pilots are hands-on, not self-serve. We set it up, train it on your
+            business, and manage it with you — starting with a short application on WhatsApp.
           </p>
           <div className="flex flex-wrap justify-center gap-3">
             <Button asChild size="lg">
-              <a href="/auth/login?returnTo=/api/provision">
-                Get started free <ArrowRight className="size-4" />
+              <a href={APPLY_URL} target="_blank" rel="noopener noreferrer">
+                Apply for a founding pilot <ArrowRight className="size-4" />
               </a>
             </Button>
           </div>
         </div>
       </section>
 
-      {/* Features */}
+      {/* How it works */}
       <section className="mx-auto w-full max-w-5xl border-t px-6 py-16 sm:px-10">
         <div className="grid gap-6 sm:grid-cols-3">
-          {FEATURES.map((f) => (
+          {HOW_IT_WORKS.map((f) => (
             <Card key={f.title} className="p-6">
               <f.icon className="mb-3 size-7 text-primary" />
               <div className="mb-1.5 text-[15px] font-bold">{f.title}</div>
@@ -121,34 +143,26 @@ function LandingPage() {
         </div>
       </section>
 
-      {/* Plans */}
+      {/* Offers */}
       <section className="mx-auto w-full max-w-5xl border-t px-6 py-16 sm:px-10">
         <h2 className="mb-8 text-center text-2xl font-bold tracking-tight sm:text-3xl">
-          Transparent pricing
+          Founding pilot offers
         </h2>
         <div className="grid gap-6 sm:grid-cols-3">
-          {PLANS.map((p) => (
-            <Card
-              key={p.name}
-              className={`relative p-6 ${p.highlight ? 'border-primary shadow-[0_0_0_1px_hsl(var(--primary))]' : ''}`}
-            >
-              {p.highlight && (
-                <Badge className="absolute -top-2.5 left-5" variant="secondary">
-                  Most popular
-                </Badge>
+          {OFFERS.map((o) => (
+            <Card key={o.name} className="flex flex-col p-6">
+              <div className="mb-1 text-base font-bold">{o.name}</div>
+              <div className="mb-1 text-2xl font-extrabold tracking-tight">{o.monthly}</div>
+              <div className="mb-1 text-[13px] font-medium text-muted-foreground">{o.setup}</div>
+              {o.setupNote && (
+                <div className="mb-3 text-[12px] leading-relaxed text-muted-foreground">{o.setupNote}</div>
               )}
-              <div className="mb-1 text-base font-bold">{p.name}</div>
-              <div className="mb-4 text-3xl font-extrabold tracking-tight">
-                EC${p.price}
-                <span className="text-[13px] font-medium text-muted-foreground">/mo</span>
-              </div>
-              <ul className="flex flex-col gap-2">
-                {p.features.map((f) => (
-                  <li key={f} className="flex items-center gap-2 text-[13px] text-muted-foreground">
-                    <Check className="size-3.5 text-primary" /> {f}
-                  </li>
-                ))}
-              </ul>
+              <p className="mb-4 flex-1 text-[13px] leading-relaxed text-muted-foreground">{o.desc}</p>
+              <Button asChild variant="outline" size="sm">
+                <a href={APPLY_URL} target="_blank" rel="noopener noreferrer">
+                  Apply for a founding pilot
+                </a>
+              </Button>
             </Card>
           ))}
         </div>
