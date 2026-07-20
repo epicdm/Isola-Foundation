@@ -37,8 +37,12 @@
  *
  * All other events: 200 no-op.
  *
- * Account isolation: looks up ChatwootBinding WHERE mode='a2'; unknown
- * account_ids return 200 immediately so Wave-A tenants are untouched.
+ * Inbox isolation: looks up ChatwootBinding WHERE mode='a2' by inbox_id (not
+ * account_id — Chatwoot inbox ids are unique platform-wide, and multiple A2
+ * tenants can share one Chatwoot account, so account-only lookup is
+ * ambiguous — see the resolution block below for the 2026-07-01 incident
+ * this mirrors from bff-v2). Unknown inbox_ids return 200 immediately so
+ * Wave-A tenants and unrelated inboxes are untouched.
  *
  * ── P0 (2026-07-15): cross-path double-reply ──────────────────────────────
  * A single inbound WhatsApp message to number 9043 produced TWO AI replies.
@@ -191,17 +195,35 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
   }
 
   // ── Resolve A2 tenant via ChatwootBinding ─────────────────────────────────
+  // Resolve by the SPECIFIC Chatwoot inbox this event came from — not by
+  // account id alone. Multiple tenants can share one Chatwoot account (e.g.
+  // several A2 tenants live on account 5), so accountId-only lookup is
+  // ambiguous and can silently resolve to the wrong tenant's agent/token.
+  // Matches the fix bff-v2 already shipped after a live incident (2026-07-01:
+  // 295-6737 and EMA shared account 5; accountId-only resolution there picked
+  // the wrong tenant's stale token). Chatwoot inbox ids are unique platform-
+  // wide, so inbox_id alone is a safe, unambiguous lookup key.
+  const inboxId: string | null =
+    conv.inbox_id != null ? String(conv.inbox_id) :
+    body.inbox_id != null  ? String(body.inbox_id)  : null;
+  if (!inboxId) {
+    console.warn('[agent-bot] message_created missing inbox_id — cannot safely resolve tenant, ignoring');
+    return 200;
+  }
   const binding = await prisma.chatwootBinding.findFirst({
-    where: { account_id: accountId, mode: 'a2' },
+    where: { inbox_id: inboxId, mode: 'a2' },
     include: {
       tenant: {
         include: { agents: true, users: { where: { agent_took_over: true } } },
       },
+      // Per-inbox agent override (S4): when agent_id is set on the binding,
+      // use that specific agent instead of tenant.agents[0]. Null → unchanged behaviour.
+      agent: true,
     },
   });
   if (!binding) {
-    // Not an A2 account we manage — ack and ignore (isolation guarantee)
-    console.log('[agent-bot] No A2 binding for account', accountId, '— no-op');
+    // Not an A2 inbox we manage — ack and ignore (isolation guarantee)
+    console.log('[agent-bot] No A2 binding for inbox', inboxId, '(account', accountId + ') — no-op');
     return 200;
   }
 
@@ -298,8 +320,10 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
   }
 
   // ── Agent config ──────────────────────────────────────────────────────────
-  const agent = tenant.agents[0];
-  if (!agent?.is_active) {
+  // S4: if this inbox has a pinned agent_id, use that agent directly;
+  // otherwise fall back to the tenant's first agent (existing behaviour).
+  const agent = (binding as any).agent ?? tenant.agents[0];
+  if (!agent || !agent.is_active) {
     console.log('[agent-bot] No active agent for tenant', tenantId);
     return 200;
   }
@@ -380,22 +404,76 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
       select: { phone_number_id: true },
     });
 
+    // Resolve the Clawith identity only when actually needed.
+    // S4 two-level lookup:
+    //   1. Per-agent binding — ClawithBinding WHERE agent_id = agent.id (unique index).
+    //      Lets two agents on the same tenant dispatch to different Clawith identities.
+    //   2. Per-tenant fallback — ClawithBinding WHERE tenant_id = tenantId AND agent_id IS NULL.
+    //      Exactly the current behaviour when no per-agent row exists.
+    const brainProvider: string = (agent as any).brain_provider ?? 'native';
+    let clawithBindingRow: { clawith_agent_id: string; paperclip_agent_id: string; paperclip_company_id: string } | null = null;
+    let odooBindingRow: { url: string; db: string; login: string | null; api_key_enc: string } | null = null;
+    if (brainProvider === 'clawith') {
+      // 1. Agent-specific binding (new)
+      clawithBindingRow = await prisma.clawithBinding.findUnique({
+        where: { agent_id: agent.id },
+      });
+      // 2. Tenant-level fallback (existing behaviour — agent_id IS NULL rows)
+      if (!clawithBindingRow) {
+        clawithBindingRow = await prisma.clawithBinding.findFirst({
+          where: { tenant_id: tenantId, agent_id: null },
+        });
+      }
+
+      // Resolve the tenant's Odoo binding so Clawith uses the tenant's own
+      // Odoo connection instead of its hardcoded sandbox credentials.
+      // Omitted entirely when no binding exists — Clawith falls back to sandbox.
+      odooBindingRow = await prisma.odooBinding.findUnique({
+        where: { tenant_id: tenantId },
+        select: { url: true, db: true, login: true, api_key_enc: true },
+      });
+    }
+
+    // Decrypt the Odoo API key outside the try/catch so a decryption failure
+    // surfaces clearly rather than being swallowed as an AI error.
+    let odooBindingInput: import('@/lib/brain-provider').OdooBindingInput | null = null;
+    if (odooBindingRow) {
+      const { decryptSecret } = await import('@/lib/tenant-secrets');
+      odooBindingInput = {
+        url:      odooBindingRow.url,
+        db:       odooBindingRow.db,
+        login:    odooBindingRow.login,
+        password: decryptSecret(odooBindingRow.api_key_enc),
+      };
+    }
+
+    let needsHandoff = false;
+
     try {
       const result = await generateReply({
         agent: {
           intelligence_tier: agent.intelligence_tier,
-          brain_provider:    (agent as any).brain_provider ?? 'native',
+          brain_provider:    brainProvider,
           flowise_flow_id:   (agent as any).flowise_flow_id ?? null,
         },
         system:    buildSystemPrompt(agent),
         messages:  aiMessages,
-        sessionId: conversation.id, // stable per-conversation key for Flowise memory
+        sessionId: conversation.id, // stable per-conversation key for Flowise/Clawith memory
         phoneNumberId: waNumberForHermesGate?.phone_number_id ?? '',
         senderPhone: customerPhone,
+        clawithBinding: clawithBindingRow
+          ? {
+              clawith_agent_id:     clawithBindingRow.clawith_agent_id,
+              paperclip_agent_id:   clawithBindingRow.paperclip_agent_id,
+              paperclip_company_id: clawithBindingRow.paperclip_company_id,
+            }
+          : null,
+        odooBinding: odooBindingInput,
       });
-      reply      = result.text;
-      tokensUsed = result.tokensUsed;
-      model      = result.model;
+      reply       = result.text;
+      tokensUsed  = result.tokensUsed;
+      model       = result.model;
+      needsHandoff = result.needsHandoff === true;
     } catch (err: any) {
       console.error('[agent-bot] AI error:', err?.message ?? err);
       return 200; // do not reply with an error message
@@ -433,6 +511,15 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
       // Don't return error — the dedup row is already claimed; avoid retrigger
     } else {
       console.log(`[agent-bot] Reply posted to conv cw#${cwConvId} for account ${accountId}`);
+    }
+
+    // ── Surface handoff (Clawith needs_handoff) — INTO Chatwoot, not a separate ping ──
+    // Conversation.human_handling remains the ONLY gate on whether the bot may
+    // keep replying (set true exclusively by an actual human reply, above).
+    // This is a visibility signal for a human to look, not a silence switch —
+    // the bot still answers subsequent messages unless/until a human replies.
+    if (needsHandoff && botToken) {
+      await surfaceHandoff(baseUrl, accountId, cwConvId, botToken);
     }
 
     // ── Meter tokens ─────────────────────────────────────────────────────────
@@ -506,6 +593,76 @@ async function toggleConvStatus(
   } catch (e: any) {
     console.warn('[agent-bot] toggle_status error:', e?.message);
   }
+}
+
+/**
+ * Surfaces a brain's needs_handoff signal (currently only Clawith emits this)
+ * INTO Chatwoot for a human to notice — never a separate owner ping. Three
+ * best-effort actions, each independently caught so one failing never blocks
+ * the others or the caller: a private note (visible to human agents only,
+ * never sent to the customer), a label, and a status toggle to 'open' — the
+ * SAME status value the outgoing-reply handler above uses when a human
+ * actually takes over, i.e. "needs a human's eyes". This never touches
+ * Conversation.human_handling; that flag stays the single authority for
+ * whether the bot may keep replying (see file header).
+ */
+const HANDOFF_LABEL = 'ai-handoff';
+
+async function surfaceHandoff(
+  baseUrl:   string,
+  accountId: string,
+  cwConvId:  number,
+  botToken:  string,
+): Promise<void> {
+  try {
+    const noteRes = await fetch(
+      `${baseUrl}/api/v1/accounts/${accountId}/conversations/${cwConvId}/messages`,
+      {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', api_access_token: botToken },
+        body:    JSON.stringify({
+          content:      '🤖 Clawith flagged this conversation for human review.',
+          message_type: 'outgoing',
+          private:      true,
+        }),
+        signal: AbortSignal.timeout(10000),
+      },
+    );
+    if (!noteRes.ok) {
+      console.warn(`[agent-bot] handoff private note failed (${noteRes.status}):`, await noteRes.text().catch(() => ''));
+    }
+  } catch (e: any) {
+    console.warn('[agent-bot] handoff private note error:', e?.message);
+  }
+
+  try {
+    // Chatwoot's label endpoint REPLACES the conversation's full label set —
+    // fetch the existing set first so this only adds, never clobbers.
+    const getRes = await fetch(
+      `${baseUrl}/api/v1/accounts/${accountId}/conversations/${cwConvId}/labels`,
+      { headers: { api_access_token: botToken }, signal: AbortSignal.timeout(10000) },
+    );
+    const existing: string[] = getRes.ok ? ((await getRes.json().catch(() => ({})))?.payload ?? []) : [];
+    if (!existing.includes(HANDOFF_LABEL)) {
+      const labelRes = await fetch(
+        `${baseUrl}/api/v1/accounts/${accountId}/conversations/${cwConvId}/labels`,
+        {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json', api_access_token: botToken },
+          body:    JSON.stringify({ labels: [...existing, HANDOFF_LABEL] }),
+          signal:  AbortSignal.timeout(10000),
+        },
+      );
+      if (!labelRes.ok) {
+        console.warn(`[agent-bot] handoff label failed (${labelRes.status}):`, await labelRes.text().catch(() => ''));
+      }
+    }
+  } catch (e: any) {
+    console.warn('[agent-bot] handoff label error:', e?.message);
+  }
+
+  await toggleConvStatus(baseUrl, accountId, cwConvId, 'open', botToken);
+  console.log(`[agent-bot] Handoff surfaced for conv cw#${cwConvId}`);
 }
 
 /**

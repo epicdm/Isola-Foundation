@@ -31,6 +31,7 @@ import {
   EMA_CHATWOOT_BASE_URL,
   EMA_CHATWOOT_ACCOUNT_ID,
   EMA_CHATWOOT_INBOX_ID,
+  EMA_CLAWITH_AGENT_ID,
 } from '@/lib/ema-sales-seed-data';
 import {
   EPIC_MAIN_PHONE_NUMBER_ID,
@@ -47,10 +48,6 @@ export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
   const { default: prisma } = await import('@/lib/prisma');
-
-  // Schema migrations first — idempotent ALTER TABLE statements so production
-  // (neondb) stays in sync without a separate migration runner.
-  await runMigrations(prisma);
 
   // Resolve admin tenant once; both seeds need it
   const adminTenantId = await resolveAdminTenantId(prisma);
@@ -73,95 +70,15 @@ export async function register() {
   // 'hermes') and ship as code instead of a raw SQL edit against production.
   await flipEmaSalesToHermesOnce(prisma, adminTenantId);
   await flipEpicToHermesOnce(prisma, adminTenantId);
+
+  // v1.11.0 Clawith cutover — EMA (0001) only. Runs last so it always wins
+  // over flipEmaSalesToHermesOnce within the same cold start. Gated at the
+  // routing layer too: ISOLA_BRIDGE_ALLOWED_PHONE_NUMBER_IDS in
+  // lib/brain-provider.ts is the real safety boundary.
+  await flipEmaSalesToClawithOnce(prisma, adminTenantId);
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-/**
- * Idempotent schema migrations using raw SQL. Runs on every cold start so
- * production (neondb) stays in sync with schema.prisma without a separate
- * migration runner or CI step. ADD COLUMN IF NOT EXISTS is always safe to
- * re-run; it is a no-op when the column already exists.
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function runMigrations(prisma: any) {
-  try {
-    await prisma.$executeRawUnsafe(
-      `ALTER TABLE "Conversation" ADD COLUMN IF NOT EXISTS human_handling BOOLEAN NOT NULL DEFAULT FALSE;`,
-    );
-    await prisma.$executeRawUnsafe(
-      `ALTER TABLE "Message" ADD COLUMN IF NOT EXISTS chatwoot_message_id INTEGER;`,
-    );
-    // Add unique index separately so IF NOT EXISTS works on older Postgres versions
-    await prisma.$executeRawUnsafe(
-      `CREATE UNIQUE INDEX IF NOT EXISTS "Message_chatwoot_message_id_key" ON "Message"(chatwoot_message_id) WHERE chatwoot_message_id IS NOT NULL;`,
-    );
-    // Inbound dedup: unique index on Meta wamid so duplicate deliveries are caught
-    // at the DB level (P2002) before the AI is called.
-    await prisma.$executeRawUnsafe(
-      `CREATE UNIQUE INDEX IF NOT EXISTS "Message_wa_message_id_key" ON "Message"(wa_message_id) WHERE wa_message_id IS NOT NULL;`,
-    );
-    // P0 (2026-07-15): cross-path inbound dedup, keyed ONLY on Meta's wamid,
-    // independent of Tenant/Conversation/routing-path. Closes the gap where
-    // Message.wa_message_id (direct WA webhook path) and
-    // Message.chatwoot_message_id (Chatwoot agent-bot path) are different
-    // local keys, so the same physical Meta message reaching both paths
-    // produced two AI replies. See lib/inbound-dedup.ts.
-    await prisma.$executeRawUnsafe(`
-      CREATE TABLE IF NOT EXISTS "InboundDedup" (
-        id         TEXT PRIMARY KEY,
-        message_id TEXT NOT NULL,
-        created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    await prisma.$executeRawUnsafe(
-      `CREATE UNIQUE INDEX IF NOT EXISTS "InboundDedup_message_id_key" ON "InboundDedup"(message_id);`,
-    );
-    // A2 mode: ChatwootBinding.mode column distinguishes mirror (Wave A) from
-    // a2 (Chatwoot owns WA channel, this app is the AI brain).
-    await prisma.$executeRawUnsafe(
-      `ALTER TABLE "ChatwootBinding" ADD COLUMN IF NOT EXISTS mode VARCHAR(20) NOT NULL DEFAULT 'mirror';`,
-    );
-    // After-hours away message: sent verbatim instead of silence during off-hours.
-    await prisma.$executeRawUnsafe(
-      `ALTER TABLE "Agent" ADD COLUMN IF NOT EXISTS away_message TEXT NOT NULL DEFAULT '';`,
-    );
-    // Brain-provider abstraction: per-agent choice of reply runtime (native Claude
-    // vs external self-hosted Flowise flow). Default 'native' for every existing row.
-    await prisma.$executeRawUnsafe(
-      `ALTER TABLE "Agent" ADD COLUMN IF NOT EXISTS brain_provider VARCHAR(20) NOT NULL DEFAULT 'native';`,
-    );
-    await prisma.$executeRawUnsafe(
-      `ALTER TABLE "Agent" ADD COLUMN IF NOT EXISTS flowise_flow_id TEXT;`,
-    );
-    // P6: EMA landing page funnel attribution — standalone table, no FKs.
-    await prisma.$executeRawUnsafe(`
-      CREATE TABLE IF NOT EXISTS "ConsumerLead" (
-        id            TEXT PRIMARY KEY,
-        phone_number  TEXT,
-        utm_source    TEXT,
-        utm_medium    TEXT,
-        utm_campaign  TEXT,
-        utm_term      TEXT,
-        utm_content   TEXT,
-        referrer      TEXT,
-        landing_path  TEXT,
-        cta           TEXT,
-        odoo_lead_id  INTEGER,
-        created_at    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    await prisma.$executeRawUnsafe(
-      `CREATE INDEX IF NOT EXISTS "ConsumerLead_created_at_idx" ON "ConsumerLead"(created_at);`,
-    );
-    await prisma.$executeRawUnsafe(
-      `CREATE INDEX IF NOT EXISTS "ConsumerLead_utm_source_utm_campaign_idx" ON "ConsumerLead"(utm_source, utm_campaign);`,
-    );
-    console.log('[instrumentation] Schema migrations applied');
-  } catch (err) {
-    console.error('[instrumentation] Migration error:', err);
-  }
-}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function resolveAdminTenantId(prisma: any): Promise<string | null> {
@@ -225,18 +142,25 @@ async function seedDefaultAgent(prisma: any, adminTenantId: string | null) {
   }
 
   try {
-    await prisma.agent.upsert({
+    // NOT prisma.agent.upsert({where:{tenant_id}}) — Agent.tenant_id lost its
+    // unique constraint in 9b1b9f7 (S4: one tenant can own multiple agents).
+    // See seedEmaSalesAgent below for the full rationale.
+    const existingDefaultAgent = await prisma.agent.findFirst({
       where: { tenant_id: adminTenantId },
-      create: {
-        tenant_id:         adminTenantId,
-        name:              'Isola Assistant',
-        greeting:          'Hello! How can I help you today?',
-        business_info:     'EPIC Communications — multi-tenant WhatsApp AI platform serving Dominica.',
-        intelligence_tier: 'advanced',  // claude-sonnet for admin/test tenant
-        is_active:         true,
-      },
-      update: {}, // idempotent — don't overwrite if owner has customised it
+      select: { id: true },
     });
+    if (!existingDefaultAgent) {
+      await prisma.agent.create({
+        data: {
+          tenant_id:         adminTenantId,
+          name:              'Isola Assistant',
+          greeting:          'Hello! How can I help you today?',
+          business_info:     'EPIC Communications — multi-tenant WhatsApp AI platform serving Dominica.',
+          intelligence_tier: 'advanced',  // claude-sonnet for admin/test tenant
+          is_active:         true,
+        },
+      });
+    } // idempotent — don't overwrite if owner has customised it
     console.log('[instrumentation] Default agent ensured for tenant', adminTenantId);
   } catch (err) {
     console.error('[instrumentation] Default agent seed error:', err);
@@ -307,51 +231,74 @@ async function seedWaveBTenants(prisma: any) {
       // intelligence_tier, brain_provider) are only set on create so an operator
       // override persists. flowise_flow_id is synced from source (it's a fixed
       // test-fixture reference, not something an operator hand-edits per tenant).
-      await prisma.agent.upsert({
-        where:  { tenant_id: soul.tenantId },
-        create: {
-          tenant_id:         soul.tenantId,
-          name:              soul.agentName,
-          greeting:          soul.greeting,
-          business_info:     soul.businessInfo,
-          knowledge_text:    soul.knowledgeText,
-          away_message:      soul.awayMessage,
-          intelligence_tier: 'standard',
-          after_hours_start: soul.afterHoursStart,
-          after_hours_end:   soul.afterHoursEnd,
-          timezone:          soul.timezone,
-          is_active:         true,
-          brain_provider:    'native',
-          flowise_flow_id:   soul.flowiseFlowId ?? null,
-        },
-        update: {
-          // Soul-derived fields: always sync from source so typo-fixes and content
-          // updates propagate automatically on next cold start.
-          name:              soul.agentName,
-          greeting:          soul.greeting,
-          business_info:     soul.businessInfo,
-          knowledge_text:    soul.knowledgeText,
-          away_message:      soul.awayMessage,
-          after_hours_start: soul.afterHoursStart,
-          after_hours_end:   soul.afterHoursEnd,
-          timezone:          soul.timezone,
-          flowise_flow_id:   soul.flowiseFlowId ?? null,
-        },
+      // NOT prisma.agent.upsert({where:{tenant_id}}) — Agent.tenant_id lost
+      // its unique constraint in 9b1b9f7 (S4: one tenant can own multiple
+      // agents). See seedEmaSalesAgent below for the full rationale.
+      const existingWaveBAgent = await prisma.agent.findFirst({
+        where: { tenant_id: soul.tenantId },
+        select: { id: true },
       });
+      if (!existingWaveBAgent) {
+        await prisma.agent.create({
+          data: {
+            tenant_id:         soul.tenantId,
+            name:              soul.agentName,
+            greeting:          soul.greeting,
+            business_info:     soul.businessInfo,
+            knowledge_text:    soul.knowledgeText,
+            away_message:      soul.awayMessage,
+            intelligence_tier: 'standard',
+            after_hours_start: soul.afterHoursStart,
+            after_hours_end:   soul.afterHoursEnd,
+            timezone:          soul.timezone,
+            is_active:         true,
+            brain_provider:    'native',
+            flowise_flow_id:   soul.flowiseFlowId ?? null,
+          },
+        });
+      } else {
+        await prisma.agent.update({
+          where: { id: existingWaveBAgent.id },
+          data: {
+            // Soul-derived fields: always sync from source so typo-fixes and content
+            // updates propagate automatically on next cold start.
+            name:              soul.agentName,
+            greeting:          soul.greeting,
+            business_info:     soul.businessInfo,
+            knowledge_text:    soul.knowledgeText,
+            away_message:      soul.awayMessage,
+            after_hours_start: soul.afterHoursStart,
+            after_hours_end:   soul.afterHoursEnd,
+            timezone:          soul.timezone,
+            flowise_flow_id:   soul.flowiseFlowId ?? null,
+          },
+        });
+      }
 
       // 3. ChatwootBinding (mode='a2') — the ONLY routing key for A2 tenants
-      await prisma.chatwootBinding.upsert({
-        where:  { tenant_id: soul.tenantId },
-        create: {
-          tenant_id:  soul.tenantId,
-          base_url:   'https://inbox.epic.dm',
-          account_id: soul.chatwootAccountId,
-          token:      '',                   // A2: uses CHATWOOT_AGENTBOT_TOKEN env var
-          inbox_id:   soul.chatwootInboxId,
-          mode:       'a2',
-        },
-        update: { mode: 'a2' }, // ensure mode is always 'a2' on re-run
+      // NOT prisma.chatwootBinding.upsert({where:{tenant_id}}) —
+      // ChatwootBinding.tenant_id is not unique either (same S4 change).
+      const existingWaveBBinding = await prisma.chatwootBinding.findFirst({
+        where: { tenant_id: soul.tenantId },
+        select: { id: true },
       });
+      if (!existingWaveBBinding) {
+        await prisma.chatwootBinding.create({
+          data: {
+            tenant_id:  soul.tenantId,
+            base_url:   'https://inbox.epic.dm',
+            account_id: soul.chatwootAccountId,
+            token:      '',                   // A2: uses CHATWOOT_AGENTBOT_TOKEN env var
+            inbox_id:   soul.chatwootInboxId,
+            mode:       'a2',
+          },
+        });
+      } else {
+        await prisma.chatwootBinding.update({
+          where: { id: existingWaveBBinding.id },
+          data: { mode: 'a2' }, // ensure mode is always 'a2' on re-run
+        });
+      }
 
       console.log(`[instrumentation] Wave B tenant seeded: ${soul.agentName} (${soul.tenantId})`);
     } catch (err) {
@@ -386,26 +333,44 @@ async function seedEmaSalesAgent(prisma: any) {
       update: {}, // never overwrite plan/status once set
     });
 
-    await prisma.agent.upsert({
+    // NOT prisma.agent.upsert({where:{tenant_id}}) — Agent.tenant_id lost its
+    // unique constraint in 9b1b9f7 (S4: one tenant can own multiple agents),
+    // and that migration was applied to helium via db execute but never
+    // added to runMigrations() below, so neon (this DATABASE_URL) never got
+    // it either way the constraint is gone here (confirmed live 2026-07-18:
+    // the upsert's ON CONFLICT throws Postgres 42P10 on every cold start).
+    // 9b1b9f7 converted the two flip helpers below to find-then-create/update
+    // but missed this seed's own upsert — this had been silently broken on
+    // every cold start, which is why ema_sales_tenant never got an Agent row.
+    const existingEmaAgent = await prisma.agent.findFirst({
       where: { tenant_id: EMA_SALES_TENANT_ID },
-      create: {
-        tenant_id: EMA_SALES_TENANT_ID,
-        name: 'EMA',
-        greeting: EMA_SALES_GREETING,
-        business_info: EMA_SALES_BUSINESS_INFO,
-        knowledge_text: EMA_SALES_KNOWLEDGE_TEXT,
-        intelligence_tier: 'standard',
-        is_active: true,
-        brain_provider: 'native',
-      },
-      update: {
-        // Soul-derived fields sync from source; operational fields untouched.
-        name: 'EMA',
-        greeting: EMA_SALES_GREETING,
-        business_info: EMA_SALES_BUSINESS_INFO,
-        knowledge_text: EMA_SALES_KNOWLEDGE_TEXT,
-      },
+      select: { id: true },
     });
+    if (!existingEmaAgent) {
+      await prisma.agent.create({
+        data: {
+          tenant_id: EMA_SALES_TENANT_ID,
+          name: 'EMA',
+          greeting: EMA_SALES_GREETING,
+          business_info: EMA_SALES_BUSINESS_INFO,
+          knowledge_text: EMA_SALES_KNOWLEDGE_TEXT,
+          intelligence_tier: 'standard',
+          is_active: true,
+          brain_provider: 'native',
+        },
+      });
+    } else {
+      await prisma.agent.update({
+        where: { id: existingEmaAgent.id },
+        data: {
+          // Soul-derived fields sync from source; operational fields untouched.
+          name: 'EMA',
+          greeting: EMA_SALES_GREETING,
+          business_info: EMA_SALES_BUSINESS_INFO,
+          knowledge_text: EMA_SALES_KNOWLEDGE_TEXT,
+        },
+      });
+    }
 
     // Direct-webhook routing row ONLY — no ChatwootBinding. This number's
     // WABA (272252189309178) already has the EPIC_BFF_test app's webhook
@@ -467,26 +432,38 @@ async function seedEmaSalesChatwootBinding(prisma: any) {
   }
 
   try {
-    await prisma.chatwootBinding.upsert({
+    // NOT prisma.chatwootBinding.upsert({where:{tenant_id}}) —
+    // ChatwootBinding.tenant_id is not unique (S4 change, see
+    // seedEmaSalesAgent above for the full rationale).
+    const existingEmaBinding = await prisma.chatwootBinding.findFirst({
       where: { tenant_id: EMA_SALES_TENANT_ID },
-      create: {
-        tenant_id: EMA_SALES_TENANT_ID,
-        base_url: EMA_CHATWOOT_BASE_URL,
-        account_id: EMA_CHATWOOT_ACCOUNT_ID,
-        token,
-        inbox_id: EMA_CHATWOOT_INBOX_ID,
-        mode: 'a2',
-      },
-      update: {
-        // Resync from env/secret on every cold start — e.g. if the token
-        // rotates — no manual DB patch needed.
-        base_url: EMA_CHATWOOT_BASE_URL,
-        account_id: EMA_CHATWOOT_ACCOUNT_ID,
-        token,
-        inbox_id: EMA_CHATWOOT_INBOX_ID,
-        mode: 'a2',
-      },
+      select: { id: true },
     });
+    if (!existingEmaBinding) {
+      await prisma.chatwootBinding.create({
+        data: {
+          tenant_id: EMA_SALES_TENANT_ID,
+          base_url: EMA_CHATWOOT_BASE_URL,
+          account_id: EMA_CHATWOOT_ACCOUNT_ID,
+          token,
+          inbox_id: EMA_CHATWOOT_INBOX_ID,
+          mode: 'a2',
+        },
+      });
+    } else {
+      await prisma.chatwootBinding.update({
+        where: { id: existingEmaBinding.id },
+        data: {
+          // Resync from env/secret on every cold start — e.g. if the token
+          // rotates — no manual DB patch needed.
+          base_url: EMA_CHATWOOT_BASE_URL,
+          account_id: EMA_CHATWOOT_ACCOUNT_ID,
+          token,
+          inbox_id: EMA_CHATWOOT_INBOX_ID,
+          mode: 'a2',
+        },
+      });
+    }
     console.log(
       '[instrumentation] EMA Chatwoot binding active — tenant',
       EMA_SALES_TENANT_ID,
@@ -574,20 +551,24 @@ async function seedEpicWhatsAppNumbers(prisma: any, adminTenantId: string | null
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function flipEmaSalesToHermesOnce(prisma: any, adminTenantId: string | null) {
   try {
-    const agent = await prisma.agent.findUnique({
+    const agent = await prisma.agent.findFirst({
       where: { tenant_id: EMA_SALES_TENANT_ID },
-      select: { brain_provider: true },
+      select: { id: true, brain_provider: true },
     });
     if (!agent) {
       console.warn('[instrumentation] EMA sales agent not found — hermes flip deferred');
       return;
     }
-    if (agent.brain_provider === 'hermes') {
-      return; // already flipped — no-op
+    if (agent.brain_provider !== 'native') {
+      // Already flipped past native — no-op. Not just "!== 'hermes'": a
+      // later, more specific flip (flipEmaSalesToClawithOnce) may have since
+      // moved this tenant past hermes, and this one-time flip must not
+      // clobber that on the next cold start.
+      return;
     }
 
     await prisma.agent.update({
-      where: { tenant_id: EMA_SALES_TENANT_ID },
+      where: { id: agent.id },
       data: { brain_provider: 'hermes' },
     });
 
@@ -607,6 +588,90 @@ async function flipEmaSalesToHermesOnce(prisma: any, adminTenantId: string | nul
 }
 
 /**
+ * v1.11.0 cutover: EMA sales Agent.brain_provider → 'clawith', wired to the
+ * new Isola bridge. Creates/refreshes the ClawithBinding row for
+ * EMA_SALES_TENANT_ID (clawith_agent_id = EMA_CLAWITH_AGENT_ID, pinned via
+ * agent_id to the Agent created by seedEmaSalesAgent above; the paperclip_*
+ * columns are leftovers from the legacy dispatch contract, unused by the
+ * bridge, left empty). Ships as code (prisma calls + the same audit() call
+ * the admin PATCH route uses) rather than a raw SQL edit against production,
+ * per this project's established convention.
+ *
+ * Deliberately NOT prisma.clawithBinding.upsert({where:{tenant_id}}) — same
+ * reasoning as the Agent fix in seedEmaSalesAgent above: ClawithBinding.
+ * tenant_id is not unique either (schema.prisma: `tenant_id String` +
+ * `@@index([tenant_id])`, since a tenant can have multiple agents/bindings
+ * post-S4), so upsert's ON CONFLICT would throw the same 42P10. This
+ * find-then-create/update needs no DB-level unique constraint.
+ *
+ * The REAL safety boundary for this cutover is
+ * ISOLA_BRIDGE_ALLOWED_PHONE_NUMBER_IDS in lib/brain-provider.ts — this flip
+ * only ever touches EMA_SALES_TENANT_ID (phone_number_id 1023804347491554).
+ * It never touches tenant 43b006e4's two already-live clawith numbers (old
+ * clawith_agent_ids 8166ea11.../75ff7811...), which keep routing through
+ * tryClawithLegacy exactly as before. Idempotent — no-ops once the Agent is
+ * already 'clawith' with the target clawith_agent_id already set.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function flipEmaSalesToClawithOnce(prisma: any, adminTenantId: string | null) {
+  try {
+    const agent = await prisma.agent.findFirst({
+      where: { tenant_id: EMA_SALES_TENANT_ID },
+      select: { id: true, brain_provider: true },
+    });
+    if (!agent) {
+      console.warn('[instrumentation] EMA sales agent not found — clawith flip deferred');
+      return;
+    }
+
+    const existingBinding = await prisma.clawithBinding.findFirst({
+      where: { tenant_id: EMA_SALES_TENANT_ID },
+      select: { id: true, clawith_agent_id: true },
+    });
+    if (!existingBinding) {
+      await prisma.clawithBinding.create({
+        data: {
+          tenant_id: EMA_SALES_TENANT_ID,
+          agent_id: agent.id,
+          clawith_agent_id: EMA_CLAWITH_AGENT_ID,
+          paperclip_agent_id: '',
+          paperclip_company_id: '',
+        },
+      });
+      console.log('[instrumentation] EMA ClawithBinding created — tenant', EMA_SALES_TENANT_ID);
+    } else if (existingBinding.clawith_agent_id !== EMA_CLAWITH_AGENT_ID) {
+      await prisma.clawithBinding.update({
+        where: { id: existingBinding.id },
+        data: { clawith_agent_id: EMA_CLAWITH_AGENT_ID },
+      });
+      console.log('[instrumentation] EMA ClawithBinding clawith_agent_id updated — tenant', EMA_SALES_TENANT_ID);
+    }
+
+    if (agent.brain_provider === 'clawith') {
+      return; // already flipped — no-op
+    }
+
+    await prisma.agent.update({
+      where: { id: agent.id },
+      data: { brain_provider: 'clawith' },
+    });
+
+    await audit({
+      tenantId: adminTenantId ?? EMA_SALES_TENANT_ID,
+      actorId: 'instrumentation:flip-ema-sales-clawith',
+      action: 'admin.tenant.update',
+      entity: 'tenant',
+      entityId: EMA_SALES_TENANT_ID,
+      meta: { changes: ['brain_provider'], from: agent.brain_provider, to: 'clawith' },
+    });
+
+    console.log('[instrumentation] EMA sales brain_provider flipped to clawith — tenant', EMA_SALES_TENANT_ID);
+  } catch (err) {
+    console.error('[instrumentation] EMA sales clawith flip error:', err);
+  }
+}
+
+/**
  * One-time production go-live flip: admin/tenant-zero Agent.brain_provider
  * 'native' → 'hermes', for the EPIC main (3742) and FB-linked (1568)
  * numbers. Same rationale and idempotency as flipEmaSalesToHermesOnce()
@@ -622,9 +687,9 @@ async function flipEmaSalesToHermesOnce(prisma: any, adminTenantId: string | nul
 async function flipEpicToHermesOnce(prisma: any, adminTenantId: string | null) {
   if (!adminTenantId) return;
   try {
-    const agent = await prisma.agent.findUnique({
+    const agent = await prisma.agent.findFirst({
       where: { tenant_id: adminTenantId },
-      select: { brain_provider: true },
+      select: { id: true, brain_provider: true },
     });
     if (!agent) {
       console.warn('[instrumentation] EPIC (admin tenant) agent not found — hermes flip deferred');
@@ -635,7 +700,7 @@ async function flipEpicToHermesOnce(prisma: any, adminTenantId: string | null) {
     }
 
     await prisma.agent.update({
-      where: { tenant_id: adminTenantId },
+      where: { id: agent.id },
       data: { brain_provider: 'hermes' },
     });
 

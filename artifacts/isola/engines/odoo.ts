@@ -239,10 +239,12 @@ export async function findOrCreateUtmRecord(
 }
 
 // ── Work-queue task lookup (IL-1 workspace work-queue) ──────────────────────
-// Odoo here is a single EPIC-wide instance (see lib/connector.ts resolveConfig
-// — odoo reads global env config, not a per-tenant binding), so there is no
-// tenant dimension to filter project.task on. Callers must always scope by
-// assignee, never "all tasks", or they will leak another tenant's Odoo data.
+// A tenant may have its own Odoo instance via OdooBinding (see
+// lib/connector.ts resolveConfig / lib/engine-bindings.ts — S2), or fall
+// through to the platform-default env config; either way there is still no
+// tenant dimension on project.task itself to filter by. Callers must always
+// scope by assignee, never "all tasks", or they will leak another tenant's
+// (or another Odoo instance's) data.
 
 export interface OdooTask {
   id: number

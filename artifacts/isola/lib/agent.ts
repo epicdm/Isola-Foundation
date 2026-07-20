@@ -11,7 +11,8 @@
 import { prisma } from './prisma';
 import { TIER_MODELS } from './ai';
 import { generateReply } from './brain-provider';
-import { getWhatsAppConfig, getChatwootConfig } from './engines';
+import { getChatwootConfig } from './engines';
+import { callEngine } from './connector';
 import { meterTokens } from './meter';
 import { claimInboundMessageId } from './inbound-dedup';
 import { EPIC_MAIN_PHONE_NUMBER_ID, EPIC_FB_LINKED_PHONE_NUMBER_ID } from './epic-seed-data';
@@ -27,7 +28,6 @@ const ALWAYS_ON_PHONE_NUMBER_IDS: ReadonlySet<string> = new Set([
 ]);
 
 // Engine clients — imported as-is, not modified
-import { sendText } from '@/engines/whatsapp';
 import {
   upsertContact,
   getContactConversations,
@@ -70,7 +70,7 @@ export async function handleInboundWhatsApp(params: {
       tenant: {
         include: {
           agents: true,
-          chatwoot_binding: true,
+          chatwoot_bindings: true,
         },
       },
     },
@@ -201,8 +201,27 @@ export async function handleInboundWhatsApp(params: {
     }));
 
   // ── 10. Generate reply via the brain-provider socket ──────────────────────
-  // Honors agent.brain_provider (native | flowise | hermes). generateReply()
-  // never throws — any flowise/hermes failure falls back to native inside it.
+  // Honors agent.brain_provider (native | flowise | hermes | clawith). generateReply()
+  // never throws — any flowise/hermes/clawith failure falls back to native inside it.
+  //
+  // Resolve the Clawith identity only when actually needed — same S4 two-level
+  // lookup as the A2 path (app/api/chatwoot/agent-bot/route.ts): per-agent
+  // binding first (ClawithBinding.agent_id, unique), then per-tenant fallback
+  // (ClawithBinding.tenant_id WHERE agent_id IS NULL). Without this, a
+  // direct-webhook tenant flipped to brain_provider='clawith' would call
+  // generateReply() with no clawithBinding and silently fall back to native.
+  let clawithBindingRow: { clawith_agent_id: string; paperclip_agent_id: string; paperclip_company_id: string } | null = null;
+  if (agent.brain_provider === 'clawith') {
+    clawithBindingRow = await prisma.clawithBinding.findUnique({
+      where: { agent_id: agent.id },
+    });
+    if (!clawithBindingRow) {
+      clawithBindingRow = await prisma.clawithBinding.findFirst({
+        where: { tenant_id: tenant.id, agent_id: null },
+      });
+    }
+  }
+
   let reply = '';
   let tokensUsed = 0;
   let replyModel = TIER_MODELS[agent.intelligence_tier] ?? TIER_MODELS['standard'];
@@ -215,6 +234,13 @@ export async function handleInboundWhatsApp(params: {
       sessionId: conversation.id,
       phoneNumberId: waNumber.phone_number_id,
       senderPhone: customerPhone,
+      clawithBinding: clawithBindingRow
+        ? {
+            clawith_agent_id: clawithBindingRow.clawith_agent_id,
+            paperclip_agent_id: clawithBindingRow.paperclip_agent_id,
+            paperclip_company_id: clawithBindingRow.paperclip_company_id,
+          }
+        : null,
     });
     reply = result.text;
     tokensUsed = result.tokensUsed;
@@ -237,45 +263,37 @@ export async function handleInboundWhatsApp(params: {
     },
   });
 
-  // ── 12. Send WhatsApp reply — engine client used as-is ────────────────────
-  // Resolve the outbound token: if token_env is set on the number row, use the
-  // env var it names — but ONLY if the name matches the strict allowlist prefix
-  // (META_* or WHATSAPP_*). This prevents an attacker-controlled token_env value
-  // from reading unrelated process secrets (e.g. SESSION_SECRET, DATABASE_URL).
-  const waConfig = getWhatsAppConfig();
-  const TOKEN_ENV_ALLOWLIST = /^(META_|WHATSAPP_)/;
-  let effectiveToken: string;
-  if (waNumber.token_env) {
-    if (!TOKEN_ENV_ALLOWLIST.test(waNumber.token_env)) {
-      console.error(`[agent] token_env "${waNumber.token_env}" rejected — must start with META_ or WHATSAPP_`);
-      return; // fail-closed: do not send with wrong credentials
+  // ── 12. Send WhatsApp reply — routed through callEngine ───────────────────
+  // resolveConfig() (lib/connector.ts) resolves this tenant's WhatsAppNumber
+  // and its token_env/access_token — the allowlisted-env-var-name check that
+  // used to live here directly now lives there, as the one place every
+  // caller (this file, lib/agent-tools.ts) shares.
+  try {
+    const sendResult = await callEngine(
+      'whatsapp',
+      'sendText',
+      [{ to: from, body: reply }], // Meta expects `to` without leading +
+      {
+        tenant: { tenantId: tenant.id },
+        actorId: `agent:${agent.id}`,
+        whatsappNumberId: waNumber.id,
+        entity: 'conversation',
+        entityId: conversation.id,
+      },
+    );
+    if (!sendResult.ok) {
+      console.error('[agent] WhatsApp send failed:', sendResult.error);
     }
-    const resolved = process.env[waNumber.token_env];
-    if (!resolved) {
-      console.error(`[agent] token_env "${waNumber.token_env}" is set but env var is empty or missing — aborting send`);
-      return; // fail fast rather than send with no token
-    }
-    effectiveToken = resolved;
-  } else {
-    effectiveToken = waNumber.access_token;
-  }
-  const sendResult = await sendText(waConfig, {
-    phoneId: waNumber.phone_number_id,
-    token: effectiveToken,
-    to: from, // Meta expects without leading +
-    body: reply,
-  });
-
-  if (!sendResult.ok) {
-    console.error('[agent] WhatsApp send failed:', sendResult.error);
+  } catch (err: any) {
+    console.error('[agent] WhatsApp send failed:', err?.message ?? err);
   }
 
   // ── 13. Mirror AI reply in Chatwoot ───────────────────────────────────────
   // Use effectiveCwConvId (returned from step 8) so we mirror even on the first
   // turn of a conversation, when conversation.chatwoot_conversation_id was still
   // null in memory but mirrorInbound has since created and persisted the conv id.
-  if (effectiveCwConvId !== null && tenant.chatwoot_binding) {
-    const cwConfig = getChatwootConfig(tenant.chatwoot_binding);
+  if (effectiveCwConvId !== null && tenant.chatwoot_bindings[0]) {
+    const cwConfig = getChatwootConfig(tenant.chatwoot_bindings[0]);
     await addMessage(
       cwConfig,
       effectiveCwConvId,
@@ -373,12 +391,12 @@ async function getOrCreateConversation(params: {
 async function mirrorInbound(
   tenant: {
     id: string;
-    chatwoot_binding: {
+    chatwoot_bindings: {
       base_url: string;
       account_id: string;
       token: string;
       inbox_id: string | null;
-    } | null;
+    }[];
   },
   waNumber: { phone_number_id: string },
   customerPhone: string,
@@ -386,8 +404,12 @@ async function mirrorInbound(
   _waMessageId: string,
   existingChatwootConvId: number | null,
 ): Promise<number | null> {
-  if (!tenant.chatwoot_binding) return null;
-  const cwConfig = getChatwootConfig(tenant.chatwoot_binding);
+  // Wave-A mirror uses the first (and historically only) ChatwootBinding for
+  // the tenant. Multi-binding tenants (S4) route via the A2 agentbot path
+  // which has its own inbox-specific resolution; this fallback is Wave-A only.
+  const chatwootBinding = tenant.chatwoot_bindings[0] ?? null;
+  if (!chatwootBinding) return null;
+  const cwConfig = getChatwootConfig(chatwootBinding);
 
   // Tracked outside try/catch so it can be returned to the caller even if
   // addMessage fails — the conv id is still valid for the AI-reply mirror.
@@ -396,8 +418,8 @@ async function mirrorInbound(
   try {
     const chatwootContactId = await upsertContact(cwConfig, customerPhone);
 
-    if (!effectiveConvId && tenant.chatwoot_binding.inbox_id) {
-      const inboxId = parseInt(tenant.chatwoot_binding.inbox_id, 10);
+    if (!effectiveConvId && chatwootBinding.inbox_id) {
+      const inboxId = parseInt(chatwootBinding.inbox_id, 10);
       const existing = await getContactConversations(cwConfig, chatwootContactId);
       const open = existing.find((c) => c.inbox_id === inboxId && c.status === 'open');
       if (open) {

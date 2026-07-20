@@ -16,6 +16,14 @@ model Tenant {
   plan           String  @default("starter") // starter | growth | pro
   magnus_user_id String? // linked Magnus account id (shared by wallet + voice)
 
+  // Registry classification tag (S1c-2 — additive; nullable, no default).
+  // Distinguishes genuine business tenants from test/duplicate/merged rows
+  // accumulated during onboarding experiments, so downstream consumers
+  // (e.g. the cockpit's tenant list) can filter to tenant_kind = 'real'.
+  // Untagged (null) rows are neither included nor excluded by convention —
+  // tagging is a one-time backfill (S1c-2 Part B), not enforced at write time.
+  tenant_kind String? // real | test | duplicate | merged
+
   // Owner's own WhatsApp number — delivery target for proactive owner
   // notifications (e.g. the missed-call/voicemail-catch WA alert). Mirrors
   // Isola Lite's LiteAccount.ownerPhone. E.164, e.g. +17671234567.
@@ -60,7 +68,11 @@ model Tenant {
   users             User[]
   agents            Agent[]
   whatsapp_numbers  WhatsAppNumber[]
-  chatwoot_binding  ChatwootBinding?
+  chatwoot_bindings ChatwootBinding[]
+  odoo_binding      OdooBinding?
+  fiserv_binding    FiservBinding?
+  bff_binding       BffBinding?
+  clawith_bindings  ClawithBinding[]
   conversations     Conversation[]
   wallet            Wallet?
   wallet_txns       WalletTxn[]
@@ -71,6 +83,7 @@ model Tenant {
   voicemail_catches TenantVoicemailCatch[]
   memberships       Membership[]
   voice_lines       VoiceLine[]
+  approval_requests ApprovalRequest[]
 }
 
 // ── Per-tenant voicemail catches (AI missed-call catcher) ────────────────────
@@ -189,7 +202,7 @@ model User {
 
 model Agent {
   id                String  @id @default(cuid())
-  tenant_id         String  @unique
+  tenant_id         String
   name              String  @default("Isola Assistant")
   greeting          String  @default("Hello! How can I help you today?")
   business_info     String  @default("")
@@ -200,16 +213,22 @@ model Agent {
   away_message      String  @default("") // sent verbatim during after-hours instead of silence
   timezone          String  @default("America/Dominica")
   is_active         Boolean @default(true)
-  brain_provider    String  @default("native") // native | flowise | hermes — which runtime generates replies
+  brain_provider    String  @default("native") // native | flowise | hermes | clawith — which runtime generates replies
   flowise_flow_id   String? // Flowise chatflow id, required when brain_provider="flowise"
   // hermes has no dedicated column: HERMES_AGENT_URL is a single shared env var
   // (not per-tenant), and routing is additionally gated by a hardcoded
   // phone_number_id allowlist in lib/brain-provider.ts — see HERMES_ALLOWED_PHONE_NUMBER_IDS.
+  // clawith has no dedicated column either: the per-tenant identity lives in
+  // ClawithBinding (below), resolved by tenant_id — same pattern as OdooBinding.
 
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
-  tenant Tenant @relation(fields: [tenant_id], references: [id])
+  tenant            Tenant            @relation(fields: [tenant_id], references: [id])
+  chatwoot_bindings ChatwootBinding[] @relation("ChatwootBindingAgent")
+  clawith_binding   ClawithBinding?   @relation("ClawithBindingAgent")
+
+  @@index([tenant_id])
 }
 
 // ── WhatsApp routing table ────────────────────────────────────────────────────
@@ -236,7 +255,8 @@ model WhatsAppNumber {
 
 model ChatwootBinding {
   id         String  @id @default(cuid())
-  tenant_id  String  @unique
+  tenant_id  String
+  agent_id   String? // optional: the specific Agent that handles this inbox; null → use tenant's default agent (tenant.agents[0])
   base_url   String // e.g. https://inbox.epic.dm
   account_id String
   token      String // Chatwoot Application API agent token (set to '' for a2 — bot token used instead)
@@ -247,6 +267,85 @@ model ChatwootBinding {
   updated_at DateTime @updatedAt
 
   tenant Tenant @relation(fields: [tenant_id], references: [id])
+  agent  Agent? @relation("ChatwootBindingAgent", fields: [agent_id], references: [id])
+
+  @@index([tenant_id])
+}
+
+// ── Odoo / Fiserv / BFF per-tenant bindings (S2 — additive) ──────────────────
+// Mirror the WhatsAppNumber/ChatwootBinding shape: one row per tenant,
+// resolveConfig() in lib/connector.ts merges these over the platform-default
+// env config when present, falling back to the env config when absent (see
+// lib/engine-bindings.ts). Secret fields (suffixed _enc) are AES-256-GCM
+// envelope-encrypted with TENANT_MASTER_KEY via lib/tenant-secrets.ts — never
+// stored in plaintext. Magnus intentionally has no binding table here: its
+// per-tenant identity already lives on Tenant.magnus_* / VoiceLine, and its
+// connection (baseUrl/apiKey/apiSecret) is genuine shared platform infra.
+
+model OdooBinding {
+  id            String  @id @default(cuid())
+  tenant_id     String  @unique
+  url           String // Odoo base URL, e.g. https://epic-communications-inc.odoo.com
+  db            String // Odoo database name
+  login         String? // Odoo cloud login email (the human user whose API key is stored below)
+  api_key_enc   String // AES-256-GCM envelope-encrypted Odoo API key — see lib/tenant-secrets.ts
+  instance_type String? // hosted_saas | local_docker_clone — mirrors Tenant.odoo_instance_type
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+}
+
+model FiservBinding {
+  id          String  @id @default(cuid())
+  tenant_id   String  @unique
+  api_key_enc String // AES-256-GCM envelope-encrypted Fiserv API key
+  base_url    String? // optional override; defaults to platform FISERV_BASE_URL when unset
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+}
+
+model BffBinding {
+  id                  String @id @default(cuid())
+  tenant_id           String @unique
+  base_url            String
+  internal_secret_enc String // AES-256-GCM envelope-encrypted BFF internal secret
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+}
+
+// ── Clawith per-tenant binding (S3 — additive) ───────────────────────────────
+// Mirrors ChatwootBinding's shape: one row per tenant, resolved by tenant_id
+// in the agent-bot route when Agent.brain_provider = 'clawith'. No secret
+// fields here — the single CLAWITH_SHARED_SECRET is a platform-level env var
+// (same pattern as HERMES_AGENT_URL), not per-tenant; what IS per-tenant is
+// which Clawith/Paperclip identity this tenant's conversations dispatch to.
+//
+// Per-agent override: set agent_id to pin a binding to a specific Agent (e.g.
+// EMA sales agent vs front-line agent on the same tenant). When null this is
+// the tenant-level fallback binding (current / legacy behaviour).
+model ClawithBinding {
+  id                   String  @id @default(cuid())
+  tenant_id            String
+  agent_id             String? @unique // optional: pin to a specific Agent; null → per-tenant fallback
+  clawith_agent_id     String  // Clawith's own agent id — the `agent_id` field in the dispatch request body
+  paperclip_agent_id   String
+  paperclip_company_id String
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+  agent  Agent? @relation("ClawithBindingAgent", fields: [agent_id], references: [id])
+
+  @@index([tenant_id])
 }
 
 // ── Consent (WhatsApp send gate — fail-closed) ────────────────────────────────
@@ -455,6 +554,37 @@ model AuditLog {
   @@index([tenant_id, created_at])
   @@index([tenant_id, request_id])
   @@index([consumer_account_id, created_at])
+}
+
+// ── S6: governance — approval gate (mint → approve → redeem) ────────────────
+//
+// First gated action: operator voice-routing changes ("voice.route.set").
+// Deny-by-default: an operator write is blocked until a pending
+// ApprovalRequest for the exact same params is approved by a tenant
+// owner/admin (self-approve allowed in v1), then redeemed with its
+// single-use `token` before the underlying mutation is attempted. tenant_id
+// is required — v1 gating is always tenant-scoped.
+model ApprovalRequest {
+  id            String    @id @default(cuid())
+  tenant_id     String
+  token         String    @unique // 256-bit redemption secret; single-use; only ever returned to the authenticated approver
+  action        String // v1: "voice.route.set"
+  target_entity String? // "voice_line"
+  target_id     String? // VoiceLine.id — binds the approval to one line
+  payload       Json      @default("{}") // exact approved params: { did, mode, forwardNumber } — binds the token to these params
+  status        String    @default("pending") // pending | approved | denied | consumed | expired  (deny-by-default)
+  requested_by  String // User.id (or "agent:<id>" in future)
+  decided_by    String? // approver User.id
+  decided_at    DateTime?
+  consumed_at   DateTime? // single-use marker (set atomically on redeem)
+  expires_at    DateTime // TTL
+  created_at    DateTime  @default(now())
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+
+  @@index([tenant_id, status])
+  @@index([tenant_id, created_at])
+  @@index([expires_at])
 }
 
 // ── Drizzle-managed auth tables (DO NOT DROP) ────────────────────────────────

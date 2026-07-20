@@ -1,0 +1,28 @@
+-- Migrate-deploy foundation Phase B: Message_wa_message_id_key drift fix,
+-- replay-safe replacement for the retired 20260719180000 migration.
+--
+-- schema.prisma declares `wa_message_id String? @unique` (full/non-partial),
+-- and the baseline migration (20260712031920_baseline) already creates it
+-- that way — fresh databases are correct from baseline. The only place this
+-- has ever drifted is Neon, where instrumentation.ts's hand-rolled
+-- runMigrations() created a PARTIAL index (WHERE wa_message_id IS NOT NULL)
+-- via raw SQL before this migration history was ever applied there (see
+-- bt-neon-schema-reconciliation-campaign Phase 0).
+--
+-- The previous fix (20260719180000, create-concurrently-then-swap) is
+-- correct in spirit but structurally cannot run through `prisma migrate
+-- deploy` under any circumstances — CREATE/DROP INDEX CONCURRENTLY cannot
+-- execute inside a transaction, and Prisma always wraps migrations in one.
+-- Confirmed twice: P3018 on direct apply, P3006 replaying migration history
+-- onto a fresh shadow database. It was never applied to any database, so
+-- retiring it is safe.
+--
+-- This migration uses a plain transactional drop+create instead:
+--   - On Neon (the only place with drift): converts partial -> full.
+--     Message currently has ~375 rows; a momentary exclusive lock on that
+--     table for a single index rebuild is negligible.
+--   - On helium / any fresh database: the index is already full/non-partial
+--     (baseline), so this drops and recreates the identical index — a
+--     harmless no-op in effect, safe to replay from a clean slate.
+DROP INDEX IF EXISTS "Message_wa_message_id_key";
+CREATE UNIQUE INDEX "Message_wa_message_id_key" ON "Message"("wa_message_id");
