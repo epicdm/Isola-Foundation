@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation';
-import { getSession } from '@/lib/session';
+import { requireAdmin } from '@/lib/admin-guard';
 import { isMagnusConfigured } from '@/lib/engines';
 import { getVoiceHealthReport } from '@/lib/voice-health-report';
 import { VoiceHealthTable } from './VoiceHealthTable';
@@ -10,8 +10,8 @@ export const metadata = { title: 'Admin — Voice Health' };
 export const revalidate = 0;
 
 export default async function VoiceHealthPage() {
-  const session = await getSession();
-  if (!session?.isAdmin) redirect('/');
+  const guard = await requireAdmin();
+  if (!guard.ok) redirect('/');
 
   if (!isMagnusConfigured()) {
     return (
@@ -32,6 +32,7 @@ export default async function VoiceHealthPage() {
     { label: 'Green', value: summary.green },
     { label: 'Amber', value: summary.amber },
     { label: 'Red', value: summary.red },
+    { label: 'Retired', value: summary.gray },
   ];
 
   return (
@@ -43,7 +44,7 @@ export default async function VoiceHealthPage() {
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         {stats.map((s) => (
           <Card key={s.label}>
             <CardHeader className="pb-2">
