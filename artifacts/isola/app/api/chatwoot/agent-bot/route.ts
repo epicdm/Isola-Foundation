@@ -38,11 +38,18 @@
  * All other events: 200 no-op.
  *
  * Inbox isolation: looks up ChatwootBinding WHERE mode='a2' by inbox_id (not
- * account_id — Chatwoot inbox ids are unique platform-wide, and multiple A2
- * tenants can share one Chatwoot account, so account-only lookup is
- * ambiguous — see the resolution block below for the 2026-07-01 incident
+ * account_id — Chatwoot inbox ids are meant to be unique platform-wide, and
+ * multiple A2 tenants can share one Chatwoot account, so account-only lookup
+ * is ambiguous — see the resolution block below for the 2026-07-01 incident
  * this mirrors from bff-v2). Unknown inbox_ids return 200 immediately so
  * Wave-A tenants and unrelated inboxes are untouched.
+ *
+ * That "unique" assumption isn't actually enforced anywhere, and did fail in
+ * practice (2026-07-20: a retired tenant's stale binding collided with the
+ * active tenant's on inbox 3, and non-deterministically won). If more than
+ * one binding matches, resolveActiveBinding() (lib/chatwoot-binding-
+ * resolution.ts) picks deterministically: active tenant status first, then
+ * most-recently-updated, then binding id — never DB scan order.
  *
  * ── P0 (2026-07-15): cross-path double-reply ──────────────────────────────
  * A single inbound WhatsApp message to number 9043 produced TWO AI replies.
@@ -62,6 +69,7 @@ import { generateReply } from '@/lib/brain-provider';
 import { meterTokens } from '@/lib/meter';
 import { claimInboundMessageId } from '@/lib/inbound-dedup';
 import { toggleConvStatus, surfaceHandoff } from '@/lib/chatwoot-handoff';
+import { resolveActiveBinding } from '@/lib/chatwoot-binding-resolution';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -211,7 +219,7 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
     console.warn('[agent-bot] message_created missing inbox_id — cannot safely resolve tenant, ignoring');
     return 200;
   }
-  const binding = await prisma.chatwootBinding.findFirst({
+  const bindings = await prisma.chatwootBinding.findMany({
     where: { inbox_id: inboxId, mode: 'a2' },
     include: {
       tenant: {
@@ -222,10 +230,21 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
       agent: true,
     },
   });
+  const binding = resolveActiveBinding(bindings);
   if (!binding) {
     // Not an A2 inbox we manage — ack and ignore (isolation guarantee)
     console.log('[agent-bot] No A2 binding for inbox', inboxId, '(account', accountId + ') — no-op');
     return 200;
+  }
+  if (bindings.length > 1) {
+    console.warn(
+      `[agent-bot] Multiple A2 bindings for inbox ${inboxId} (account ${accountId}) — ` +
+        `resolved to tenant ${binding.tenant_id} (status=${binding.tenant.status}); others: ` +
+        bindings
+          .filter((b) => b.id !== binding.id)
+          .map((b) => `${b.tenant_id}(${b.tenant.status})`)
+          .join(', '),
+    );
   }
 
   const botToken = process.env.CHATWOOT_AGENTBOT_TOKEN;
