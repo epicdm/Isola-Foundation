@@ -8,8 +8,8 @@
     "build": "next build",
     "start": "next start",
     "start:prod": "prisma migrate deploy && next start",
-    "db:push": "pnpm --filter @workspace/scripts run guard-not-prod-db && prisma db push",
-    "migrate:dev": "pnpm --filter @workspace/scripts run guard-not-prod-db && prisma migrate dev",
+    "db:push": "tsx ../../scripts/src/guard-not-prod-db.ts && prisma db push",
+    "migrate:dev": "tsx ../../scripts/src/guard-not-prod-db.ts && prisma migrate dev",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

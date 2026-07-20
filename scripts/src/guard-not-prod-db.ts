@@ -1,4 +1,7 @@
+import { existsSync } from 'node:fs'
+import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import dotenv from 'dotenv'
 
 // Neon prod host for this project. `db push` / `migrate dev` must never run
 // against it — see MEMORY.md "Never use prisma db push on isola DBs" and the
@@ -27,8 +30,22 @@ export function isProdDatabaseUrl(databaseUrl: string | undefined): boolean {
   return PROD_HOST_PATTERN.test(host)
 }
 
+// Prisma/drizzle-kit auto-load `.env` from the invoking package's cwd and
+// use that value unless the shell already exported DATABASE_URL. This guard
+// must resolve the SAME effective value, or a prod URL that only lives in a
+// package's .env file (never exported) sails straight past it while the
+// downstream tool still picks it up. dotenv.config() without `override`
+// mirrors that precedence: an exported value always wins over the file.
+export function loadEffectiveDatabaseUrl(cwd: string): string | undefined {
+  const envPath = path.join(cwd, '.env')
+  if (existsSync(envPath)) {
+    dotenv.config({ path: envPath })
+  }
+  return process.env.DATABASE_URL
+}
+
 function main() {
-  const databaseUrl = process.env.DATABASE_URL
+  const databaseUrl = loadEffectiveDatabaseUrl(process.cwd())
   if (isProdDatabaseUrl(databaseUrl)) {
     console.error(
       `guard-not-prod-db: refusing dev/push against prod DB (host: ${redactedHost(databaseUrl)}). ` +

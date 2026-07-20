@@ -8,8 +8,8 @@
     "./schema": "./src/schema/index.ts"
   },
   "scripts": {
-    "push": "pnpm --filter @workspace/scripts run guard-not-prod-db && drizzle-kit push --config ./drizzle.config.ts",
-    "push-force": "pnpm --filter @workspace/scripts run guard-not-prod-db && drizzle-kit push --force --config ./drizzle.config.ts"
+    "push": "tsx ../../scripts/src/guard-not-prod-db.ts && drizzle-kit push --config ./drizzle.config.ts",
+    "push-force": "tsx ../../scripts/src/guard-not-prod-db.ts && drizzle-kit push --force --config ./drizzle.config.ts"
   },
   "dependencies": {
     "drizzle-orm": "catalog:",
@@ -20,6 +20,7 @@
   "devDependencies": {
     "@types/node": "catalog:",
     "@types/pg": "^8.20.0",
-    "drizzle-kit": "^0.31.10"
+    "drizzle-kit": "^0.31.10",
+    "tsx": "catalog:"
   }
 }
