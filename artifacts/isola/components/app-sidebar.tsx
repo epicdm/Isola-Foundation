@@ -16,6 +16,7 @@ import {
   PauseCircle,
   ChevronsUpDown,
   Command,
+  HeartPulse,
 } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 
@@ -68,6 +69,7 @@ const ADMIN_NAV: NavGroup = {
   items: [
     { href: '/admin', label: 'Admin', icon: Building2 },
     { href: '/admin/plans', label: 'Plans & Rates', icon: BarChart3 },
+    { href: '/admin/voice-health', label: 'Voice Health', icon: HeartPulse },
   ],
 };
 
