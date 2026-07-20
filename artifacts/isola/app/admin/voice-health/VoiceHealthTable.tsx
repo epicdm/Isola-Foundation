@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import Link from 'next/link';
 import { type ColumnDef } from '@tanstack/react-table';
 import { RefreshCw } from 'lucide-react';
 import { DataTable } from '@/components/data-table';
@@ -10,18 +11,24 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { cn } from '@/lib/utils';
 import type { VoiceHealthReport, VoiceHealthLine } from '@/lib/voice-health-report';
 
-type ColorFilter = 'all' | 'green' | 'amber' | 'red';
+// 'all' means "all live lines" — retired (gray) lines are intentionally
+// excluded from the default view (the whole point of retiring a line is
+// that it drops off the operator's problem list) and only show up when the
+// Retired filter is explicitly selected.
+type ColorFilter = 'all' | 'green' | 'amber' | 'red' | 'gray';
 
 const COLOR_DOT: Record<VoiceHealthLine['color'], string> = {
   green: 'bg-green-500',
   amber: 'bg-amber-500',
   red: 'bg-red-500',
+  gray: 'bg-gray-400',
 };
 
 const COLOR_BADGE_CLASS: Record<VoiceHealthLine['color'], string> = {
   green: 'border-transparent bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-300',
   amber: 'border-transparent bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300',
   red: 'border-transparent bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300',
+  gray: 'border-transparent bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300',
 };
 
 const FILTERS: { key: ColorFilter; label: string }[] = [
@@ -29,6 +36,7 @@ const FILTERS: { key: ColorFilter; label: string }[] = [
   { key: 'green', label: 'Green' },
   { key: 'amber', label: 'Amber' },
   { key: 'red', label: 'Red' },
+  { key: 'gray', label: 'Retired' },
 ];
 
 const columns: ColumnDef<VoiceHealthLine, any>[] = [
@@ -74,6 +82,18 @@ const columns: ColumnDef<VoiceHealthLine, any>[] = [
     ),
   },
   {
+    accessorKey: 'provisioningState',
+    header: 'Provisioning',
+    cell: ({ row }) => <span className="text-muted-foreground">{row.original.provisioningState}</span>,
+  },
+  {
+    accessorKey: 'createdAt',
+    header: 'Created',
+    cell: ({ row }) => (
+      <span className="text-muted-foreground">{new Date(row.original.createdAt).toLocaleDateString()}</span>
+    ),
+  },
+  {
     id: 'issues',
     accessorFn: (row) => row.issues.join(' '),
     header: 'Issues',
@@ -87,6 +107,19 @@ const columns: ColumnDef<VoiceHealthLine, any>[] = [
             <li key={i}>{issue}</li>
           ))}
         </ul>
+      ),
+  },
+  {
+    id: 'actions',
+    header: '',
+    enableSorting: false,
+    cell: ({ row }) =>
+      row.original.ownerKind === 'business' && row.original.tenantId ? (
+        <Button asChild size="sm" variant="ghost">
+          <Link href={`/admin/tenants/${row.original.tenantId}`}>Open →</Link>
+        </Button>
+      ) : (
+        <span className="text-muted-foreground">—</span>
       ),
   },
 ];
@@ -116,7 +149,10 @@ export function VoiceHealthTable({ initialReport }: { initialReport: VoiceHealth
   }
 
   const filteredLines = useMemo(
-    () => (colorFilter === 'all' ? report.lines : report.lines.filter((l) => l.color === colorFilter)),
+    () =>
+      colorFilter === 'all'
+        ? report.lines.filter((l) => l.color !== 'gray')
+        : report.lines.filter((l) => l.color === colorFilter),
     [report.lines, colorFilter],
   );
 
@@ -125,7 +161,7 @@ export function VoiceHealthTable({ initialReport }: { initialReport: VoiceHealth
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap gap-2">
           {FILTERS.map((f) => {
-            const count = f.key === 'all' ? report.summary.total : report.summary[f.key];
+            const count = f.key === 'all' ? report.summary.total - report.summary.gray : report.summary[f.key];
             return (
               <Button
                 key={f.key}

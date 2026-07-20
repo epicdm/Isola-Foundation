@@ -135,13 +135,69 @@ describe('classifyVoiceLineHealth — assignment / provisioning-state checks', (
     expect(result.color).toBe('red');
   });
 
-  it('null resolution fields (no magnus_*_id stored) are not applicable, not failures', () => {
+  it('provisioning_state=completed but magnus_callerid_id/magnus_diddestination_id never stored -> MISSING/red (false-green fix)', () => {
     const result = classifyVoiceLineHealth(
       line({ magnusCallerIdId: null, magnusDidDestinationId: null }),
       resolution({ callerId: null, didDestination: null }),
     );
+    expect(result.status).toBe('MISSING');
+    expect(result.color).toBe('red');
+    expect(result.issues.some((i) => i.includes('magnus_callerid_id is not stored'))).toBe(true);
+    expect(result.issues.some((i) => i.includes('magnus_diddestination_id is not stored'))).toBe(true);
+  });
+
+  it('the same null magnus_*_id fields are NOT failures while provisioning is still in progress', () => {
+    const result = classifyVoiceLineHealth(
+      line({ provisioningState: 'pending', magnusCallerIdId: null, magnusDidDestinationId: null }),
+      resolution({ callerId: null, didDestination: null, routing: null }),
+    );
     expect(result.status).toBe('OK');
     expect(result.issues).toEqual([]);
+  });
+});
+
+describe('classifyVoiceLineHealth — retired lines (terminal state)', () => {
+  it('provisioning_state=retired short-circuits to RETIRED/gray, even with every resource id missing', () => {
+    const result = classifyVoiceLineHealth(
+      line({
+        provisioningState: 'retired',
+        did: '17678182217',
+        magnusSipId: null,
+        magnusCallerIdId: null,
+        magnusDidDestinationId: null,
+      }),
+      resolution({ sip: null, callerId: null, didDestination: null, routing: null }),
+    );
+    expect(result.status).toBe('RETIRED');
+    expect(result.color).toBe('gray');
+    expect(result.issues).toEqual([]);
+  });
+
+  it('a retired line is not re-flagged even when it also matches a legacy-dup ConsumerAccount', () => {
+    const result = classifyVoiceLineHealth(line({ provisioningState: 'retired' }), resolution(), ['ca-legacy-1']);
+    expect(result.status).toBe('RETIRED');
+    expect(result.color).toBe('gray');
+    expect(result.issues).toEqual([]);
+  });
+});
+
+describe('classifyVoiceLineHealth — legacy ConsumerAccount duplicate', () => {
+  it('an otherwise-healthy line matching a legacy ConsumerAccount -> LEGACY_DUP/amber', () => {
+    const result = classifyVoiceLineHealth(line(), resolution(), ['ca-legacy-1']);
+    expect(result.status).toBe('LEGACY_DUP');
+    expect(result.color).toBe('amber');
+    expect(result.issues).toEqual(['legacy ConsumerAccount duplicate (ca-legacy-1)']);
+  });
+
+  it('a legacy-dup match does not downgrade a more severe MISSING/red finding', () => {
+    const result = classifyVoiceLineHealth(
+      line({ magnusSipId: '1831' }),
+      resolution({ sip: { found: false, cidNumber: null }, didDestination: { found: true, idSip: '1831' } }),
+      ['ca-legacy-1'],
+    );
+    expect(result.status).toBe('MISSING');
+    expect(result.color).toBe('red');
+    expect(result.issues.some((i) => i.includes('legacy ConsumerAccount duplicate (ca-legacy-1)'))).toBe(true);
   });
 });
 
@@ -151,7 +207,8 @@ describe('summarize', () => {
       classifyVoiceLineHealth(line(), resolution()),
       classifyVoiceLineHealth(line(), resolution({ routing: { mode: 'degraded' } })),
       classifyVoiceLineHealth(line(), resolution({ sip: { found: false, cidNumber: null } })),
+      classifyVoiceLineHealth(line({ provisioningState: 'retired' }), resolution()),
     ]);
-    expect(summary).toEqual({ total: 3, green: 1, amber: 1, red: 1 });
+    expect(summary).toEqual({ total: 4, green: 1, amber: 1, red: 1, gray: 1 });
   });
 });
