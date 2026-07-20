@@ -61,6 +61,7 @@ import { prisma } from '@/lib/prisma';
 import { generateReply } from '@/lib/brain-provider';
 import { meterTokens } from '@/lib/meter';
 import { claimInboundMessageId } from '@/lib/inbound-dedup';
+import { toggleConvStatus, surfaceHandoff } from '@/lib/chatwoot-handoff';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -452,6 +453,7 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
     try {
       const result = await generateReply({
         agent: {
+          id:                 agent.id,
           intelligence_tier: agent.intelligence_tier,
           brain_provider:    brainProvider,
           flowise_flow_id:   (agent as any).flowise_flow_id ?? null,
@@ -461,6 +463,7 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
         sessionId: conversation.id, // stable per-conversation key for Flowise/Clawith memory
         phoneNumberId: waNumberForHermesGate?.phone_number_id ?? '',
         senderPhone: customerPhone,
+        tenantId,
         clawithBinding: clawithBindingRow
           ? {
               clawith_agent_id:     clawithBindingRow.clawith_agent_id,
@@ -567,103 +570,9 @@ async function handleStatusChanged(body: Record<string, any>, event: string) {
 }
 
 // ── Chatwoot helpers ──────────────────────────────────────────────────────────
-
-async function toggleConvStatus(
-  baseUrl:   string,
-  accountId: string,
-  cwConvId:  number,
-  status:    string,
-  botToken:  string,
-) {
-  try {
-    const res = await fetch(
-      `${baseUrl}/api/v1/accounts/${accountId}/conversations/${cwConvId}/toggle_status`,
-      {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json', api_access_token: botToken },
-        body:    JSON.stringify({ status }),
-        signal:  AbortSignal.timeout(10000),
-      },
-    );
-    if (res.ok) {
-      console.log(`[agent-bot] Conv cw#${cwConvId} toggled to ${status}`);
-    } else {
-      console.warn(`[agent-bot] toggle_status failed (${res.status}):`, await res.text().catch(() => ''));
-    }
-  } catch (e: any) {
-    console.warn('[agent-bot] toggle_status error:', e?.message);
-  }
-}
-
-/**
- * Surfaces a brain's needs_handoff signal (currently only Clawith emits this)
- * INTO Chatwoot for a human to notice — never a separate owner ping. Three
- * best-effort actions, each independently caught so one failing never blocks
- * the others or the caller: a private note (visible to human agents only,
- * never sent to the customer), a label, and a status toggle to 'open' — the
- * SAME status value the outgoing-reply handler above uses when a human
- * actually takes over, i.e. "needs a human's eyes". This never touches
- * Conversation.human_handling; that flag stays the single authority for
- * whether the bot may keep replying (see file header).
- */
-const HANDOFF_LABEL = 'ai-handoff';
-
-async function surfaceHandoff(
-  baseUrl:   string,
-  accountId: string,
-  cwConvId:  number,
-  botToken:  string,
-): Promise<void> {
-  try {
-    const noteRes = await fetch(
-      `${baseUrl}/api/v1/accounts/${accountId}/conversations/${cwConvId}/messages`,
-      {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json', api_access_token: botToken },
-        body:    JSON.stringify({
-          content:      '🤖 Clawith flagged this conversation for human review.',
-          message_type: 'outgoing',
-          private:      true,
-        }),
-        signal: AbortSignal.timeout(10000),
-      },
-    );
-    if (!noteRes.ok) {
-      console.warn(`[agent-bot] handoff private note failed (${noteRes.status}):`, await noteRes.text().catch(() => ''));
-    }
-  } catch (e: any) {
-    console.warn('[agent-bot] handoff private note error:', e?.message);
-  }
-
-  try {
-    // Chatwoot's label endpoint REPLACES the conversation's full label set —
-    // fetch the existing set first so this only adds, never clobbers.
-    const getRes = await fetch(
-      `${baseUrl}/api/v1/accounts/${accountId}/conversations/${cwConvId}/labels`,
-      { headers: { api_access_token: botToken }, signal: AbortSignal.timeout(10000) },
-    );
-    const existing: string[] = getRes.ok ? ((await getRes.json().catch(() => ({})))?.payload ?? []) : [];
-    if (!existing.includes(HANDOFF_LABEL)) {
-      const labelRes = await fetch(
-        `${baseUrl}/api/v1/accounts/${accountId}/conversations/${cwConvId}/labels`,
-        {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json', api_access_token: botToken },
-          body:    JSON.stringify({ labels: [...existing, HANDOFF_LABEL] }),
-          signal:  AbortSignal.timeout(10000),
-        },
-      );
-      if (!labelRes.ok) {
-        console.warn(`[agent-bot] handoff label failed (${labelRes.status}):`, await labelRes.text().catch(() => ''));
-      }
-    }
-  } catch (e: any) {
-    console.warn('[agent-bot] handoff label error:', e?.message);
-  }
-
-  await toggleConvStatus(baseUrl, accountId, cwConvId, 'open', botToken);
-  console.log(`[agent-bot] Handoff surfaced for conv cw#${cwConvId}`);
-}
+// toggleConvStatus / surfaceHandoff live in lib/chatwoot-handoff.ts (extracted
+// so surfaceHandoff's single-fire behavior is unit-testable — route.ts may
+// only export HTTP method handlers per Next.js App Router rules).
 
 /**
  * Best-effort typing-presence toggle via Chatwoot's `toggle_typing_status`
