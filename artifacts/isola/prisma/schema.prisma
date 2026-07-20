@@ -65,25 +65,26 @@ model Tenant {
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
-  users             User[]
-  agents            Agent[]
-  whatsapp_numbers  WhatsAppNumber[]
-  chatwoot_bindings ChatwootBinding[]
-  odoo_binding      OdooBinding?
-  fiserv_binding    FiservBinding?
-  bff_binding       BffBinding?
-  clawith_bindings  ClawithBinding[]
-  conversations     Conversation[]
-  wallet            Wallet?
-  wallet_txns       WalletTxn[]
-  usage_meters      UsageMeter[]
-  subscription      Subscription?
-  audit_logs        AuditLog[]
-  consents          Consent[]
-  voicemail_catches TenantVoicemailCatch[]
-  memberships       Membership[]
-  voice_lines       VoiceLine[]
-  approval_requests ApprovalRequest[]
+  users               User[]
+  agents              Agent[]
+  whatsapp_numbers    WhatsAppNumber[]
+  chatwoot_bindings   ChatwootBinding[]
+  odoo_binding        OdooBinding?
+  fiserv_binding      FiservBinding?
+  bff_binding         BffBinding?
+  clawith_bindings    ClawithBinding[]
+  conversations       Conversation[]
+  wallet              Wallet?
+  wallet_txns         WalletTxn[]
+  usage_meters        UsageMeter[]
+  subscription        Subscription?
+  audit_logs          AuditLog[]
+  consents            Consent[]
+  voicemail_catches   TenantVoicemailCatch[]
+  memberships         Membership[]
+  voice_lines         VoiceLine[]
+  approval_requests   ApprovalRequest[]
+  notification_outbox NotificationOutbox[]
 }
 
 // ── Per-tenant voicemail catches (AI missed-call catcher) ────────────────────
@@ -335,7 +336,7 @@ model ClawithBinding {
   id                   String  @id @default(cuid())
   tenant_id            String
   agent_id             String? @unique // optional: pin to a specific Agent; null → per-tenant fallback
-  clawith_agent_id     String  // Clawith's own agent id — the `agent_id` field in the dispatch request body
+  clawith_agent_id     String // Clawith's own agent id — the `agent_id` field in the dispatch request body
   paperclip_agent_id   String
   paperclip_company_id String
 
@@ -585,6 +586,39 @@ model ApprovalRequest {
   @@index([tenant_id, status])
   @@index([tenant_id, created_at])
   @@index([expires_at])
+}
+
+// ── S6 Phase 2: notification outbox (durable, idempotent, consent-checked outbound sends) ──
+//
+// v1 = one channel (WhatsApp) + one producer (voicemail-catch owner alert),
+// flag-gated. Replaces deliverCatch()'s direct fire-and-forget send in
+// lib/voicemail-poller.ts with an enqueue (lib/notify.ts) + drain
+// (lib/notify-drain.ts) pair so a failed send retries with backoff instead
+// of being lost, and a duplicate enqueue is a no-op instead of a double-send.
+model NotificationOutbox {
+  id              String    @id @default(cuid())
+  tenant_id       String
+  contact         String // destination (E.164 / handle)
+  channel         String // v1: "whatsapp"
+  consent_basis   String // "owner_self_notification" (v1) | future: customer_* bases that require a Consent opt-in
+  template        String
+  payload         Json      @default("{}")
+  dedupe_key      String // idempotency; unique per tenant
+  state           String    @default("pending") // pending | sending | sent | failed | dead_letter
+  attempt_count   Int       @default(0)
+  max_attempts    Int       @default(5)
+  next_attempt_at DateTime? // retry backoff; drain picks up when <= now
+  external_ref    String? // provider message id once sent
+  failure_reason  String?
+  sent_at         DateTime?
+  created_at      DateTime  @default(now())
+  updated_at      DateTime  @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+
+  @@unique([tenant_id, dedupe_key])
+  @@index([state, next_attempt_at])
+  @@index([tenant_id, created_at])
 }
 
 // ── Drizzle-managed auth tables (DO NOT DROP) ────────────────────────────────

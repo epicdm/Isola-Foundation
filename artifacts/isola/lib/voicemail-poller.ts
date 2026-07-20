@@ -34,8 +34,8 @@ import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { prisma } from '@/lib/prisma';
-import { sendTemplate } from '@/engines/whatsapp';
-import { getWhatsAppConfig } from '@/lib/engines';
+import { sendWhatsApp } from '@/lib/notify-whatsapp';
+import { enqueueNotification } from '@/lib/notify';
 import {
   parseVoicemailMeta,
   transcribeVoicemail,
@@ -67,8 +67,12 @@ const FIXTURE_DIR = process.env.VOICEMAIL_CATCH_FIXTURE_DIR ?? '';
 // var since Foundation has no DB-backed runtime-flag system yet.
 const DELIVER_ENABLED = process.env.VOICEMAIL_CATCH_DELIVER === 'true';
 
+// S6 Phase 2: route the owner alert through the durable NotificationOutbox
+// (lib/notify.ts + lib/notify-drain.ts) instead of the direct send below.
+// Default OFF — existing DELIVER_ENABLED direct-send path is unchanged.
+const NOTIFY_OUTBOX_ENABLED = process.env.NOTIFY_OUTBOX_ENABLED === 'true';
+
 const TEMPLATE_NAME = process.env.VOICEMAIL_CATCH_TEMPLATE || 'isola_missed_call_alert';
-const TEMPLATE_LANGUAGE = process.env.VOICEMAIL_CATCH_TEMPLATE_LANGUAGE || 'en_US';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -175,77 +179,96 @@ export async function processVoicemailFile(opts: {
 
 // ── WA delivery ────────────────────────────────────────────────────────────
 
+// Template body param: single line, no newlines/tabs/4+ spaces (Meta rejects them) — same rule as source.
+function buildMissedCallSummaryLine(opts: { callerId: string; summary: string; urgency: string }): string {
+  const urgencyTag = opts.urgency === 'urgent' ? ' [urgent]' : '';
+  return `From +${opts.callerId}${urgencyTag}: ${opts.summary}`
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 300);
+}
+
 /**
- * deliverCatch: send a WhatsApp template notification to the tenant owner.
- * GATE: only runs when VOICEMAIL_CATCH_DELIVER=true. Skips silently (with a
- * log line) if Tenant.owner_phone is unset, or if the tenant has no
- * WhatsAppNumber row to send FROM.
+ * deliverCatch: send a WhatsApp template notification to the tenant owner
+ * directly (non-durable — a failed send is lost). GATE: only runs when
+ * VOICEMAIL_CATCH_DELIVER=true. Used when NOTIFY_OUTBOX_ENABLED is OFF; when
+ * ON, deliverOrEnqueueCatch below enqueues into NotificationOutbox instead
+ * and this function is not called.
  */
 async function deliverCatch(opts: {
   tenantId: string;
   magnusSipUsername: string;
-  callerId: string;
-  summary: string;
-  urgency: string;
+  ownerPhone: string;
+  summaryLine: string;
 }): Promise<boolean> {
-  const { tenantId, magnusSipUsername, callerId, summary, urgency } = opts;
+  const { tenantId, magnusSipUsername, ownerPhone, summaryLine } = opts;
 
   if (!DELIVER_ENABLED) {
     console.info(`[voicemail-poller] delivery gate OFF — storing only (tenantId=${tenantId})`);
     return false;
   }
 
+  try {
+    const result = await sendWhatsApp({
+      tenantId,
+      contact: ownerPhone,
+      template: TEMPLATE_NAME,
+      payload: { summaryLine },
+    });
+    console.info(
+      `[voicemail-poller] WA catch send ok=${result.ok} status=${result.status}${result.error ? ` error=${result.error}` : ''} to ${ownerPhone} (${magnusSipUsername}) via template ${TEMPLATE_NAME}`,
+    );
+    return result.ok;
+  } catch (err: any) {
+    console.error(`[voicemail-poller] WA template delivery failed for ${magnusSipUsername}: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * deliverOrEnqueueCatch: resolve the tenant owner's phone once, then either
+ * enqueue into NotificationOutbox (NOTIFY_OUTBOX_ENABLED=true — durable,
+ * retries on failure via lib/notify-drain.ts) or send directly via
+ * deliverCatch (flag OFF — the original non-durable behavior, unchanged).
+ * Returns true when no further delivery attempt is needed for this catch
+ * (sent, enqueued, or already enqueued as a duplicate).
+ */
+async function deliverOrEnqueueCatch(opts: {
+  tenantId: string;
+  magnusSipUsername: string;
+  msgId: string;
+  callerId: string;
+  summary: string;
+  urgency: string;
+}): Promise<boolean> {
+  const { tenantId, magnusSipUsername, msgId, callerId, summary, urgency } = opts;
+
   const tenant = await prisma.tenant.findUnique({
     where: { id: tenantId },
     select: { owner_phone: true },
   });
-
   const ownerPhone = tenant?.owner_phone;
   if (!ownerPhone) {
     console.warn(`[voicemail-poller] no owner_phone on tenant ${tenantId} (${magnusSipUsername}) — delivery skipped`);
     return false;
   }
 
-  // Resolve the tenant's own WhatsApp number to send FROM. Most tenants
-  // have exactly one; if there are several, the earliest-created wins
-  // (matches the "primary number" assumption used elsewhere in this app).
-  const waNumber = await prisma.whatsAppNumber.findFirst({
-    where: { tenant_id: tenantId },
-    orderBy: { created_at: 'asc' },
-    select: { phone_number_id: true, access_token: true, token_env: true },
-  });
-  if (!waNumber) {
-    console.warn(`[voicemail-poller] no WhatsAppNumber configured for tenant ${tenantId} — delivery skipped`);
-    return false;
-  }
-  const token = waNumber.token_env ? process.env[waNumber.token_env] : waNumber.access_token;
-  if (!token) {
-    console.warn(`[voicemail-poller] WhatsAppNumber for tenant ${tenantId} has no resolvable token — delivery skipped`);
-    return false;
-  }
+  const summaryLine = buildMissedCallSummaryLine({ callerId, summary, urgency });
 
-  const urgencyTag = urgency === 'urgent' ? ' [urgent]' : '';
-  // Template body param: single line, no newlines/tabs/4+ spaces (Meta rejects them) — same rule as source.
-  const summaryLine = `From +${callerId}${urgencyTag}: ${summary}`
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 300);
-
-  try {
-    const result = await sendTemplate(getWhatsAppConfig(), {
-      phoneId: waNumber.phone_number_id,
-      token,
-      to: ownerPhone.replace(/^\+/, ''),
-      name: TEMPLATE_NAME,
-      language: TEMPLATE_LANGUAGE,
-      params: [summaryLine],
+  if (NOTIFY_OUTBOX_ENABLED) {
+    const enqueueResult = await enqueueNotification({
+      tenantId,
+      contact: ownerPhone,
+      channel: 'whatsapp',
+      consentBasis: 'owner_self_notification',
+      template: TEMPLATE_NAME,
+      payload: { summaryLine, callerId, urgency },
+      dedupeKey: `voicemail:${tenantId}:${msgId}`,
     });
-    console.info(`[voicemail-poller] WA catch send ok=${result.ok} status=${result.status} to ${ownerPhone} (${magnusSipUsername}) via template ${TEMPLATE_NAME}`);
-    return result.ok;
-  } catch (err: any) {
-    console.error(`[voicemail-poller] WA template delivery failed for ${magnusSipUsername}: ${err.message}`);
-    return false;
+    return enqueueResult.enqueued || enqueueResult.reason === 'duplicate';
   }
+
+  return deliverCatch({ tenantId, magnusSipUsername, ownerPhone, summaryLine });
 }
 
 // ── Main poller ───────────────────────────────────────────────────────────────
@@ -351,9 +374,10 @@ export async function pollTenantVoicemails(): Promise<PollTenantVoicemailsResult
         } else {
           result.newCatches++;
 
-          const delivered = await deliverCatch({
+          const delivered = await deliverOrEnqueueCatch({
             tenantId: tenant.id,
             magnusSipUsername: sipUsername,
+            msgId,
             callerId: meta.callerId,
             summary: summary.summary,
             urgency: summary.urgency,
