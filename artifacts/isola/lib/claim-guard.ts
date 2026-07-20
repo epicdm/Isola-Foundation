@@ -23,7 +23,9 @@ export const SALES_TENANT_IDS: ReadonlySet<string> = new Set([
 
 // Ratified once-off/setup + monthly figures (EC$) from the approved Claim
 // Register. No other EC$ figure may appear in a sales-tenant reply.
-const RATIFIED_EC_AMOUNTS = new Set([750, 249, 250, 99, 149]);
+// 375 = SBL setup, billed as two EC$375 installments (before work +
+// on acceptance) — both installments share this one figure.
+const RATIFIED_EC_AMOUNTS = new Set([750, 249, 250, 99, 149, 375]);
 // Ratified per-minute voice rate — sourced from the same env var Magnus/Lite
 // billing already uses, so this can't drift from the live billing rate.
 const RATIFIED_PER_MIN_RATE = Number(process.env.LITE_DOMINICA_RATE_EC_PER_MIN ?? '0.27');
@@ -44,22 +46,60 @@ export const DEFLECTION =
 
 // Hard-never deny-list — heuristic regexes, first pass. Expect tuning as the
 // regression suite and live traffic surface false positives/negatives.
-const HARD_NEVERS: { id: string; pattern: RegExp }[] = [
+//
+// requiresPositiveClaim: for a handful of rules, a bare keyword match also
+// fires on an honest negative disclaimer ("we don't offer a complex IVR"),
+// which fails safe (deflect + escalate, never a fabrication) but generates a
+// false escalation. Those rules are checked with isNegatedClaim() below so
+// only an affirmative claim blocks. Left false (the default) for the rest of
+// the deny-list, which is first-pass and tuned from the audit log instead.
+const HARD_NEVERS: { id: string; pattern: RegExp; requiresPositiveClaim?: boolean }[] = [
   { id: 'voice_ai', pattern: /\bvoice[\s-]?AI\b|\bAI\s+(answers?|picks?\s+up|handles?)\s+(your\s+|the\s+)?(phone\s*)?calls?\b/i },
   { id: 'unlimited_autonomy', pattern: /\bunlimited autonomy\b|\bfully autonomous\b|\bno human (oversight|involvement|needed)\b/i },
-  { id: 'guaranteed_accuracy', pattern: /\bguarantee[sd]?\b[^.?!]{0,40}\b(sales|accuracy|results|conversion)s?\b/i },
+  { id: 'guaranteed_accuracy', pattern: /\bguarantee[sd]?\b[^.?!]{0,40}\b(sales|accuracy|results|conversion)s?\b/i, requiresPositiveClaim: true },
   { id: 'missed_call_recovery', pattern: /\bmissed[\s-]call recovery\b|\brecovers?\s+(every|all)\s+missed calls?\b/i },
-  { id: 'complex_ivr', pattern: /\bIVR\b|\bmulti-?level (phone )?menu\b/i },
+  { id: 'complex_ivr', pattern: /\bIVR\b|\bmulti-?level (phone )?menu\b/i, requiresPositiveClaim: true },
   { id: 'instant_self_service', pattern: /\binstant self-?service\b|\b14-?day free\b|\bself-?serve sign-?up\b/i },
-  { id: 'automated_refunds', pattern: /\bautomat(ed|ic) refunds?\b/i },
-  { id: 'every_intl_route', pattern: /\bevery international (route|destination)\b|\ball countries\b/i },
+  { id: 'automated_refunds', pattern: /\bautomat(ed|ic) refunds?\b/i, requiresPositiveClaim: true },
+  { id: 'every_intl_route', pattern: /\bevery international (route|destination)\b|\ball countries\b/i, requiresPositiveClaim: true },
   { id: 'autonomous_finance', pattern: /\bautonomous(ly)?\s+(move|transfer|charge)s?\b|\bAI\s+(can|will)\s+(move|transfer)\s+money\b/i },
   // Order-independent: catches both "guaranteed migration of every WhatsApp
   // number" and "we migrate every WhatsApp number, guaranteed."
   { id: 'guaranteed_migration', pattern: /(?=[\s\S]*\bguarantee[sd]?\b)(?=[\s\S]*\bmigrat(e|ion|ing)\b)(?=[\s\S]*\b(every|all)\s+(your\s+)?WhatsApp numbers?\b)/i },
 ];
 
-const EC_PRICE = /EC\$\s?([\d,]+(?:\.\d+)?)/gi;
+const NEGATION_WORDS = /\b(don't|doesn't|do not|does not|won't|will not|can't|cannot|can not|isn't|is not|aren't|are not|never|unable to)\b/i;
+
+// True if `text` reads as an honest disclaimer rather than a claim at the
+// match starting at `matchIndex` — i.e. a negation word appears earlier in
+// the same sentence (scanning back to the previous sentence boundary).
+function isNegatedClaim(text: string, matchIndex: number): boolean {
+  let sentenceStart = 0;
+  for (let i = matchIndex - 1; i >= 0; i--) {
+    if (text[i] === '.' || text[i] === '?' || text[i] === '!') {
+      sentenceStart = i + 1;
+      break;
+    }
+  }
+  return NEGATION_WORDS.test(text.slice(sentenceStart, matchIndex));
+}
+
+// For requiresPositiveClaim rules: true only if some occurrence of `pattern`
+// in `text` is NOT a negated disclaimer. Non-flagged rules keep the simpler
+// any-match-blocks behavior via pattern.test() in guardReply below.
+function hasPositiveClaim(text: string, pattern: RegExp): boolean {
+  const global = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g');
+  for (const m of text.matchAll(global)) {
+    if (!isNegatedClaim(text, m.index ?? 0)) return true;
+  }
+  return false;
+}
+
+// Currency-tagged price scan. This sales agent's entire ratified Claim
+// Register is EC$-denominated, so any US$ or unqualified $ figure is always
+// out of scope for it — block outright rather than allow-listing amounts
+// that were never ratified for this agent in the first place.
+const PRICE = /(EC\$|US\$|\$)\s?([\d,]+(?:\.\d+)?)/gi;
 
 /**
  * Scans a generated reply for a sales tenant. Non-sales tenants pass through
@@ -68,12 +108,17 @@ const EC_PRICE = /EC\$\s?([\d,]+(?:\.\d+)?)/gi;
 export function guardReply(text: string, tenantId: string): GuardResult {
   if (!SALES_TENANT_IDS.has(tenantId)) return { text, blocked: false };
 
-  for (const { id, pattern } of HARD_NEVERS) {
-    if (pattern.test(text)) return { text: DEFLECTION, blocked: true, rule: id };
+  for (const { id, pattern, requiresPositiveClaim } of HARD_NEVERS) {
+    const hit = requiresPositiveClaim ? hasPositiveClaim(text, pattern) : pattern.test(text);
+    if (hit) return { text: DEFLECTION, blocked: true, rule: id };
   }
 
-  for (const m of text.matchAll(EC_PRICE)) {
-    const amount = Number(m[1].replace(/,/g, ''));
+  for (const m of text.matchAll(PRICE)) {
+    const currency = m[1].toUpperCase();
+    const amount = Number(m[2].replace(/,/g, ''));
+    if (currency !== 'EC$') {
+      return { text: DEFLECTION, blocked: true, rule: 'non_ec_price' };
+    }
     if (!RATIFIED_EC_AMOUNTS.has(amount) && amount !== RATIFIED_PER_MIN_RATE) {
       return { text: DEFLECTION, blocked: true, rule: 'unratified_price' };
     }

@@ -87,9 +87,61 @@ describe('guardReply — hard-never deny-list (dispatch scenario 4: unsupported 
   }
 });
 
+describe('guardReply — negation-aware narrowing (fast-follow: honest disclaimers should not escalate)', () => {
+  const cases: { label: string; disclaimerText: string; claimText: string }[] = [
+    {
+      label: 'complex IVR',
+      disclaimerText: "We don't offer a complex IVR — just a simple WhatsApp greeting.",
+      claimText: 'We can build you a complex IVR menu.',
+    },
+    {
+      label: 'guaranteed sales/accuracy',
+      disclaimerText: "We can't guarantee sales, but many customers see strong results.",
+      claimText: 'We guarantee higher sales for your business.',
+    },
+    {
+      label: 'automated refunds',
+      disclaimerText: "We don't do automated refunds — our team reviews every request.",
+      claimText: 'Automated refunds are issued the same day.',
+    },
+    {
+      label: 'every international route',
+      disclaimerText: "We don't support all countries yet, but we're adding more.",
+      claimText: 'We support every international route out of the box.',
+    },
+  ];
+
+  for (const { label, disclaimerText, claimText } of cases) {
+    it(`does not block an honest negative disclaimer: ${label}`, () => {
+      const result = guardReply(disclaimerText, SALES_TENANT);
+      expect(result.blocked).toBe(false);
+      expect(result.text).toBe(disclaimerText);
+    });
+
+    it(`still blocks the equivalent positive claim: ${label}`, () => {
+      const result = guardReply(claimText, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.text).not.toBe(claimText);
+    });
+  }
+
+  it('blocks a positive claim even when an unrelated negation appears earlier in a prior sentence', () => {
+    const result = guardReply("We don't charge setup fees. We can build you a complex IVR menu.", SALES_TENANT);
+    expect(result.blocked).toBe(true);
+    expect(result.rule).toBe('complex_ivr');
+  });
+});
+
 describe('guardReply — price allow-list (dispatch scenarios 1-3 and 5)', () => {
   it('passes ratified setup + monthly prices unchanged (SBL, PBX-Upgrade, WA-Receptionist)', () => {
     const text = 'The Managed SBL is EC$750 setup + EC$249/mo. PBX-Upgrade is EC$250 setup + EC$99/mo. WA-Receptionist is EC$250 setup + EC$149/mo.';
+    const result = guardReply(text, SALES_TENANT);
+    expect(result.blocked).toBe(false);
+    expect(result.text).toBe(text);
+  });
+
+  it('passes the ratified SBL two-installment price (EC$375 before work + EC$375 at acceptance) unchanged', () => {
+    const text = 'The SBL setup is EC$375 before work + EC$375 at acceptance.';
     const result = guardReply(text, SALES_TENANT);
     expect(result.blocked).toBe(false);
     expect(result.text).toBe(text);
@@ -111,5 +163,17 @@ describe('guardReply — price allow-list (dispatch scenarios 1-3 and 5)', () =>
     const result = guardReply('Setup is EC$750, but the monthly is EC$399.', SALES_TENANT);
     expect(result.blocked).toBe(true);
     expect(result.rule).toBe('unratified_price');
+  });
+
+  it('blocks a US$ figure even if the number matches a ratified EC$ amount', () => {
+    const result = guardReply('That plan is US$149/mo.', SALES_TENANT);
+    expect(result.blocked).toBe(true);
+    expect(result.rule).toBe('non_ec_price');
+  });
+
+  it('blocks a bare unqualified $ figure', () => {
+    const result = guardReply('That plan is $149/mo.', SALES_TENANT);
+    expect(result.blocked).toBe(true);
+    expect(result.rule).toBe('non_ec_price');
   });
 });
