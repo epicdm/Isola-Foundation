@@ -234,6 +234,7 @@ export async function handleInboundWhatsApp(params: {
       sessionId: conversation.id,
       phoneNumberId: waNumber.phone_number_id,
       senderPhone: customerPhone,
+      tenantId: tenant.id,
       clawithBinding: clawithBindingRow
         ? {
             clawith_agent_id: clawithBindingRow.clawith_agent_id,

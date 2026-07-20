@@ -36,6 +36,8 @@
 import { chatComplete, TIER_MODELS } from './ai';
 import { decryptSecret } from './tenant-secrets';
 import { prisma } from './prisma';
+import { guardReply, SALES_TENANT_IDS, DEFLECTION as GUARD_ERROR_DEFLECTION } from './claim-guard';
+import { audit } from './audit';
 
 const FLOWISE_TIMEOUT_MS = 20_000;
 // Hermes agent replies in ~10-45s; 50s gives headroom before falling back to
@@ -103,6 +105,7 @@ export interface BrainReplyResult {
 }
 
 export interface BrainAgent {
+  id: string;
   intelligence_tier: string;
   brain_provider: string;       // 'native' | 'flowise' | 'hermes' | 'clawith'
   flowise_flow_id: string | null;
@@ -134,19 +137,24 @@ export async function generateReply(params: {
   agent: BrainAgent;
   system: string;
   messages: { role: 'user' | 'assistant'; content: string }[];
-  /** Stable per-conversation key so Flowise/Hermes memory keeps context. */
+  /** Stable per-conversation key so Flowise/Hermes memory keeps context. Also used
+   *  as the AuditLog entity_id when the claim-guard blocks a reply below. */
   sessionId: string;
   /** Meta phone_number_id this reply is being generated for — required for the hermes per-number gate. */
   phoneNumberId: string;
   /** E.164 sender phone, forwarded verbatim to Hermes/Clawith. */
   senderPhone: string;
+  /** Tenant id — scopes the claim-guard (see lib/claim-guard.ts) to the sales tenants only. */
+  tenantId: string;
   /** Tenant's Clawith identity — required for brain_provider='clawith'; null/absent falls back to native. */
   clawithBinding?: ClawithBindingInput | null;
   /** Tenant's Odoo connection — when present, Clawith uses the tenant's own Odoo instead of its sandbox. */
   odooBinding?: OdooBindingInput | null;
 }): Promise<BrainReplyResult> {
-  const { agent, system, messages, sessionId, phoneNumberId, senderPhone, clawithBinding, odooBinding } = params;
+  const { agent, system, messages, sessionId, phoneNumberId, senderPhone, tenantId, clawithBinding, odooBinding } = params;
   const model = TIER_MODELS[agent.intelligence_tier] ?? TIER_MODELS['standard'];
+
+  let result: BrainReplyResult | null = null;
 
   if (agent.brain_provider === 'flowise' && agent.flowise_flow_id) {
     const flowiseResult = await tryFlowise({
@@ -155,12 +163,13 @@ export async function generateReply(params: {
       sessionId,
     });
     if (flowiseResult) {
-      return { ...flowiseResult, model: `flowise:${agent.flowise_flow_id}` };
+      result = { ...flowiseResult, model: `flowise:${agent.flowise_flow_id}` };
+    } else {
+      console.warn('[brain-provider] Flowise failed — falling back to native for this reply');
     }
-    console.warn('[brain-provider] Flowise failed — falling back to native for this reply');
   }
 
-  if (agent.brain_provider === 'hermes') {
+  if (!result && agent.brain_provider === 'hermes') {
     if (!HERMES_ALLOWED_PHONE_NUMBER_IDS.has(phoneNumberId)) {
       console.warn(
         `[brain-provider] brain_provider=hermes but phone_number_id ${phoneNumberId} is not on the hermes allowlist — falling back to native`,
@@ -168,13 +177,14 @@ export async function generateReply(params: {
     } else {
       const hermesResult = await tryHermes({ messages, sessionId, phoneNumberId, senderPhone });
       if (hermesResult) {
-        return { ...hermesResult, model: 'hermes' };
+        result = { ...hermesResult, model: 'hermes' };
+      } else {
+        console.warn('[brain-provider] Hermes failed — falling back to native for this reply');
       }
-      console.warn('[brain-provider] Hermes failed — falling back to native for this reply');
     }
   }
 
-  if (agent.brain_provider === 'clawith') {
+  if (!result && agent.brain_provider === 'clawith') {
     if (!clawithBinding) {
       console.warn(
         '[brain-provider] brain_provider=clawith but no ClawithBinding for this tenant — falling back to native',
@@ -197,9 +207,10 @@ export async function generateReply(params: {
         odooBinding: odooBinding ?? null,
       });
       if (clawithResult) {
-        return { ...clawithResult, model: 'clawith' };
+        result = { ...clawithResult, model: 'clawith' };
+      } else {
+        console.warn('[brain-provider] Clawith (legacy rollback) failed — falling back to native for this reply');
       }
-      console.warn('[brain-provider] Clawith (legacy rollback) failed — falling back to native for this reply');
     } else {
       // DEFAULT: the contained v1.11.0 Isola bridge for every clawith number. A missing
       // agent/binding or any bridge error returns null → native fallback (contained,
@@ -211,19 +222,65 @@ export async function generateReply(params: {
         callerPhone: senderPhone,
       });
       if (clawithResult) {
-        return { ...clawithResult, model: 'clawith' };
+        result = { ...clawithResult, model: 'clawith' };
+      } else {
+        console.warn('[brain-provider] Isola bridge failed — falling back to native for this reply');
       }
-      console.warn('[brain-provider] Isola bridge failed — falling back to native for this reply');
     }
   }
 
-  const result = await chatComplete({ model, system, messages, maxTokens: 4096 });
-  return {
-    text: result.text,
-    tokensUsed: result.inputTokens + result.outputTokens,
-    model,
-    provider: 'native',
-  };
+  if (!result) {
+    const native = await chatComplete({ model, system, messages, maxTokens: 4096 });
+    result = {
+      text: native.text,
+      tokensUsed: native.inputTokens + native.outputTokens,
+      model,
+      provider: 'native',
+    };
+  }
+
+  // Claim-guard: post-generation output filter, scoped to the sales tenants
+  // (SALES_TENANT_IDS in lib/claim-guard.ts). Runs regardless of which
+  // provider answered — this is the one chokepoint every provider's reply
+  // passes through, which matters specifically for clawith: its prompt is
+  // hosted entirely on the external Clawith side and is not reachable from
+  // this repo, so an output filter here is the only enforcement point.
+  //
+  // Fail-closed on a guard error too: generateReply() is documented above to
+  // never throw, so if guardReply() itself ever threw (it's pure regex today
+  // and shouldn't, but this is a fabrication guard on a customer-facing sales
+  // agent — assume nothing), an unhandled exception here would propagate to
+  // the caller's catch block and result in NO reply being sent at all, which
+  // is worse than a raw unguarded reply going out. Catch, deflect, and audit
+  // instead of letting the raw (unchecked) text through or the call throw.
+  try {
+    const guarded = guardReply(result.text, tenantId);
+    if (guarded.blocked) {
+      console.warn(`[brain-provider] claim-guard blocked a reply (rule=${guarded.rule}) for tenant ${tenantId}`);
+      await audit({
+        tenantId,
+        actorId: `agent:${agent.id}`,
+        action: 'claim_guard.blocked',
+        entity: 'conversation',
+        entityId: sessionId,
+        meta: { rule: guarded.rule },
+      });
+      return { ...result, text: guarded.text, needsHandoff: true };
+    }
+    return result;
+  } catch (err: any) {
+    console.error('[brain-provider] claim-guard threw — deflecting fail-closed:', err?.message ?? err);
+    await audit({
+      tenantId,
+      actorId: `agent:${agent.id}`,
+      action: 'claim_guard.error',
+      entity: 'conversation',
+      entityId: sessionId,
+      meta: { error: String(err?.message ?? err) },
+    });
+    if (!SALES_TENANT_IDS.has(tenantId)) return result; // non-sales tenant: guard errors never affect other tenants
+    return { ...result, text: GUARD_ERROR_DEFLECTION, needsHandoff: true };
+  }
 }
 
 // ── Flowise implementation ───────────────────────────────────────────────────
