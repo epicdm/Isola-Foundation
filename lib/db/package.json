@@ -8,8 +8,8 @@
     "./schema": "./src/schema/index.ts"
   },
   "scripts": {
-    "push": "drizzle-kit push --config ./drizzle.config.ts",
-    "push-force": "drizzle-kit push --force --config ./drizzle.config.ts"
+    "push": "pnpm --filter @workspace/scripts run guard-not-prod-db && drizzle-kit push --config ./drizzle.config.ts",
+    "push-force": "pnpm --filter @workspace/scripts run guard-not-prod-db && drizzle-kit push --force --config ./drizzle.config.ts"
   },
   "dependencies": {
     "drizzle-orm": "catalog:",
