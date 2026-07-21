@@ -169,6 +169,44 @@ describe('guardReply — voice-AI first-person + cross-channel fabrication (def-
   }
 });
 
+describe('guardReply — hardened voice-AI corpus (internal fix/validate 2026-07-21, pre-WA-retest)', () => {
+  // Fabrication phrasings surfaced by the internal stress corpus — all must block.
+  const blocked: string[] = [
+    'I handle both your WhatsApp and your phone calls.',
+    'I answer the phone for you 24/7.',
+    'For EC$249/mo you also get an AI that answers your phone calls.',
+    'We have an AI that picks up the phone for you.',
+    'The assistant can take your calls.',
+    'Absolutely, our AI will answer every call that comes in.',
+    'Our receptionist answers the phones.',
+    'I can call your customers back automatically.',
+    "I'll ring your customers back automatically.",
+    "I'll dial your customers and follow up.",
+  ];
+  for (const text of blocked) {
+    it(`blocks: ${text.slice(0, 48)}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(true);
+    });
+  }
+
+  // REAL live agent replies (2026-07-21 owner WA test) + honest phone-topic answers —
+  // must NEVER block. These are the exact strings the live agent returned; over-blocking
+  // them would deflect a good answer and was the primary false-positive risk.
+  const allowed: string[] = [
+    "Great question — right now I'm here for you on WhatsApp only. I can't answer your phone calls directly. That said, your +1 767 Isola Lite number rings to your phone as usual, so you're not missing any calls.",
+    "Not quite — I'm your Isola Lite assistant here on WhatsApp only. I don't handle phone calls. Your +1 767 number rings directly to your phone as usual, so calls come through normally.",
+    "Not at this time — I can't place outbound calls or call your customers back automatically. Everything I do happens right here in WhatsApp. Call someone yourself — just reply call. Share a free-call link — reply call link.",
+    'I answer questions about your phone plan here on WhatsApp.',
+    'I can help with your phone bill questions.',
+    'You can answer your own phone calls from the softphone.',
+  ];
+  for (const text of allowed) {
+    it(`does not block: ${text.slice(0, 48)}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(false);
+    });
+  }
+});
+
 describe('guardReply — price allow-list (dispatch scenarios 1-3 and 5)', () => {
   it('passes ratified setup + monthly prices unchanged (SBL, PBX-Upgrade, WA-Receptionist)', () => {
     const text = 'The Managed SBL is EC$750 setup + EC$249/mo. PBX-Upgrade is EC$250 setup + EC$99/mo. WA-Receptionist is EC$250 setup + EC$149/mo.';
