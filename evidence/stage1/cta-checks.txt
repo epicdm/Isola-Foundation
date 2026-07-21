@@ -1,0 +1,42 @@
+=== CTA behavior/state exercise (against real, committed adapter) ===
+PASS  contact-validation "+1767 123 4567" => true
+PASS  contact-validation "1234567890" => true
+PASS  contact-validation "name@example.com" => true
+PASS  contact-validation "a.b+c@sub.example.co" => true
+PASS  contact-validation "wa" => false
+PASS  contact-validation "" => false
+PASS  contact-validation "12345" => false
+PASS  contact-validation "not-an-email@" => false
+PASS  consent=false => CONSENT_REQUIRED
+PASS  service_error => code SERVICE_UNAVAILABLE
+PASS  service_error => recovery retry
+PASS  service_error => correlationId present
+PASS  human_takeover => assisted + chatwoot handoff
+PASS  success => status success
+PASS  success => correlationId present
+PASS  success => intentId present
+PASS  duplicate => duplicate:true
+PASS  duplicate => same intentId
+PASS  comms-only => success
+PASS  comms-only => activateAssistant() with none => VALIDATION/skip (assistant stays null, never auto-activated)
+
+TOTAL: 20 passed, 0 failed
+EXIT_CODE=0
+
+=== CTA registry frontendCalls scope check (all 13 CTAs) ===
+CTA_COUNT=13
+UNSAFE_FRONTEND_CALLS=0
+cta_business_line frontendCalls=["createIntent"]
+cta_hosted_pbx frontendCalls=["createIntent"]
+cta_connect_pbx frontendCalls=["createIntent"]
+cta_personal_line frontendCalls=["createIntent"]
+cta_add_receptionist frontendCalls=["createIntent"]
+cta_add_sales_assistant frontendCalls=["createIntent"]
+cta_upgrade_epic_pbx frontendCalls=["createIntent"]
+cta_build_smart_front_desk frontendCalls=["createIntent"]
+cta_talk_sales_assistant frontendCalls=["createIntent"]
+cta_request_demo frontendCalls=["createIntent"]
+cta_apply frontendCalls=["createIntent"]
+cta_resume_setup frontendCalls=["resumeJourney"]
+cta_contact_support frontendCalls=["supportRequest"]
+EXIT_CODE=0

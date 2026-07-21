@@ -1,0 +1,5 @@
+
+> @workspace/isola@0.0.0 typecheck /home/runner/workspace/artifacts/isola
+> tsc --noEmit
+
+EXIT_CODE=0

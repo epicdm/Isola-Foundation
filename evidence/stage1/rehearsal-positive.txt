@@ -1,0 +1,2 @@
+REHEARSAL 18/18 passed
+EXIT_CODE=0

@@ -1,0 +1,51 @@
+=== package: /tmp/isola-foh-stage1-v3/foh-package ===
+=== zip source: incoming/isola-foh-stage1-v3.zip ===
+284663 incoming/isola-foh-stage1-v3.zip
+95678a5f2ee399e32ddd7379ee5028b50b59527ef04515c45a1c28ff77d0422c  incoming/isola-foh-stage1-v3.zip
+=== bash verify.sh (rerun) ===
+apply.sh: OK
+artifacts/isola/app/(marketing)/assistants/page.tsx: OK
+artifacts/isola/app/(marketing)/business-line/page.tsx: OK
+artifacts/isola/app/(marketing)/communications/page.tsx: OK
+artifacts/isola/app/(marketing)/connect-pbx/page.tsx: OK
+artifacts/isola/app/(marketing)/hosted-pbx/page.tsx: OK
+artifacts/isola/app/(marketing)/personal-line/page.tsx: OK
+artifacts/isola/app/(marketing)/products/page.tsx: OK
+artifacts/isola/app/(marketing)/solutions/page.tsx: OK
+artifacts/isola/app/(marketing)/solutions/smart-front-desk/page.tsx: OK
+artifacts/isola/components/foh/chrome.tsx: OK
+artifacts/isola/components/foh/cta-panel.tsx: OK
+artifacts/isola/components/foh/product-page.tsx: OK
+artifacts/isola/components/foh/readiness.tsx: OK
+artifacts/isola/contracts/analytics-client.js: OK
+artifacts/isola/contracts/analytics-schema.json: OK
+artifacts/isola/contracts/cta-registry.js: OK
+artifacts/isola/contracts/rehearsal-evidence.json: OK
+artifacts/isola/contracts/rehearsal-runner.js: OK
+artifacts/isola/contracts/service-adapter.js: OK
+artifacts/isola/lib/foh/analytics.ts: OK
+artifacts/isola/lib/foh/catalog.ts: OK
+artifacts/isola/lib/foh/cta-registry.ts: OK
+artifacts/isola/lib/foh/service-adapter.ts: OK
+artifacts/isola/lib/foh/use-cta.ts: OK
+artifacts/isola/tests/cta-state.test.tsx: OK
+artifacts/isola/tests/fixtures/foh-app.jsx: OK
+artifacts/isola/tests/foh-stage1.test.ts: OK
+artifacts/isola/tests/harness-mirror.test.ts: OK
+README.md: OK
+review/foh-app.jsx: OK
+review/foh-site-bundle.html: OK
+review/foh-stage1-diagnostic.txt: OK
+verify.sh: OK
+OK: 34 files verified
+VERIFY_EXIT_CODE=0
+=== physical file count ===
+36
+=== checksum-covered file count ===
+34
+=== key file hashes (adapter + rehearsal-evidence, package copy) ===
+389227ce088c0d6d0c0d1200a2723888120a9df1974f441bbd99877df47f11fb  /tmp/isola-foh-stage1-v3/foh-package/artifacts/isola/contracts/service-adapter.js
+f979df21929c831d43202414154e6fa96627087b302a4c134ebaca28a5c27c46  /tmp/isola-foh-stage1-v3/foh-package/artifacts/isola/contracts/rehearsal-evidence.json
+=== same files, as committed in repo ===
+389227ce088c0d6d0c0d1200a2723888120a9df1974f441bbd99877df47f11fb  artifacts/isola/contracts/service-adapter.js
+f979df21929c831d43202414154e6fa96627087b302a4c134ebaca28a5c27c46  artifacts/isola/contracts/rehearsal-evidence.json

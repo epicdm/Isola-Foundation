@@ -1,0 +1,81 @@
+
+> @workspace/isola@0.0.0 test /home/runner/workspace/artifacts/isola
+> vitest run
+
+
+ RUN  v3.2.7 /home/runner/workspace/artifacts/isola
+
+ ✓ tests/foh-stage1.test.ts (19 tests) 895ms
+   ✓ CTA journey semantics (mock adapter) > duplicate submission is idempotent (same intentId)  442ms
+ ✓ app/api/approvals/[id]/route.test.ts (14 tests) 23ms
+stderr | lib/brain-provider.test.ts > generateReply — claim-guard integration (Clawith path, mocked bridge) > a fabricated voice-AI claim from the (mocked) Clawith bridge is deflected for a sales tenant, and flags handoff
+[brain-provider] claim-guard blocked a reply (rule=voice_ai) for tenant ema_sales_tenant
+
+stderr | lib/brain-provider.test.ts > generateReply — claim-guard integration (Clawith path, mocked bridge) > an unratified/invented price from the (mocked) Clawith bridge is deflected for a sales tenant, and flags handoff
+[brain-provider] claim-guard blocked a reply (rule=unratified_price) for tenant ema_sales_tenant
+
+stderr | lib/brain-provider.test.ts > generateReply — claim-guard integration (native fallback path) > a fabricated claim from the native fallback is deflected for a sales tenant
+[brain-provider] claim-guard blocked a reply (rule=guaranteed_accuracy) for tenant ema_sales_tenant
+
+stderr | lib/brain-provider.test.ts > generateReply — claim-guard fail-closed on a guard error > deflects (does not send the raw reply, does not throw) when guardReply itself throws for a sales tenant
+[brain-provider] claim-guard threw — deflecting fail-closed: synthetic guard failure
+
+stderr | lib/brain-provider.test.ts > generateReply — claim-guard fail-closed on a guard error > passes the raw reply through for a non-sales tenant even when guardReply throws (error path stays scoped too)
+[brain-provider] claim-guard threw — deflecting fail-closed: synthetic guard failure
+
+ ✓ lib/brain-provider.test.ts (8 tests) 20ms
+ ✓ lib/voice-routing-service.test.ts (28 tests) 18ms
+ ✓ app/api/voice/routing/route.test.ts (8 tests) 18ms
+ ✓ app/api/voice/forward/route.test.ts (7 tests) 18ms
+ ✓ app/api/consumer/voice/routing/route.test.ts (5 tests) 13ms
+ ✓ lib/voice-routing.test.ts (64 tests) 21ms
+ ✓ app/api/consumer/voice/forward/route.test.ts (3 tests) 11ms
+ ✓ lib/claim-guard.test.ts (38 tests) 10ms
+stdout | lib/chatwoot-lead-context.test.ts > stampLeadContext — proves: a tagged inbound lands in New with source populated > stamps pilot_stage=New and source=founding-pilot-apply for a matching first message
+[agent-bot] Lead context stamped for conv cw#42: {"pilot_stage":"New","source":"founding-pilot-apply"}
+
+stdout | lib/chatwoot-lead-context.test.ts > stampLeadContext — proves: a tagged inbound lands in New with source populated > stamps only pilot_stage=New (no source) when the first message is not a known apply prefill
+[agent-bot] Lead context stamped for conv cw#42: {"pilot_stage":"New"}
+
+stderr | lib/chatwoot-lead-context.test.ts > stampLeadContext — proves: a tagged inbound lands in New with source populated > never throws when the Chatwoot API call fails
+[agent-bot] stampLeadContext failed (500): {}
+
+stderr | lib/chatwoot-lead-context.test.ts > stampLeadContext — proves: a tagged inbound lands in New with source populated > never throws when fetch itself rejects (network error)
+[agent-bot] stampLeadContext error: network down
+
+ ✓ lib/chatwoot-lead-context.test.ts (9 tests) 12ms
+ ✓ lib/voice-routing-connector.test.ts (10 tests) 9ms
+ ✓ lib/notify-drain.test.ts (6 tests) 9ms
+stdout | lib/notify.test.ts > enqueueNotification — consent gate > refuses a customer-basis notification when no Consent row exists
+[notify] consent denied — tenant=tenant-1 contact=+17671234567 basis=customer_marketing
+
+stdout | lib/notify.test.ts > enqueueNotification — consent gate > refuses a customer-basis notification when Consent status is opted_out
+[notify] consent denied — tenant=tenant-1 contact=+17671234567 basis=customer_marketing
+
+stdout | lib/notify.test.ts > enqueueNotification — idempotent dedupe > reports a duplicate (no double-enqueue) when dedupeKey already exists
+[notify] duplicate enqueue skipped — tenant=tenant-1 dedupeKey=voicemail:tenant-1:msg0000
+
+ ✓ lib/notify.test.ts (6 tests) 7ms
+ ✓ lib/magnus-voice.test.ts (9 tests) 7ms
+ ✓ lib/voice-health.test.ts (17 tests) 7ms
+stdout | lib/chatwoot-handoff.test.ts > surfaceHandoff — single-fire (P1 dispatch fix) > posts the private note, adds the label, and toggles status when not previously surfaced
+[agent-bot] Conv cw#42 toggled to open
+
+stdout | lib/chatwoot-handoff.test.ts > surfaceHandoff — single-fire (P1 dispatch fix) > posts the private note, adds the label, and toggles status when not previously surfaced
+[agent-bot] Handoff surfaced for conv cw#42
+
+stdout | lib/chatwoot-handoff.test.ts > surfaceHandoff — single-fire (P1 dispatch fix) > skips the private note, label POST, and status toggle entirely when the handoff label is already present
+[agent-bot] Handoff already surfaced for conv cw#42 — skipping duplicate
+
+ ✓ lib/chatwoot-handoff.test.ts (2 tests) 7ms
+ ✓ lib/agent-tools.test.ts (3 tests) 4ms
+ ✓ lib/chatwoot-binding-resolution.test.ts (6 tests) 4ms
+ ✓ tests/harness-mirror.test.ts (4 tests) 4ms
+ ✓ tests/cta-state.test.tsx (6 tests) 3ms
+
+ Test Files  21 passed (21)
+      Tests  272 passed (272)
+   Start at  01:17:07
+   Duration  7.01s (transform 645ms, setup 0ms, collect 1.71s, tests 1.12s, environment 3ms, prepare 1.28s)
+
+EXIT_CODE=0

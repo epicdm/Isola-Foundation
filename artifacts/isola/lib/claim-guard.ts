@@ -61,7 +61,7 @@ const HARD_NEVERS: { id: string; pattern: RegExp; requiresPositiveClaim?: boolea
   // pass: "answers your WhatsApp" (T1) has no call object, and "you make/receive calls on the
   // softphone" (T5) has a CUSTOMER subject, not an AI subject. Not requiresPositiveClaim -> an
   // honest "we don't offer voice AI" over-blocks to a human, which fails safe.
-  { id: 'voice_ai', pattern: /\bvoice[\s-]?AI\b|\b(?:AI|I|we|our (?:AI|assistant|receptionist|bot))(?:'ll| will| can| could| also| do| now| even| still)*\s+(?:answers?|answer|picks?(?:\s+up)?|pick(?:\s+up)?|takes?|handles?)\s+(?:up )?(?:the |your |incoming |inbound |all |any |those |phone |voice |business )*(?:phone |voice )?calls?\b/i },
+  { id: 'voice_ai', pattern: /\bvoice[\s-]?AI\b|\b(?:AI|assistant|receptionist|bot|I|we)(?:'ll| will| can| could| also| do| now| even| still| that| which| who)*\s+(?:answers?|answer|picks?(?:\s+up)?|pick(?:\s+up)?|takes?|handles?)\b(?:\s+[\w'-]+){0,6}?\s+(?:phones?(?!\s+(?:plan|bill|number|settings|contract|charger|case|screen|app|model|company|carrier|provider))|voice[\s-]?calls?|voice[\s-]?line|calls?)\b/i },
   // ai_voice_channel — the WhatsApp AI ALSO running the voice/call channel: "same AI on
   // WhatsApp and voice", "same AI, both channels" (the exact cross-channel fabrication in the
   // 2026-07-18 Tests 1 & 4), plus an AI/assistant/first-person subject tied to "both channels"
@@ -71,7 +71,7 @@ const HARD_NEVERS: { id: string; pattern: RegExp; requiresPositiveClaim?: boolea
   // call the customer ("I can place an outbound call", "I'll call you back"). Subject-anchored to
   // the AI/assistant ("I"/"our AI"/"let me") so approved customer-side calling ("you can make and
   // receive calls from a softphone", T5 — a "you" subject) is never caught.
-  { id: 'ai_places_call', pattern: /\b(?:I|let me|our (?:AI|assistant|bot))(?:'ll| will| can| could| also)*\s+(?:place|places|placed|make|makes|dial|dials|initiate|initiates|put through|ring|rings)\s+(?:you |them |him |her )?(?:an?|the|your|a|one|that)?\s*(?:outbound|out-?going|automated|quick|phone|direct)?\s*calls?\b|\b(?:I|our (?:AI|assistant|bot))(?:'ll| will| can| could)*\s+calls?\s+(?:you|them|him|her|the\s+customer|your\s+customer|back)\b/i },
+  { id: 'ai_places_call', pattern: /\b(?:I|let me|our (?:AI|assistant|bot))(?:'ll| will| can| could| also)*\s+(?:place|places|placed|make|makes|dial|dials|initiate|initiates|put through|ring|rings)\s+(?:you |them |him |her )?(?:an?|the|your|a|one|that)?\s*(?:outbound|out-?going|automated|quick|phone|direct)?\s*calls?\b|\b(?:I|our (?:AI|assistant|bot))(?:'ll| will| can| could)*\s+(?:call|calls|ring|rings|dial|dials)\s+(?:you|them|him|her|your\s+customers?|the\s+customers?|customers?|back)\b/i },
   { id: 'unlimited_autonomy', pattern: /\bunlimited autonomy\b|\bfully autonomous\b|\bno human (oversight|involvement|needed)\b/i },
   { id: 'guaranteed_accuracy', pattern: /\bguarantee[sd]?\b[^.?!]{0,40}\b(sales|accuracy|results|conversion)s?\b/i, requiresPositiveClaim: true },
   { id: 'missed_call_recovery', pattern: /\bmissed[\s-]call recovery\b|\brecovers?\s+(every|all)\s+missed calls?\b/i },
