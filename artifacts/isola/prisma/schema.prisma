@@ -84,6 +84,7 @@ model Tenant {
   memberships         Membership[]
   voice_lines         VoiceLine[]
   approval_requests   ApprovalRequest[]
+  escalation_refs     EscalationRef[]
   notification_outbox NotificationOutbox[]
 }
 
@@ -267,8 +268,9 @@ model ChatwootBinding {
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
-  tenant Tenant @relation(fields: [tenant_id], references: [id])
-  agent  Agent? @relation("ChatwootBindingAgent", fields: [agent_id], references: [id])
+  tenant        Tenant         @relation(fields: [tenant_id], references: [id])
+  agent         Agent?         @relation("ChatwootBindingAgent", fields: [agent_id], references: [id])
+  conversations Conversation[]
 
   @@index([tenant_id])
 }
@@ -382,16 +384,30 @@ model Conversation {
   human_handling           Boolean   @default(false) // true when a human agent has replied in Chatwoot
   last_message_at          DateTime?
 
+  // Authoritative snapshot of the exact Chatwoot inbox/binding this
+  // conversation lives in, captured from the live webhook's inbox_id (see
+  // agent-bot/route.ts) — never re-derived from tenant_id alone. A tenant can
+  // own more than one active a2 ChatwootBinding (S4 per-agent routing, e.g.
+  // "EMA sales agent vs front-line agent on the same tenant"), so a
+  // tenant-wide binding lookup is ambiguous; /api/customer/escalate resolves
+  // the Chatwoot account/inbox from chatwoot_binding_id only, and fails
+  // closed when it is null (legacy row) or inconsistent.
+  chatwoot_inbox_id   String?
+  chatwoot_binding_id String?
+
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
-  tenant          Tenant          @relation(fields: [tenant_id], references: [id])
-  whatsapp_number WhatsAppNumber? @relation(fields: [whatsapp_number_id], references: [id])
-  messages        Message[]
+  tenant           Tenant           @relation(fields: [tenant_id], references: [id])
+  whatsapp_number  WhatsAppNumber?  @relation(fields: [whatsapp_number_id], references: [id])
+  chatwoot_binding ChatwootBinding? @relation(fields: [chatwoot_binding_id], references: [id])
+  messages         Message[]
+  escalation_refs  EscalationRef[]
 
   @@unique([tenant_id, chatwoot_conversation_id])
   @@index([tenant_id, status])
   @@index([tenant_id, last_message_at])
+  @@index([chatwoot_binding_id])
 }
 
 model Message {
@@ -584,6 +600,43 @@ model ApprovalRequest {
   tenant Tenant @relation(fields: [tenant_id], references: [id])
 
   @@index([tenant_id, status])
+  @@index([tenant_id, created_at])
+  @@index([expires_at])
+}
+
+// ── Escalation reference (opaque per-turn handle for escalate_to_human) ─────
+//
+// The public Clawith agent (EMA) is never handed a raw conversation/tenant/
+// account/inbox id to call escalate_to_human with. Instead, on each turn we
+// route through the Isola bridge, Foundation mints a short-lived opaque
+// `token` bound server-side to the exact conversation, and hands ONLY that
+// token to the agent (via the bridge's per-turn runtime instruction — the
+// same channel already used to hand the agent the caller's verified phone
+// number). /api/customer/escalate resolves ownership from this token alone.
+// Scoped capability, not an independent agent credential
+// (def-clawith-escalation-shared-token-no-agent-principal-2026-07-21): every
+// field below is bound at mint time and re-checked fail-closed at resolve
+// time in /api/customer/escalate, but possession of a valid token only
+// proves the bearer was handed this exact reference for this exact turn —
+// it does not independently prove which Clawith execution is presenting it,
+// since mcp-isola-customer-tools still authenticates with one shared
+// bearer token for every tenant/agent.
+model EscalationRef {
+  id                  String   @id @default(cuid())
+  purpose             String   @default("escalate_to_human") // bound intent — this ref is unusable for any other endpoint/action
+  tenant_id           String
+  conversation_id     String
+  clawith_agent_id    String // ClawithBinding.clawith_agent_id snapshotted at mint time — re-checked against the conversation's CURRENT binding on resolve so a stale/rebound agent fails closed
+  chatwoot_binding_id String // Conversation.chatwoot_binding_id snapshotted at mint time — must still match on resolve
+  chatwoot_inbox_id   String? // Conversation.chatwoot_inbox_id snapshotted at mint time — must still match on resolve when both are present
+  correlation_id      String   @unique // non-secret per-turn trace id forwarded to the bridge/logs; never the capability itself
+  token               String   @unique // 256-bit opaque capability; minted fresh per turn
+  expires_at          DateTime // short TTL — long enough for one agent turn, not for reuse across a conversation's lifetime
+  created_at          DateTime @default(now())
+
+  tenant       Tenant       @relation(fields: [tenant_id], references: [id])
+  conversation Conversation @relation(fields: [conversation_id], references: [id])
+
   @@index([tenant_id, created_at])
   @@index([expires_at])
 }

@@ -1,0 +1,71 @@
+=== Stage 1 integration corrections (3 objective repository fixes) ===
+
+--- Fix 1: removed 3 unused @ts-expect-error directives (TS2578) ---
+Files: lib/foh/analytics.ts, lib/foh/cta-registry.ts, lib/foh/service-adapter.ts
+Reason: tsconfig.json already has resolveJsonModule:true and allowJs:true, making the
+defensive @ts-expect-error comment (for a JSON import error that never occurs) itself
+an error under TS2578 "Unused @ts-expect-error directive".
+
+>>> diff: /tmp/isola-foh-stage1-v3/foh-package/artifacts/isola/lib/foh/analytics.ts  vs  artifacts/isola/lib/foh/analytics.ts
+3d2
+< // @ts-expect-error - JSON import; ensure resolveJsonModule is enabled (it is in this app's tsconfig).
+
+>>> diff: /tmp/isola-foh-stage1-v3/foh-package/artifacts/isola/lib/foh/cta-registry.ts  vs  artifacts/isola/lib/foh/cta-registry.ts
+4d3
+< // @ts-expect-error - plain JS contract, no d.ts.
+
+>>> diff: /tmp/isola-foh-stage1-v3/foh-package/artifacts/isola/lib/foh/service-adapter.ts  vs  artifacts/isola/lib/foh/service-adapter.ts
+4d3
+< // @ts-expect-error - plain JS contract, no d.ts; shape asserted at runtime below.
+
+--- Fix 2: added globalThis root fallback (SSR crash fix) ---
+Files: contracts/cta-registry.js, contracts/analytics-client.js
+Reason: IIFE root-detection used only (window ? window : this); both are undefined during
+Next.js SSR/strict-ESM bundling, causing "Cannot set properties of undefined" when the
+module tried to assign root.CTA_REGISTRY during static prerendering of /assistants.
+service-adapter.js already had the correct 3-way globalThis fallback; this fix brings the
+other two contract files in line with that existing, working pattern.
+
+>>> diff: /tmp/isola-foh-stage1-v3/foh-package/artifacts/isola/contracts/cta-registry.js  vs  artifacts/isola/contracts/cta-registry.js
+126c126
+< })(typeof window !== 'undefined' ? window : this);
+---
+> })(typeof globalThis !== 'undefined' ? globalThis : typeof window !== 'undefined' ? window : this);
+
+>>> diff: /tmp/isola-foh-stage1-v3/foh-package/artifacts/isola/contracts/analytics-client.js  vs  artifacts/isola/contracts/analytics-client.js
+53c53
+< })(typeof window !== 'undefined' ? window : this);
+---
+> })(typeof globalThis !== 'undefined' ? globalThis : typeof window !== 'undefined' ? window : this);
+
+--- Fix 3: vitest.config.ts — .tsx inclusion + automatic JSX transform ---
+Reason: test.include did not match *.test.tsx (silently skipped cta-state.test.tsx);
+and no esbuild.jsx config caused "ReferenceError: React is not defined" once the .tsx
+file was discovered, since this codebase relies on the automatic JSX runtime (normally
+supplied by Next/SWC, absent when Vitest/esbuild runs standalone). Confirmed correct fix
+via Context7 (/vitest-dev/vitest v3_2_4 docs): top-level esbuild.jsx: "automatic".
+
+>>> git diff (committed, vs parent commit):
+diff --git a/artifacts/isola/vitest.config.ts b/artifacts/isola/vitest.config.ts
+index e804482..fd9fbab 100644
+--- a/artifacts/isola/vitest.config.ts
++++ b/artifacts/isola/vitest.config.ts
+@@ -2,6 +2,9 @@ import path from 'node:path';
+ import { defineConfig } from 'vitest/config';
+ 
+ export default defineConfig({
++  esbuild: {
++    jsx: 'automatic',
++  },
+   resolve: {
+     alias: {
+       '@': path.resolve(__dirname, '.'),
+@@ -9,7 +12,7 @@ export default defineConfig({
+   },
+   test: {
+     environment: 'node',
+-    include: ['**/*.test.ts'],
++    include: ['**/*.test.ts', '**/*.test.tsx'],
+     exclude: ['node_modules/**', '.next/**'],
+   },
+ });

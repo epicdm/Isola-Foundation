@@ -1,0 +1,58 @@
+--- a/backend/app/api/isola_bridge.py
++++ b/backend/app/api/isola_bridge.py
+@@ -62,8 +62,16 @@
+ class BridgeMessageIn(BaseModel):
+     agent_id: uuid.UUID
+     phone: str = Field(min_length=3, max_length=64)
+     text: str = Field(min_length=1)
+     external_conversation_id: str | None = None
++    # Opaque, short-lived scoped-capability minted by Foundation per turn
++    # (lib/escalation-ref.ts). Carries no raw conversation/tenant/account/
++    # inbox id of its own -- handed to the agent via caller_directive
++    # below, never as a tool argument the agent could omit or forge.
++    conversation_ref: str | None = None
++    # Non-secret per-turn trace id, safe to log on either side.
++    correlation_id: str | None = None
+
+
+ def _authorize(secret_header: str | None) -> JSONResponse | None:
+@@ -168,13 +176,27 @@
+                 # Convey the verified caller phone as a trusted per-turn runtime
+                 # instruction so the agent can drive its account-lookup tool
+                 # without asking the customer to re-state their number. This is
+                 # re-declared every call, so the bridge stays stateless.
+                 caller_directive = (
+                     "The customer you are assisting is contacting EPIC "
+                     f"Communications from the verified account phone number {phone}. "
+                     "Treat this as their confirmed identity. When a tool or account "
+                     f"lookup needs the customer's phone number, use {phone} directly "
+                     "and do not ask them to provide or confirm it."
+                 )
++                # Escalation instruction, only when Foundation minted a ref for
++                # this turn (public Clawith path). The ref is a one-turn,
++                # single-purpose capability -- the agent must never repeat,
++                # explain, or disclose it, and it carries no decoded ownership
++                # id of its own.
++                if body.conversation_ref:
++                    caller_directive += (
++                        " If the customer explicitly asks for a human, or the "
++                        "request is out of scope for you, call the "
++                        "escalate_to_human tool with conversation_ref="
++                        f'"{body.conversation_ref}" and a short reason. This '
++                        "conversation_ref is single-use for this turn only -- "
++                        "never repeat it, explain it, or include it in any reply "
++                        "to the customer, and never describe what it contains."
++                    )
+                 async with open_run_state_reader(db) as reader:
+                     intake = await enqueue_chat_runtime(
+@@ -272,9 +294,10 @@
+     return JSONResponse(
+         status_code=200,
+         content={
+             "reply": reply,
+             "run_id": str(run_id),
+             "matched_session": str(session_id),
+             "status": final_status,
++            "correlation_id": body.correlation_id,
+         },
+     )

@@ -1,0 +1,37 @@
+=== confirm real repo file untouched (diff exit 1 = differ, expected) ===
+138c138
+<         return pending({ stage: 'provisioning_started', service: req && req.service, authority: 'Magnus (voice) · Isola (governed)' });
+---
+>         return pending({ stage: (req && req.service === 'business_line') ? 'provisioning_started_NEGATIVE_CONTROL' : 'provisioning_started', service: req && req.service, authority: 'Magnus (voice) · Isola (governed)' });
+DIFF_EXIT_CODE=1 (nonzero expected: files differ)
+=== running negative-control rehearsal ===
+REHEARSAL 17/18 passed
+EXIT_CODE=1
+=== failed scenario detail ===
+      },
+      "timestamp": "2026-07-21T01:17:51.234Z",
+      "result": "FAIL"
+    },
+    {
+      "scenario": "S02",
+      "name": "Hosted PBX — no assistant",
+      "inputFixture": {
+        "service": "hosted_pbx"
+      },
+      "adapterCalls": [
+        "activateService"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "pending",
+          "actual": "pending",
+          "pass": true
+        },
+        {
+          "field": "data.stage",
+          "expected": "provisioning_started",
+=== confirm real repo adapter hash unchanged post-run ===
+389227ce088c0d6d0c0d1200a2723888120a9df1974f441bbd99877df47f11fb  artifacts/isola/contracts/service-adapter.js
+=== cleanup ===
+NEGATIVE_CONTROL_DIR_REMOVED=YES

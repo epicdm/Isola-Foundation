@@ -1,0 +1,46 @@
+=== git status (post-sanitization) ===
+On branch feat/front-of-house-launch-readiness
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	evidence/
+	incoming/
+
+nothing added to commit but untracked files present (use "git add" to track)
+
+=== git branch --show-current ===
+feat/front-of-house-launch-readiness
+
+=== git rev-parse HEAD ===
+27e598e01381e03ba9c1bd2b6c7fd9c407ce325a
+
+=== git branch -vv ===
+* feat/front-of-house-launch-readiness         27e598e feat(isola): add Stage 1 front-of-house routes
+  feature/s6-approval-request-voice-gate       3cdc418 [origin/feature/s6-approval-request-voice-gate] S6 Phase 1: add_approval_request migration (generated via prisma migrate dev --create-only against helium)
+  feature/s6-phase2-notification-outbox        0eeff66 [origin/feature/s6-phase2-notification-outbox] S6 Phase 2: NotificationOutbox — durable, idempotent, consent-checked outbound queue
+  fix-instrumentation-nonunique-tenant-upserts 5b1500a [origin/fix-instrumentation-nonunique-tenant-upserts] Fix instrumentation.ts seed upserts using non-unique tenant_id
+  main                                         f449ace [origin/main: ahead 40] Published your App
+  migrate-deploy-foundation-phase-a            a5d41e9 [origin/migrate-deploy-foundation-phase-a] Migrate-deploy foundation Phase B: replay-safe index migration + wire migrate deploy into run command
+  phase-c-retire-runmigrations                 756647a [origin/main: ahead 1, behind 15] Phase C: retire runMigrations() raw-SQL runner; migrate deploy is the prod schema path
+  pr12                                         caef365 feat(isola): add canonical tenant registry linkage columns (S1a)
+  replit-agent                                 6c38554 Published your App
+  spine/identity-anchor-fix                    ed7ba05 fix: filter null phones from identityPhones to satisfy Prisma notIn string[] type
+  spine/unify-identity-phase-a                 f2c72e2 [origin/spine/unify-identity-phase-a: gone] feat(db): Unify Identity Phase A — additive schema (Identity/Membership/VoiceLine)
+  spine/unify-identity-phase-b                 d598fa3 feat(db): Unify Identity Phase B — idempotent backfill script + run report
+
+=== git remote -v (sanitized, no embedded credentials) ===
+gitsafe-backup	git://gitsafe:5418/backup.git (fetch)
+gitsafe-backup	git://gitsafe:5418/backup.git (push)
+origin	https://github.com/epicdm/Isola-Foundation.git (fetch)
+origin	https://github.com/epicdm/Isola-Foundation.git (push)
+
+=== PAT filename-remnant check (pre-sanitization; expected to show .git/config since it held the token before set-url) ===
+(post-sanitization, origin URL itself no longer contains ghp_; residual match above, if any, is from git internal reflog/packed-refs history of the URL change, not the live remote config)
+
+=== ls-remote origin HEAD attempt (expected to fail: no credential helper configured) ===
+error: unable to read askpass response from 'replit-git-askpass'
+fatal: could not read Username for 'https://github.com': No such device or address
+LS_REMOTE_EXIT_CODE=128
+
+=== PUSH: NOT ATTEMPTED — no safe authentication available (no SSH key present, gh cli not authenticated, embedded PAT intentionally removed and not restored) ===
+=== local commit and git bundle retained as durable evidence ===
+-rw-r--r-- 1 runner runner 69277409 Jul 21 01:15 /home/runner/workspace/evidence/stage1/isola-stage1.bundle

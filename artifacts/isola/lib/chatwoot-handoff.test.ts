@@ -36,6 +36,24 @@ describe('surfaceHandoff — single-fire (P1 dispatch fix)', () => {
     expect(toggle).toHaveLength(1);
   });
 
+  it('posts a caller-supplied noteText instead of the generic default when provided', async () => {
+    const posted: any[] = [];
+    (global.fetch as any).mockImplementation((url: string, init?: any) => {
+      if (url.endsWith('/labels') && init?.method === undefined) {
+        return Promise.resolve(jsonResponse({ payload: [] }));
+      }
+      if (url.endsWith('/messages') && init?.method === 'POST') {
+        posted.push(JSON.parse(init.body));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    await surfaceHandoff(BASE_URL, ACCOUNT_ID, CW_CONV_ID, BOT_TOKEN, 'custom escalation note');
+
+    expect(posted).toHaveLength(1);
+    expect(posted[0].content).toBe('custom escalation note');
+  });
+
   it('skips the private note, label POST, and status toggle entirely when the handoff label is already present', async () => {
     (global.fetch as any).mockImplementation((url: string, init?: any) => {
       if (url.endsWith('/labels') && init?.method === undefined) {

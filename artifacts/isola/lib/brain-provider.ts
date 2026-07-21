@@ -37,6 +37,7 @@ import { chatComplete, TIER_MODELS } from './ai';
 import { decryptSecret } from './tenant-secrets';
 import { prisma } from './prisma';
 import { guardReply, SALES_TENANT_IDS, DEFLECTION as GUARD_ERROR_DEFLECTION } from './claim-guard';
+import { detectEscalationIntent } from './escalation-intent';
 import { audit } from './audit';
 
 const FLOWISE_TIMEOUT_MS = 20_000;
@@ -150,8 +151,15 @@ export async function generateReply(params: {
   clawithBinding?: ClawithBindingInput | null;
   /** Tenant's Odoo connection — when present, Clawith uses the tenant's own Odoo instead of its sandbox. */
   odooBinding?: OdooBindingInput | null;
+  /** Opaque per-turn escalation ref (lib/escalation-ref.ts), forwarded to the
+   *  Isola bridge only — null/absent for every non-clawith provider. */
+  conversationRef?: string | null;
+  /** Non-secret correlation id minted alongside conversationRef — forwarded to
+   *  the Isola bridge for cross-system tracing. Never used to resolve
+   *  ownership; distinct from conversationRef itself. */
+  escalationCorrelationId?: string | null;
 }): Promise<BrainReplyResult> {
-  const { agent, system, messages, sessionId, phoneNumberId, senderPhone, tenantId, clawithBinding, odooBinding } = params;
+  const { agent, system, messages, sessionId, phoneNumberId, senderPhone, tenantId, clawithBinding, odooBinding, conversationRef, escalationCorrelationId } = params;
   const model = TIER_MODELS[agent.intelligence_tier] ?? TIER_MODELS['standard'];
 
   let result: BrainReplyResult | null = null;
@@ -218,8 +226,9 @@ export async function generateReply(params: {
       const clawithResult = await tryIsolaBridge({
         agentId: clawithBinding.clawith_agent_id,
         messages,
-        sessionId,
         callerPhone: senderPhone,
+        conversationRef: conversationRef ?? null,
+        correlationId: escalationCorrelationId ?? null,
       });
       if (clawithResult) {
         result = { ...clawithResult, model: 'clawith' };
@@ -253,6 +262,14 @@ export async function generateReply(params: {
   // the caller's catch block and result in NO reply being sent at all, which
   // is worse than a raw unguarded reply going out. Catch, deflect, and audit
   // instead of letting the raw (unchecked) text through or the call throw.
+  // Escalation-intent handoff (def-ema-needs-handoff-flag-inconsistent): force a
+  // human handoff for sales tenants when the INBOUND message signals a high-stakes
+  // intent (cancellation, contract, refund/billing dispute, price negotiation,
+  // explicit human request, complaint), even when the reply is a clean deflection
+  // the brain flagged needs_handoff=false. Fail-safe: only ever ADDS a handoff.
+  const lastUserText = [...messages].reverse().find((m) => m.role === 'user')?.content ?? '';
+  const escalation = detectEscalationIntent(lastUserText, tenantId);
+
   try {
     const guarded = guardReply(result.text, tenantId);
     if (guarded.blocked) {
@@ -266,6 +283,18 @@ export async function generateReply(params: {
         meta: { rule: guarded.rule },
       });
       return { ...result, text: guarded.text, needsHandoff: true };
+    }
+    if (escalation.escalate) {
+      console.warn(`[brain-provider] escalation-intent handoff (category=${escalation.category}) for tenant ${tenantId}`);
+      await audit({
+        tenantId,
+        actorId: `agent:${agent.id}`,
+        action: 'escalation_intent.handoff_forced',
+        entity: 'conversation',
+        entityId: sessionId,
+        meta: { category: escalation.category },
+      });
+      return { ...result, needsHandoff: true };
     }
     return result;
   } catch (err: any) {
@@ -453,8 +482,16 @@ async function tryHermes(params: {
  * Contract (Foundation → Isola bridge):
  *   POST https://agents.epic.dm/api/isola/bridge/message
  *   headers: { 'X-Isola-Secret': CLAWITH_SHARED_SECRET }
- *   body: { agent_id, phone, text, external_conversation_id }
+ *   body: { agent_id, phone, text, conversation_ref, correlation_id }
  *   expects: { reply: string, run_id, status, matched_session, needs_handoff?: boolean }
+ *
+ * Deliberately NOT sent: any raw Conversation id, tenant id, Chatwoot
+ * account id, inbox ownership id, or ChatwootBinding id
+ * (def-clawith-escalation-shared-token-no-agent-principal-2026-07-21 /
+ * scoped-capability hardening) — `conversation_ref` is the only
+ * conversation-identifying value the bridge/agent ever receives, and it is
+ * opaque. `correlation_id` is a non-secret per-turn trace id, safe to log on
+ * either side, that carries no ownership information of its own.
  *
  * Any non-2xx, network error, or empty reply is treated identically: return
  * null so the caller falls back to native. Never throws.
@@ -468,8 +505,16 @@ const CLAWITH_TIMEOUT_MS = 45_000;
 async function tryIsolaBridge(params: {
   agentId: string;
   messages: { role: 'user' | 'assistant'; content: string }[];
-  sessionId: string;
   callerPhone: string;
+  /** Opaque, short-lived, scoped-capability ref (lib/escalation-ref.ts).
+   *  Forwarded so the bridge can hand it to the agent for escalate_to_human —
+   *  never a raw conversation/tenant/account/inbox id. Null when unavailable
+   *  (e.g. EscalationRef mint failed); the bridge/agent simply has no ref to
+   *  offer that turn and escalate_to_human is unusable until the next one. */
+  conversationRef: string | null;
+  /** Non-secret per-turn trace id minted alongside conversationRef — forwarded
+   *  for cross-system log correlation only, never used for ownership. */
+  correlationId: string | null;
 }): Promise<{ text: string; tokensUsed: number; provider: 'clawith'; needsHandoff: boolean } | null> {
   const secret = process.env.CLAWITH_SHARED_SECRET;
   if (!secret) {
@@ -489,7 +534,8 @@ async function tryIsolaBridge(params: {
         agent_id: params.agentId,
         phone: params.callerPhone,
         text: userText,
-        external_conversation_id: params.sessionId,
+        conversation_ref: params.conversationRef,
+        correlation_id: params.correlationId,
       }),
       signal: AbortSignal.timeout(CLAWITH_TIMEOUT_MS),
     });
