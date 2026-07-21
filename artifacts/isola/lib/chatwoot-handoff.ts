@@ -48,6 +48,12 @@ export async function toggleConvStatus(
  * deduped, so the private note re-posted on every needs_handoff=true message
  * in a conversation (P1 dispatch bug) — now the whole surfacing sequence
  * fires at most once per conversation.
+ *
+ * `noteText` defaults to the generic needs_handoff wording above; callers with
+ * a more specific reason (e.g. the governed escalate_to_human endpoint) may
+ * override it. This never changes the single-fire gate itself — if the
+ * ai-handoff label is already present (from an earlier call, with either
+ * note), this still no-ops.
  */
 export const HANDOFF_LABEL = 'ai-handoff';
 
@@ -56,6 +62,7 @@ export async function surfaceHandoff(
   accountId: string,
   cwConvId:  number,
   botToken:  string,
+  noteText:  string = '🤖 Clawith flagged this conversation for human review.',
 ): Promise<void> {
   let existing: string[] = [];
   try {
@@ -80,7 +87,7 @@ export async function surfaceHandoff(
         method:  'POST',
         headers: { 'Content-Type': 'application/json', api_access_token: botToken },
         body:    JSON.stringify({
-          content:      '🤖 Clawith flagged this conversation for human review.',
+          content:      noteText,
           message_type: 'outgoing',
           private:      true,
         }),
