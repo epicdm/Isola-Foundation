@@ -150,6 +150,74 @@ describe('generateReply — claim-guard integration (Clawith path, mocked bridge
   });
 });
 
+describe('generateReply — Clawith path forwards conversationRef to the Isola bridge', () => {
+  it('sends the caller-supplied conversationRef as conversation_ref on the bridge request', async () => {
+    mockBridgeReply({ reply: 'ok', needs_handoff: false });
+
+    await generateReply({
+      ...baseParams,
+      agent: baseAgent(),
+      tenantId: OTHER_TENANT,
+      clawithBinding: CLAWITH_BINDING,
+      conversationRef: 'opaque-ref-123',
+    });
+
+    const [, init] = (global.fetch as any).mock.calls[0];
+    const sentBody = JSON.parse(init.body);
+    expect(sentBody.conversation_ref).toBe('opaque-ref-123');
+  });
+
+  it('sends conversation_ref: null when no ref was minted for this turn', async () => {
+    mockBridgeReply({ reply: 'ok', needs_handoff: false });
+
+    await generateReply({
+      ...baseParams,
+      agent: baseAgent(),
+      tenantId: OTHER_TENANT,
+      clawithBinding: CLAWITH_BINDING,
+    });
+
+    const [, init] = (global.fetch as any).mock.calls[0];
+    const sentBody = JSON.parse(init.body);
+    expect(sentBody.conversation_ref).toBeNull();
+  });
+
+  it('forwards escalationCorrelationId as correlation_id on the bridge request', async () => {
+    mockBridgeReply({ reply: 'ok', needs_handoff: false });
+
+    await generateReply({
+      ...baseParams,
+      agent: baseAgent(),
+      tenantId: OTHER_TENANT,
+      clawithBinding: CLAWITH_BINDING,
+      conversationRef: 'opaque-ref-123',
+      escalationCorrelationId: 'corr-abc',
+    });
+
+    const [, init] = (global.fetch as any).mock.calls[0];
+    const sentBody = JSON.parse(init.body);
+    expect(sentBody.correlation_id).toBe('corr-abc');
+  });
+
+  it('never sends the raw Conversation id (sessionId) to the Isola bridge', async () => {
+    mockBridgeReply({ reply: 'ok', needs_handoff: false });
+
+    await generateReply({
+      ...baseParams,
+      sessionId: 'raw-conversation-db-id-should-not-leak',
+      agent: baseAgent(),
+      tenantId: OTHER_TENANT,
+      clawithBinding: CLAWITH_BINDING,
+      conversationRef: 'opaque-ref-123',
+    });
+
+    const [, init] = (global.fetch as any).mock.calls[0];
+    const sentBody = JSON.parse(init.body);
+    expect(sentBody.external_conversation_id).toBeUndefined();
+    expect(JSON.stringify(sentBody)).not.toContain('raw-conversation-db-id-should-not-leak');
+  });
+});
+
 describe('generateReply — claim-guard integration (native fallback path)', () => {
   it('a fabricated claim from the native fallback is deflected for a sales tenant', async () => {
     chatCompleteMock.mockResolvedValue({

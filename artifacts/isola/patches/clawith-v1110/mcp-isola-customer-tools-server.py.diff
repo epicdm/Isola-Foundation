@@ -1,0 +1,78 @@
+--- a/server.py
++++ b/server.py
+@@ -116,20 +116,66 @@
+
+
+ @mcp.tool()
+-def escalate_to_human(reason: str) -> dict[str, Any]:
+-    """Signal that this conversation should be handed off to a human.
++def escalate_to_human(conversation_ref: str, reason: str = "") -> dict[str, Any]:
++    """Hand this conversation off to a human agent.
+
+-    Side-effect-free: this only emits the intent. The actual handoff wiring
+-    (spine / Chatwoot) is a later component. Use when the customer explicitly
+-    asks for a human or the request is out of scope for the assistant.
++    Calls the governed Foundation escalation endpoint using the same
++    customer-scoped bearer token as get_my_account. `conversation_ref` is
++    the opaque, short-lived reference this turn's runtime instruction gave
++    you -- pass it through EXACTLY as given. Never invent one, reuse one
++    across turns, or ask the customer for it; if you were not given one
++    this turn, do not call this tool.
+
+     Args:
+-        reason: Short reason for the escalation.
++        conversation_ref: The opaque reference from this turn's runtime
++            instruction. Required.
++        reason: Optional short, customer-safe summary of why you are
++            escalating (e.g. "customer asked for a human").
+
+     Returns:
+-        A structured escalation signal.
++        On success: {"escalated": True, "status": "escalated" |
++        "already_escalated", "correlation_id": str}. On failure:
++        {"escalated": False, "error": <code>, "correlation_id": str |
++        None} -- NEVER claim a handoff occurred unless this reports
++        escalated: True. Error codes mirror the spine endpoint's own
++        denial reasons (e.g. "unknown_or_expired_conversation_ref",
++        "ref_scope_mismatch", "binding_unresolved",
++        "malformed_conversation_ref") and must be surfaced honestly.
+     """
+-    return {"escalate": True, "reason": (reason or "").strip()}
++    conversation_ref = (conversation_ref or "").strip()
++    if not conversation_ref:
++        return {"escalated": False, "error": "conversation_ref_required", "correlation_id": None}
++    if not _CUSTOMER_TOKEN:
++        return {"escalated": False, "error": "server misconfigured: customer token unset", "correlation_id": None}
++    url = f"{_SPINE_HTTP}/api/customer/escalate"
++    try:
++        resp = requests.post(
++            url,
++            json={
++                "conversation_ref": conversation_ref,
++                "summary": (reason or "").strip()[:2000] or None,
++            },
++            headers={"Authorization": f"Bearer {_CUSTOMER_TOKEN}"},
++            timeout=_TIMEOUT,
++        )
++    except requests.RequestException as e:
++        return {"escalated": False, "error": f"spine request failed: {type(e).__name__}", "correlation_id": None}
++    try:
++        data = resp.json()
++    except ValueError:
++        return {"escalated": False, "error": "spine returned non-JSON body", "correlation_id": None}
++    correlation_id = data.get("correlation_id") if isinstance(data, dict) else None
++    if resp.status_code != 200 or not isinstance(data, dict) or not data.get("ok"):
++        error = data.get("error") if isinstance(data, dict) else None
++        return {
++            "escalated": False,
++            "error": error or f"spine returned status {resp.status_code}",
++            "correlation_id": correlation_id,
++        }
++    return {
++        "escalated": True,
++        "status": data.get("status"),
++        "correlation_id": correlation_id,
++    }
+
+
+ if __name__ == "__main__":

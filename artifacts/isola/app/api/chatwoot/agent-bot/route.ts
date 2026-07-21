@@ -294,6 +294,8 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
         customer_phone:          customerPhone,
         status:                  'open',
         human_handling:          false,
+        chatwoot_inbox_id:       inboxId,
+        chatwoot_binding_id:     binding.id,
       },
     });
     // Lead-pipeline context capture (Lane 1 Task 3) — stamp once, on the
@@ -327,7 +329,16 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
   }
   await prisma.conversation.update({
     where: { id: conversation.id },
-    data:  { last_message_at: new Date(), customer_phone: customerPhone },
+    data:  {
+      last_message_at:     new Date(),
+      customer_phone:      customerPhone,
+      // Refresh/backfill the binding snapshot on every inbound message —
+      // cheap, and the only place a legacy (pre-snapshot) conversation ever
+      // gets a value here, from the one unambiguous signal available: this
+      // message's own live inbox_id.
+      chatwoot_inbox_id:   inboxId,
+      chatwoot_binding_id: binding.id,
+    },
   });
 
   // ── Human-handling gate (replaces status-based gating) ───────────────────
@@ -477,6 +488,29 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
       };
     }
 
+    // Mint a fresh opaque escalation ref for this turn — ONLY the Clawith path
+    // ever gets one; the bridge hands it to the agent (never a raw
+    // conversation/tenant/account/inbox id) so escalate_to_human can resolve
+    // ownership server-side from the ref alone (lib/escalation-ref.ts). Scoped
+    // to purpose/tenant/agent/binding/inbox/conversation at mint time — bound
+    // to `binding.id`/`inboxId` (this request's OWN live values, just
+    // persisted onto the conversation above), not the possibly-stale
+    // in-memory `conversation.*` snapshot from before that update.
+    let conversationRef: string | null = null;
+    let escalationCorrelationId: string | null = null;
+    if (clawithBindingRow) {
+      const { createEscalationRef } = await import('@/lib/escalation-ref');
+      const mint = await createEscalationRef({
+        tenantId,
+        conversationId:    conversation.id,
+        clawithAgentId:    clawithBindingRow.clawith_agent_id,
+        chatwootBindingId: binding.id,
+        chatwootInboxId:   inboxId ?? null,
+      });
+      conversationRef = mint.token;
+      escalationCorrelationId = mint.correlationId;
+    }
+
     let needsHandoff = false;
 
     try {
@@ -501,6 +535,8 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
             }
           : null,
         odooBinding: odooBindingInput,
+        conversationRef,
+        escalationCorrelationId,
       });
       reply       = result.text;
       tokensUsed  = result.tokensUsed;

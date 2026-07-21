@@ -5,15 +5,40 @@
  * ISOLA_CUSTOMER_TOOLS_TOKEN used by /api/customer/account — the public
  * agent holds no other credential (def-clawith-escalate-tool-no-chatwoot-wiring-2026-07-21).
  *
- * Ownership is resolved ENTIRELY server-side from `conversation_id` — the
- * opaque per-conversation id we ourselves handed Clawith as `sessionId` in
- * generateReply() (see app/api/chatwoot/agent-bot/route.ts). The caller
- * supplies no tenant/company/account/inbox id; any such field in the request
- * body is ignored. Conversation.tenant_id -> ChatwootBinding (mode='a2') is
- * the only path to an account_id/base_url/bot token, exactly as the agent-bot
- * webhook itself resolves them.
+ * Ownership is resolved ENTIRELY server-side from `conversation_ref` — an
+ * opaque, short-lived, scoped-capability token (lib/escalation-ref.ts) bound
+ * at mint time to purpose, tenant, Clawith agent, ChatwootBinding, inbox,
+ * Conversation and a correlation id. Foundation mints it per turn and hands
+ * it to the agent ONLY via the Isola bridge's per-turn runtime instruction
+ * (isola_bridge.py's caller_directive channel — never a raw conversation/
+ * tenant/account/inbox id, and never a value the agent could forge or reuse
+ * past its TTL). The caller supplies no tenant/company/account/inbox/
+ * conversation id; any such field in the request body is ignored. Every
+ * bound field is RE-CHECKED against the conversation's current state below
+ * (not just "does the token exist") — a mismatch on any of them (wrong
+ * purpose, wrong tenant, wrong Clawith agent, wrong binding, wrong inbox)
+ * fails closed as `ref_scope_mismatch`, distinct from `binding_unresolved`
+ * (which means Foundation itself cannot determine a consistent binding for
+ * this conversation at all). The Chatwoot account_id/base_url/bot token come
+ * ONLY from Conversation.chatwoot_binding_id — the exact ChatwootBinding
+ * snapshotted onto the conversation at webhook time (see agent-bot/route.ts)
+ * — never a fresh tenant-wide ChatwootBinding lookup, which is ambiguous
+ * once a tenant owns more than one active a2 binding (S4 per-agent
+ * routing).
  *
- * Effects (idempotent — safe to retry with the same conversation_id):
+ * IMPORTANT — this is a scoped capability check, NOT independent agent
+ * authentication (def-clawith-escalation-shared-token-no-agent-principal-
+ * 2026-07-21): mcp-isola-customer-tools still authenticates every call with
+ * ONE shared bearer token (ISOLA_CUSTOMER_TOOLS_TOKEN) for every tenant and
+ * agent. The scoped ref proves the bearer was handed THIS exact reference
+ * for THIS exact turn and closes the cross-tenant/cross-agent/cross-binding
+ * ambiguity that a raw id would leave open — it does not prove the HTTP
+ * request itself originated from the specific Clawith execution named in
+ * the ref, as opposed to some other holder of the same shared token replaying
+ * a leaked reference before it expires. Do not weaken these checks, and do
+ * not present them elsewhere as solving that remaining gap.
+ *
+ * Effects (idempotent — safe to retry with the same still-valid conversation_ref):
  *   1. Conversation.human_handling = true — the ONE authoritative silence
  *      gate (stronger than the existing soft needs_handoff -> surfaceHandoff()
  *      path, which only flags a conversation for review and never silences
@@ -33,7 +58,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'node:crypto';
 import { prisma } from '@/lib/prisma';
 import { surfaceHandoff } from '@/lib/chatwoot-handoff';
-import { resolveActiveBinding } from '@/lib/chatwoot-binding-resolution';
+import { resolveEscalationRef } from '@/lib/escalation-ref';
 import { audit } from '@/lib/audit';
 
 function ctEq(a: string, b: string): boolean {
@@ -54,6 +79,19 @@ function fail(status: number, error: string, correlationId: string) {
   return NextResponse.json({ ok: false, error, correlation_id: correlationId }, { status });
 }
 
+/** Two-level ClawithBinding lookup mirroring agent-bot/route.ts's own
+ *  resolution order: per-agent binding first, tenant-level fallback second.
+ *  Used only to find the CURRENT expected clawith_agent_id for a
+ *  conversation's agent, to compare against the ref's snapshot. */
+async function currentClawithAgentId(tenantId: string, agentId: string | null): Promise<string | null> {
+  if (agentId) {
+    const perAgent = await prisma.clawithBinding.findUnique({ where: { agent_id: agentId } });
+    if (perAgent) return perAgent.clawith_agent_id;
+  }
+  const perTenant = await prisma.clawithBinding.findFirst({ where: { tenant_id: tenantId, agent_id: null } });
+  return perTenant?.clawith_agent_id ?? null;
+}
+
 export async function POST(req: NextRequest) {
   const correlationId = crypto.randomUUID();
   if (!authed(req)) return fail(401, 'bad_auth', correlationId);
@@ -61,31 +99,82 @@ export async function POST(req: NextRequest) {
   let body: any = {};
   try { body = await req.json(); } catch { /* treat as empty body */ }
 
-  const conversationId: string | null =
-    typeof body?.conversation_id === 'string' && body.conversation_id.trim()
-      ? body.conversation_id.trim()
+  const conversationRef: string | null =
+    typeof body?.conversation_ref === 'string' && body.conversation_ref.trim()
+      ? body.conversation_ref.trim()
       : null;
   const summary: string | null =
     typeof body?.summary === 'string' && body.summary.trim()
       ? body.summary.trim().slice(0, 2000)
       : null;
 
-  if (!conversationId) return fail(400, 'conversation_id required', correlationId);
+  if (!conversationRef) return fail(400, 'conversation_ref required', correlationId);
 
-  // Ownership resolution — entirely server-side. Nothing else in `body`
-  // (tenant_id, account_id, inbox_id, etc.) is ever read past this point.
-  const conversation = await prisma.conversation.findUnique({ where: { id: conversationId } });
+  // Ownership resolution — entirely server-side, from the opaque ref alone.
+  // Nothing else in `body` (conversation_id, tenant_id, account_id,
+  // inbox_id, etc.) is ever read past this point.
+  const resolved = await resolveEscalationRef(conversationRef);
+  if (!resolved) return fail(404, 'unknown_or_expired_conversation_ref', correlationId);
+  if (resolved.purpose !== 'escalate_to_human') {
+    return fail(400, 'malformed_conversation_ref', correlationId);
+  }
+
+  const conversation = await prisma.conversation.findUnique({ where: { id: resolved.conversationId } });
   if (!conversation) return fail(404, 'unknown_conversation', correlationId);
   if (conversation.chatwoot_conversation_id === null) {
     return fail(409, 'conversation_not_chatwoot_backed', correlationId);
   }
+  // Cross-tenant fail-closed — the ref's own snapshot must still agree with
+  // the conversation it resolves to.
+  if (resolved.tenantId !== conversation.tenant_id) {
+    return fail(403, 'ref_scope_mismatch', correlationId);
+  }
 
-  const bindings = await prisma.chatwootBinding.findMany({
-    where:   { tenant_id: conversation.tenant_id, mode: 'a2' },
+  // Binding resolution — from the conversation's OWN stored snapshot only,
+  // never a fresh tenant-wide lookup. A tenant can own more than one active
+  // a2 ChatwootBinding (S4 per-agent routing); querying by tenant_id alone
+  // is exactly the ambiguity class that already caused two live incidents
+  // on the inbound path (2026-07-01, 2026-07-20) before it was fixed there
+  // by keying on the webhook's own inbox_id. Escalation must fail closed
+  // rather than guess when the snapshot is missing or inconsistent — there
+  // is no live inbox_id to fall back to here (unlike the inbound webhook,
+  // which always carries one).
+  if (!conversation.chatwoot_binding_id) {
+    return fail(409, 'binding_unresolved', correlationId);
+  }
+  const binding = await prisma.chatwootBinding.findUnique({
+    where:   { id: conversation.chatwoot_binding_id },
     include: { tenant: true },
   });
-  const binding = resolveActiveBinding(bindings);
-  if (!binding) return fail(409, 'no_chatwoot_binding', correlationId);
+  if (
+    !binding ||
+    binding.mode !== 'a2' ||
+    binding.tenant_id !== conversation.tenant_id ||
+    binding.tenant.status !== 'active' ||
+    (conversation.chatwoot_inbox_id !== null && conversation.chatwoot_inbox_id !== binding.inbox_id)
+  ) {
+    return fail(409, 'binding_unresolved', correlationId);
+  }
+
+  // Cross-binding / cross-inbox / cross-agent fail-closed — the ref must
+  // still name the SAME binding, inbox and Clawith agent the conversation
+  // resolves to right now. A mismatch here means either a ref minted for a
+  // different conversation/agent is being replayed, or the tenant's binding
+  // was rebound between mint and use — either way, deny rather than guess.
+  if (resolved.chatwootBindingId !== conversation.chatwoot_binding_id) {
+    return fail(403, 'ref_scope_mismatch', correlationId);
+  }
+  if (
+    resolved.chatwootInboxId !== null &&
+    conversation.chatwoot_inbox_id !== null &&
+    resolved.chatwootInboxId !== conversation.chatwoot_inbox_id
+  ) {
+    return fail(403, 'ref_scope_mismatch', correlationId);
+  }
+  const expectedClawithAgentId = await currentClawithAgentId(conversation.tenant_id, binding.agent_id);
+  if (!expectedClawithAgentId || resolved.clawithAgentId !== expectedClawithAgentId) {
+    return fail(403, 'ref_scope_mismatch', correlationId);
+  }
 
   const botToken = process.env.CHATWOOT_AGENTBOT_TOKEN;
   if (!botToken) return fail(500, 'bot_token_not_configured', correlationId);
@@ -120,10 +209,12 @@ export async function POST(req: NextRequest) {
     meta:      { already_escalated: alreadyEscalated, has_summary: summary !== null },
   });
 
+  // Never return the decoded ownership payload (conversation/tenant/binding/
+  // inbox id) — status + correlation_id is the entire contract the MCP tool
+  // and agent ever see.
   return NextResponse.json({
     ok:             true,
     status:         alreadyEscalated ? 'already_escalated' : 'escalated',
     correlation_id: correlationId,
-    conversation_id: conversation.id,
   });
 }
