@@ -54,7 +54,24 @@ export const DEFLECTION =
 // only an affirmative claim blocks. Left false (the default) for the rest of
 // the deny-list, which is first-pass and tuned from the audit log instead.
 const HARD_NEVERS: { id: string; pattern: RegExp; requiresPositiveClaim?: boolean }[] = [
-  { id: 'voice_ai', pattern: /\bvoice[\s-]?AI\b|\bAI\s+(answers?|picks?\s+up|handles?)\s+(your\s+|the\s+)?(phone\s*)?calls?\b/i },
+  // voice_ai — the sales agent (in ANY grammatical person) claiming an AI answers/handles
+  // phone or VOICE calls. Covers the literal "voice AI", third-person "our AI answers your
+  // calls", AND the first-person framing EMA actually used on 2026-07-18 ("I answer the call",
+  // "I also answer phone calls"). The object is pinned to phone/voice CALLS so approved claims
+  // pass: "answers your WhatsApp" (T1) has no call object, and "you make/receive calls on the
+  // softphone" (T5) has a CUSTOMER subject, not an AI subject. Not requiresPositiveClaim -> an
+  // honest "we don't offer voice AI" over-blocks to a human, which fails safe.
+  { id: 'voice_ai', pattern: /\bvoice[\s-]?AI\b|\b(?:AI|I|we|our (?:AI|assistant|receptionist|bot))(?:'ll| will| can| could| also| do| now| even| still)*\s+(?:answers?|answer|picks?(?:\s+up)?|pick(?:\s+up)?|takes?|handles?)\s+(?:up )?(?:the |your |incoming |inbound |all |any |those |phone |voice |business )*(?:phone |voice )?calls?\b/i },
+  // ai_voice_channel — the WhatsApp AI ALSO running the voice/call channel: "same AI on
+  // WhatsApp and voice", "same AI, both channels" (the exact cross-channel fabrication in the
+  // 2026-07-18 Tests 1 & 4), plus an AI/assistant/first-person subject tied to "both channels"
+  // or a "WhatsApp and voice" pairing.
+  { id: 'ai_voice_channel', pattern: /\bsame\s+AI\b[^.?!]{0,45}\b(?:voice|calls?|phone|both\s+channels)\b|\b(?:AI|assistant|receptionist|bot|I)\b[^.?!]{0,30}\b(?:both\s+channels|voice\s+and\s+whatsapp|whatsapp\s+and\s+voice)\b/i },
+  // ai_places_call — the assistant offering to autonomously PLACE/MAKE an outbound call, or to
+  // call the customer ("I can place an outbound call", "I'll call you back"). Subject-anchored to
+  // the AI/assistant ("I"/"our AI"/"let me") so approved customer-side calling ("you can make and
+  // receive calls from a softphone", T5 — a "you" subject) is never caught.
+  { id: 'ai_places_call', pattern: /\b(?:I|let me|our (?:AI|assistant|bot))(?:'ll| will| can| could| also)*\s+(?:place|places|placed|make|makes|dial|dials|initiate|initiates|put through|ring|rings)\s+(?:you |them |him |her )?(?:an?|the|your|a|one|that)?\s*(?:outbound|out-?going|automated|quick|phone|direct)?\s*calls?\b|\b(?:I|our (?:AI|assistant|bot))(?:'ll| will| can| could)*\s+calls?\s+(?:you|them|him|her|the\s+customer|your\s+customer|back)\b/i },
   { id: 'unlimited_autonomy', pattern: /\bunlimited autonomy\b|\bfully autonomous\b|\bno human (oversight|involvement|needed)\b/i },
   { id: 'guaranteed_accuracy', pattern: /\bguarantee[sd]?\b[^.?!]{0,40}\b(sales|accuracy|results|conversion)s?\b/i, requiresPositiveClaim: true },
   { id: 'missed_call_recovery', pattern: /\bmissed[\s-]call recovery\b|\brecovers?\s+(every|all)\s+missed calls?\b/i },
