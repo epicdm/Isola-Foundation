@@ -132,6 +132,43 @@ describe('guardReply — negation-aware narrowing (fast-follow: honest disclaime
   });
 });
 
+describe('guardReply — voice-AI first-person + cross-channel fabrication (def-ema-voice-ai-capability-fabrication-2026-07-18 regression)', () => {
+  // The exact (and near-exact) fabrications EMA produced against the live 5-scenario
+  // acceptance test on 2026-07-18 — all must now deflect + escalate.
+  const blocked: { label: string; text: string }[] = [
+    { label: 'Test 1 — first-person "I answer the call" + same AI on voice', text: 'I answer the call. Same AI on WhatsApp and voice.' },
+    { label: 'Test 4 — "I also answer phone calls — same AI, both channels"', text: 'I also answer phone calls — same AI, both channels.' },
+    { label: 'Test 4 — offer to place an outbound call', text: 'I can place an outbound call to them for you.' },
+    { label: 'assistant offers to call the customer', text: "I'll call you back on your phone shortly." },
+    { label: 'cross-channel fragment: same AI on voice', text: 'Same AI on WhatsApp and voice.' },
+    { label: 'third-person AI answers calls (original-rule regression)', text: 'Our AI answers your phone calls automatically.' },
+  ];
+  for (const { label, text } of blocked) {
+    it(`blocks voice-AI fabrication: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.text).not.toBe(text);
+    });
+  }
+
+  // Approved Claim Register statements that MUST still pass — a false positive here blocks a
+  // real sale. T1 = the AI answers WhatsApp (not calls); T5 = the CUSTOMER (not the AI) makes
+  // and receives calls on a softphone.
+  const allowed: { label: string; text: string }[] = [
+    { label: 'T1 first-person: I answer your WhatsApp', text: "I answer your WhatsApp messages 24/7 and escalate what I can't handle to you." },
+    { label: 'T1: AI receptionist answers WhatsApp', text: 'Your AI receptionist answers your WhatsApp and you stay in control from one inbox.' },
+    { label: 'T5: you make and receive calls on a softphone', text: 'You can make and receive calls on your business number from a softphone app on your phone.' },
+    { label: 'T5 variant: customer calling on the business line', text: 'You make and receive calls on your business line; the softphone runs on your phone.' },
+  ];
+  for (const { label, text } of allowed) {
+    it(`does not block approved claim: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(false);
+      expect(result.text).toBe(text);
+    });
+  }
+});
+
 describe('guardReply — price allow-list (dispatch scenarios 1-3 and 5)', () => {
   it('passes ratified setup + monthly prices unchanged (SBL, PBX-Upgrade, WA-Receptionist)', () => {
     const text = 'The Managed SBL is EC$750 setup + EC$249/mo. PBX-Upgrade is EC$250 setup + EC$99/mo. WA-Receptionist is EC$250 setup + EC$149/mo.';
