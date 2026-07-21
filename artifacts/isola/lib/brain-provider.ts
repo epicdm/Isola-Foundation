@@ -37,6 +37,7 @@ import { chatComplete, TIER_MODELS } from './ai';
 import { decryptSecret } from './tenant-secrets';
 import { prisma } from './prisma';
 import { guardReply, SALES_TENANT_IDS, DEFLECTION as GUARD_ERROR_DEFLECTION } from './claim-guard';
+import { detectEscalationIntent } from './escalation-intent';
 import { audit } from './audit';
 
 const FLOWISE_TIMEOUT_MS = 20_000;
@@ -253,6 +254,14 @@ export async function generateReply(params: {
   // the caller's catch block and result in NO reply being sent at all, which
   // is worse than a raw unguarded reply going out. Catch, deflect, and audit
   // instead of letting the raw (unchecked) text through or the call throw.
+  // Escalation-intent handoff (def-ema-needs-handoff-flag-inconsistent): force a
+  // human handoff for sales tenants when the INBOUND message signals a high-stakes
+  // intent (cancellation, contract, refund/billing dispute, price negotiation,
+  // explicit human request, complaint), even when the reply is a clean deflection
+  // the brain flagged needs_handoff=false. Fail-safe: only ever ADDS a handoff.
+  const lastUserText = [...messages].reverse().find((m) => m.role === 'user')?.content ?? '';
+  const escalation = detectEscalationIntent(lastUserText, tenantId);
+
   try {
     const guarded = guardReply(result.text, tenantId);
     if (guarded.blocked) {
@@ -266,6 +275,18 @@ export async function generateReply(params: {
         meta: { rule: guarded.rule },
       });
       return { ...result, text: guarded.text, needsHandoff: true };
+    }
+    if (escalation.escalate) {
+      console.warn(`[brain-provider] escalation-intent handoff (category=${escalation.category}) for tenant ${tenantId}`);
+      await audit({
+        tenantId,
+        actorId: `agent:${agent.id}`,
+        action: 'escalation_intent.handoff_forced',
+        entity: 'conversation',
+        entityId: sessionId,
+        meta: { category: escalation.category },
+      });
+      return { ...result, needsHandoff: true };
     }
     return result;
   } catch (err: any) {
