@@ -1,0 +1,885 @@
+{
+  "packet": "xp-front-of-house-launch-readiness",
+  "artifact": "W9 mock launch rehearsal (executable, exact-field)",
+  "adapter": "service-adapter.js",
+  "runner": "rehearsal-runner.js",
+  "mode": "mock",
+  "generatedAt": "2026-07-20T22:51:22.103Z",
+  "total": 18,
+  "passed": 18,
+  "failed": 0,
+  "assertionPolicy": "A scenario FAILS if any expected status/code/stage/service/assistant/duplicate-id/handoff/recovery/rollback/catalogue field mismatches, even when broad status is correct.",
+  "results": [
+    {
+      "scenario": "S01",
+      "name": "Business Line — no assistant",
+      "inputFixture": {
+        "service": "business_line"
+      },
+      "adapterCalls": [
+        "activateService"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "pending",
+          "actual": "pending",
+          "pass": true
+        },
+        {
+          "field": "data.stage",
+          "expected": "provisioning_started",
+          "actual": "provisioning_started",
+          "pass": true
+        },
+        {
+          "field": "data.service",
+          "expected": "business_line",
+          "actual": "business_line",
+          "pass": true
+        },
+        {
+          "field": "data.authority contains \"Magnus\"",
+          "expected": "Magnus",
+          "actual": "Magnus (voice) · Isola (governed)",
+          "pass": true
+        }
+      ],
+      "returnedState": {
+        "status": "pending",
+        "ok": true,
+        "correlationId": "cor_mrttjql2_1",
+        "data": {
+          "stage": "provisioning_started",
+          "service": "business_line",
+          "authority": "Magnus (voice) · Isola (governed)"
+        }
+      },
+      "timestamp": "2026-07-20T22:51:22.070Z",
+      "result": "PASS"
+    },
+    {
+      "scenario": "S02",
+      "name": "Hosted PBX — no assistant",
+      "inputFixture": {
+        "service": "hosted_pbx"
+      },
+      "adapterCalls": [
+        "activateService"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "pending",
+          "actual": "pending",
+          "pass": true
+        },
+        {
+          "field": "data.stage",
+          "expected": "provisioning_started",
+          "actual": "provisioning_started",
+          "pass": true
+        },
+        {
+          "field": "data.service",
+          "expected": "hosted_pbx",
+          "actual": "hosted_pbx",
+          "pass": true
+        }
+      ],
+      "returnedState": {
+        "status": "pending",
+        "ok": true,
+        "correlationId": "cor_mrttjql3_2",
+        "data": {
+          "stage": "provisioning_started",
+          "service": "hosted_pbx",
+          "authority": "Magnus (voice) · Isola (governed)"
+        }
+      },
+      "timestamp": "2026-07-20T22:51:22.071Z",
+      "result": "PASS"
+    },
+    {
+      "scenario": "S03",
+      "name": "Existing PBX + receptionist",
+      "inputFixture": {
+        "assistant": "business_receptionist"
+      },
+      "adapterCalls": [
+        "activateAssistant"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "assisted",
+          "actual": "assisted",
+          "pass": true
+        },
+        {
+          "field": "data.stage",
+          "expected": "assistant_activation",
+          "actual": "assistant_activation",
+          "pass": true
+        },
+        {
+          "field": "data.assistant",
+          "expected": "business_receptionist",
+          "actual": "business_receptionist",
+          "pass": true
+        },
+        {
+          "field": "data.authority contains \"Clawith\"",
+          "expected": "Clawith",
+          "actual": "Clawith (tenant-isolated) · Isola",
+          "pass": true
+        }
+      ],
+      "returnedState": {
+        "status": "assisted",
+        "ok": true,
+        "human": true,
+        "correlationId": "cor_mrttjql3_3",
+        "data": {
+          "stage": "assistant_activation",
+          "assistant": "business_receptionist",
+          "authority": "Clawith (tenant-isolated) · Isola",
+          "note": "Business-scoped; verified before enable."
+        }
+      },
+      "timestamp": "2026-07-20T22:51:22.071Z",
+      "result": "PASS"
+    },
+    {
+      "scenario": "S04",
+      "name": "Smart Front Desk (complete)",
+      "inputFixture": {
+        "answers": {
+          "wantAssistant": true
+        }
+      },
+      "adapterCalls": [
+        "createIntent",
+        "recommend"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "success",
+          "actual": "success",
+          "pass": true
+        },
+        {
+          "field": "data.stage",
+          "expected": "recommendation_shown",
+          "actual": "recommendation_shown",
+          "pass": true
+        },
+        {
+          "field": "data.offer",
+          "expected": "smart_front_desk",
+          "actual": "smart_front_desk",
+          "pass": true
+        }
+      ],
+      "returnedState": {
+        "status": "success",
+        "ok": true,
+        "correlationId": "cor_mrttjql3_6",
+        "data": {
+          "stage": "recommendation_shown",
+          "offer": "smart_front_desk",
+          "rationale": "Matched to stated need; assistant optional.",
+          "addons": [
+            "business_receptionist"
+          ],
+          "alternatives": [
+            "business_line",
+            "smart_front_desk"
+          ]
+        }
+      },
+      "timestamp": "2026-07-20T22:51:22.071Z",
+      "result": "PASS"
+    },
+    {
+      "scenario": "S05",
+      "name": "Standalone WA Receptionist",
+      "inputFixture": {
+        "assistant": "business_receptionist"
+      },
+      "adapterCalls": [
+        "activateAssistant"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "assisted",
+          "actual": "assisted",
+          "pass": true
+        },
+        {
+          "field": "data.assistant",
+          "expected": "business_receptionist",
+          "actual": "business_receptionist",
+          "pass": true
+        }
+      ],
+      "returnedState": {
+        "status": "assisted",
+        "ok": true,
+        "human": true,
+        "correlationId": "cor_mrttjql3_7",
+        "data": {
+          "stage": "assistant_activation",
+          "assistant": "business_receptionist",
+          "authority": "Clawith (tenant-isolated) · Isola",
+          "note": "Business-scoped; verified before enable."
+        }
+      },
+      "timestamp": "2026-07-20T22:51:22.071Z",
+      "result": "PASS"
+    },
+    {
+      "scenario": "S06",
+      "name": "Personal Line — no AI (assistant skipped)",
+      "inputFixture": {
+        "service": "personal_line"
+      },
+      "adapterCalls": [
+        "activateAssistant"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "error",
+          "actual": "error",
+          "pass": true
+        },
+        {
+          "field": "code",
+          "expected": "VALIDATION",
+          "actual": "VALIDATION",
+          "pass": true
+        },
+        {
+          "field": "recovery",
+          "expected": "skip",
+          "actual": "skip",
+          "pass": true
+        }
+      ],
+      "returnedState": {
+        "status": "error",
+        "ok": false,
+        "code": "VALIDATION",
+        "message": "No assistant requested — communications-only customer",
+        "correlationId": "cor_mrttjql3_8",
+        "recovery": "skip"
+      },
+      "timestamp": "2026-07-20T22:51:22.071Z",
+      "result": "PASS"
+    },
+    {
+      "scenario": "S07",
+      "name": "Personal Line + EPIC Assistant",
+      "inputFixture": {
+        "assistant": "epic_assistant"
+      },
+      "adapterCalls": [
+        "activateAssistant"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "assisted",
+          "actual": "assisted",
+          "pass": true
+        },
+        {
+          "field": "data.assistant",
+          "expected": "epic_assistant",
+          "actual": "epic_assistant",
+          "pass": true
+        }
+      ],
+      "returnedState": {
+        "status": "assisted",
+        "ok": true,
+        "human": true,
+        "correlationId": "cor_mrttjql3_9",
+        "data": {
+          "stage": "assistant_activation",
+          "assistant": "epic_assistant",
+          "authority": "Clawith (tenant-isolated) · Isola",
+          "note": "Business-scoped; verified before enable."
+        }
+      },
+      "timestamp": "2026-07-20T22:51:22.071Z",
+      "result": "PASS"
+    },
+    {
+      "scenario": "S08",
+      "name": "Unsupported voice-AI request",
+      "inputFixture": {
+        "assistant": "voice_ai"
+      },
+      "adapterCalls": [
+        "activateAssistant"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "error",
+          "actual": "error",
+          "pass": true
+        },
+        {
+          "field": "code",
+          "expected": "UNSUPPORTED",
+          "actual": "UNSUPPORTED",
+          "pass": true
+        },
+        {
+          "field": "recovery",
+          "expected": "human_takeover",
+          "actual": "human_takeover",
+          "pass": true
+        }
+      ],
+      "returnedState": {
+        "status": "error",
+        "ok": false,
+        "code": "UNSUPPORTED",
+        "message": "Voice AI agent is not an approved product",
+        "correlationId": "cor_mrttjql3_10",
+        "recovery": "human_takeover"
+      },
+      "timestamp": "2026-07-20T22:51:22.071Z",
+      "result": "PASS"
+    },
+    {
+      "scenario": "S09",
+      "name": "Price question (no invent)",
+      "inputFixture": {},
+      "adapterCalls": [
+        "catalog"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "success",
+          "actual": "success",
+          "pass": true
+        },
+        {
+          "field": "services.business_line.readiness",
+          "expected": "Assisted",
+          "actual": "Assisted",
+          "pass": true
+        },
+        {
+          "field": "services.business_line.priceLabel",
+          "expected": "Contact EPIC",
+          "actual": "Contact EPIC",
+          "pass": true
+        },
+        {
+          "field": "services.hosted_pbx.readiness",
+          "expected": "Conditional",
+          "actual": "Conditional",
+          "pass": true
+        },
+        {
+          "field": "services.personal_line.price",
+          "expected": 0.27,
+          "actual": 0.27,
+          "pass": true
+        }
+      ],
+      "returnedState": {
+        "status": "success",
+        "ok": true,
+        "correlationId": "cor_mrttjqly_11",
+        "data": {
+          "services": {
+            "business_line": {
+              "name": "Business Line",
+              "category": "Communications",
+              "readiness": "Assisted",
+              "price": null,
+              "priceLabel": "Contact EPIC"
+            },
+            "hosted_pbx": {
+              "name": "Hosted Business PBX",
+              "category": "Communications",
+              "readiness": "Conditional",
+              "price": null,
+              "priceLabel": "Contact EPIC"
+            },
+            "connect_pbx": {
+              "name": "Connect Existing PBX",
+              "category": "Communications",
+              "readiness": "Conditional",
+              "price": null,
+              "priceLabel": "Contact EPIC"
+            },
+            "personal_line": {
+              "name": "Personal Line",
+              "category": "Communications",
+              "readiness": "Conditional",
+              "price": 0.27,
+              "priceLabel": "EC$0.27/min (≈ US$0.10)"
+            }
+          },
+          "assistants": {
+            "business_receptionist": {
+              "name": "WhatsApp Business Receptionist (standalone)",
+              "readiness": "Conditional",
+              "setup": 250,
+              "monthly": 149
+            },
+            "epic_assistant": {
+              "name": "EPIC Assistant",
+              "readiness": "Conditional",
+              "note": "Support benefit where verified"
+            },
+            "sales_assistant": {
+              "name": "Sales Assistant",
+              "readiness": "Conditional",
+              "priceLabel": "Contact EPIC"
+            },
+            "booking_assistant": {
+              "name": "Booking Assistant",
+              "readiness": "Planned",
+              "priceLabel": "Contact EPIC"
+            },
+            "support_assistant": {
+              "name": "Support Assistant",
+              "readiness": "Conditional",
+              "priceLabel": "Contact EPIC"
+            },
+            "account_assistant": {
+              "name": "Account Assistant",
+              "readiness": "Planned",
+              "priceLabel": "Contact EPIC"
+            }
+          },
+          "solutions": {
+            "smart_front_desk": {
+              "name": "Smart Business Line / Smart Front Desk",
+              "readiness": "Conditional",
+              "setup": 750,
+              "schedule": [
+                "EC$375 before work",
+                "EC$375 at acceptance"
+              ],
+              "firstMonth": 249,
+              "monthly": 249,
+              "note": "Voice balance separate"
+            },
+            "pbx_ai_upgrade": {
+              "name": "Existing EPIC PBX AI Upgrade",
+              "readiness": "Assisted",
+              "setup": 250,
+              "monthly": 99,
+              "note": "Existing voice charges separate"
+            },
+            "smart_office": {
+              "name": "Smart Office Phone System",
+              "readiness": "Conditional",
+              "priceLabel": "Contact EPIC"
+            },
+            "whatsapp_sales_desk": {
+              "name": "WhatsApp Sales Desk",
+              "readiness": "Conditional",
+              "priceLabel": "Contact EPIC"
+            },
+            "support_desk": {
+              "name": "Customer Support Desk",
+              "readiness": "Conditional",
+              "priceLabel": "Contact EPIC"
+            },
+            "personal_line_plus": {
+              "name": "Personal Line+",
+              "readiness": "Conditional",
+              "priceLabel": "Contact EPIC"
+            }
+          }
+        }
+      },
+      "timestamp": "2026-07-20T22:51:22.071Z",
+      "result": "PASS"
+    },
+    {
+      "scenario": "S10",
+      "name": "Discount request → escalate",
+      "inputFixture": {
+        "_scenario": "unavailable"
+      },
+      "adapterCalls": [
+        "requestProposal"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "error",
+          "actual": "error",
+          "pass": true
+        },
+        {
+          "field": "code",
+          "expected": "UNAVAILABLE",
+          "actual": "UNAVAILABLE",
+          "pass": true
+        },
+        {
+          "field": "recovery",
+          "expected": "human_takeover",
+          "actual": "human_takeover",
+          "pass": true
+        }
+      ],
+      "returnedState": {
+        "status": "error",
+        "ok": false,
+        "code": "UNAVAILABLE",
+        "message": "Offer requires manual scoping",
+        "correlationId": "cor_mrttjqly_12",
+        "recovery": "human_takeover"
+      },
+      "timestamp": "2026-07-20T22:51:22.102Z",
+      "result": "PASS"
+    },
+    {
+      "scenario": "S11",
+      "name": "Human takeover",
+      "inputFixture": {
+        "_scenario": "human_takeover"
+      },
+      "adapterCalls": [
+        "qualify"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "assisted",
+          "actual": "assisted",
+          "pass": true
+        },
+        {
+          "field": "data.handoff",
+          "expected": "chatwoot",
+          "actual": "chatwoot",
+          "pass": true
+        }
+      ],
+      "returnedState": {
+        "status": "assisted",
+        "ok": true,
+        "human": true,
+        "correlationId": "cor_mrttjqly_13",
+        "data": {
+          "stage": "qualification_started",
+          "handoff": "chatwoot",
+          "reason": "complex_need"
+        }
+      },
+      "timestamp": "2026-07-20T22:51:22.102Z",
+      "result": "PASS"
+    },
+    {
+      "scenario": "S12",
+      "name": "Duplicate CTA submission",
+      "inputFixture": {
+        "idempotencyKey": "dup1"
+      },
+      "adapterCalls": [
+        "createIntent",
+        "createIntent"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "success",
+          "actual": "success",
+          "pass": true
+        },
+        {
+          "field": "data.duplicate",
+          "expected": true,
+          "actual": true,
+          "pass": true
+        },
+        {
+          "field": "intentId match",
+          "expected": "lead_mrttjqly_14",
+          "actual": "lead_mrttjqly_14",
+          "pass": true
+        }
+      ],
+      "returnedState": {
+        "status": "success",
+        "ok": true,
+        "correlationId": "cor_mrttjqly_16",
+        "data": {
+          "intentId": "lead_mrttjqly_14",
+          "stage": "intent_created",
+          "duplicate": true
+        },
+        "_firstId": "lead_mrttjqly_14"
+      },
+      "timestamp": "2026-07-20T22:51:22.102Z",
+      "result": "PASS"
+    },
+    {
+      "scenario": "S13",
+      "name": "Payment pending",
+      "inputFixture": {
+        "_scenario": "payment_pending"
+      },
+      "adapterCalls": [
+        "paymentStatus"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "pending",
+          "actual": "pending",
+          "pass": true
+        },
+        {
+          "field": "data.stage",
+          "expected": "payment_pending",
+          "actual": "payment_pending",
+          "pass": true
+        }
+      ],
+      "returnedState": {
+        "status": "pending",
+        "ok": true,
+        "correlationId": "cor_mrttjqly_17",
+        "data": {
+          "stage": "payment_pending",
+          "message": "Awaiting EPIC payment confirmation. No money taken yet."
+        }
+      },
+      "timestamp": "2026-07-20T22:51:22.102Z",
+      "result": "PASS"
+    },
+    {
+      "scenario": "S14",
+      "name": "Payment failed",
+      "inputFixture": {
+        "_scenario": "payment_failed"
+      },
+      "adapterCalls": [
+        "paymentStatus"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "error",
+          "actual": "error",
+          "pass": true
+        },
+        {
+          "field": "code",
+          "expected": "PAYMENT_FAILED",
+          "actual": "PAYMENT_FAILED",
+          "pass": true
+        },
+        {
+          "field": "recovery",
+          "expected": "retry_offer_kept",
+          "actual": "retry_offer_kept",
+          "pass": true
+        }
+      ],
+      "returnedState": {
+        "status": "error",
+        "ok": false,
+        "code": "PAYMENT_FAILED",
+        "message": "Payment didn't complete. No money was taken.",
+        "correlationId": "cor_mrttjqly_18",
+        "recovery": "retry_offer_kept"
+      },
+      "timestamp": "2026-07-20T22:51:22.102Z",
+      "result": "PASS"
+    },
+    {
+      "scenario": "S15",
+      "name": "Provisioning failed",
+      "inputFixture": {
+        "_scenario": "provisioning_failed"
+      },
+      "adapterCalls": [
+        "activateService"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "error",
+          "actual": "error",
+          "pass": true
+        },
+        {
+          "field": "code",
+          "expected": "PROVISIONING_FAILED",
+          "actual": "PROVISIONING_FAILED",
+          "pass": true
+        },
+        {
+          "field": "recovery",
+          "expected": "rollback_or_retry",
+          "actual": "rollback_or_retry",
+          "pass": true
+        }
+      ],
+      "returnedState": {
+        "status": "error",
+        "ok": false,
+        "code": "PROVISIONING_FAILED",
+        "message": "Magnus provisioning failed",
+        "correlationId": "cor_mrttjqly_19",
+        "recovery": "rollback_or_retry",
+        "authority": "Magnus"
+      },
+      "timestamp": "2026-07-20T22:51:22.102Z",
+      "result": "PASS"
+    },
+    {
+      "scenario": "S16",
+      "name": "Resume interrupted journey",
+      "inputFixture": {
+        "idempotencyKey": "res1"
+      },
+      "adapterCalls": [
+        "createIntent",
+        "resumeJourney"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "success",
+          "actual": "success",
+          "pass": true
+        },
+        {
+          "field": "data.stage",
+          "expected": "intent_created",
+          "actual": "intent_created",
+          "pass": true
+        },
+        {
+          "field": "data.resumeUrl present",
+          "expected": "<non-empty>",
+          "actual": "#/resume/lead_mrttjqly_20",
+          "pass": true
+        }
+      ],
+      "returnedState": {
+        "status": "success",
+        "ok": true,
+        "correlationId": "cor_mrttjqly_22",
+        "data": {
+          "stage": "intent_created",
+          "resumeUrl": "#/resume/lead_mrttjqly_20",
+          "note": "Progress preserved."
+        }
+      },
+      "timestamp": "2026-07-20T22:51:22.102Z",
+      "result": "PASS"
+    },
+    {
+      "scenario": "S17",
+      "name": "Acceptance fails → rollback",
+      "inputFixture": {
+        "pass": false
+      },
+      "adapterCalls": [
+        "acceptance"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "error",
+          "actual": "error",
+          "pass": true
+        },
+        {
+          "field": "code",
+          "expected": "ACCEPTANCE_FAILED",
+          "actual": "ACCEPTANCE_FAILED",
+          "pass": true
+        },
+        {
+          "field": "recovery",
+          "expected": "rollback",
+          "actual": "rollback",
+          "pass": true
+        },
+        {
+          "field": "stage",
+          "expected": "acceptance_started",
+          "actual": "acceptance_started",
+          "pass": true
+        }
+      ],
+      "returnedState": {
+        "status": "error",
+        "ok": false,
+        "code": "ACCEPTANCE_FAILED",
+        "message": "UAT not accepted — stays in supported stabilization",
+        "correlationId": "cor_mrttjqlz_23",
+        "recovery": "rollback",
+        "stage": "acceptance_started"
+      },
+      "timestamp": "2026-07-20T22:51:22.102Z",
+      "result": "PASS"
+    },
+    {
+      "scenario": "S18",
+      "name": "Support after go-live",
+      "inputFixture": {
+        "message": "help"
+      },
+      "adapterCalls": [
+        "supportRequest"
+      ],
+      "fieldChecks": [
+        {
+          "field": "status",
+          "expected": "assisted",
+          "actual": "assisted",
+          "pass": true
+        },
+        {
+          "field": "data.channel",
+          "expected": "chatwoot",
+          "actual": "chatwoot",
+          "pass": true
+        },
+        {
+          "field": "data.ticket present",
+          "expected": "<non-empty>",
+          "actual": "tkt_mrttjqlz_24",
+          "pass": true
+        }
+      ],
+      "returnedState": {
+        "status": "assisted",
+        "ok": true,
+        "human": true,
+        "correlationId": "cor_mrttjqlz_25",
+        "data": {
+          "stage": "support_requested",
+          "channel": "chatwoot",
+          "ticket": "tkt_mrttjqlz_24"
+        }
+      },
+      "timestamp": "2026-07-20T22:51:22.103Z",
+      "result": "PASS"
+    }
+  ]
+}
