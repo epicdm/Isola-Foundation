@@ -28,6 +28,7 @@
  */
 import { randomBytes, randomUUID } from 'crypto';
 import { prisma } from './prisma';
+import { ESCALATION_REF_ALLOWED_PHONE_NUMBER_IDS } from './brain-provider';
 
 const ESCALATION_REF_TTL_MS = 15 * 60 * 1000; // 15 min — one agent turn, generously bounded
 const ESCALATE_TO_HUMAN_PURPOSE = 'escalate_to_human';
@@ -69,6 +70,36 @@ export async function createEscalationRef(params: CreateEscalationRefParams): Pr
     },
   });
   return { token, correlationId };
+}
+
+export interface MintEscalationRefIfAllowedParams extends CreateEscalationRefParams {
+  /** Meta phone_number_id for this turn — gates the mint via
+   *  ESCALATION_REF_ALLOWED_PHONE_NUMBER_IDS (see brain-provider.ts doc
+   *  comment). brain_provider='clawith' + a resolved ClawithBinding means a
+   *  tenant/number is on Clawith; it does NOT mean the EscalationRef
+   *  hardening migration + bridge patches are deployed for that number —
+   *  those are two independent readiness axes, and conflating them crashed
+   *  every inbound message on an already-live Clawith number with
+   *  `column EscalationRef.purpose does not exist`
+   *  (defect-foundation-migration-resolved-without-execution-2026-07-22). */
+  phoneNumberId: string;
+}
+
+/** Mints an EscalationRef only when phoneNumberId is on the allowlist;
+ *  otherwise skips the mint and returns nulls — never throws. Callers
+ *  should treat a null token exactly like the pre-existing "no Clawith
+ *  binding" case: the turn proceeds without a conversationRef. */
+export async function mintEscalationRefIfAllowed(
+  params: MintEscalationRefIfAllowedParams,
+): Promise<{ token: string | null; correlationId: string | null }> {
+  if (!ESCALATION_REF_ALLOWED_PHONE_NUMBER_IDS.has(params.phoneNumberId)) {
+    console.warn(
+      `[escalation-ref] phone_number_id ${params.phoneNumberId || '(none)'} is not on the escalation-ref allowlist — skipping EscalationRef mint, no conversationRef this turn`,
+    );
+    return { token: null, correlationId: null };
+  }
+  const { phoneNumberId: _phoneNumberId, ...mintParams } = params;
+  return createEscalationRef(mintParams);
 }
 
 export interface ResolvedEscalationRef {

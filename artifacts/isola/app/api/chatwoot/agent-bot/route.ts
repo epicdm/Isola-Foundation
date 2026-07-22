@@ -499,8 +499,9 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
     let conversationRef: string | null = null;
     let escalationCorrelationId: string | null = null;
     if (clawithBindingRow) {
-      const { createEscalationRef } = await import('@/lib/escalation-ref');
-      const mint = await createEscalationRef({
+      const { mintEscalationRefIfAllowed } = await import('@/lib/escalation-ref');
+      const mint = await mintEscalationRefIfAllowed({
+        phoneNumberId:     waNumberForHermesGate?.phone_number_id ?? '',
         tenantId,
         conversationId:    conversation.id,
         clawithAgentId:    clawithBindingRow.clawith_agent_id,
