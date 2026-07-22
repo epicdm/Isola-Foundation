@@ -72,6 +72,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Voice account not provisioned yet — try again shortly.' }, { status: 409 });
   }
 
+  // See the matching check in ../options/route.ts — a retired line can
+  // still carry stale SIP creds, so distinguish it explicitly instead of
+  // falling through to a BFF call that 502s on a missing mirror row.
+  if (voiceLine.provisioning_state === 'retired') {
+    return NextResponse.json({ error: 'Voice account has been retired.' }, { status: 410 });
+  }
+  if (voiceLine.provisioning_state !== 'completed') {
+    return NextResponse.json({ error: 'Voice account provisioning is not complete — try again shortly.' }, { status: 409 });
+  }
+
   const body = await req.json().catch(() => ({}));
   const { bundleId, method, currency } = body ?? {};
 
