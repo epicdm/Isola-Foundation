@@ -1,11 +1,16 @@
 // FOH catalog — grounded in Port + claim-guard.ts. EC$ amounts limited to the
-// ratified set {750, 375, 249, 250, 99, 149} and EC$0.27/min. Anything else => "Contact EPIC".
+// ratified set {750, 375, 249, 250, 99, 149, 187.5, 124.5, 499.5} and
+// EC$0.27/min. Anything else => "Contact EPIC".
 export type Readiness = 'Live' | 'Assisted' | 'Conditional' | 'Planned' | 'Not offered';
 export interface Price { label: string; unit?: string; note: string }
 
 export const PRICE: Record<string, Price> = {
   contact: { label: 'Contact EPIC', note: 'Pricing confirmed by EPIC before any work begins.' },
-  sfd: { label: 'EC$750', unit: ' setup', note: 'Two EC$375 installments — before work, then at acceptance · EC$249/mo · voice balance separate.' },
+  sfd: {
+    label: 'EC$750',
+    unit: ' setup',
+    note: 'Two EC$375 installments — before work, then at acceptance · EC$249/mo · voice balance separate. Founding promo (first 3 customers): EC$375 setup (two EC$187.50 installments) · EC$124.50/mo for months 1–3, then EC$249/mo.',
+  },
   war: { label: 'EC$250', unit: ' setup', note: 'EC$149/mo · no new voice line or PBX included.' },
   pbxup: { label: 'EC$250', unit: ' setup', note: 'EC$99/mo · existing voice charges separate.' },
   personal: { label: 'EC$0.27', unit: '/min', note: 'Prepaid wallet · calling billed per minute.' },

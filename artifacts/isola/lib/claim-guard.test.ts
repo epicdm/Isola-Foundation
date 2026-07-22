@@ -222,6 +222,13 @@ describe('guardReply — price allow-list (dispatch scenarios 1-3 and 5)', () =>
     expect(result.text).toBe(text);
   });
 
+  it('passes the ratified SBL founding-promo prices unchanged (EC$187.50 setup installment + EC$124.50/mo)', () => {
+    const text = 'The founding promo SBL setup is EC$187.50 before work + EC$187.50 at acceptance, then EC$124.50/mo for months 1-3.';
+    const result = guardReply(text, SALES_TENANT);
+    expect(result.blocked).toBe(false);
+    expect(result.text).toBe(text);
+  });
+
   it('passes the ratified voice per-minute rate unchanged', () => {
     const text = 'Voice is billed at EC$0.27/min.';
     const result = guardReply(text, SALES_TENANT);
