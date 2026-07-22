@@ -91,6 +91,33 @@ export const ISOLA_BRIDGE_ALLOWED_PHONE_NUMBER_IDS: ReadonlySet<string> = new Se
   ...(process.env.ISOLA_BRIDGE_ALLOWED_PNIDS?.split(',').map((s) => s.trim()).filter(Boolean) ?? []),
 ]);
 
+/**
+ * Per-number gate for the hardened EscalationRef mint (lib/escalation-ref.ts
+ * createEscalationRef). That mint requires migration
+ * 20260721020000_harden_escalation_ref (EscalationRef.purpose/
+ * clawith_agent_id/chatwoot_binding_id/chatwoot_inbox_id/correlation_id) to
+ * exist on the target database, plus the clawith-v1110 bridge/MCP patches
+ * under patches/clawith-v1110/ to be applied on deepseek — none of that has
+ * shipped yet (see patches/clawith-v1110/README.md "Deployment order").
+ * Deliberately empty until that rollout lands: a Clawith-bound tenant/number
+ * existing today (brain_provider='clawith' + ClawithBinding resolved) is a
+ * separate, already-live axis from "is the escalation-ref hardening ready,"
+ * and conflating the two crashed every inbound message on an already-live
+ * Clawith number with `column EscalationRef.purpose does not exist`.
+ * Mirrors HERMES_ALLOWED_PHONE_NUMBER_IDS / ISOLA_BRIDGE_ALLOWED_PHONE_NUMBER_IDS
+ * above: hardcoded floor + additive env var, so going live needs no code deploy.
+ */
+const _ESCALATION_REF_ALLOWED_HARDCODED: readonly string[] = [
+  // deliberately empty — do not add a phone_number_id here until migration
+  // 20260721020000_harden_escalation_ref is applied against production AND
+  // the clawith-v1110 bridge/MCP patches are live for that number.
+];
+
+export const ESCALATION_REF_ALLOWED_PHONE_NUMBER_IDS: ReadonlySet<string> = new Set([
+  ..._ESCALATION_REF_ALLOWED_HARDCODED,
+  ...(process.env.ESCALATION_REF_ALLOWED_PNIDS?.split(',').map((s) => s.trim()).filter(Boolean) ?? []),
+]);
+
 export interface BrainReplyResult {
   text: string;
   tokensUsed: number;
