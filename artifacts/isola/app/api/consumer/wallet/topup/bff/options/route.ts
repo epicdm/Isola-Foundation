@@ -34,6 +34,19 @@ export async function GET() {
     return NextResponse.json({ error: 'Voice account not provisioned yet — try again shortly.' }, { status: 409 });
   }
 
+  // A line can carry stale-but-present SIP creds after being retired
+  // (sub-resource ids torn down out-of-band, creds left on the record) —
+  // the presence check above alone can't tell that apart from "still
+  // provisioning," so distinguish retired explicitly with 410 Gone rather
+  // than letting it fall through to a BFF call that 502s on a missing
+  // mirror row. See bt-foundation-wallet-topup-502.
+  if (voiceLine.provisioning_state === 'retired') {
+    return NextResponse.json({ error: 'Voice account has been retired.' }, { status: 410 });
+  }
+  if (voiceLine.provisioning_state !== 'completed') {
+    return NextResponse.json({ error: 'Voice account provisioning is not complete — try again shortly.' }, { status: 409 });
+  }
+
   const result = await getTopupOptions(getBffConfig(), {
     username: voiceLine.magnus_sip_username,
     password: voiceLine.magnus_sip_password,
