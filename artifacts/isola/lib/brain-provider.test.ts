@@ -150,6 +150,67 @@ describe('generateReply — claim-guard integration (Clawith path, mocked bridge
   });
 });
 
+describe('generateReply — escalation-claim handoff backstop (defect-lite-concierge-stale-owner-active-silent-drop-2026-07-21)', () => {
+  it('forces needsHandoff true when the (mocked) bridge reply itself claims escalation but returns needs_handoff: false — the exact conversation #100 repro', async () => {
+    mockBridgeReply({
+      reply:
+        "Absolutely — I've already escalated your request to a human team member. They'll take it from here. " +
+        "Thanks for reaching out, and someone from EPIC will be with you shortly!",
+      needs_handoff: false,
+    });
+
+    const result = await generateReply({
+      ...baseParams,
+      agent: baseAgent(),
+      tenantId: OTHER_TENANT,
+      clawithBinding: CLAWITH_BINDING,
+    });
+
+    expect(result.needsHandoff).toBe(true);
+    expect(auditMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantId: OTHER_TENANT,
+        action: 'escalation_claim.handoff_forced',
+        meta: { rule: 'already_escalated' },
+      }),
+    );
+  });
+
+  it('does not double-fire (no extra audit call) when the brain already set needsHandoff: true on an escalation-claiming reply', async () => {
+    mockBridgeReply({
+      reply: "I've already escalated this to a human team member — they'll take it from here.",
+      needs_handoff: true,
+    });
+
+    const result = await generateReply({
+      ...baseParams,
+      agent: baseAgent(),
+      tenantId: OTHER_TENANT,
+      clawithBinding: CLAWITH_BINDING,
+    });
+
+    expect(result.needsHandoff).toBe(true);
+    expect(auditMock).not.toHaveBeenCalled();
+  });
+
+  it('leaves a routine reply with no escalation claim untouched (needsHandoff stays false, no audit call)', async () => {
+    mockBridgeReply({
+      reply: 'Our team is available Monday to Friday, 9am–5pm.',
+      needs_handoff: false,
+    });
+
+    const result = await generateReply({
+      ...baseParams,
+      agent: baseAgent(),
+      tenantId: OTHER_TENANT,
+      clawithBinding: CLAWITH_BINDING,
+    });
+
+    expect(result.needsHandoff).toBe(false);
+    expect(auditMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('generateReply — Clawith path forwards conversationRef to the Isola bridge', () => {
   it('sends the caller-supplied conversationRef as conversation_ref on the bridge request', async () => {
     mockBridgeReply({ reply: 'ok', needs_handoff: false });

@@ -38,6 +38,7 @@ import { decryptSecret } from './tenant-secrets';
 import { prisma } from './prisma';
 import { guardReply, SALES_TENANT_IDS, DEFLECTION as GUARD_ERROR_DEFLECTION } from './claim-guard';
 import { detectEscalationIntent } from './escalation-intent';
+import { detectEscalationClaim } from './escalation-claim';
 import { audit } from './audit';
 
 const FLOWISE_TIMEOUT_MS = 20_000;
@@ -295,6 +296,29 @@ export async function generateReply(params: {
         meta: { category: escalation.category },
       });
       return { ...result, needsHandoff: true };
+    }
+
+    // Escalation-CLAIM handoff backstop (defect-lite-concierge-stale-owner-active-
+    // silent-drop-2026-07-21): force a human handoff whenever the reply text ITSELF
+    // asserts a human has been engaged for this conversation, but the brain didn't
+    // flag needs_handoff for this turn. Runs for every tenant/provider (not scoped to
+    // SALES_TENANT_IDS) — see lib/escalation-claim.ts for why. Fail-safe: only ever
+    // ADDS a handoff; a brain that already set needsHandoff=true is left untouched
+    // (no redundant audit entry).
+    if (!result.needsHandoff) {
+      const claim = detectEscalationClaim(result.text);
+      if (claim.claims) {
+        console.warn(`[brain-provider] escalation-claim handoff backstop (rule=${claim.rule}) for tenant ${tenantId}`);
+        await audit({
+          tenantId,
+          actorId: `agent:${agent.id}`,
+          action: 'escalation_claim.handoff_forced',
+          entity: 'conversation',
+          entityId: sessionId,
+          meta: { rule: claim.rule },
+        });
+        return { ...result, needsHandoff: true };
+      }
     }
     return result;
   } catch (err: any) {
