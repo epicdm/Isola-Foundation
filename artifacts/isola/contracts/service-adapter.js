@@ -31,7 +31,10 @@
     },
     solutions: {
       smart_front_desk: { name: 'Smart Business Line / Smart Front Desk', readiness: 'Conditional',
-        setup: 750, schedule: ['EC$375 before work', 'EC$375 at acceptance'], firstMonth: 249, monthly: 249, note: 'Voice balance separate' },
+        setup: 750, schedule: ['EC$375 before work', 'EC$375 at acceptance'], firstMonth: 249, monthly: 249, note: 'Voice balance separate',
+        // Founding promo (dec-sbl-founding-price-value-and-promo-2026-07-22): half off setup
+        // + the first 3 months, capped at the first 3 founding customers.
+        promo: { label: 'Founding promo — first 3 customers', setup: 375, schedule: ['EC$187.50 before work', 'EC$187.50 at acceptance'], monthly: 124.5, monthlyMonths: 3, thenMonthly: 249, note: 'EC$124.50/mo for months 1-3, then EC$249/mo' } },
       pbx_ai_upgrade:   { name: 'Existing EPIC PBX AI Upgrade', readiness: 'Assisted', setup: 250, monthly: 99, note: 'Existing voice charges separate' },
       smart_office:     { name: 'Smart Office Phone System', readiness: 'Conditional', priceLabel: 'Contact EPIC' },
       whatsapp_sales_desk: { name: 'WhatsApp Sales Desk', readiness: 'Conditional', priceLabel: 'Contact EPIC' },

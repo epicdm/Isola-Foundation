@@ -25,7 +25,12 @@ export const SALES_TENANT_IDS: ReadonlySet<string> = new Set([
 // Register. No other EC$ figure may appear in a sales-tenant reply.
 // 375 = SBL setup, billed as two EC$375 installments (before work +
 // on acceptance) — both installments share this one figure.
-const RATIFIED_EC_AMOUNTS = new Set([750, 249, 250, 99, 149, 375]);
+// 187.5 = SBL founding-promo setup installment (billed as two EC$187.50
+// installments, half of the regular 375); 124.5 = SBL founding-promo
+// monthly for months 1-3; 499.5 = SBL founding-promo cash-through-first-month
+// total (dec-sbl-founding-price-value-and-promo-2026-07-22, capped at the
+// first 3 founding customers — Perky's Pizza qualifies).
+const RATIFIED_EC_AMOUNTS = new Set([750, 249, 250, 99, 149, 375, 187.5, 124.5, 499.5]);
 // Ratified per-minute voice rate — sourced from the same env var Magnus/Lite
 // billing already uses, so this can't drift from the live billing rate.
 const RATIFIED_PER_MIN_RATE = Number(process.env.LITE_DOMINICA_RATE_EC_PER_MIN ?? '0.27');

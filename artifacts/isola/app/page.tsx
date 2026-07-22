@@ -74,6 +74,16 @@ const OFFERS = [
     setupNote: 'billed as two EC$375 installments — before work, then on acceptance',
     monthly: 'EC$249/mo',
     desc: 'A fully managed WhatsApp Business Line, set up and supported by our team end to end.',
+    // Founding promo (dec-sbl-founding-price-value-and-promo-2026-07-22): half
+    // off setup + the first 3 months, capped at the first 3 founding
+    // customers — never advertise this as "limited time".
+    promo: {
+      badge: 'Founding promo — first 3 customers',
+      setup: 'EC$375 setup',
+      setupNote: 'billed as two EC$187.50 installments — before work, then on acceptance',
+      monthly: 'EC$124.50/mo for months 1–3',
+      monthlyNote: 'then EC$249/mo from month 4',
+    },
   },
   {
     name: 'WA-Receptionist',
@@ -152,10 +162,27 @@ function LandingPage() {
           {OFFERS.map((o) => (
             <Card key={o.name} className="flex flex-col p-6">
               <div className="mb-1 text-base font-bold">{o.name}</div>
-              <div className="mb-1 text-2xl font-extrabold tracking-tight">{o.monthly}</div>
-              <div className="mb-1 text-[13px] font-medium text-muted-foreground">{o.setup}</div>
-              {o.setupNote && (
-                <div className="mb-3 text-[12px] leading-relaxed text-muted-foreground">{o.setupNote}</div>
+              {o.promo && (
+                <Badge variant="secondary" className="mb-2 w-fit text-[11px]">
+                  {o.promo.badge}
+                </Badge>
+              )}
+              <div className="mb-1 text-2xl font-extrabold tracking-tight">
+                {o.promo ? o.promo.monthly : o.monthly}
+              </div>
+              {o.promo && (
+                <div className="mb-1 text-[12px] text-muted-foreground">
+                  {o.promo.monthlyNote} · regular {o.monthly}
+                </div>
+              )}
+              <div className="mb-1 text-[13px] font-medium text-muted-foreground">
+                {o.promo ? o.promo.setup : o.setup}
+              </div>
+              {(o.promo ? o.promo.setupNote : o.setupNote) && (
+                <div className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+                  {o.promo ? o.promo.setupNote : o.setupNote}
+                  {o.promo && <> · regular {o.setup}</>}
+                </div>
               )}
               <p className="mb-4 flex-1 text-[13px] leading-relaxed text-muted-foreground">{o.desc}</p>
               <Button asChild variant="outline" size="sm">
