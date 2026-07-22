@@ -22,15 +22,43 @@
 -- derived from `prisma migrate diff --from-url <drifted db> --to-schema-datamodel
 -- prisma/schema.prisma --script`, not hand-guessed.
 --
--- Safe on zero rows: "EscalationRef" is a short-TTL (15 min), single-purpose
--- capability-token table gated behind an allowlist that is currently empty for
--- every phone_number_id, and was confirmed to hold 0 rows in production
--- immediately before this migration was authored. Adding NOT NULL columns with no
--- default therefore needs no backfill step. The guard below turns a would-be
--- generic Postgres NOT NULL violation into a clear, intentional stop if that
--- invariant ever turns out to be false at deploy time. The `IF NOT EXISTS` guards
--- make this migration idempotent if re-run, or if any of these objects already
--- exist for another reason.
+-- State-dependent safety guard (revised per Codex review on PR #50 — the original
+-- unconditional zero-row guard would have wrongly failed an already-hardened
+-- database that happens to hold live rows, even though every statement below
+-- would be a no-op there):
+--
+-- Column-by-column safety classification for adding to a table that may already
+-- have rows, derived from prisma/schema.prisma and the three prior migrations:
+--   "purpose"             -- SAFE:   NOT NULL, but has a DEFAULT. Postgres 11+
+--                             backfills existing rows from the default without a
+--                             table rewrite; no data loss, no manual backfill.
+--   "chatwoot_inbox_id"   -- SAFE:   nullable; existing rows simply get NULL.
+--   "clawith_agent_id"    -- UNSAFE: NOT NULL, no default. Cannot be added to a
+--   "chatwoot_binding_id" --         populated table without a real backfill —
+--   "correlation_id"      --         Postgres would reject every existing row.
+--   unique index on
+--   "correlation_id"       -- SELF-GUARDING: CREATE UNIQUE INDEX IF NOT EXISTS is
+--                             a no-op if the index already exists, and Postgres
+--                             itself will reject the CREATE (aborting the whole
+--                             migration transaction) if "correlation_id" already
+--                             holds duplicate non-null values — no separate check
+--                             needed; native uniqueness enforcement is sufficient
+--                             and this migration deliberately does not attempt to
+--                             deduplicate or rewrite any existing row to work
+--                             around that.
+--
+-- So the only state that is actually unsafe to run this migration's DDL against
+-- is: the table has one or more rows, AND at least one of the three UNSAFE
+-- columns above is still missing. In that state we stop before any DDL runs
+-- (Postgres migrations run inside a transaction, so a RAISE EXCEPTION here rolls
+-- back cleanly — no partial columns, no partial index, no row touched, and
+-- `prisma migrate deploy` records the migration as failed, never as applied).
+-- Every other state — zero rows regardless of which columns are missing, or a
+-- fully/partially-hardened table with rows where only the SAFE objects above are
+-- still missing — is left to proceed, because every remaining statement below is
+-- provably safe (idempotent, default-backed, nullable, or self-guarding) for a
+-- populated table. This migration never inspects or modifies the CONTENTS of any
+-- existing row — only whether specific columns/index exist.
 --
 -- Out of scope, deliberately not touched: the Drizzle/Replit-Auth-owned "users"
 -- and "sessions" tables surface unrelated drift (varchar-vs-text column types,
@@ -49,9 +77,29 @@
 -- does not exist` the moment escalate_to_human is invoked.
 
 DO $$
+DECLARE
+  has_rows       boolean;
+  missing_unsafe boolean;
 BEGIN
-  IF EXISTS (SELECT 1 FROM "EscalationRef") THEN
-    RAISE EXCEPTION 'EscalationRef repair migration expects zero existing rows (confirmed empty in production on 2026-07-22); found existing rows instead. Stopping before the NOT NULL column adds below — review whether this invariant changed and what backfill those existing rows need before proceeding.';
+  SELECT EXISTS (SELECT 1 FROM "EscalationRef") INTO has_rows;
+
+  SELECT
+       NOT EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'EscalationRef' AND column_name = 'clawith_agent_id'
+       )
+    OR NOT EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'EscalationRef' AND column_name = 'chatwoot_binding_id'
+       )
+    OR NOT EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'EscalationRef' AND column_name = 'correlation_id'
+       )
+  INTO missing_unsafe;
+
+  IF has_rows AND missing_unsafe THEN
+    RAISE EXCEPTION 'EscalationRef repair migration: table has existing rows and is still missing one or more of clawith_agent_id / chatwoot_binding_id / correlation_id (all NOT NULL with no default). These cannot be safely added to a populated table by this migration — Postgres would reject every existing row, and this migration deliberately does not backfill or guess values for them. Stopping before any DDL. Write and run an explicit, reviewed backfill migration for the existing rows first (populating all three fields from their real bound values), then re-run this repair, which will then find the unsafe columns already present and proceed safely.';
   END IF;
 END $$;
 
