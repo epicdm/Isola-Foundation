@@ -111,8 +111,34 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ ok: true });
 }
 
+// Per-phone-number-id ignore list (Port defect-foundation-must-ignore-hermes-
+// 9043-2026-07-23). Foundation and bff-v2 (EPIC_BFF) are BOTH subscribed to
+// the same WABA, so Meta delivers every event to both. Hermes's internal
+// WhatsApp number (+1 767-818-9043, phone_number_id 1029700810228517) is
+// owned exclusively by bff-v2/EPIC_BFF — Foundation must acknowledge but
+// never process it: no tenant resolution, no Flowise/agent invocation, no
+// DB writes, no send.
+//
+// 1029700810228517 (Hermes 9043) is a HARDCODED floor, not just an env var —
+// this exact number already leaked through once because an earlier fix set
+// WEBHOOK_IGNORE_PHONE_IDS without any code reading it (env presence was
+// mistaken for enforcement). WEBHOOK_IGNORE_PHONE_IDS still works and can add
+// further ids on top, but 9043 is never dependent on it alone.
+// Read fresh on every call (not module-level) so an env change takes effect
+// on next request without a code deploy.
+const HERMES_9043_PHONE_NUMBER_ID = '1029700810228517';
+
+function getIgnoredPhoneNumberIds(): Set<string> {
+  const fromEnv = (process.env.WEBHOOK_IGNORE_PHONE_IDS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return new Set([HERMES_9043_PHONE_NUMBER_ID, ...fromEnv]);
+}
+
 async function processWebhook(body: Record<string, unknown>) {
   const entries = (body?.entry as any[]) ?? [];
+  const ignoredPhoneNumberIds = getIgnoredPhoneNumberIds();
 
   for (const entry of entries) {
     for (const change of (entry.changes as any[]) ?? []) {
@@ -120,6 +146,16 @@ async function processWebhook(body: Record<string, unknown>) {
 
       const value = change.value as Record<string, any>;
       const phoneNumberId: string = value?.metadata?.phone_number_id ?? '';
+
+      // Early ignore guard — filtered per-change so a batched webhook
+      // containing both an ignored (9043) and an allowed (e.g. 6737)
+      // change still processes the allowed one. No tenant/agent
+      // resolution, no Flowise, no DB write, no send for an ignored id.
+      if (phoneNumberId && ignoredPhoneNumberIds.has(phoneNumberId)) {
+        console.log('[webhook/wa] ignore-phone-id', phoneNumberId, '— acknowledged, zero downstream processing (not owned by Foundation)');
+        continue;
+      }
+
       const messages: any[] = value?.messages ?? [];
 
       for (const msg of messages) {
