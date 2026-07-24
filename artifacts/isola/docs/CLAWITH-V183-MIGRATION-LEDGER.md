@@ -1,11 +1,42 @@
 # Clawith v1.8.3 Migration Ledger
 
 Status: refined by R1.6 (`xp-clawith-r16-canonicality-backup-ledger-close`),
-2026-07-24. Supersedes the pattern-grouped table in
+2026-07-24, then updated with explicit owner dispositions during the R1.6
+security-close pass (same date). Supersedes the pattern-grouped table in
 `artifacts/isola/docs/CLAWITH-R1-RUNBOOK.md` (R1 inventory, still the
 system-of-record for how the counts were first derived). Nothing in this
 document has been executed — this is a read-only reconciliation, per
 `decision-clawith-v183-migrate-or-retire-2026-07-24`.
+
+## Owner dispositions (controlling, applied 2026-07-24)
+
+- **3742**: Hermes remains authoritative. The two dormant v1.8.3 3742
+  bindings (Rex, legacy EMA) are not migration assets — prepare for
+  reversible retirement in R2/R3, do not remove in this packet.
+- **Perky's Pizza**: preserve all seven discovered records. Do not discard
+  or migrate any of the 7 until the seven-vs-two discrepancy is
+  reconciled.
+- **Ministry of Agriculture Dominica**: classified **ARCHIVE** (not
+  DISCARD, not MIGRATE). Do not migrate without independent business
+  confirmation.
+- **`/opt/isola-bridge`**: classified **OBSOLETE**, subject to dependency
+  confirmation. Prepare retirement for R3. Do not stop or alter in this
+  packet.
+- **~37 realistic-named test tenants**: approved for eventual discard
+  *after* the replacement backup is accepted (see
+  `evidence-clawith-r16-credential-backup-close-2026-07-24` — the
+  passphrase-compromised archive has since been superseded and the new one
+  verified). Do not delete now.
+- **9043**: leave unchanged, out of scope.
+- **Untraced nginx applications** (`app.isola.epic.dm`,
+  `chat.isola.epic.dm`, `staging.isola.epic.dm`): remain OWNER DECISION —
+  must be identified before any v1.8.3 shutdown.
+- **Registration and activation**: public registration remains disabled.
+  Future customer onboarding uses `POST /tenants/self-create`. SMTP/email
+  delivery is the approved activation path. Invitation enforcement needs
+  the smallest upstream-consistent correction plus regression tests (see
+  `defect-clawith-test-user-wrong-tenant-2026-07-24`, still Open). No
+  separate authentication system is to be created.
 
 ## 0. Precondition status
 
@@ -56,7 +87,7 @@ source_channel (whether any session was ever `whatsapp` vs. only
 | Keystone Cafe Two | 2 (20s apart) | No | No | None | Recommend DISCARD |
 | Keystone Diner | 2 (4 min apart) | No | No | None | Recommend DISCARD |
 | Mango Tree Kitchen | 1 | No | No | None | Recommend DISCARD |
-| **Ministry of Agriculture Dominica** | 1 | No | No | **40 sessions, `trigger` only**, real government-agency name | **OWNER DECISION — highest sustained activity in this cluster but still zero independent (Odoo/WhatsApp) confirmation; do not lump with zero-activity siblings, but do not assume real without an explicit owner call** |
+| **Ministry of Agriculture Dominica** | 1 | No | No | **40 sessions, `trigger` only**, real government-agency name | **ARCHIVE (owner disposition, 2026-07-24) — highest sustained activity in this cluster but still zero independent (Odoo/WhatsApp) confirmation; archived rather than discarded or migrated; migration requires independent business confirmation first** |
 | Mitchell Bakery | 2 (22s apart) | No | No | None | Recommend DISCARD |
 | Pebble Cove Store | 1 | No | No | None | Recommend DISCARD |
 | Roseau Marine Supplies | 3 | 1 of 3 has a channel row (Rex, disconnected) | No | None | Recommend DISCARD (the one channel row is the same dormant Rex processor already covered in the 3742 truth-proof, not independent evidence of realness) |
@@ -90,30 +121,36 @@ traffic evidence in available logs. Left running untouched this pass.
 
 - MIGRATE: 0 confirmed this pass (still gated — 3742 needs an owner
   disable decision first; Perky's needs its 7-vs-2 discrepancy resolved
-  before any row is migrated).
-- ARCHIVE: 0.
+  before any row is migrated; Ministry of Agriculture requires independent
+  business confirmation before it could ever move from ARCHIVE to MIGRATE).
+- ARCHIVE: 1 (Ministry of Agriculture Dominica — owner disposition,
+  2026-07-24).
 - DISCARD TEST DATA: ~183 (obvious-pattern group, unchanged) + 37 of the 38
-  realistic-named rows now carry an explicit DISCARD recommendation
-  (pending owner approval) = ~220 tenants with a clear discard
-  recommendation once approved.
-- OBSOLETE: 1 service (`isola-bridge.service`, recommended, not executed).
-- OWNER DECISION (the concrete short list, down from ~158 generic rows):
+  realistic-named rows, **approved in principle for eventual discard**
+  (owner disposition, 2026-07-24) but gated on the replacement backup
+  being fully accepted — not deleted in this pass.
+- OBSOLETE: 1 service (`isola-bridge.service`, owner-confirmed
+  classification, subject to dependency confirmation, retirement prepared
+  for R3, not executed).
+- OWNER DECISION (remaining open items after the 2026-07-24 dispositions):
   1. 3742 split-brain — approve/deny the prepared disable script for Rex +
-     legacy EMA (`CLAWITH-R16-3742-TRUTH-PROOF.md`).
+     legacy EMA (`CLAWITH-R16-3742-TRUTH-PROOF.md`). Disposition: prepare
+     for reversible retirement in R2/R3, do not remove now.
   2. Perky's Pizza — resolve 7-vs-2 row count, identify the one real pilot
-     tenant, approve its migration path. Never discard any of the 7 without
-     that resolution.
-  3. Ministry of Agriculture Dominica — approve or reject the DISCARD
-     recommendation given its unusually high internal-trigger activity.
-  4. `isola-bridge.service` (Aria) — approve/deny stop+disable (a future R3
-     item; not touched this pass).
-  5. The ~37 other realistic-named tenant rows — approve the bulk DISCARD
-     recommendation in section 2 (can be approved as one batch given
-     uniform evidence, or reviewed individually).
-  6. 9043/Demo Diner — unchanged, out of scope, stays with Hermes.
-  7. 3 extra nginx-fronted apps (`app.isola.epic.dm`, `chat.isola.epic.dm`,
-     `staging.isola.epic.dm`) — still not traced, carried forward from R1,
-     out of scope for R1.6.
+     tenant, approve its migration path. Disposition: preserve all 7,
+     never discard or migrate any of them until resolved.
+  3. `isola-bridge.service` (Aria) — dependency confirmation on the 3
+     untraced nginx apps below, then approve/deny stop+disable as an R3
+     item.
+  4. 9043/Demo Diner — unchanged, out of scope, stays with Hermes.
+  5. 3 extra nginx-fronted apps (`app.isola.epic.dm`, `chat.isola.epic.dm`,
+     `staging.isola.epic.dm`) — still not traced; must be identified
+     before any v1.8.3 shutdown.
+  6. Invitation-enforcement code fix for
+     `defect-clawith-test-user-wrong-tenant-2026-07-24` — smallest
+     upstream-consistent correction plus regression tests, routing all
+     self-registration through `/tenants/self-create`. Not implemented in
+     this pass (documentation/ledger only).
 
 ## 5. R2 / R3 draft packets
 
