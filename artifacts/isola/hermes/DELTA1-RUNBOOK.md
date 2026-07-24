@@ -10,11 +10,200 @@ Port packet: `xp-agent-platform-hermes-epic-activation`, DELTA 1, gate
 | Step | Result |
 |---|---|
 | 1. Preserve `owner_os_router` | Done (with a caught-and-fixed near-miss, see below) |
-| 2. Tailscale restore | **PENDING-OWNER** — auth URL delivered, Eric has not yet logged in |
+| 2. Tailscale restore | Done — Eric authenticated; access-boundary verified server-side (see Round 2 §A) |
 | 3. Bind workspace to `epic-operator` profile | Done, verified end-to-end |
 | 4. Fix `/api/hermes-config` 500 | Done, verified |
-| 5. Retire stopped pm2 duplicates | **BLOCKED** — see below |
+| 4b. Fix `/api/hermes-config` secret disclosure | Done, verified (see Round 2 §C) |
+| 5. Retire stopped pm2 duplicates | **BLOCKED**, real resurrection risk found, not disproven (see Round 2 §D) |
+| Telegram round-trip (`HERMES-WORKSPACE-DELTA1-PING`) | **NOT FOUND** on any bot/profile (see Round 2 §B) |
+| Dashboard secret rotation | Done, verified against the live plugin code (see Round 2 §C) |
 | 6. Evidence + Port | This document + Port entities updated |
+
+---
+
+# Round 2 — owner-authorized secret rotation, redaction fix, PM2 investigation
+
+Same executor session continuing after Eric completed tailscale auth and sent a Telegram probe.
+Covers: tailscale verification, the Telegram round-trip check, owner-authorized rotation of
+`dashboard.basic_auth.secret`, the `/api/hermes-config` redaction fix, and a read-only
+investigation of the PM2 safety-hook block from Delta 1 step 5.
+
+## Round 2 §A — Tailscale protected-access verification
+
+`tailscale status` on deepseek now shows itself connected (`100.117.210.117`) alongside Eric's
+`ericthinkpad` peer. Verified the actual nginx access-control logic server-side, since I have no
+credential for the nginx basic-auth layer and won't attempt to obtain one:
+
+- Non-tailnet source (loopback, `127.0.0.1` → `:7000`): **`403`** (CIDR allow-list `100.64.0.0/10`
+  correctly denies it) — this **is** the non-tailnet-denial proof (A1 item 5).
+- Tailnet-interface source (bound to `100.117.210.117` → `:7000` and `:7001`): **`401`** with
+  `WWW-Authenticate: Basic realm="Hermes Workspace"` from `nginx/1.18.0` — proves the CIDR check
+  passes for a real tailnet peer and nginx basic-auth engages **before** the app is ever reached
+  (A1 items 2–3).
+- Re-verified post-tailscale that workspace chat still uses `epic-operator`
+  (`GET /api/connection-settings` → `gateway: http://127.0.0.1:8645`) (A1 item 6).
+
+**Not verified**: an actual browser login through the tailnet path with nginx's basic-auth
+password (A1 item 4) and the controlled-restart session-persistence check specifically *after*
+tailscale (A1 item 7) — the session-persistence mechanism itself was already proven in Round 1 §3c
+and re-confirmed incidentally during the Round 2 rotation/redaction restarts below, but not
+re-run as a dedicated post-tailscale test. I don't have Eric's nginx basic-auth password and won't
+try to obtain or guess it — this last leg needs Eric to do himself from his own browser.
+
+## Round 2 §B — Telegram round-trip: NOT FOUND
+
+Searched exhaustively for `HERMES-WORKSPACE-DELTA1-PING` on deepseek: `epic-operator`'s pm2 logs
+(300-line tail and full log files), its profile log directory, the default gateway's systemd
+journal (2-hour window), and every other profile's pm2 logs (`ema-customer`/`epic-business` have
+no Telegram token; `sales` → `@epic_arbiter_bot`, checked too). **Zero matches anywhere.**
+`getUpdates` against the `epic-operator` bot token returned an empty result (consistent with
+either "already consumed by active polling" or "never sent" — not conclusive either way), and the
+gateway process has been continuously online (no crashes) for the entire relevant window.
+
+`epic-operator`'s actual bot is **`@epicdm_operator_bot`**. The likely explanation: Eric messaged
+the old/habitual default bot, **`@EPICDM_Hermes_bot`** (root `~/.hermes`, systemd
+`hermes-gateway.service`) instead — that bot's journal was also checked and also has no match, but
+it's the more plausible target for muscle-memory. **Reporting this as unconfirmed rather than
+fabricating a pass.** Eric: please resend `HERMES-WORKSPACE-DELTA1-PING` explicitly to
+`@epicdm_operator_bot`.
+
+## Round 2 §C — Secret rotation + redaction fix
+
+### Consumer identification (before any change)
+`dashboard.basic_auth.secret` exists in exactly one place: the root `/home/epicdm/.hermes/config.yaml`
+(no per-profile `config.yaml` has its own copy, confirmed by grep across all 7 profiles). It has
+exactly one consumer: the `dashboard_auth/basic` Hermes Agent plugin, loaded by the single pm2
+process `hermes-dashboard` (id 21, script `hermes_cli.main dashboard --port 9119 --host 127.0.0.1`).
+No `HERMES_DASHBOARD_BASIC_AUTH_SECRET` env-var override exists anywhere (would take precedence
+over config.yaml if it did). The secret is a pure HMAC-SHA256 signing key for the dashboard's own
+stateless session tokens (`_sign`/`_unsign` in the plugin) — unrelated to the nginx `.htpasswd`
+credential (a completely separate auth layer) and unrelated to any other service on the host.
+
+### Rotation
+1. Backed up `/home/epicdm/.hermes/config.yaml` → `~/backups/config.yaml.bak-20260724-023733`
+   before any edit.
+2. **Incident during rotation**: a verification `diff` command printed **both** the old and the
+   freshly-generated new secret values in full cleartext into this session's transcript — the
+   exact mistake the owner's instructions explicitly warned against. Caught immediately; the
+   compromised-on-arrival new value was discarded unused and a **second** new value was generated
+   and written, this time verified via line-count + SHA-256 fingerprint only (never printing
+   secret content). Only that second value was ever put into service.
+3. Restarted `hermes-dashboard` (the sole consumer) via pm2.
+4. **Verification** (old fails / new succeeds): direct HTTP testing against a live login session
+   wasn't possible — see the structural finding below — so verification was done against the
+   actual running plugin code, imported directly from its own file
+   (`plugins/dashboard_auth/basic/__init__.py`) in its own venv, never reimplemented:
+   `BasicAuthProvider.verify_session()` with a token signed using the **old** secret → `None`
+   (rejected); the same call with a token signed using the **new** secret (loaded fresh from the
+   post-rotation config file) → a valid `Session` object (accepted). All temp files that ever held
+   secret material were `shred -u`'d off `/tmp` afterward.
+5. Confirmed no collateral damage: `hermes-dashboard` online post-restart, `/` and `/login` both
+   `200`, workspace still logs in and still points at `epic-operator`, and the nginx
+   tailscale-fronted dashboard (`:7001`) still correctly challenges with basic auth.
+
+### Structural finding: this credential is currently dormant
+Tracing exactly how `dashboard.basic_auth` gets enforced turned up `should_require_auth(host)` in
+`hermes_cli/web_server.py`: the cookie/password auth gate (`auth_required`) is **only** active for
+non-loopback `Host` headers. This dashboard is started with `--host 127.0.0.1`, **and** the nginx
+tailscale-proxy for it explicitly forces `proxy_set_header Host 127.0.0.1` (documented in nginx's
+own config comment, for a DNS-rebinding-defense reason). So every request this dashboard ever
+receives — direct or via the protected tailscale path — arrives with a loopback Host header, which
+means `auth_required` is **structurally always false** for this deployment. The actual live
+protection for the dashboard is nginx's CIDR allow-list + `.htpasswd` (layer 1) plus a separate,
+unrelated ephemeral `_SESSION_TOKEN` mechanism for loopback mode (layer 2) — **not**
+`dashboard.basic_auth`/this secret. The rotation was still correct and necessary (the value was
+exposed and Eric explicitly authorized it regardless), but Eric should know the credential doesn't
+currently gate any live traffic — worth a follow-up decision on whether to keep it configured
+(in case the bind mode ever changes) or remove the vestigial config block.
+
+### Redaction fix
+Root cause: `handleHermesConfigGet` passed the **entire raw parsed `config.yaml` tree** through to
+the JSON response verbatim (`config: input.config` in `normalizeHermesConfigState`,
+`src/server/hermes-config-migration.ts`). Provider API keys were already correctly masked via a
+separate `maskedCredentials` path, but nothing masked the raw tree itself — so
+`dashboard.basic_auth.secret` and `password_hash` (and anything else credential-shaped anywhere in
+that tree) passed straight through.
+
+Fix (same branch, `fix/delta1-hermes-config-500`, commit `940e648a`): added
+`redactSecretsDeep()`, a recursive walk that masks any string value whose **key** matches a
+credential-shaped pattern (`secret|password|passphrase|token|api[_-]?key|apikey|credential|bearer|
+private[_-]?key|signing[_-]?key`, case-insensitive) with `••••` (the same `MASK_SENTINEL` already
+used elsewhere in this codebase for MCP secrets), applied to the config tree at the point it enters
+the response. `${ENV_VAR}`-style reference placeholders are left untouched (matching the existing
+convention in `mcp-normalize.ts` — a reference isn't a literal secret). Non-matching fields (e.g.
+`session_ttl_seconds`) are unaffected.
+
+Added a regression test in the existing `hermes-config-migration.test.ts` (matches its existing
+style) covering: the literal secret value never appears anywhere in the serialized response,
+`secret`/`password_hash` are masked, a credential nested arbitrarily deep is still caught, an
+env-var reference is preserved untouched, and non-secret sibling fields pass through unmodified.
+Used an obviously-fake fixture value in the test rather than the real (now-rotated) compromised
+secret, to avoid propagating even the dead value unnecessarily.
+
+`vitest run` on the file: 4/4 passed (including the new test). Built + deployed + verified live:
+- `GET /api/hermes-config` unauthenticated → `401` (unchanged from the step-4 fix)
+- `GET /api/hermes-config` authenticated → `200`, `config.dashboard.basic_auth.secret` and
+  `.password_hash` both `••••`, `.username`/`.session_ttl_seconds` untouched, provider masking
+  (`KIMI_API_KEY`) still correct.
+
+Patch archived: `~/backups/0001-fix-api-redact-credential-shaped-values-from-api-her.patch`,
+mirrored here at `artifacts/isola/hermes/hermes-workspace-config-redaction-940e648a.patch`. Push to
+`outsourc-e/hermes-workspace` failed `403` again (no write access), as expected.
+
+## Round 2 §D — PM2 cleanup: read-only investigation
+
+**1. Exact hook**: `enforce-safety.js`, a `PreToolUse` hook. Rule matches the two-word
+process-manager removal commands (delete/kill) against the JSON-stringified tool input of *every*
+tool call.
+
+**2. Location/control**: `~/.claude/hooks/enforce-safety.js` on **the executor's own machine**
+(global, user-level — wired via both project and global `.claude/settings.json`). This is **not**
+a control installed on deepseek; it fires for any tool call in this Claude Code session regardless
+of target host, and it fired even on prose that merely *mentioned* the phrase in a task
+description, not just literal command execution.
+
+**3. Expected gate/API**: none is actually implemented or referenced by the hook itself. Its
+message ("use the gate", "the validated UI/API layer") is doctrine text with no concrete target —
+consistent with Eric's own Port search finding no such workflow or action defined.
+
+**4. Are the stopped entries in the active dump?** Yes — both `hermes-gateway` entries are present
+in `/home/epicdm/.pm2/dump.pm2`, `status: "stopped"`.
+
+**5–6. Resurrect/reboot risk, autorestart/startup persistence**: **Real, unresolved risk found —
+not disproven.** Both entries carry `autorestart: true` and `autostart: true` in the saved dump.
+Systemd unit `pm2-epicdm.service` is `enabled` (`WantedBy=multi-user.target`) and its `ExecStart`
+runs a full process-list resurrect on every start — so **every reboot of this host resurrects
+this exact dump**. Whether pm2 6.0.14's resurrect specifically respects a saved `"stopped"` status
+field (vs. restarting everything with `autorestart`/`autostart` true regardless of last state) is
+version-specific behavior I could not verify without actually running it, which would be a real,
+disruptive action against all 24 processes and was correctly out of scope for a read-only
+investigation. **I cannot prove these entries are inert against a reboot** — the evidence leans
+toward a real conflict risk with the canonical systemd `hermes-gateway.service` (the original
+"gateway.lock conflict" concern from the Round 1 evidence), not away from it.
+
+**7. Exact safe supported method**: **none currently exists.** No Port workflow, no wrapper script,
+no scoped exception mechanism in the hook itself (it's a blanket string match with no allowlist).
+
+### Outcome: PM2 CLEANUP DEFERRED SAFELY
+"Safely" describes the decision not to act (no hook bypass, nothing deleted, nothing hand-edited
+in pm2's internal state) — **not** a claim that the underlying risk is zero; the investigation
+above found evidence of a real, unresolved resurrection risk that Eric's own bar for a "safe"
+deferral does not consider proven-absent. pm2 ids 11/12 remain untouched, `status: stopped`,
+exactly as before. `dump.pm2` backup from Round 1 remains valid
+(`~/backups/dump.pm2.bak-20260724-020640`); no new backup was needed since nothing changed.
+
+**Bounded follow-up options for Eric** (not executed — each needs an explicit decision):
+- Eric removes pm2 ids 11 and 12 directly from his own terminal, then saves the process list —
+  two short commands, ~10 seconds, not subject to this session's local hook since it isn't Eric's
+  tool call.
+- Eric adds a scoped exception to `enforce-safety.js` (e.g. an explicit pm_id allowlist or a
+  one-time override) so a future session can do this under an audited exception rather than a
+  blanket bypass.
+- *(Mentioned for completeness, not recommended without explicit sign-off)*: hand-editing
+  `dump.pm2` to drop just those two entries would prevent a future resurrect from reviving them
+  without ever invoking the specific process-manager command this host's hook blocks — but doing
+  that unilaterally would violate the *spirit* of "do not bypass or disable the deployed safety
+  hook" even though it wouldn't trip the hook's literal pattern match, so it was not done.
 
 ## 1. Preserve `owner_os_router`
 
@@ -194,25 +383,34 @@ Rollback for 3a/3c: restore the two `.env` backups above, restart
 
 ## Acceptance tests (A1–A6)
 
-- **A1** (tailscale end-to-end): PENDING-OWNER — auth URL delivered, awaiting Eric's login.
+- **A1** (tailscale end-to-end): CIDR + basic-auth ordering verified server-side (Round 2 §A);
+  actual browser login through the tailnet path needs Eric (no nginx password available to me).
 - **A2** (workspace chat round-trip on `epic-operator` + session survives restart): chat
   round-trip and session persistence both verified via curl (see step 3c). Live Telegram
-  ping-pong on the operator gateway: PENDING-OWNER.
-- **A3** (`/api/hermes-config` 200 authed / 401 unauthed): verified, see step 4.
+  ping-pong on the operator gateway: **NOT FOUND** — see Round 2 §B, needs Eric to resend to the
+  correct bot (`@epicdm_operator_bot`).
+- **A3** (`/api/hermes-config` 200 authed / 401 unauthed): verified, see step 4. Still holds after
+  the Round 2 redaction fix.
 - **A4** (`owner_os_router` committed + patch archived, files still live on disk): done, see
   step 1.
 - **A5** (no stopped `hermes-gateway` entries; pm2 dump backup archived; systemd unit + 3 profile
   gateways + dashboard + workspace all online): dump backup archived; all named processes
-  confirmed online throughout; **stopped entries still present — BLOCKED, see step 5.**
-- **A6** (zero secret values in any output): **violated once** — see the security note under step
-  3c. Caught, flagged, and the affected secret's rotation recommended. No secret values appear in
-  this document; masked forms only (`46b2...`, key names).
+  confirmed online throughout; **stopped entries still present — BLOCKED, resurrection risk found
+  not disproven, see Round 2 §D.**
+- **A6** (zero secret values in any output): **violated twice across this engagement** — once in
+  Round 1 (an `/api/hermes-config` response body), once in Round 2 (a `diff` during secret
+  rotation). Both caught and flagged in real time; the Round 1 exposure is now moot (that secret
+  has been rotated); the Round 2 exposure's compromised-on-arrival value was discarded unused
+  before ever being put into service. No secret values appear in this document; masked forms only.
 
 ## Open items for Eric
 
-1. Complete tailscale login: `https://login.tailscale.com/a/f8b3125345ac9`
-2. Send a Telegram message to the `epic-operator` bot to close out the live round-trip check.
-3. Rotate `dashboard.basic_auth.secret` (and consider the `eric` password hash) in
-   `~/.hermes/config.yaml` — exposed once in this session's transcript.
+1. Verify the actual browser login through the tailscale path works with your nginx basic-auth
+   credential — I don't have it and won't try to obtain it (A1 item 4).
+2. Resend `HERMES-WORKSPACE-DELTA1-PING` explicitly to `@epicdm_operator_bot` (not
+   `@EPICDM_Hermes_bot`) to close out the live round-trip check.
+3. Decide whether to keep `dashboard.basic_auth` configured (currently dormant — see the
+   structural finding in Round 2 §C) or remove it, now that it's rotated.
 4. Clarify what "the gate" is for retiring the two stopped `hermes-gateway` pm2 entries (ids 11,
-   12), or do it directly, or grant an explicit exception to the `enforce-safety.js` block.
+   12), or do it directly, or grant an explicit exception to the `enforce-safety.js` block — see
+   the real, unresolved resurrection risk found in Round 2 §D.
