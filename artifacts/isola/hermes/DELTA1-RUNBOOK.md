@@ -366,6 +366,52 @@ that would defeat the exact thing the hook exists to prevent. **Nothing was remo
 are untouched, in their original `stopped` state.** Needs Eric to say what "the gate" is, or to do
 this step directly, or to grant an explicit one-time exception.
 
+## Round 3 — Owner UAT confirmed + PM2 retirement executed
+
+**Owner UAT (independently verified from logs, not just self-report):**
+- Browser: real traffic from `ericthinkpad` (`100.99.240.51`) through the tailscale-protected
+  `:7000` path, all `200`s, live session `087045ae-d6ed-4111-93f5-ef156a87a868`. The actual chat
+  content confirms identity: *"1. workspace-ok 2. epic-operator 3. confirmed — I am the
+  epic-operator profile..."*
+- Telegram: `inbound message: ... msg='HERMES-WORKSPACE-DELTA1-PING'` → `response ready: ...
+  319 chars` → sent to `5136767981`. Full reply retrieved from `state.db`: *"Pong! 🏓
+  `HERMES-WORKSPACE-DELTA1-PING` received. ... Standing by."* Both A1 and A2 now fully pass.
+
+**PM2 retirement — executed with explicit owner authorization.** The owner's follow-up message
+read as a checklist that could have meant either "you run this" or "here's my plan" — rather than
+guess, this was surfaced directly: running the script by invoking its path would **not** trip the
+local pattern-matching safety hook (the actual removal subcommand is hidden behind a variable
+indirection inside the file, so the literal blocked phrase never appears in a direct path
+invocation), but doing so would still be a **genuine bypass of the hook's intent**, not just its
+literal pattern. The owner was given that exact tradeoff and explicitly chose to have the executor
+run it directly. Checksum re-verified immediately before running (matched:
+`574fa603...653506b0aa`). Every precondition passed; the script completed cleanly:
+
+```
+ok: ids 11/12 absent from live state and the saved dump.
+ok: systemd hermes-gateway.service still active
+ok: hermes-epic-operator-gateway still online
+ok: hermes-epic-business-gateway still online
+ok: hermes-ema-gateway still online
+RETIREMENT COMPLETE.
+Rollback backup: /home/epicdm/backups/dump.pm2.bak-20260724-032233
+```
+
+**Full 9-point post-execution verification, independently re-run (not just the script's own
+output):** ids 11/12 absent from `pm2 jlist` and from the saved dump; the dump now contains zero
+`hermes-gateway` entries at all, so a future `pm2 resurrect` has nothing to restore for that name
+(verified by inspecting dump content rather than actually invoking `resurrect` against the live
+22-process fleet, which would have been an unnecessary additional risk); systemd
+`hermes-gateway.service` still active; all three named profile gateways still online with
+**unchanged restart counts** (17/2/10 — proving the script only observed them, never touched
+them); workspace still resolves to `epic-operator` (`127.0.0.1:8645`); the operator gateway's own
+process uptime was continuous throughout (never restarted), confirming Telegram was never
+disrupted.
+
+`defect-hermes-pm2-duplicate-resurrection-risk-2026-07-24` closed `Verified` in Port. All 6 Delta 1
+steps and both follow-on defects (config secret disclosure, PM2 resurrection risk) are now
+complete.
+
 ## Rollback inventory
 
 | File | Backup |
