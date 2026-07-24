@@ -42,24 +42,52 @@ regardless of what credentials are stored in their `channel_configs` rows —
 the delivery path is structurally exclusive to the BFF/Hermes app
 registration proven above.
 
-## B. Live Hermes processor/route for 3742
+## B. Live customer-facing processor/route for 3742 (CORRECTED 2026-07-24)
 
-Code-level (Isola-Foundation repo, `artifacts/isola/lib/brain-provider.ts`):
+**Correction to the original section B below:** `artifacts/isola/lib/brain-provider.ts`
+and its `HERMES_ALLOWED_PHONE_NUMBER_IDS` gate exist only in this
+Isola-Foundation repo as a design/reference file — verified via `find` and
+`grep -r` across the entire live `/opt/bff-v2` deployment on deepseek: the
+file does not exist there, and the string `HERMES_ALLOWED_PHONE_NUMBER_IDS`
+appears nowhere in the deployed code. That mechanism is not what actually
+routes 3742's live traffic. The corrected trace, read directly from the
+deployed code and database, is:
 
-- `HERMES_ALLOWED_PHONE_NUMBER_IDS` hardcodes 3742's phone_number_id
-  (masked `...9171`) as a Hermes-eligible number, resolving server-side to
-  the `epic-business` persona.
-- `DEFAULT_HERMES_AGENT_URL = 'https://bff.epic.dm/api/internal/agent/invoke'`
-  — the single generalized Hermes endpoint for every Hermes number,
-  superseding a prior EMA-specific path (2026-07-13).
-- Per `evidence-clawith-revenue-path-live-reconciliation-2026-07-24`: live
-  inbound flow is Meta → Isola-Foundation (Replit) webhook → dispatch →
-  `brain_provider` check → Hermes via the URL above. This matches the Graph
-  API webhook_configuration proof in section A exactly (both point at the
-  `bff.epic.dm` surface, not at `runtime.epic.dm:8800`).
+- Per `decision-isola-whatsapp-number-role-map-2026-07-24`: 3742 is EPIC's
+  single customer-facing "everything agent" — the front door for prospects,
+  sales, product/marketing inquiries, onboarding, account support,
+  collections, service and escalation, rather than a Hermes-branded routing
+  layer.
+- Inbound webhook: `app/api/whatsapp/webhook/route.ts` → session resolution
+  in `app/lib/webhook/session-detector.ts` `detectSession()`.
+- **Owner branch (narrow, not the customer path):** `detectSession()` only
+  returns `kind: 'owner'` when the sender's phone exactly equals the
+  resolved agent's `ownerPhone` column (for this agent, masked `...8382`),
+  scoped to the same `waPhoneNumberId` being messaged. Only then does
+  `dispatchMessage()` reach `handleHermesChat()` → `handleHermesQuery()`
+  (`app/lib/hermes.ts`) — this is the one real, deployed "Hermes" call, and
+  it is owner-only (business-mode Q&A, gated additionally on the tenant
+  having Odoo configured), never reached by a normal customer message.
+- **Customer branch (what a real prospect/customer hits):** for any other
+  sender, `detectSession()` step 4 resolves the "dedicated agent" via
+  `Agent.findFirst({ waPhoneNumberId: <3742's id, masked ...9171>, status:
+  'active' })`. Verified live against `isolav2` (bff-v2's own Postgres,
+  port 5433): exactly one agent row matches — id masked `...0a018`,
+  name `EMA`, `waPhoneNumberId` = masked `...9171`, `status = 'active'`,
+  `isActive = true`. No other row in this database claims the same
+  `waPhoneNumberId`. `dispatchMessage()` then routes to `handleCustomer()`,
+  which generates the reply natively (Anthropic Claude via `callLLM`) from
+  this agent's own config (a rich B2B account-rep + onboarding + collections
+  + folded-in SBL sales-funnel persona) and sends it back through
+  `sendWhatsAppMessage()` — one send, no external Hermes-gateway hop for
+  this path.
 
-**Conclusion: Hermes, reached via `https://bff.epic.dm/api/internal/agent/invoke`,
-is proven as the sole live, structurally-reachable processor for 3742.**
+**Conclusion: the deployed customer-facing processor for 3742 is bff-v2's own
+`EMA` agent (id masked `...8a018`), reached via `https://bff.epic.dm/api/whatsapp/webhook`
+→ `session-detector` → `handleCustomer`, confirmed as the sole agent bound to
+this phone_number_id in the live database. "Hermes" (`handleHermesQuery`) is a
+real, deployed capability of this same agent, but is reachable only through
+the narrow owner-phone branch, not the customer path this front door serves.**
 
 ## C. The two obsolete v1.8.3 processors — pinned to exact rows
 
