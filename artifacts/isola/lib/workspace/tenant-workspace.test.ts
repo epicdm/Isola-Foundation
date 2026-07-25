@@ -2,12 +2,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const { prismaMock, isAgentToolsEnabledMock, getCurrentUsageMock, getUsageHistoryMock } = vi.hoisted(() => ({
   prismaMock: {
-    agent: { findMany: vi.fn(), findFirst: vi.fn() },
+    agent: { findMany: vi.fn(), findFirst: vi.fn(), count: vi.fn() },
     whatsAppNumber: { findMany: vi.fn() },
     tenant: { findUnique: vi.fn() },
     chatwootBinding: { findMany: vi.fn(), findFirst: vi.fn() },
     clawithBinding: { findMany: vi.fn() },
     conversation: { count: vi.fn(), findFirst: vi.fn(), findMany: vi.fn() },
+    user: { count: vi.fn() },
     escalationRef: { count: vi.fn(), findFirst: vi.fn() },
     message: { count: vi.fn() },
     auditLog: { findMany: vi.fn() },
@@ -82,6 +83,8 @@ beforeEach(() => {
   prismaMock.escalationRef.findFirst.mockResolvedValue(null);
   prismaMock.message.count.mockResolvedValue(0);
   prismaMock.auditLog.findMany.mockResolvedValue([]);
+  prismaMock.user.count.mockResolvedValue(0);
+  prismaMock.agent.count.mockResolvedValue(1);
   getCurrentUsageMock.mockResolvedValue(null);
   getUsageHistoryMock.mockResolvedValue([]);
   isAgentToolsEnabledMock.mockReturnValue(false);
@@ -204,8 +207,9 @@ describe('handoff state', () => {
     prismaMock.conversation.count.mockResolvedValue(2);
     prismaMock.escalationRef.count.mockResolvedValue(5);
     prismaMock.escalationRef.findFirst.mockResolvedValue({ created_at: new Date('2026-07-25T05:00:00Z') });
+    prismaMock.user.count.mockResolvedValue(1);
 
-    const panel = await getHandoffState(ctx({ user: { agent_took_over: true } }));
+    const panel = await getHandoffState(ctx());
     expect(panel.data.humanHandlingCount).toBe(2);
     expect(panel.data.ownerTakeoverActive).toBe(true);
     expect(panel.data.escalationsLast7Days).toBe(5);
@@ -213,6 +217,58 @@ describe('handoff state', () => {
     expect(prismaMock.conversation.count).toHaveBeenCalledWith({
       where: { tenant_id: TENANT, human_handling: true },
     });
+  });
+
+  // Regression: takeover must describe the workspace being VIEWED, not the
+  // viewer. An admin whose own tenant has takeover on, acting as another
+  // tenant, previously saw that flag rendered against the other workspace.
+  it('reads takeover from the viewed workspace, not the viewing user', async () => {
+    prismaMock.user.count.mockResolvedValue(0);
+    const panel = await getHandoffState(
+      ctx({
+        effectiveTenantId: OTHER_TENANT,
+        isAdmin: true,
+        user: { id: 'admin', tenant_id: TENANT, agent_took_over: true },
+      })
+    );
+    expect(panel.data.ownerTakeoverActive).toBe(false);
+    expect(prismaMock.user.count).toHaveBeenCalledWith({
+      where: { tenant_id: OTHER_TENANT, agent_took_over: true },
+    });
+  });
+});
+
+/* ------------------------------------------------------------ fail closed */
+
+describe('fail-closed tenant scope', () => {
+  it('throws rather than querying when the tenant scope is missing', async () => {
+    // Prisma silently drops `tenant_id: undefined`, which would make every read
+    // cross-tenant. The guard must fire before any query runs.
+    const broken = ctx({ effectiveTenantId: undefined });
+    await expect(getAiTeam(broken)).rejects.toThrow(/tenant scope/i);
+    await expect(getActivitySummary(broken)).rejects.toThrow(/tenant scope/i);
+    await expect(getHandoffState(broken)).rejects.toThrow(/tenant scope/i);
+    await expect(getConversationOverview(broken)).rejects.toThrow(/tenant scope/i);
+    expect(prismaMock.agent.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.conversation.count).not.toHaveBeenCalled();
+  });
+});
+
+/* -------------------------------------------- agent-detail attribution */
+
+describe('agent detail attribution', () => {
+  it('marks counts workspace-wide when the tenant has several assistants', async () => {
+    prismaMock.agent.findFirst.mockResolvedValue(agentRow());
+    prismaMock.agent.count.mockResolvedValue(3);
+    const panel = await getAgentDetail(ctx(), 'agent-ema');
+    expect(panel?.data.countsAreWorkspaceWide).toBe(true);
+  });
+
+  it('attributes counts to the assistant when it is the only one', async () => {
+    prismaMock.agent.findFirst.mockResolvedValue(agentRow());
+    prismaMock.agent.count.mockResolvedValue(1);
+    const panel = await getAgentDetail(ctx(), 'agent-ema');
+    expect(panel?.data.countsAreWorkspaceWide).toBe(false);
   });
 });
 
