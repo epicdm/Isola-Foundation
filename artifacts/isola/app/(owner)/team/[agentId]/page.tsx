@@ -47,9 +47,21 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {[
-          { label: 'Conversations', value: String(agent.conversationCount), sub: 'All time' },
-          { label: 'Open now', value: String(agent.openConversationCount), sub: 'Awaiting reply' },
-          { label: 'With a person', value: String(agent.humanHandlingCount), sub: 'Handed over' },
+          {
+            label: 'Conversations',
+            value: String(agent.conversationCount),
+            sub: agent.countsAreWorkspaceWide ? 'Across this workspace' : 'All time',
+          },
+          {
+            label: 'Open now',
+            value: String(agent.openConversationCount),
+            sub: agent.countsAreWorkspaceWide ? 'Across this workspace' : 'Awaiting reply',
+          },
+          {
+            label: 'With a person',
+            value: String(agent.humanHandlingCount),
+            sub: agent.countsAreWorkspaceWide ? 'Across this workspace' : 'Handed over',
+          },
           { label: 'Channels', value: String(agent.channels.length), sub: 'Connected' },
         ].map((s) => (
           <Card key={s.label}>

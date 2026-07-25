@@ -175,6 +175,9 @@ Enforcement is deterministic in `.claude/hooks/isola-guard.js` (26 self-tests).
 | G7 | Tenant→ChatwootBinding is 1:many; `findFirst({tenant_id})` is ambiguous | Always resolve per-conversation `chatwoot_binding_id` or via `resolveActiveBinding()` | Standing rule |
 | G8 | No local Postgres, no Docker, no Playwright in the engineering environment | Signed-in real-data UAT cannot be run locally — requires owner-provided dev DB or a deploy gate | Owner |
 | G9 | 18 IsolaServices contracts are all mock; `configure({mode:'real'})` is never called | FOH funnel remains mock; owner workspace deliberately uses the control-plane API instead | Later chunk |
+| G10 | **No intra-tenant authorization on owner reads.** The workspace routes check authentication only — no `can()` / `requireAdmin()`. Any authenticated user of a tenant, whatever their Membership role, reads that tenant's full team, audit trail and conversation previews incl. customer names and phone numbers | Consistent with the pre-existing `/dashboard` and `/inbox` behaviour, so not a regression — but role separation within a tenant is unimplemented | Later chunk / owner decision |
+| G11 | `getWorkspaceBindingSummary` passes the tenant's entire ChatwootBinding set to `resolveActiveBinding()`, which is designed to break ties *within one `(inbox_id, mode)` collision set*. With one tenant the primary sort key (`tenant.status`) is constant, so it degenerates to `updated_at DESC` | A tenant with two distinct inboxes may see `connections.inboxId`/`mode` naming one that does not govern its conversations. Same-tenant display accuracy, not isolation | Later chunk |
+| G12 | `lib/session.ts:89-91` silently keeps `effectiveTenant = user.tenant` when the act-as tenant id does not resolve | An admin acting as a non-existent tenant sees their own business name in the header while all data panels scope to the bogus id and return empty. Admin-only, no disclosure | Later chunk |
 
 ---
 

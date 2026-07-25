@@ -89,12 +89,21 @@ export interface AgentDetail {
   openConversationCount: number;
   humanHandlingCount: number;
   lastActivityAt: string | null;
+  /**
+   * True when the counts above are workspace-wide rather than this assistant's.
+   * Conversations carry no agent foreign key, so with several assistants the
+   * totals cannot honestly be attributed to one of them.
+   */
+  countsAreWorkspaceWide: boolean;
 }
 
 export interface HandoffState {
   /** Conversations currently being handled by a human. */
   humanHandlingCount: number;
-  /** Tenant-wide manual takeover switch (User.agent_took_over). */
+  /**
+   * True when any user of THIS workspace has manual takeover switched on.
+   * Scoped to the workspace being viewed, never to the viewer's own tenant.
+   */
   ownerTakeoverActive: boolean;
   /** Escalations minted in the trailing window. */
   escalationsLast7Days: number;
@@ -174,6 +183,22 @@ function daysAgo(n: number): Date {
   return new Date(Date.now() - n * 24 * 60 * 60 * 1000);
 }
 
+/**
+ * Fail closed on a missing tenant scope.
+ *
+ * Prisma silently drops `where: { tenant_id: undefined }`, which would turn
+ * every read in this module into a cross-tenant query. `effectiveTenantId` is
+ * non-null today, so this guard should never fire — that is exactly why it is
+ * cheap to keep.
+ */
+function requireTenantScope(ctx: SessionCtx): string {
+  const tenantId = ctx.effectiveTenantId;
+  if (!tenantId || typeof tenantId !== 'string') {
+    throw new Error('workspace read attempted without a tenant scope');
+  }
+  return tenantId;
+}
+
 /** Format a stored E.164-ish number for display without inventing digits. */
 export function formatNumber(raw: string | null | undefined): string | null {
   if (!raw) return null;
@@ -223,7 +248,7 @@ async function channelsForTenant(
 }
 
 export async function getAiTeam(ctx: SessionCtx): Promise<Panel<TeamMember[]>> {
-  const tenantId = ctx.effectiveTenantId;
+  const tenantId = requireTenantScope(ctx);
 
   const [agents, waNumbers, tenant, chatwootBindings, clawithBindings] = await Promise.all([
     prisma.agent.findMany({ where: { tenant_id: tenantId }, orderBy: { created_at: 'asc' } }),
@@ -253,7 +278,6 @@ export async function getAiTeam(ctx: SessionCtx): Promise<Panel<TeamMember[]>> {
     );
   }
 
-  const agentIds = agents.map((a) => a.id);
   const [convCounts, openCounts, lastMessages] = await Promise.all([
     prisma.conversation.count({ where: { tenant_id: tenantId } }),
     prisma.conversation.count({ where: { tenant_id: tenantId, status: 'open' } }),
@@ -298,10 +322,12 @@ export async function getAiTeam(ctx: SessionCtx): Promise<Panel<TeamMember[]>> {
 }
 
 export async function getAgentDetail(ctx: SessionCtx, agentId: string): Promise<Panel<AgentDetail> | null> {
-  const tenantId = ctx.effectiveTenantId;
+  const tenantId = requireTenantScope(ctx);
 
   const agent = await prisma.agent.findFirst({ where: { id: agentId, tenant_id: tenantId } });
   if (!agent) return null; // 404 — never leak existence across tenants
+
+  const agentCount = await prisma.agent.count({ where: { tenant_id: tenantId } });
 
   const [waNumbers, tenant, chatwootBindings, conversationsTotal, conversationsOpen, humanHandling, lastMessage] =
     await Promise.all([
@@ -355,6 +381,7 @@ export async function getAgentDetail(ctx: SessionCtx, agentId: string): Promise<
     openConversationCount: conversationsOpen,
     humanHandlingCount: humanHandling,
     lastActivityAt: lastMessage?.last_message_at ? lastMessage.last_message_at.toISOString() : null,
+    countsAreWorkspaceWide: agentCount > 1,
   };
 
   return live('isola.foundation', detail, lastMessage?.last_message_at ?? null);
@@ -393,9 +420,9 @@ export function getAgentTools(): Panel<AgentToolInfo[]> {
 /* ---------------------------------------------------------- handoff state */
 
 export async function getHandoffState(ctx: SessionCtx): Promise<Panel<HandoffState>> {
-  const tenantId = ctx.effectiveTenantId;
+  const tenantId = requireTenantScope(ctx);
 
-  const [humanHandlingCount, escalations, latest] = await Promise.all([
+  const [humanHandlingCount, escalations, latest, takeoverUsers] = await Promise.all([
     prisma.conversation.count({ where: { tenant_id: tenantId, human_handling: true } }),
     prisma.escalationRef.count({ where: { tenant_id: tenantId, created_at: { gte: daysAgo(7) } } }),
     prisma.escalationRef.findFirst({
@@ -403,11 +430,15 @@ export async function getHandoffState(ctx: SessionCtx): Promise<Panel<HandoffSta
       orderBy: { created_at: 'desc' },
       select: { created_at: true },
     }),
+    // Takeover is a property of the WORKSPACE being viewed, not of the viewer.
+    // Reading ctx.user.agent_took_over here would report an admin's own home
+    // tenant state while they act as another tenant.
+    prisma.user.count({ where: { tenant_id: tenantId, agent_took_over: true } }),
   ]);
 
   const state: HandoffState = {
     humanHandlingCount,
-    ownerTakeoverActive: Boolean(ctx.user.agent_took_over),
+    ownerTakeoverActive: takeoverUsers > 0,
     escalationsLast7Days: escalations,
     mostRecentEscalationAt: latest?.created_at ? latest.created_at.toISOString() : null,
   };
@@ -418,7 +449,7 @@ export async function getHandoffState(ctx: SessionCtx): Promise<Panel<HandoffSta
 /* -------------------------------------------------------------- activity */
 
 export async function getActivitySummary(ctx: SessionCtx): Promise<Panel<ActivitySummary>> {
-  const tenantId = ctx.effectiveTenantId;
+  const tenantId = requireTenantScope(ctx);
   const since = daysAgo(7);
 
   const [
@@ -500,7 +531,7 @@ export async function getConversationOverview(
   ctx: SessionCtx,
   limit = 20
 ): Promise<Panel<ConversationOverviewRow[]>> {
-  const tenantId = ctx.effectiveTenantId;
+  const tenantId = requireTenantScope(ctx);
 
   const rows = await prisma.conversation.findMany({
     where: { tenant_id: tenantId },
@@ -532,7 +563,7 @@ export async function getConversationOverview(
 
 /** Bindings that exist for this tenant, for the honest "what is connected" panel. */
 export async function getWorkspaceBindingSummary(ctx: SessionCtx) {
-  const tenantId = ctx.effectiveTenantId;
+  const tenantId = requireTenantScope(ctx);
   const bindings = await prisma.chatwootBinding.findMany({
     where: { tenant_id: tenantId },
     select: { id: true, tenant_id: true, updated_at: true, agent_id: true, inbox_id: true, mode: true },
