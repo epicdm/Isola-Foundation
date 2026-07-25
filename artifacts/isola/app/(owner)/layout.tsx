@@ -1,6 +1,7 @@
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { getSession } from '@/lib/session';
+import { resolveWorkspaceAuthz, workspaceRoleLabel } from '@/lib/workspace/authz';
 import { AppSidebar } from '@/components/app-sidebar';
 import { Topbar } from '@/components/topbar';
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar';
@@ -20,10 +21,13 @@ export default async function OwnerLayout({ children }: { children: React.ReactN
     redirect(`/auth/login?returnTo=${encodeURIComponent(safe)}`);
   }
 
-  // Admin without act-as goes to admin panel
-  if (session.isAdmin && !session.user.act_as_tenant_id) {
-    redirect('/admin');
-  }
+  // A platform administrator is NOT automatically sent to the operator console.
+  // These are tenant routes; asking for one is an explicit choice of the tenant
+  // realm, and the operator console stays reachable through its own explicit
+  // entry (/admin, plus the switch in the sidebar). Previously an admin loading
+  // /team was silently bounced to /admin, so the owner could never reach their
+  // own workspace (defect-isola-owner-login-lands-saas-operator-2026-07-25).
+  const authz = await resolveWorkspaceAuthz(session);
 
   const actingAsTenantName = session.user.act_as_tenant_id
     ? session.effectiveTenant.business_name
@@ -38,7 +42,7 @@ export default async function OwnerLayout({ children }: { children: React.ReactN
     <SidebarProvider style={{ '--sidebar-width': 'calc(var(--spacing) * 68)' } as React.CSSProperties}>
       <AppSidebar
         userName={session.user.name ?? session.user.email ?? 'User'}
-        userRole={session.isAdmin ? 'Admin (act-as)' : 'Owner'}
+        userRole={workspaceRoleLabel(authz)}
         tenantName={session.user.tenant.business_name}
         agentTookOver={session.user.agent_took_over}
         isAdmin={session.isAdmin}

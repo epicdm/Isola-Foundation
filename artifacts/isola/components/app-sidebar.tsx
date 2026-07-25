@@ -19,6 +19,7 @@ import {
   HeartPulse,
   Activity,
   Users,
+  ShieldCheck,
 } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 
@@ -161,9 +162,14 @@ export function AppSidebar({
       </SidebarHeader>
 
       <SidebarContent>
-        <NavMain groups={isAdmin && !actingAsTenantName ? [ADMIN_NAV] : [OWNER_NAV]} />
+        {/* This sidebar only renders inside the tenant workspace, so the tenant
+            navigation is always primary — an administrator who deliberately
+            opened a tenant route must not be shown the operator navigation in
+            its place. The console remains reachable as a clearly separate
+            secondary group and from the switch in the footer. */}
+        <NavMain groups={[OWNER_NAV]} />
 
-        {isAdmin && actingAsTenantName && <NavMain groups={[ADMIN_NAV]} />}
+        {isAdmin && <NavMain groups={[ADMIN_NAV]} />}
       </SidebarContent>
 
       <SidebarFooter>
@@ -185,6 +191,16 @@ export function AppSidebar({
                 </SidebarMenuButton>
               </DropdownMenuTrigger>
               <DropdownMenuContent side="top" align="start" className="w-56">
+                {/* Explicit, deliberate realm switch. Shown only to a platform
+                    administrator; tenant and operator data are never mixed in
+                    one context — this navigates to the separate console. */}
+                {isAdmin && (
+                  <DropdownMenuItem asChild>
+                    <a href="/admin" className="cursor-pointer">
+                      <ShieldCheck className="mr-2 size-4" /> Open Operator Console
+                    </a>
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem asChild>
                   {/* Real OIDC end-session route on artifacts/api-server; it
                       clears the sid cookie and returns to the public homepage. */}

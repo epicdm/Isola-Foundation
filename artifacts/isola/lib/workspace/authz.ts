@@ -124,6 +124,28 @@ export async function resolveWorkspaceAuthz(ctx: SessionCtx): Promise<WorkspaceA
   return { ...DENIED, basis: 'no-membership', membershipRole: null };
 }
 
+/**
+ * Owner-readable role label, derived from the SAME authority that decides
+ * access. Never derived from `User.role`, which carries @default("owner") and
+ * would label every user an owner regardless of their real membership
+ * (defect-isola-owner-login-lands-saas-operator-2026-07-25, part B).
+ */
+export function workspaceRoleLabel(authz: WorkspaceAuthz): string {
+  if (authz.basis === 'platform-admin') return 'Platform administrator';
+  switch (authz.membershipRole) {
+    case 'owner':
+      return 'Tenant owner';
+    case 'admin':
+      return 'Tenant manager';
+    case 'staff':
+      return 'Tenant staff';
+    default:
+      // No Membership row. Only the pre-Membership home-tenant owner reaches
+      // owner level without one; anything else genuinely has no access.
+      return authz.basis === 'home-tenant-owner' ? 'Tenant owner' : 'No workspace access';
+  }
+}
+
 /** True when `level` satisfies `minimum`. */
 export function levelSatisfies(level: WorkspaceAccessLevel, minimum: 'manager' | 'owner'): boolean {
   if (level === 'denied') return false;
