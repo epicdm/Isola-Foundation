@@ -9,6 +9,7 @@
 
 import { redirect } from 'next/navigation';
 import { getSession } from '@/lib/session';
+import { resolveWorkspaceAuthz } from '@/lib/workspace/authz';
 import { getAuthUser } from '@/lib/auth';
 import { cookies } from 'next/headers';
 import { MessageCircle, ClipboardCheck, Wrench, ArrowRight } from 'lucide-react';
@@ -34,6 +35,17 @@ export default async function RootPage() {
     redirect('/api/provision');
   }
 
+  // Realm selection on the customer-facing entry point.
+  //
+  // Being a platform administrator must NOT, on its own, send someone to the
+  // operator console: the same human can hold both platform authority and a
+  // tenant Membership, and arriving here is a customer-facing entry. Prefer the
+  // tenant workspace whenever the user actually has workspace access, and fall
+  // back to the operator console only when they have none. The console stays
+  // explicitly reachable at /admin and from the switch in the workspace sidebar
+  // (defect-isola-owner-login-lands-saas-operator-2026-07-25).
+  const workspaceAuthz = await resolveWorkspaceAuthz(session);
+  if (workspaceAuthz.level !== 'denied') redirect('/dashboard');
   if (session.isAdmin) redirect('/admin');
   redirect('/dashboard');
 }

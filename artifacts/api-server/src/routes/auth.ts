@@ -60,11 +60,24 @@ function setOidcCookie(res: Response, name: string, value: string) {
   });
 }
 
+/**
+ * Only internal application paths may be used as a post-login destination.
+ *
+ * Rejected, in order: anything that is not a string; anything not rooted at
+ * '/'; protocol-relative '//evil.example'; and any value containing a
+ * backslash — several browsers normalise '/\evil.example' to '//evil.example',
+ * which would otherwise slip past the '//' check and become an open redirect.
+ * Control characters are rejected because they can be used to smuggle a
+ * newline into the Location header.
+ */
 function getSafeReturnTo(value: unknown): string {
   if (
     typeof value !== 'string' ||
     !value.startsWith('/') ||
-    value.startsWith('//')
+    value.startsWith('//') ||
+    value.includes('\\') ||
+    // Control characters (incl. CR/LF) could smuggle a header injection.
+    Array.from(value).some((ch) => (ch.codePointAt(0) ?? 0) < 0x20 || ch.codePointAt(0) === 0x7f)
   ) {
     return '/';
   }

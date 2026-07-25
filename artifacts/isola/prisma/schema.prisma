@@ -272,6 +272,24 @@ model ChatwootBinding {
   agent         Agent?         @relation("ChatwootBindingAgent", fields: [agent_id], references: [id])
   conversations Conversation[]
 
+  // CW00: one Chatwoot door (account + inbox) may carry at most ONE Foundation
+  // registration per mode. A ChatwootBinding row is the governed REGISTRATION
+  // pointing at a Clawith agent — two of them on one door is not "two agents",
+  // it is an ambiguous front door: agent-bot/route.ts resolves the owning
+  // tenant with findMany({ inbox_id, mode: 'a2' }), so a duplicate makes
+  // tenant/agent/token resolution ambiguous (same failure class as the
+  // 2026-07-01 account-5 incident). lib/chatwoot-binding-resolution.ts is the
+  // runtime filter; this is the structural fix.
+  //
+  // inbox_id is nullable and Postgres unique indexes are NULLS DISTINCT, so
+  // rows without an inbox (no door) never collide — no existing row is broken,
+  // and a partial `WHERE inbox_id IS NOT NULL` index would be exactly
+  // equivalent while being inexpressible in Prisma and therefore permanent
+  // drift. `mode` is part of the key rather than a `WHERE mode = 'a2'` filter
+  // because mode has other values ('mirror'), making this a strictly safer
+  // superset key. See migration
+  // 20260725210000_chatwoot_binding_account_inbox_mode_unique.
+  @@unique([account_id, inbox_id, mode])
   @@index([tenant_id])
 }
 

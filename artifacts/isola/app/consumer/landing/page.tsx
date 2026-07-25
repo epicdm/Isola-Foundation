@@ -11,6 +11,7 @@
  * WhatsApp number and the existing /consumer/login page.
  */
 
+import { cookies } from 'next/headers';
 import type { Metadata } from 'next';
 import { Check, MessageCircle, Phone } from 'lucide-react';
 
@@ -59,7 +60,13 @@ function WhatsAppIcon({ className, style }: { className?: string; style?: React.
   return <MessageCircle className={className} style={style} />;
 }
 
-export default function EmaMarketingLandingPage() {
+export default async function EmaMarketingLandingPage() {
+  // Presence of the workspace session cookie only decides which label the
+  // header shows. It is never treated as proof of a session — following the
+  // link still passes through middleware and the owner layout's real
+  // getSession() check, so a stale cookie just lands on the login screen.
+  const hasWorkspaceSession = (await cookies()).has('sid');
+
   return (
     <main className="ema-texture min-h-screen">
       {/* Nav */}
@@ -72,11 +79,23 @@ export default function EmaMarketingLandingPage() {
         </div>
         <div className="flex items-center gap-2 sm:gap-3">
           <ConsumerThemeToggle />
+          {/* Personal (EMA) sign-in — phone OTP realm. Was hidden below the sm
+              breakpoint, so on a phone the header offered no way in at all. */}
           <a
             href={LOGIN_URL}
-            className="ema-interactive hidden text-sm font-semibold text-muted-foreground hover:text-foreground sm:inline-block"
+            className="ema-interactive text-sm font-semibold text-muted-foreground hover:text-foreground"
           >
-            Sign in
+            Personal
+          </a>
+          {/* Business workspace entry. This is the real Replit OIDC flow served
+              by artifacts/api-server (/auth/login), the only supported login
+              route — owners and existing customers previously had no visible
+              way to reach it from this page. */}
+          <a
+            href={hasWorkspaceSession ? '/dashboard' : '/auth/login?returnTo=%2Fdashboard'}
+            className="ema-interactive text-sm font-semibold text-foreground hover:underline"
+          >
+            {hasWorkspaceSession ? 'Open Workspace' : 'Sign In'}
           </a>
           <a
             href={WHATSAPP_URL}

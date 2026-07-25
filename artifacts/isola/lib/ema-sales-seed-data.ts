@@ -34,6 +34,14 @@
  */
 
 export const EMA_SALES_TENANT_ID = 'ema_sales_tenant';
+/**
+ * Configuration-backed name of the Foundation Agent row (the governed
+ * REGISTRATION pointing at the Clawith agent) that owns this tenant's
+ * Chatwoot door. The seed guard resolves the Agent row by
+ * (tenant_id, name) — never by account_id, and never "whichever agent this
+ * tenant happens to have first".
+ */
+export const EMA_SALES_AGENT_NAME = 'EMA';
 export const EMA_SALES_WA_NUMBER_ID = 'ema_sales_wa_num';
 export const EMA_SALES_PHONE_NUMBER_ID = '1023804347491554';
 export const EMA_SALES_WABA_ID = '272252189309178';

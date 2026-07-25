@@ -32,6 +32,7 @@ import {
   EMA_CHATWOOT_ACCOUNT_ID,
   EMA_CHATWOOT_INBOX_ID,
   EMA_CLAWITH_AGENT_ID,
+  EMA_SALES_AGENT_NAME,
 } from '@/lib/ema-sales-seed-data';
 import {
   EPIC_MAIN_PHONE_NUMBER_ID,
@@ -43,6 +44,13 @@ import {
   EPIC_WABA_ID,
 } from '@/lib/epic-seed-data';
 import { audit } from '@/lib/audit';
+import {
+  decideChatwootBindingSeed,
+  describeSeedDecision,
+  type AgentFacts,
+  type DesiredRegistration,
+  type ExistingRegistration,
+} from '@/lib/chatwoot-binding-seed-guard';
 
 export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
@@ -97,6 +105,197 @@ async function resolveAdminTenantId(prisma: any): Promise<string | null> {
     return user?.tenant_id ?? null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * ── The ONE governed way this process may write a ChatwootBinding ──────────
+ *
+ * A ChatwootBinding is the governed REGISTRATION that points one Chatwoot door
+ * (account + inbox + mode) at one Foundation Agent row, which points at one
+ * Clawith agent, owned by one tenant. It is not a second AI employee and it is
+ * not a routing convenience — it is the authority record for that door.
+ *
+ * Every cold-start binding write now goes through here. This function only
+ * READS; the single write it may perform is the one
+ * decideChatwootBindingSeed() (lib/chatwoot-binding-seed-guard.ts) explicitly
+ * authorises. If the guard refuses, nothing is written and the conflict is
+ * logged with ids + reason code only — never a token.
+ *
+ * Identity is configuration-backed end to end:
+ *   • tenant id      — a code constant / seed-data constant
+ *   • agent          — resolved by (tenant_id, agent NAME) from the same
+ *                      constant, so it is never "whichever agent came first"
+ *                      and never inferred from account_id
+ *   • door           — account_id + inbox_id + mode; inbox_id is mandatory,
+ *                      because several tenants share one Chatwoot account and
+ *                      account_id alone can never establish ownership
+ */
+export interface ChatwootBindingSeedConfig {
+  /** Human label for logs, e.g. 'EMA sales' or 'Wave B / Anansi'. */
+  label: string;
+  tenantId: string;
+  /** Configuration-backed Agent NAME within that tenant. */
+  agentName: string;
+  baseUrl: string;
+  accountId: string;
+  inboxId: string;
+  mode: string;
+  /** Chatwoot auth token ('' for a2, which uses CHATWOOT_AGENTBOT_TOKEN). Never logged. */
+  token: string;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function applyChatwootBindingSeed(prisma: any, cfg: ChatwootBindingSeedConfig) {
+  const log = (msg: string) => console.log(`[instrumentation][cw-binding-guard][${cfg.label}] ${msg}`);
+  const warn = (msg: string) => console.warn(`[instrumentation][cw-binding-guard][${cfg.label}] ${msg}`);
+
+  try {
+    // ── Reads only ─────────────────────────────────────────────────────────
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: cfg.tenantId },
+      select: { id: true, status: true },
+    });
+
+    // Resolve the Agent row by explicit (tenant, name). Zero or several
+    // matches means the registration pointer cannot be established — the
+    // guard then refuses rather than writing a NULL or arbitrary pointer.
+    const agentMatches: Array<{ id: string; tenant_id: string; brain_provider: string }> =
+      tenant
+        ? await prisma.agent.findMany({
+            where: { tenant_id: cfg.tenantId, name: cfg.agentName },
+            select: { id: true, tenant_id: true, brain_provider: true },
+          })
+        : [];
+    if (agentMatches.length !== 1) {
+      warn(
+        `agent registration unresolvable — tenant=${cfg.tenantId} name=${cfg.agentName} matches=${agentMatches.length}`,
+      );
+    }
+    const agentRow = agentMatches.length === 1 ? agentMatches[0] : null;
+
+    // Clawith identity, resolved exactly the way the runtime resolves it in
+    // app/api/chatwoot/agent-bot/route.ts: per-agent row first, then the
+    // tenant-level (agent_id IS NULL) fallback.
+    let clawithAgentId: string | null = null;
+    if (agentRow) {
+      const perAgent = await prisma.clawithBinding.findFirst({
+        where: { agent_id: agentRow.id },
+        select: { clawith_agent_id: true },
+      });
+      const tenantLevel = perAgent
+        ? null
+        : await prisma.clawithBinding.findFirst({
+            where: { tenant_id: cfg.tenantId, agent_id: null },
+            select: { clawith_agent_id: true },
+          });
+      clawithAgentId = perAgent?.clawith_agent_id ?? tenantLevel?.clawith_agent_id ?? null;
+    }
+
+    const agent: AgentFacts | null = agentRow
+      ? {
+          id: agentRow.id,
+          tenant_id: agentRow.tenant_id,
+          brain_provider: agentRow.brain_provider,
+          clawith_agent_id: clawithAgentId,
+        }
+      : null;
+
+    // Every registration standing at this door — keyed by the door, never by
+    // tenant_id. This is what makes "another ACTIVE registration already owns
+    // this door" detectable at all.
+    const doorRows: Array<{
+      id: string;
+      tenant_id: string;
+      agent_id: string | null;
+      base_url: string;
+      account_id: string;
+      inbox_id: string | null;
+      mode: string;
+      token: string;
+      tenant: { status: string };
+    }> = cfg.inboxId
+      ? await prisma.chatwootBinding.findMany({
+          where: { account_id: cfg.accountId, inbox_id: cfg.inboxId, mode: cfg.mode },
+          select: {
+            id: true,
+            tenant_id: true,
+            agent_id: true,
+            base_url: true,
+            account_id: true,
+            inbox_id: true,
+            mode: true,
+            token: true,
+            tenant: { select: { status: true } },
+          },
+        })
+      : [];
+
+    const doorRegistrations: ExistingRegistration[] = doorRows.map((r) => ({
+      id: r.id,
+      tenant_id: r.tenant_id,
+      tenant_status: r.tenant.status,
+      agent_id: r.agent_id,
+      base_url: r.base_url,
+      account_id: r.account_id,
+      inbox_id: r.inbox_id,
+      mode: r.mode,
+      token: r.token,
+    }));
+
+    const desired: DesiredRegistration = {
+      tenantId: cfg.tenantId,
+      agentId: agent?.id ?? null,
+      baseUrl: cfg.baseUrl,
+      accountId: cfg.accountId,
+      inboxId: cfg.inboxId,
+      mode: cfg.mode,
+      token: cfg.token,
+    };
+
+    // ── Decide ─────────────────────────────────────────────────────────────
+    const decision = decideChatwootBindingSeed({
+      desired,
+      tenant: tenant ? { id: tenant.id, status: tenant.status } : null,
+      agent,
+      doorRegistrations,
+    });
+
+    for (const w of decision.warnings) {
+      warn(
+        `stale inactive registration left untouched at this door — binding=${w.binding_id} tenant=${w.tenant_id}(${w.tenant_status}) agent=${w.agent_id ?? 'null'}`,
+      );
+    }
+
+    // ── Act — at most one write, exactly the one authorised ────────────────
+    switch (decision.action) {
+      case 'refuse':
+        warn(describeSeedDecision(decision));
+        return;
+
+      case 'noop':
+        // The correct registration already exists. Deliberately NO write:
+        // ChatwootBinding.updated_at is @updatedAt, and an unconditional
+        // refresh here is precisely what kept an invalid row permanently the
+        // "freshest" row at a contested door.
+        log(describeSeedDecision(decision));
+        return;
+
+      case 'create':
+        await prisma.chatwootBinding.create({ data: decision.data });
+        log(describeSeedDecision(decision));
+        return;
+
+      case 'update':
+        await prisma.chatwootBinding.update({
+          where: { id: decision.bindingId },
+          data: decision.data,
+        });
+        log(describeSeedDecision(decision));
+        return;
+    }
+  } catch (err) {
+    console.error(`[instrumentation][cw-binding-guard][${cfg.label}] seed error:`, err);
   }
 }
 
@@ -275,30 +474,26 @@ async function seedWaveBTenants(prisma: any) {
         });
       }
 
-      // 3. ChatwootBinding (mode='a2') — the ONLY routing key for A2 tenants
-      // NOT prisma.chatwootBinding.upsert({where:{tenant_id}}) —
-      // ChatwootBinding.tenant_id is not unique either (same S4 change).
-      const existingWaveBBinding = await prisma.chatwootBinding.findFirst({
-        where: { tenant_id: soul.tenantId },
-        select: { id: true },
+      // 3. ChatwootBinding (mode='a2') — the ONLY routing key for A2 tenants.
+      //
+      // Was: findFirst({where:{tenant_id}}) then an unconditional
+      // update({mode:'a2'}) on every cold start. That inferred door ownership
+      // from the tenant, wrote a registration with a NULL agent pointer, and
+      // bumped @updatedAt on every process start. Now routed through the one
+      // governed writer, which refuses on a retired tenant, a NULL/unresolvable
+      // agent pointer, a missing Clawith identity, or a door another ACTIVE
+      // registration already owns — and writes nothing at all when the
+      // registration is already correct.
+      await applyChatwootBindingSeed(prisma, {
+        label:      `Wave B / ${soul.agentName}`,
+        tenantId:   soul.tenantId,
+        agentName:  soul.agentName,
+        baseUrl:    'https://inbox.epic.dm',
+        accountId:  soul.chatwootAccountId,
+        inboxId:    soul.chatwootInboxId,
+        mode:       'a2',
+        token:      '',                   // A2: uses CHATWOOT_AGENTBOT_TOKEN env var
       });
-      if (!existingWaveBBinding) {
-        await prisma.chatwootBinding.create({
-          data: {
-            tenant_id:  soul.tenantId,
-            base_url:   'https://inbox.epic.dm',
-            account_id: soul.chatwootAccountId,
-            token:      '',                   // A2: uses CHATWOOT_AGENTBOT_TOKEN env var
-            inbox_id:   soul.chatwootInboxId,
-            mode:       'a2',
-          },
-        });
-      } else {
-        await prisma.chatwootBinding.update({
-          where: { id: existingWaveBBinding.id },
-          data: { mode: 'a2' }, // ensure mode is always 'a2' on re-run
-        });
-      }
 
       console.log(`[instrumentation] Wave B tenant seeded: ${soul.agentName} (${soul.tenantId})`);
     } catch (err) {
@@ -350,7 +545,7 @@ async function seedEmaSalesAgent(prisma: any) {
       await prisma.agent.create({
         data: {
           tenant_id: EMA_SALES_TENANT_ID,
-          name: 'EMA',
+          name: EMA_SALES_AGENT_NAME,
           greeting: EMA_SALES_GREETING,
           business_info: EMA_SALES_BUSINESS_INFO,
           knowledge_text: EMA_SALES_KNOWLEDGE_TEXT,
@@ -364,7 +559,7 @@ async function seedEmaSalesAgent(prisma: any) {
         where: { id: existingEmaAgent.id },
         data: {
           // Soul-derived fields sync from source; operational fields untouched.
-          name: 'EMA',
+          name: EMA_SALES_AGENT_NAME,
           greeting: EMA_SALES_GREETING,
           business_info: EMA_SALES_BUSINESS_INFO,
           knowledge_text: EMA_SALES_KNOWLEDGE_TEXT,
@@ -431,50 +626,30 @@ async function seedEmaSalesChatwootBinding(prisma: any) {
     return;
   }
 
-  try {
-    // NOT prisma.chatwootBinding.upsert({where:{tenant_id}}) —
-    // ChatwootBinding.tenant_id is not unique (S4 change, see
-    // seedEmaSalesAgent above for the full rationale).
-    const existingEmaBinding = await prisma.chatwootBinding.findFirst({
-      where: { tenant_id: EMA_SALES_TENANT_ID },
-      select: { id: true },
-    });
-    if (!existingEmaBinding) {
-      await prisma.chatwootBinding.create({
-        data: {
-          tenant_id: EMA_SALES_TENANT_ID,
-          base_url: EMA_CHATWOOT_BASE_URL,
-          account_id: EMA_CHATWOOT_ACCOUNT_ID,
-          token,
-          inbox_id: EMA_CHATWOOT_INBOX_ID,
-          mode: 'a2',
-        },
-      });
-    } else {
-      await prisma.chatwootBinding.update({
-        where: { id: existingEmaBinding.id },
-        data: {
-          // Resync from env/secret on every cold start — e.g. if the token
-          // rotates — no manual DB patch needed.
-          base_url: EMA_CHATWOOT_BASE_URL,
-          account_id: EMA_CHATWOOT_ACCOUNT_ID,
-          token,
-          inbox_id: EMA_CHATWOOT_INBOX_ID,
-          mode: 'a2',
-        },
-      });
-    }
-    console.log(
-      '[instrumentation] EMA Chatwoot binding active — tenant',
-      EMA_SALES_TENANT_ID,
-      'account',
-      EMA_CHATWOOT_ACCOUNT_ID,
-      'inbox',
-      EMA_CHATWOOT_INBOX_ID,
-    );
-  } catch (err) {
-    console.error('[instrumentation] EMA Chatwoot binding seed error:', err);
-  }
+  // Was: findFirst({where:{tenant_id}}) then an unconditional update() that
+  // resynced base_url/account_id/token/inbox_id/mode on EVERY cold start.
+  // Because ChatwootBinding.updated_at is @updatedAt, that refresh kept this
+  // tenant's row permanently the "freshest" registration at account 5 /
+  // inbox 3 — a door tenant 43b006e4 already owns with a real Agent row —
+  // even after this tenant was retired and its agent pointer went NULL.
+  // resolveActiveBinding() breaks ties on updated_at, so the seeder was
+  // actively fighting the tie-breaker.
+  //
+  // Now routed through the one governed writer: it refuses on a retired
+  // tenant, refuses when the agent registration would be NULL or the Agent
+  // row is missing, refuses when the Agent needs a Clawith identity it does
+  // not have, refuses when another ACTIVE registration owns the door — and
+  // performs NO write when the registration is already correct.
+  await applyChatwootBindingSeed(prisma, {
+    label:      'EMA sales',
+    tenantId:   EMA_SALES_TENANT_ID,
+    agentName:  EMA_SALES_AGENT_NAME,
+    baseUrl:    EMA_CHATWOOT_BASE_URL,
+    accountId:  EMA_CHATWOOT_ACCOUNT_ID,
+    inboxId:    EMA_CHATWOOT_INBOX_ID,
+    mode:       'a2',
+    token,
+  });
 }
 
 /**

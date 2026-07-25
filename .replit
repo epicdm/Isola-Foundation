@@ -12,6 +12,23 @@ env = { "CI" = "true" }
 [workflows]
 runButton = "Project"
 
+# Run / Preview. `runButton` previously named a workflow that was never defined,
+# and no port was mapped, so Run produced nothing routable. This defines it.
+# Launch configuration only — no application behaviour is changed here.
+[[workflows.workflow]]
+name = "Project"
+mode = "sequential"
+author = "isola"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash artifacts/isola/scripts/run-replit-preview.sh"
+waitForPort = 5000
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
 [agent]
 stack = "PNPM_WORKSPACE"
 expertMode = true
