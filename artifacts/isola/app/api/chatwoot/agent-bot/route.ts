@@ -8,7 +8,13 @@
  * POST them back to Chatwoot via the bot token → Chatwoot delivers to WA.
  * We NEVER call the Meta send API for A2 tenants.
  *
- * Auth:  ?secret=<CHATWOOT_BOT_SECRET>  constant-time comparison.
+ * Auth:  HMAC-SHA256 signature over `${timestamp}.${rawBody}`, sent by Chatwoot
+ *        (>= 4.13) as X-Chatwoot-Signature / X-Chatwoot-Timestamp and verified
+ *        against CHATWOOT_BOT_SIGNING_SECRET — see lib/chatwoot-webhook-signature.ts.
+ *        The old `?secret=` query parameter is accepted ONLY while
+ *        CHATWOOT_ALLOW_LEGACY_QUERY_SECRET=true, to keep the bot serving
+ *        across the cutover. Once outgoing_url has been stripped of ?secret=
+ *        and signed deliveries are confirmed, unset that flag.
  *
  * ── Reply gate (human_handling flag in OUR database) ──────────────────────
  *
@@ -72,6 +78,10 @@ import { toggleConvStatus, surfaceHandoff } from '@/lib/chatwoot-handoff';
 import { resolveActiveBinding } from '@/lib/chatwoot-binding-resolution';
 import { stampLeadContext } from '@/lib/chatwoot-lead-context';
 import { SALES_TENANT_IDS } from '@/lib/claim-guard';
+import {
+  verifyChatwootSignature,
+  readSignatureHeaders,
+} from '@/lib/chatwoot-webhook-signature';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -79,31 +89,77 @@ const CHATWOOT_BASE = 'https://inbox.epic.dm'; // overridden by binding.base_url
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
-function authenticate(req: NextRequest): boolean {
-  const expected = process.env.CHATWOOT_BOT_SECRET;
-  if (!expected) {
-    console.error('[agent-bot] CHATWOOT_BOT_SECRET not set — rejecting all requests');
-    return false;
+type AuthResult =
+  | { ok: true; via: 'signature' | 'legacy-query' }
+  | { ok: false; reason: string };
+
+/**
+ * Preferred: HMAC signature (Chatwoot >= 4.13, verified on 4.16.1).
+ * Transitional: `?secret=` in the URL, allowed ONLY while
+ * CHATWOOT_ALLOW_LEGACY_QUERY_SECRET is explicitly enabled.
+ *
+ * A request that CARRIES a signature must have a VALID one — we never fall
+ * back to the query secret in that case, because a present-but-wrong signature
+ * is a tampering signal, not a client that forgot to sign.
+ */
+function authenticate(req: NextRequest, rawBody: string): AuthResult {
+  const { signature, timestamp } = readSignatureHeaders(req.headers);
+
+  if (signature || timestamp) {
+    const result = verifyChatwootSignature({
+      rawBody,
+      signature,
+      timestamp,
+      secret: process.env.CHATWOOT_BOT_SIGNING_SECRET,
+    });
+    return result.ok ? { ok: true, via: 'signature' } : { ok: false, reason: result.reason };
   }
+
+  if (process.env.CHATWOOT_ALLOW_LEGACY_QUERY_SECRET !== 'true') {
+    return { ok: false, reason: 'unsigned-and-legacy-disabled' };
+  }
+
+  const expected = process.env.CHATWOOT_BOT_SECRET;
+  if (!expected) return { ok: false, reason: 'no-legacy-secret-configured' };
+
   const provided = new URL(req.url).searchParams.get('secret') ?? '';
-  if (provided.length !== expected.length) return false;
+  if (provided.length !== expected.length) return { ok: false, reason: 'legacy-mismatch' };
   let diff = 0;
   for (let i = 0; i < expected.length; i++) {
     diff |= provided.charCodeAt(i) ^ expected.charCodeAt(i);
   }
-  return diff === 0;
+  return diff === 0
+    ? { ok: true, via: 'legacy-query' }
+    : { ok: false, reason: 'legacy-mismatch' };
 }
 
 // ── POST handler ──────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
-  if (!authenticate(req)) {
+  // The signature covers the RAW body, so it must be read as text and verified
+  // BEFORE parsing. Re-serialising parsed JSON does not reproduce the bytes
+  // Chatwoot signed.
+  let rawBody: string;
+  try {
+    rawBody = await req.text();
+  } catch {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const auth = authenticate(req, rawBody);
+  if (!auth.ok) {
+    // Logged server-side only. The response never says which check failed.
+    console.warn('[agent-bot] rejected delivery:', auth.reason);
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  if (auth.via === 'legacy-query') {
+    console.warn('[agent-bot] delivery authenticated by LEGACY query secret — ' +
+      'this path is being retired; set the bot secret and drop ?secret= from outgoing_url');
   }
 
   let body: Record<string, any>;
   try {
-    body = await req.json();
+    body = JSON.parse(rawBody);
   } catch {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
