@@ -57,6 +57,55 @@ export async function toggleConvStatus(
  */
 export const HANDOFF_LABEL = 'ai-handoff';
 
+/**
+ * Openings that identify a handoff note we have already posted. The card
+ * wording (lib/escalation-card.ts) comes first; the legacy fixed string is
+ * kept so notes written before the card existed still suppress a duplicate.
+ */
+export const HANDOFF_NOTE_MARKERS = [
+  '🔔 **Human help needed**',
+  '🤖 Clawith flagged',
+] as const;
+
+/**
+ * Second line of defence for the single-fire gate.
+ *
+ * The label-based gate only works if the label WRITE succeeds, and it silently
+ * did not: no `ai-handoff` tag exists on the live instance, while conversation
+ * 156 accumulated six identical handoff notes in a single day. Gating on a
+ * write we never verified meant the P1 this function documents as fixed was
+ * still live.
+ *
+ * Fails OPEN on any error. If we cannot determine whether a note exists, we
+ * surface anyway: a duplicate note is noise, but a handoff that never reaches
+ * a human is a customer waiting on nobody.
+ */
+async function hasExistingHandoffNote(
+  baseUrl:   string,
+  accountId: string,
+  cwConvId:  number,
+  botToken:  string,
+): Promise<boolean> {
+  try {
+    const res = await fetch(
+      `${baseUrl}/api/v1/accounts/${accountId}/conversations/${cwConvId}/messages`,
+      { headers: { api_access_token: botToken }, signal: AbortSignal.timeout(10000) },
+    );
+    if (!res.ok) return false;
+    const payload = (await res.json().catch(() => ({})))?.payload;
+    if (!Array.isArray(payload)) return false;
+    return payload.some(
+      (m: any) =>
+        m?.private === true &&
+        typeof m?.content === 'string' &&
+        HANDOFF_NOTE_MARKERS.some((marker) => m.content.startsWith(marker)),
+    );
+  } catch (e: any) {
+    console.warn('[agent-bot] handoff note lookup error:', e?.message);
+    return false;
+  }
+}
+
 export async function surfaceHandoff(
   baseUrl:   string,
   accountId: string,
@@ -77,6 +126,14 @@ export async function surfaceHandoff(
 
   if (existing.includes(HANDOFF_LABEL)) {
     console.log(`[agent-bot] Handoff already surfaced for conv cw#${cwConvId} — skipping duplicate`);
+    return;
+  }
+
+  // The label may be absent because it was never successfully written, not
+  // because this is the first handoff — so check for the note itself before
+  // posting another one.
+  if (await hasExistingHandoffNote(baseUrl, accountId, cwConvId, botToken)) {
+    console.log(`[agent-bot] Handoff note already present on conv cw#${cwConvId} — skipping duplicate`);
     return;
   }
 
@@ -114,7 +171,14 @@ export async function surfaceHandoff(
       },
     );
     if (!labelRes.ok) {
-      console.warn(`[agent-bot] handoff label failed (${labelRes.status}):`, await labelRes.text().catch(() => ''));
+      // Loud, not a warn: a failed label write is what let the duplicate-note
+      // P1 stay live while appearing fixed. The note-presence check above is
+      // now the real gate, but this must never fail quietly again.
+      console.error(
+        `[agent-bot] handoff label WRITE FAILED (${labelRes.status}) for conv cw#${cwConvId} — ` +
+        `the '${HANDOFF_LABEL}' fast-path gate will not engage for this conversation:`,
+        await labelRes.text().catch(() => ''),
+      );
     }
   } catch (e: any) {
     console.warn('[agent-bot] handoff label error:', e?.message);

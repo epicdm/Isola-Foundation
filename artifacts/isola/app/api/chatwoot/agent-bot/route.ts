@@ -82,6 +82,8 @@ import {
   verifyChatwootSignature,
   readSignatureHeaders,
 } from '@/lib/chatwoot-webhook-signature';
+import { buildEscalationCard } from '@/lib/escalation-card';
+import { detectEscalationIntent } from '@/lib/escalation-intent';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -644,7 +646,20 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
     // This is a visibility signal for a human to look, not a silence switch —
     // the bot still answers subsequent messages unless/until a human replies.
     if (needsHandoff && botToken) {
-      await surfaceHandoff(baseUrl, accountId, cwConvId, botToken);
+      // The note carries WHAT the customer wanted, not just that a handoff
+      // happened — a Chatwoot automation rule can only insert static text, so
+      // the content of the handoff is ours to compose. Routing and labelling
+      // stay with Chatwoot (see the "Escalation - route to human" rule).
+      const intent = detectEscalationIntent(content, tenantId);
+      const card = buildEscalationCard({
+        customerMessage: content,
+        aiReply: reply,
+        reason: intent.escalate ? intent.category : null,
+        contactName: typeof body.sender?.name === 'string' ? body.sender.name : null,
+        contactPhone:
+          typeof body.sender?.phone_number === 'string' ? body.sender.phone_number : null,
+      });
+      await surfaceHandoff(baseUrl, accountId, cwConvId, botToken, card);
     }
 
     // ── Meter tokens ─────────────────────────────────────────────────────────
