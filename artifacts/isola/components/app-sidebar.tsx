@@ -186,7 +186,9 @@ export function AppSidebar({
               </DropdownMenuTrigger>
               <DropdownMenuContent side="top" align="start" className="w-56">
                 <DropdownMenuItem asChild>
-                  <a href="/auth/logout" className="cursor-pointer">
+                  {/* Real OIDC end-session route on artifacts/api-server; it
+                      clears the sid cookie and returns to the public homepage. */}
+                  <a href="/auth/logout?returnTo=%2F" className="cursor-pointer">
                     <LogOut className="mr-2 size-4" /> Sign out
                   </a>
                 </DropdownMenuItem>
