@@ -18,6 +18,9 @@ interface TopbarProps {
 
 const TITLES: Record<string, string> = {
   '/dashboard': 'Dashboard',
+  '/workspace': 'Workspace',
+  '/team': 'AI Team',
+  '/activity': 'Activity & Reports',
   '/inbox': 'Inbox',
   '/agent': 'AI Agent',
   '/voice': 'Voice',
