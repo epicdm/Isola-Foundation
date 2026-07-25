@@ -106,9 +106,23 @@ async function main(): Promise<void> {
       const userId = `${P}user-${role.key}`;
       const replitId = process.env[`REPLIT_ID_${role.key.toUpperCase()}`] ?? `${P}replit-${role.key}`;
 
+      // `replit_id` is unique on both User and Identity. Re-running this script
+      // to move ONE real Replit identity between roles (the supported way to
+      // exercise all three roles with a single human login) would otherwise hit
+      // a unique violation, so release the id from whoever currently holds it.
+      // This only ever clears the pointer; it never deletes a row.
+      await prisma.user.updateMany({
+        where: { replit_id: replitId, NOT: { id: userId } },
+        data: { replit_id: null },
+      });
+      await prisma.identity.updateMany({
+        where: { replit_id: replitId, NOT: { id: identityId } },
+        data: { replit_id: null },
+      });
+
       await prisma.identity.upsert({
         where: { id: identityId },
-        update: {},
+        update: { replit_id: replitId },
         create: { id: identityId, display_name: role.name, replit_id: replitId },
       });
 
