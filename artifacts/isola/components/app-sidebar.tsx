@@ -17,6 +17,8 @@ import {
   ChevronsUpDown,
   Command,
   HeartPulse,
+  Activity,
+  Users,
 } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 
@@ -56,7 +58,9 @@ const OWNER_NAV: NavGroup = {
   items: [
     { href: '/workspace', label: 'Workspace', icon: ListChecks },
     { href: '/dashboard', label: 'Dashboard', icon: LayoutGrid },
+    { href: '/team', label: 'AI Team', icon: Users },
     { href: '/inbox', label: 'Inbox', icon: Inbox },
+    { href: '/activity', label: 'Activity', icon: Activity },
     { href: '/agent', label: 'AI Agent', icon: Bot },
     { href: '/voice', label: 'Voice', icon: Phone },
     { href: '/wallet', label: 'Wallet', icon: Wallet },
