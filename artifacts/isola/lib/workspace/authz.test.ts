@@ -7,7 +7,7 @@ vi.mock('@/lib/permissions', () => ({
   // re-exported types only; the guard deliberately does NOT use can()
 }));
 
-import { resolveWorkspaceAuthz, requireWorkspaceAccess, levelSatisfies } from './authz';
+import { resolveWorkspaceAuthz, requireWorkspaceAccess, levelSatisfies, workspaceRoleLabel } from './authz';
 import type { SessionCtx } from '@/lib/session';
 
 const TENANT = 'tenant-epic';
@@ -127,6 +127,64 @@ describe('requireWorkspaceAccess', () => {
       // The message must not describe what the view contains.
       expect(g.error).not.toMatch(/audit|conversation|customer|phone/i);
     }
+  });
+});
+
+/**
+ * defect-isola-owner-login-lands-saas-operator-2026-07-25.
+ * One human may legitimately hold BOTH platform authority and a tenant
+ * Membership. Platform status must never silently pick the realm, and the
+ * displayed role must come from the same authority that grants access.
+ */
+describe('dual-role identity (platform admin + tenant owner)', () => {
+  it('still resolves workspace access for a platform admin on a tenant route', async () => {
+    const a = await resolveWorkspaceAuthz(ctx({ isAdmin: true }));
+    expect(a.level).toBe('owner');
+    expect(a.basis).toBe('platform-admin');
+  });
+
+  it('labels a platform administrator as such, never as tenant owner', async () => {
+    const a = await resolveWorkspaceAuthz(ctx({ isAdmin: true }));
+    expect(workspaceRoleLabel(a)).toBe('Platform administrator');
+  });
+
+  it('keeps the tenant realm resolvable so the homepage does not divert to the console', async () => {
+    // The root page sends the user to the operator console ONLY when workspace
+    // access is denied. A dual-role identity must therefore resolve non-denied.
+    getMembershipRoleMock.mockResolvedValue('owner');
+    const a = await resolveWorkspaceAuthz(ctx({ isAdmin: false }));
+    expect(a.level).not.toBe('denied');
+    expect(workspaceRoleLabel(a)).toBe('Tenant owner');
+  });
+
+  it('a tenant member who is NOT a platform admin is never labelled an administrator', async () => {
+    getMembershipRoleMock.mockResolvedValue('admin');
+    const a = await resolveWorkspaceAuthz(ctx({ isAdmin: false }));
+    expect(workspaceRoleLabel(a)).toBe('Tenant manager');
+    expect(a.canViewAudit).toBe(false);
+  });
+
+  it('act-as does not blend realms: scope follows the acted-as tenant', async () => {
+    const a = await resolveWorkspaceAuthz(
+      ctx({ isAdmin: true, effectiveTenantId: OTHER, user: { id: 'admin', tenant_id: TENANT, role: 'admin' } })
+    );
+    expect(a.level).toBe('owner');
+    expect(a.basis).toBe('platform-admin');
+  });
+});
+
+describe('workspaceRoleLabel', () => {
+  it('never reports a role for someone with no access', async () => {
+    getMembershipRoleMock.mockResolvedValue('staff');
+    const a = await resolveWorkspaceAuthz(ctx({ isOwner: true }));
+    expect(a.level).toBe('denied');
+    expect(workspaceRoleLabel(a)).toBe('Tenant staff');
+  });
+
+  it('does not fall back to User.role when there is no membership and no admin', async () => {
+    getMembershipRoleMock.mockResolvedValue(null);
+    const a = await resolveWorkspaceAuthz(ctx({ isOwner: false }));
+    expect(workspaceRoleLabel(a)).toBe('No workspace access');
   });
 });
 
