@@ -2,7 +2,9 @@ import Link from 'next/link';
 import { notFound, redirect } from 'next/navigation';
 import { ArrowLeft, BookOpen, Clock, MessageCircle, Phone, Settings2, Wrench } from 'lucide-react';
 import { getSession } from '@/lib/session';
-import { getAgentDetail, getAgentTools } from '@/lib/workspace/tenant-workspace';
+import { getAgentDetail, getAgentTools, getAgentRuntimePanel } from '@/lib/workspace/tenant-workspace';
+import { WorkspaceAccessDenied } from '@/components/workspace/access-denied';
+import { requireWorkspaceAccess } from '@/lib/workspace/authz';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -14,12 +16,19 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
   const session = await getSession();
   if (!session) redirect('/');
 
+  const guard = await requireWorkspaceAccess(session, 'manager');
+  if (!guard.ok) return <WorkspaceAccessDenied message={guard.error} />;
+
   const { agentId } = await params;
-  const panel = await getAgentDetail(session, agentId);
+  const [panel, runtimePanel] = await Promise.all([
+    getAgentDetail(session, agentId, { includeConfiguration: guard.authz.canViewConfiguration }),
+    getAgentRuntimePanel(session, agentId),
+  ]);
   if (!panel) notFound();
 
   const agent = panel.data;
   const tools = getAgentTools();
+  const runtime = runtimePanel?.data;
 
   return (
     <div className="flex flex-col gap-5">
@@ -178,28 +187,84 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
 
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0">
-          <CardTitle className="text-sm">Tools</CardTitle>
+          <CardTitle className="text-sm">What this assistant can do</CardTitle>
           <Wrench className="size-4 text-muted-foreground" />
         </CardHeader>
         <CardContent className="p-0">
-          <div className="px-6">
-            <HonestState provenance={tools.provenance} icon={Wrench} title="Workspace tool permissions" />
-          </div>
-          <div className="border-t">
-            {tools.data.map((t) => (
-              <div key={t.name} className="flex items-center gap-3 border-b px-6 py-3 last:border-b-0">
-                <div className="flex min-w-0 flex-col">
-                  <span className="text-sm font-medium truncate">{t.description}</span>
-                  <span className="text-xs text-muted-foreground truncate">{t.name}</span>
-                </div>
-                <Badge variant="secondary" className="ml-auto text-[10px] uppercase">
-                  {t.tier}
-                </Badge>
+          {runtimePanel && runtimePanel.provenance.availability === 'live' && runtime?.toolsVerified ? (
+            <>
+              <div className="border-b">
+                {runtime.tools.length === 0 ? (
+                  <p className="px-6 py-4 text-sm text-muted-foreground">
+                    This assistant currently has no tools enabled. It answers from its knowledge only.
+                  </p>
+                ) : (
+                  runtime.tools.map((t) => (
+                    <div key={t.name} className="flex items-center gap-3 border-b px-6 py-3 last:border-b-0">
+                      <div className="flex min-w-0 flex-col">
+                        <span className="text-sm font-medium truncate">{t.displayName}</span>
+                        {t.description && (
+                          <span className="text-xs text-muted-foreground truncate">{t.description}</span>
+                        )}
+                      </div>
+                      {t.category && (
+                        <Badge variant="secondary" className="ml-auto text-[10px] uppercase">
+                          {t.category}
+                        </Badge>
+                      )}
+                    </div>
+                  ))
+                )}
               </div>
-            ))}
-          </div>
+              <div className="px-6 py-3">
+                <ProvenanceNote provenance={runtimePanel.provenance} />
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="px-6">
+                <HonestState
+                  provenance={runtimePanel?.provenance ?? tools.provenance}
+                  icon={Wrench}
+                  title="Live tool list unavailable"
+                />
+              </div>
+              <div className="border-t">
+                <p className="px-6 pt-4 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Tools this workspace allows
+                </p>
+                {tools.data.map((t) => (
+                  <div key={t.name} className="flex items-center gap-3 border-b px-6 py-3 last:border-b-0">
+                    <div className="flex min-w-0 flex-col">
+                      <span className="text-sm font-medium truncate">{t.description}</span>
+                      <span className="text-xs text-muted-foreground truncate">{t.name}</span>
+                    </div>
+                    <Badge variant="secondary" className="ml-auto text-[10px] uppercase">
+                      {t.tier}
+                    </Badge>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </CardContent>
       </Card>
+
+      {runtimePanel && runtime?.profile?.roleDescription && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Role, as configured in the assistant runtime</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <p className="text-sm">{runtime.profile.roleDescription}</p>
+            {runtime.profile.bio && <p className="text-sm text-muted-foreground">{runtime.profile.bio}</p>}
+            {runtime.profile.runtimeState && (
+              <p className="text-sm text-muted-foreground">Runtime status: {runtime.profile.runtimeState}</p>
+            )}
+            <ProvenanceNote provenance={runtimePanel.provenance} />
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

@@ -22,7 +22,18 @@ import { resolveActiveBinding } from '@/lib/chatwoot-binding-resolution';
 import { TOOL_NAMES, TOOL_TIER, type ToolName } from '@/lib/agent-tools';
 import { isAgentToolsEnabled } from '@/lib/engines';
 import { getCurrentUsage, getUsageHistory } from '@/lib/meter';
-import { type Panel, live, empty, notConfigured } from './provenance';
+import {
+  type Panel,
+  live,
+  empty,
+  notConfigured,
+  restricted,
+  stale,
+  unavailable,
+  mirrorFreshness,
+  MIRROR_FRESHNESS_BUDGET_MINUTES,
+} from './provenance';
+import { getAgentRuntimeProfile, type RuntimeProfile, type RuntimeTool } from './agent-runtime-read';
 
 /* ------------------------------------------------------------------ types */
 
@@ -95,6 +106,8 @@ export interface AgentDetail {
    * totals cannot honestly be attributed to one of them.
    */
   countsAreWorkspaceWide: boolean;
+  /** True when configuration detail was withheld because of the viewer's role. */
+  configurationRestricted: boolean;
 }
 
 export interface HandoffState {
@@ -321,8 +334,13 @@ export async function getAiTeam(ctx: SessionCtx): Promise<Panel<TeamMember[]>> {
   return live('isola.foundation', members, lastMessages?.last_message_at ?? null);
 }
 
-export async function getAgentDetail(ctx: SessionCtx, agentId: string): Promise<Panel<AgentDetail> | null> {
+export async function getAgentDetail(
+  ctx: SessionCtx,
+  agentId: string,
+  opts: { includeConfiguration?: boolean } = {}
+): Promise<Panel<AgentDetail> | null> {
   const tenantId = requireTenantScope(ctx);
+  const includeConfiguration = opts.includeConfiguration !== false;
 
   const agent = await prisma.agent.findFirst({ where: { id: agentId, tenant_id: tenantId } });
   if (!agent) return null; // 404 — never leak existence across tenants
@@ -366,17 +384,29 @@ export async function getAgentDetail(ctx: SessionCtx, agentId: string): Promise<
     runtimeKey: agent.brain_provider,
     intelligenceTier: agent.intelligence_tier,
     channels,
-    responsibilities: {
-      businessInfo: businessInfo || null,
-      knowledgeSummary: knowledge ? knowledge.slice(0, 400) : null,
-      knowledgeCharacters: knowledge.length,
-      greeting: agent.greeting || null,
-      awayMessage: agent.away_message || null,
-      afterHours:
-        agent.after_hours_start || agent.after_hours_end
-          ? { start: agent.after_hours_start, end: agent.after_hours_end, timezone: agent.timezone }
-          : null,
-    },
+    // Configuration detail is owner-only. A manager sees identity, status,
+    // channels and volumes, but not the business context or knowledge text.
+    responsibilities: includeConfiguration
+      ? {
+          businessInfo: businessInfo || null,
+          knowledgeSummary: knowledge ? knowledge.slice(0, 400) : null,
+          knowledgeCharacters: knowledge.length,
+          greeting: agent.greeting || null,
+          awayMessage: agent.away_message || null,
+          afterHours:
+            agent.after_hours_start || agent.after_hours_end
+              ? { start: agent.after_hours_start, end: agent.after_hours_end, timezone: agent.timezone }
+              : null,
+        }
+      : {
+          businessInfo: null,
+          knowledgeSummary: null,
+          knowledgeCharacters: 0,
+          greeting: agent.greeting || null,
+          awayMessage: null,
+          afterHours: null,
+        },
+    configurationRestricted: !includeConfiguration,
     conversationCount: conversationsTotal,
     openConversationCount: conversationsOpen,
     humanHandlingCount: humanHandling,
@@ -448,8 +478,12 @@ export async function getHandoffState(ctx: SessionCtx): Promise<Panel<HandoffSta
 
 /* -------------------------------------------------------------- activity */
 
-export async function getActivitySummary(ctx: SessionCtx): Promise<Panel<ActivitySummary>> {
+export async function getActivitySummary(
+  ctx: SessionCtx,
+  opts: { includeAudit?: boolean } = {}
+): Promise<Panel<ActivitySummary>> {
   const tenantId = requireTenantScope(ctx);
+  const includeAudit = opts.includeAudit !== false;
   const since = daysAgo(7);
 
   const [
@@ -469,12 +503,16 @@ export async function getActivitySummary(ctx: SessionCtx): Promise<Panel<Activit
     }),
     getCurrentUsage(tenantId),
     getUsageHistory(tenantId, 6),
-    prisma.auditLog.findMany({
-      where: { tenant_id: tenantId },
-      orderBy: { created_at: 'desc' },
-      take: 20,
-      select: { id: true, action: true, entity: true, actor_id: true, created_at: true },
-    }),
+    // The audit trail is owner-only. For a manager the query is not issued at
+    // all, rather than issued and filtered — least privilege at the data layer.
+    includeAudit
+      ? prisma.auditLog.findMany({
+          where: { tenant_id: tenantId },
+          orderBy: { created_at: 'desc' },
+          take: 20,
+          select: { id: true, action: true, entity: true, actor_id: true, created_at: true },
+        })
+      : Promise.resolve([] as Array<{ id: string; action: string; entity: string | null; actor_id: string; created_at: Date }>),
   ]);
 
   const summary: ActivitySummary = {
@@ -503,6 +541,14 @@ export async function getActivitySummary(ctx: SessionCtx): Promise<Panel<Activit
       at: r.created_at.toISOString(),
     })),
   };
+
+  if (!includeAudit) {
+    return restricted(
+      'isola.foundation',
+      summary,
+      'Volumes and usage are shown for your role. The detailed audit trail is available to workspace owners.'
+    );
+  }
 
   if (auditRows.length === 0 && conversationsTotal === 0) {
     return empty(
@@ -558,7 +604,98 @@ export async function getConversationOverview(
     );
   }
 
-  return live('isola.mirror', mapped, rows[0]?.last_message_at ?? null);
+  // FRESHNESS. This list is the Foundation mirror, written by Chatwoot webhooks
+  // (app/api/chatwoot/webhook and app/api/chatwoot/agent-bot). It is current
+  // only while webhook delivery is healthy, and nothing here polls Chatwoot to
+  // confirm that. Past the budget the data is real but must not be called
+  // current.
+  const newest = rows[0]?.last_message_at ?? null;
+  const { ageMinutes, withinBudget } = mirrorFreshness(newest);
+  if (!withinBudget) {
+    return stale(
+      'isola.mirror',
+      mapped,
+      newest,
+      ageMinutes === null
+        ? 'These conversations have no recorded message time, so their currency cannot be confirmed.'
+        : `Last synchronised ${ageMinutes} minutes ago, beyond the ${MIRROR_FRESHNESS_BUDGET_MINUTES}-minute freshness budget. This is either genuinely quiet, or conversation updates are not arriving. Open the conversation platform to confirm current state.`
+    );
+  }
+
+  return live('isola.mirror', mapped, newest);
+}
+
+/* ------------------------------------------------ agent runtime (Clawith) */
+
+export interface AgentRuntimePanelData {
+  profile: RuntimeProfile | null;
+  tools: RuntimeTool[];
+  toolsVerified: boolean;
+}
+
+/**
+ * EMA's real role text and enabled tools, read from the customer-agent runtime
+ * through the governed server-side adapter.
+ *
+ * The Clawith agent id is resolved from the tenant's own `ClawithBinding` —
+ * per-agent first, then the tenant-level fallback (`agent_id IS NULL`), which
+ * mirrors how the escalation path resolves it. A caller-supplied id is never
+ * used. Returns null when the agent does not belong to this tenant, so the
+ * route can 404 exactly as it does for agent detail.
+ */
+export async function getAgentRuntimePanel(
+  ctx: SessionCtx,
+  agentId: string
+): Promise<Panel<AgentRuntimePanelData> | null> {
+  const tenantId = requireTenantScope(ctx);
+
+  const agent = await prisma.agent.findFirst({
+    where: { id: agentId, tenant_id: tenantId },
+    select: { id: true },
+  });
+  if (!agent) return null;
+
+  const binding =
+    (await prisma.clawithBinding.findFirst({
+      where: { tenant_id: tenantId, agent_id: agentId },
+      select: { clawith_agent_id: true },
+    })) ??
+    (await prisma.clawithBinding.findFirst({
+      where: { tenant_id: tenantId, agent_id: null },
+      select: { clawith_agent_id: true },
+    }));
+
+  const emptyData: AgentRuntimePanelData = { profile: null, tools: [], toolsVerified: false };
+
+  if (!binding?.clawith_agent_id) {
+    return notConfigured(
+      'clawith',
+      emptyData,
+      'This assistant is not linked to the assistant runtime, so it has no runtime tools or role text yet.'
+    );
+  }
+
+  const result = await getAgentRuntimeProfile(binding.clawith_agent_id);
+
+  if (!result.configured) {
+    // The data EXISTS in the runtime — this is missing wiring, not missing data.
+    return unavailable('clawith', emptyData, result.reason);
+  }
+  if (!result.ok) {
+    return unavailable('clawith', emptyData, result.reason);
+  }
+
+  const data: AgentRuntimePanelData = {
+    profile: result.profile,
+    tools: result.tools,
+    toolsVerified: result.toolsVerified,
+  };
+
+  if (!result.toolsVerified) {
+    return live('clawith', data, result.profile.lastActiveAt);
+  }
+
+  return live('clawith', data, result.profile.lastActiveAt);
 }
 
 /** Bindings that exist for this tenant, for the honest "what is connected" panel. */

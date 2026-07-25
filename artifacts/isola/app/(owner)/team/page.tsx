@@ -7,12 +7,17 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ProvenanceNote, HonestState } from '@/components/workspace/provenance-note';
+import { WorkspaceAccessDenied } from '@/components/workspace/access-denied';
+import { requireWorkspaceAccess } from '@/lib/workspace/authz';
 
 export const revalidate = 0;
 
 export default async function TeamPage() {
   const session = await getSession();
   if (!session) redirect('/');
+
+  const guard = await requireWorkspaceAccess(session, 'manager');
+  if (!guard.ok) return <WorkspaceAccessDenied message={guard.error} />;
 
   const [team, handoff, connections] = await Promise.all([
     getAiTeam(session),

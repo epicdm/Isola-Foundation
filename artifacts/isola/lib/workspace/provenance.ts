@@ -30,7 +30,17 @@ export type Availability =
   /** No backing data model/configuration exists yet — this is a known product gap. */
   | 'not_configured'
   /** The authoritative store could not be reached or is not wired on this deployment. */
-  | 'unavailable';
+  | 'unavailable'
+  /**
+   * The data exists and is current, but this role may not see it. Distinct from
+   * `unavailable` on purpose — the user is told it is withheld, not broken.
+   */
+  | 'restricted'
+  /**
+   * Real records, but older than the freshness budget for a mirrored source.
+   * Never present mirror data past its budget as current.
+   */
+  | 'stale';
 
 export interface Provenance {
   source: SourceSystem;
@@ -89,6 +99,49 @@ export function unavailable<T>(source: SourceSystem, data: T, note: string): Pan
     data,
     provenance: { source, verifiedAt: now(), dataAsOf: null, availability: 'unavailable', note },
   };
+}
+
+export function restricted<T>(source: SourceSystem, data: T, note: string): Panel<T> {
+  return {
+    data,
+    provenance: { source, verifiedAt: now(), dataAsOf: null, availability: 'restricted', note },
+  };
+}
+
+/**
+ * Freshness policy for mirrored data.
+ *
+ * The conversation mirror is written by Chatwoot webhooks, so it is current
+ * only while webhook delivery is healthy. Anything older than this without new
+ * upstream activity must be presented as possibly stale rather than current.
+ */
+export const MIRROR_FRESHNESS_BUDGET_MINUTES = 15;
+
+/**
+ * Real but past its freshness budget. The data is shown with an explicit
+ * "may not be current" statement rather than being presented as live.
+ */
+export function stale<T>(source: SourceSystem, data: T, dataAsOf: Date | string | null, note: string): Panel<T> {
+  return {
+    data,
+    provenance: {
+      source,
+      verifiedAt: now(),
+      dataAsOf: dataAsOf ? new Date(dataAsOf).toISOString() : null,
+      availability: 'stale',
+      note,
+    },
+  };
+}
+
+export function mirrorFreshness(dataAsOf: Date | string | null): {
+  ageMinutes: number | null;
+  withinBudget: boolean;
+} {
+  if (!dataAsOf) return { ageMinutes: null, withinBudget: false };
+  const ageMs = Date.now() - new Date(dataAsOf).getTime();
+  const ageMinutes = Math.max(0, Math.round(ageMs / 60000));
+  return { ageMinutes, withinBudget: ageMinutes <= MIRROR_FRESHNESS_BUDGET_MINUTES };
 }
 
 /** Human label for a source, for UI attribution. Never exposes infrastructure detail. */
