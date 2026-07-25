@@ -1,3 +1,4 @@
+import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { getSession } from '@/lib/session';
 import { AppSidebar } from '@/components/app-sidebar';
@@ -8,7 +9,16 @@ import { cn } from '@/lib/utils';
 
 export default async function OwnerLayout({ children }: { children: React.ReactNode }) {
   const session = await getSession();
-  if (!session) redirect('/');
+  if (!session) {
+    // Send them to the real OIDC login and bring them back to where they were
+    // asking for, instead of dropping them on the public homepage. Middleware
+    // catches the no-cookie case; this handles a cookie that is present but no
+    // longer resolves to a session. The path comes from our own middleware
+    // header, never from user input.
+    const requested = (await headers()).get('x-isola-pathname') ?? '/dashboard';
+    const safe = requested.startsWith('/') && !requested.startsWith('//') ? requested : '/dashboard';
+    redirect(`/auth/login?returnTo=${encodeURIComponent(safe)}`);
+  }
 
   // Admin without act-as goes to admin panel
   if (session.isAdmin && !session.user.act_as_tenant_id) {
