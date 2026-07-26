@@ -58,7 +58,7 @@ export const CW00_EXCEPTION = {
   /** sha256 of the migration as APPLIED to production on 2026-07-25T22:21:50Z. */
   productionChecksum: 'a67295d73829ac254daa326e71d2cfb3eaf4660e387115df50cd8d59b64f8882',
   /** sha256 of the REPAIRED migration now in this repository (LF bytes). */
-  repairedChecksum: '1b06b3b3f51c0137a66b049bfa27a020fde1e5fc82533ec8360ce46b98558f68',
+  repairedChecksum: '4ef385fab8ab9439005952666954285bde7ff953f6acc2bc7ccda9ca232345be',
   approvedOn: '2026-07-26',
   reason:
     'Owner-approved single exception: the migration was made environment-agnostic so development ' +

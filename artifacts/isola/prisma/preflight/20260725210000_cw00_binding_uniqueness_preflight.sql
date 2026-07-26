@@ -35,15 +35,20 @@
 --        is_non_partial / columns_exact / on_chatwootbinding = true
 --   Q8 → shape = 'production-post-migration'
 --
--- DEVELOPMENT / FRESH (pre-migration, environment-neutral):
---   Q1 → 0 rows
+-- DEVELOPMENT / FRESH (pre-migration, environment-neutral or foreign-or-seeded):
+--   Q1 → 0 rows on a genuinely fresh database; 1 row where the application's
+--        instrumentation seeder has minted a binding on the reviewed door.
+--        More than 1 row is a STOP condition.
 --   Q2 → keep_ok = false
 --   Q3 → orphan_present = false
 --   Q4 → 0 rows
 --   Q5 → 0 rows (index not yet present) — Q5 must NEVER return a row whose
 --        shape flags are anything other than all-true; a same-named index with
 --        a different definition is a STOP condition
---   Q8 → shape = 'environment-neutral'
+--   Q8 → shape = 'environment-neutral' on a fresh database, or
+--        'foreign-or-seeded' where the seeder has populated the door. Both are
+--        safe: the migration deletes nothing in either and enforces structure
+--        only. Anything else is a STOP condition.
 --
 -- STOP AND ESCALATE if Q8 reports 'PARTIAL-IDENTITY — REFUSE' or
 -- 'UNRECOGNISED — REFUSE'. Partial presence of production's identity set is
@@ -146,6 +151,8 @@ SELECT n_door, n_keep, n_drop, n_identity,
            THEN 'production-post-migration (already deduped — migration is a no-op)'
          WHEN n_identity = 0 AND n_door = 0
            THEN 'environment-neutral (development / fresh — migration creates the index only)'
+         WHEN n_keep = 0 AND n_drop = 0 AND n_door <= 1
+           THEN 'foreign-or-seeded (development with seeder-minted bindings — migration deletes nothing, creates the index only)'
          ELSE 'PARTIAL-IDENTITY OR UNRECOGNISED — REFUSE. Do not run the migration. Escalate.'
        END AS shape
   FROM s;

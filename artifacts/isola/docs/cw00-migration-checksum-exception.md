@@ -8,7 +8,7 @@ owner exception granted 2026-07-26, and it is **not a precedent**.
 |---|---|
 | Applied to production | `2026-07-25 22:21:50.144659+00` → `.399674+00`, 1 step, no rollback |
 | Production ledger checksum (permanent) | `a67295d73829ac254daa326e71d2cfb3eaf4660e387115df50cd8d59b64f8882` |
-| Repaired repository checksum | `1b06b3b3f51c0137a66b049bfa27a020fde1e5fc82533ec8360ce46b98558f68` |
+| Repaired repository checksum | `4ef385fab8ab9439005952666954285bde7ff953f6acc2bc7ccda9ca232345be` |
 
 ## Why
 

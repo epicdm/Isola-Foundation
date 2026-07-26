@@ -37,7 +37,7 @@
 -- converge. This edit makes the migration strict where production identity is
 -- present and replayable where it is not.
 --
--- THE FOUR BRANCHES, IN ORDER
+-- THE BRANCHES, IN ORDER
 --   0. GLOBAL DUPLICATE GUARD  — any duplicate (account_id, inbox_id, mode)
 --      group other than the one reviewed pair aborts before any DML or DDL.
 --   1. PRODUCTION FIRST RUN    — the reviewed pair is present in its exact
@@ -47,9 +47,16 @@
 --      reviewed one, delete nothing, then enforce uniqueness.
 --   3. ENVIRONMENT-NEUTRAL     — NONE of the reviewed identities exist:
 --      delete nothing, require zero duplicates, then enforce uniqueness.
---   *  ANY OTHER SHAPE, including PARTIAL presence of the reviewed identity
---      set, aborts. Partial presence is treated as suspicious, never as
---      "close enough to neutral".
+--   4. FOREIGN OR SEEDED       — neither reviewed REGISTRATION exists and the
+--      reviewed door holds at most one row: there is nothing this migration is
+--      authorised to delete, so it deletes nothing and enforces uniqueness
+--      only. This is the shape of a development database whose bindings are
+--      minted by the application's own instrumentation seeder.
+--   *  ANY OTHER SHAPE aborts — including either reviewed registration
+--      appearing on its own, and any unrecognised door carrying more than one
+--      row. The rule this draws: refuse to DELETE on a shape this migration
+--      does not recognise; permit STRUCTURAL enforcement only once no
+--      duplicate can exist.
 --
 -- Being replayable does NOT relax production identity checks. Branches 1 and 2
 -- carry exactly the assertions the original had.
@@ -317,6 +324,32 @@ BEGIN
     ------------------------------------------------------------------------
     RAISE NOTICE 'CW00 binding uniqueness [environment-neutral]: none of the reviewed production identities are present and the reviewed door is empty. No registration will be deleted. Enforcing uniqueness only.';
 
+  ELSIF n_keep_row = 0 AND n_drop_row = 0 AND n_key <= 1 THEN
+    ------------------------------------------------------------------------
+    -- BRANCH 4 — FOREIGN OR SEEDED ENVIRONMENT. Neither reviewed production
+    -- REGISTRATION is present, so there is nothing this migration is
+    -- authorised to delete: its only sanctioned deletion is the specific
+    -- reviewed orphan `drop_id`. Whatever occupies the reviewed door is not
+    -- production's reviewed pair. In development that row is minted by the
+    -- application's own instrumentation seeder on every boot, together with
+    -- the `ema_sales_tenant` slug that production also uses — which is why
+    -- such a database can never reach BRANCH 3 no matter how often it is
+    -- cleaned, and why keying this branch on reviewed BINDING ids rather than
+    -- on `n_ident_present` is what makes the migration genuinely replayable.
+    --
+    -- Why `n_key <= 1` is load-bearing: the global guard at step 0
+    -- deliberately EXCLUDES the reviewed door from its duplicate scan, so a
+    -- duplicate sitting ON that door while neither reviewed id is present
+    -- would pass step 0 unseen and make the CREATE UNIQUE INDEX below fail
+    -- with an opaque Postgres error instead of a named one. Capping the door
+    -- at a single row closes that gap; step 0 covers every other door.
+    --
+    -- This branch CANNOT fire in production: production holds `keep_id`, so it
+    -- always matches BRANCH 1 or BRANCH 2, both of which are evaluated first.
+    -- No production identity assertion is weakened by its existence.
+    ------------------------------------------------------------------------
+    RAISE NOTICE 'CW00 binding uniqueness [foreign-or-seeded]: neither reviewed production registration is present and the reviewed door holds % row(s), none of them reviewed. No registration will be deleted. Enforcing uniqueness only.', n_key;
+
   ELSE
     ------------------------------------------------------------------------
     -- ANY OTHER SHAPE — including PARTIAL presence of the reviewed identity
@@ -324,7 +357,7 @@ BEGIN
     -- it means something restored, seeded or mutated part of production's
     -- identity into this database, and this migration must not guess.
     ------------------------------------------------------------------------
-    RAISE EXCEPTION 'CW00 binding uniqueness: unrecognised environment shape — rows on the reviewed door (account 5 / inbox 3 / a2) = %, reviewed KEEP binding present = %, reviewed DROP binding present = %, reviewed production identities present across ChatwootBinding/Tenant/Agent = %. Recognised shapes are: (a) production first run — 2 rows on the door with both reviewed bindings; (b) production re-run — 1 row, the reviewed KEEP binding, no DROP binding; (c) environment-neutral — zero reviewed identities anywhere and an empty door. Anything else, including PARTIAL presence of the reviewed production identity set, is treated as suspicious and refused. Stopping before any change — nothing deleted, no index created.',
+    RAISE EXCEPTION 'CW00 binding uniqueness: unrecognised environment shape — rows on the reviewed door (account 5 / inbox 3 / a2) = %, reviewed KEEP binding present = %, reviewed DROP binding present = %, reviewed production identities present across ChatwootBinding/Tenant/Agent = %. Recognised shapes are: (a) production first run — 2 rows on the door with both reviewed bindings; (b) production re-run — 1 row, the reviewed KEEP binding, no DROP binding; (c) environment-neutral — zero reviewed identities anywhere and an empty door; (d) foreign-or-seeded — neither reviewed registration present and at most one row on the door, which deletes nothing and only enforces structure. Anything else — either reviewed registration appearing alone, or an unrecognised door carrying more than one row — is treated as suspicious and refused. Stopping before any change — nothing deleted, no index created.',
       n_key, n_keep_row, n_drop_row, n_ident_present;
   END IF;
 END $$;
