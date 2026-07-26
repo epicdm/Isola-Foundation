@@ -25,34 +25,38 @@ export function UsageChart({ data }: { data: UsagePoint[] }) {
     <div className="grid gap-4 md:grid-cols-2">
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-medium text-muted-foreground">AI turns (tokens) over time</CardTitle>
+          <CardTitle className="text-sm font-medium text-muted-foreground">AI usage (tokens) over time</CardTitle>
         </CardHeader>
         <CardContent>
           {hasHistory ? (
             <ResponsiveContainer width="100%" height={220}>
               <AreaChart data={data} margin={{ left: -20, right: 8, top: 8 }}>
                 <defs>
+                  {/* Fix: --primary already contains a full hsl(...) expression (see
+                      app/globals.css), so wrapping it again in hsl(var(--primary)) produced
+                      an invalid nested color and rendered as black/transparent. Use the
+                      token directly. */}
                   <linearGradient id="tokensFill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.35} />
-                    <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0} />
+                    <stop offset="5%" stopColor="var(--primary)" stopOpacity={0.35} />
+                    <stop offset="95%" stopColor="var(--primary)" stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border)" />
                 <XAxis dataKey="month" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
                 <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={40} />
                 <Tooltip
                   contentStyle={{
-                    background: 'hsl(var(--popover))',
-                    border: '1px solid hsl(var(--border))',
+                    background: 'var(--popover)',
+                    border: '1px solid var(--border)',
                     borderRadius: 8,
                     fontSize: 12,
                   }}
                 />
-                <Area type="monotone" dataKey="tokens" stroke="hsl(var(--primary))" fill="url(#tokensFill)" strokeWidth={2} />
+                <Area type="monotone" dataKey="tokens" stroke="var(--primary)" fill="url(#tokensFill)" strokeWidth={2} />
               </AreaChart>
             </ResponsiveContainer>
           ) : (
-            <EmptyChart label="AI turns" />
+            <EmptyChart label="AI usage" />
           )}
         </CardContent>
       </Card>
@@ -67,22 +71,22 @@ export function UsageChart({ data }: { data: UsagePoint[] }) {
               <AreaChart data={data} margin={{ left: -20, right: 8, top: 8 }}>
                 <defs>
                   <linearGradient id="minutesFill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="hsl(var(--chart-2))" stopOpacity={0.35} />
-                    <stop offset="95%" stopColor="hsl(var(--chart-2))" stopOpacity={0} />
+                    <stop offset="5%" stopColor="var(--chart-2)" stopOpacity={0.35} />
+                    <stop offset="95%" stopColor="var(--chart-2)" stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border)" />
                 <XAxis dataKey="month" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
                 <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={40} />
                 <Tooltip
                   contentStyle={{
-                    background: 'hsl(var(--popover))',
-                    border: '1px solid hsl(var(--border))',
+                    background: 'var(--popover)',
+                    border: '1px solid var(--border)',
                     borderRadius: 8,
                     fontSize: 12,
                   }}
                 />
-                <Area type="monotone" dataKey="minutes" stroke="hsl(var(--chart-2))" fill="url(#minutesFill)" strokeWidth={2} />
+                <Area type="monotone" dataKey="minutes" stroke="var(--chart-2)" fill="url(#minutesFill)" strokeWidth={2} />
               </AreaChart>
             </ResponsiveContainer>
           ) : (
