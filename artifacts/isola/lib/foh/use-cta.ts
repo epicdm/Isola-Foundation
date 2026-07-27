@@ -124,7 +124,18 @@ export function useCta() {
       if (front === 'supportRequest') {
         if (!isValidContact(opts.contact)) return setState({ phase: 'validation', code: 'CONTACT_REQUIRED', msg: 'Enter a real WhatsApp number or email so a person can reach you.' });
         const r = await IsolaServices.supportRequest({ message: 'Support request from ' + ctaId, contact: normalizeContact(opts.contact!) });
-        emitAll(rec.analytics.filter((e) => e !== 'cta_click'), baseProps);
+        // P1 (third instance, found by independent review): the contract declares
+        // analytics ['cta_click','support_requested'] for cta_contact_support, but
+        // support_requested requires [customerId] and this is a pre-customer front-of-house
+        // request -- baseProps has no customerId and supportRequest returns
+        // { stage, channel, ticket } with none either. Emitting it here was therefore always
+        // rejected by emit(): it read as instrumented and recorded nothing.
+        // main @57b7fb1 emitted nothing at this point; this chain added the rejected call, so
+        // removing it restores the prior behaviour rather than dropping working instrumentation.
+        // The adapter genuinely ran and a ticket exists, so success is reported honestly.
+        // To make support_requested valid, supportRequest must return a customerId, or the
+        // contract needs a pre-customer support event -- both are contract decisions, not a
+        // display fix, and the schema is NOT weakened here to let an invalid payload pass.
         return setState({ phase: 'success', corr: r.correlationId, msg: 'A person will help you on WhatsApp.' });
       }
       if (front === 'resumeJourney') {

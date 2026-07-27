@@ -134,6 +134,37 @@ describe('P1 — the wa:* branch could not honestly emit any of its configured e
   });
 });
 
+describe('P1 (third instance) — the supportRequest branch no longer emits a rejected event', () => {
+  // cta_contact_support declares analytics ['cta_click','support_requested'], but
+  // support_requested requires [customerId] and a front-of-house support request is
+  // pre-customer: baseProps has none and the adapter returns { stage, channel, ticket }.
+  // Emitting it read as instrumented and recorded nothing. main @57b7fb1 emitted nothing here.
+  it('support_requested cannot be satisfied by baseProps alone', () => {
+    const r = emit('support_requested', baseProps);
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.error).toBe('MISSING:customerId');
+  });
+
+  it('the supportRequest branch contains no emitAll call', () => {
+    const start = USE_CTA_SOURCE.indexOf("front === 'supportRequest'");
+    expect(start).toBeGreaterThan(-1);
+    const branch = USE_CTA_SOURCE.slice(start, USE_CTA_SOURCE.indexOf("front === 'resumeJourney'"));
+    expect(branch).not.toMatch(/emitAll\s*\(/);
+  });
+
+  it('every emitAll call site supplies props that satisfy the schema', () => {
+    // The only surviving emitAll is the createIntent success path, which uses conversionProps.
+    const sites = USE_CTA_SOURCE.split('\n').filter(
+      (l) =>
+        /emitAll\s*\(/.test(l) &&
+        !/^\s*(\/\/|\*)/.test(l) && // comments
+        !/^\s*function\s+emitAll/.test(l), // the declaration itself
+    );
+    expect(sites).toHaveLength(1);
+    expect(sites[0]).toContain('conversionProps(');
+  });
+});
+
 describe('F2 — a planned CTA cannot honestly emit conversion events', () => {
   // The planned branch calls no adapter and stores no contact, so it must not claim enrolment.
   // support_requested is unsatisfiable there by construction: there is no customerId, because
