@@ -9,10 +9,16 @@ import { cn } from '@/lib/utils';
 
 export const metadata = { title: 'Plan & Usage' };
 
-const PLAN_INFO: Record<string, { price: number; features: string[]; limits: { ai_turns: number; minutes: number } }> = {
-  starter: { price: 39, features: ['AI Agent', 'WhatsApp inbox', '500 AI turns/mo', '100 mins/mo'], limits: { ai_turns: 500, minutes: 100 } },
-  growth:  { price: 89, features: ['2 000 AI turns/mo', '500 mins/mo', 'CRM integration'], limits: { ai_turns: 2000, minutes: 500 } },
-  pro:     { price: 179, features: ['Unlimited AI turns', '2 000 mins/mo', 'Priority support'], limits: { ai_turns: -1, minutes: 2000 } },
+// F3: a previous "wording alignment" relabelled AI turns as thousands of tokens while leaving
+// the limit VALUES untouched. That silently restated a 500-turn allowance as "500k tokens" and
+// a 2,000-turn allowance as "2,000k tokens", overstating both by orders of magnitude.
+// lib/plans.ts is the ratified source and defines these limits in AI TURNS (500 / 2,000 /
+// unlimited). The unit is restored here to match it. Limits, prices and keys are unchanged --
+// entitlements are ratified and altering them is a central-PM decision, not a display fix.
+const PLAN_INFO: Record<string, { price: number; features: string[]; limits: { ai_usage: number; minutes: number } }> = {
+  starter: { price: 39, features: ['AI Agent', 'WhatsApp inbox', '500 AI turns/mo', '100 mins/mo'], limits: { ai_usage: 500, minutes: 100 } },
+  growth:  { price: 89, features: ['2,000 AI turns/mo', '500 mins/mo', 'CRM integration'], limits: { ai_usage: 2000, minutes: 500 } },
+  pro:     { price: 179, features: ['Unlimited AI turns', '2,000 mins/mo', 'Priority support'], limits: { ai_usage: -1, minutes: 2000 } },
 };
 
 function UsageBar({ used, limit, label, unit }: { used: number; limit: number; label: string; unit: string }) {
@@ -58,8 +64,8 @@ export default async function PlanPage() {
   return (
     <>
       <div className="mb-6">
-        <h1 className="text-2xl font-bold tracking-tight">Plan &amp; Usage</h1>
-        <p className="text-muted-foreground text-sm mt-1">Current subscription and this month&apos;s consumption.</p>
+        <h1 className="text-2xl font-bold tracking-tight">Plan & Usage</h1>
+        <p className="text-muted-foreground text-sm mt-1">Current subscription and this month's consumption.</p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
@@ -96,21 +102,41 @@ export default async function PlanPage() {
         {/* This month's costs */}
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-base">This month&apos;s costs</CardTitle>
+            <CardTitle className="text-base">This month's costs</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="text-4xl font-extrabold tracking-tight mb-1">
               US${((usage?.tokens_cost ?? 0) + (usage?.minutes_cost ?? 0)).toFixed(2)}
             </div>
             <p className="text-xs text-muted-foreground mb-6">
-              AI tokens ${(usage?.tokens_cost ?? 0).toFixed(2)} + Calls ${(usage?.minutes_cost ?? 0).toFixed(2)}
+              AI usage US${(usage?.tokens_cost ?? 0).toFixed(2)} + Calls US${(usage?.minutes_cost ?? 0).toFixed(2)}
             </p>
-            <UsageBar
-              label="AI turns"
-              used={Math.round((usage?.tokens_used ?? 0) / 800)}
-              limit={planInfo.limits.ai_turns}
-              unit="turns"
-            />
+            {/*
+              F3: no progress bar is rendered for AI usage, because none can be drawn honestly.
+              The entitlement is denominated in AI TURNS (lib/plans.ts), but UsageMeter records
+              only `tokens_used` (Int, raw tokens -- prisma/schema.prisma). There is no turn
+              counter in the data model and no ratified turns-to-tokens conversion, so the
+              previous `tokens_used / 800` was an invented constant that produced a fabricated
+              percentage against an incompatible limit.
+              Both real facts are shown instead: the allowance in its ratified unit, and the
+              metered consumption in the unit actually recorded. Introducing a conversion, or a
+              turn counter, is a separate packet -- not a display fix.
+            */}
+            <div className="mb-4">
+              <div className="flex justify-between mb-1.5 text-xs">
+                <span className="text-muted-foreground">AI turns included</span>
+                <span className="text-foreground">
+                  {planInfo.limits.ai_usage < 0 ? '∞' : planInfo.limits.ai_usage.toLocaleString()} turns/mo
+                </span>
+              </div>
+              <div className="flex justify-between mb-1.5 text-xs">
+                <span className="text-muted-foreground">AI tokens metered this month</span>
+                <span className="text-foreground">{(usage?.tokens_used ?? 0).toLocaleString()} tokens</span>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Turn-level consumption isn’t metered yet, so progress against your turn allowance can’t be shown.
+              </p>
+            </div>
             <UsageBar
               label="Call minutes"
               used={Math.round(usage?.minutes_used ?? 0)}

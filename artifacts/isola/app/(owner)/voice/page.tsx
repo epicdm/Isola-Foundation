@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import QRCode from 'qrcode';
-import { Phone, PhoneIncoming, PhoneOutgoing, PhoneOff, Smartphone, QrCode, ShieldAlert } from 'lucide-react';
+import { Phone, PhoneIncoming, PhoneOutgoing, PhoneOff, Smartphone, QrCode, ShieldAlert, Eye, EyeOff } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -100,6 +100,13 @@ function maskFallbackNumber(num: string | null): string {
   return `•••-•••-${digits.slice(-4)}`;
 }
 
+// GOLDEN-STANDARD FIX: SIP credentials are secrets and were previously shown in plaintext
+// with no way to hide them. Mask by default; a reveal toggle shows the real value.
+function maskSecret(v: string): string {
+  if (v.length <= 4) return '•'.repeat(v.length);
+  return v.slice(0, 2) + '•'.repeat(Math.max(4, v.length - 4)) + v.slice(-2);
+}
+
 function formatDuration(secs: number): string {
   const m = Math.floor(secs / 60);
   const s = secs % 60;
@@ -122,6 +129,7 @@ export default function VoicePage() {
   const [lineLoading, setLineLoading] = useState(true);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [cellNumber, setCellNumber] = useState('');
+  const [revealSip, setRevealSip] = useState(false);
 
   const [routing, setRouting] = useState<RoutingState | null>(null);
   const [routingLoading, setRoutingLoading] = useState(true);
@@ -254,10 +262,13 @@ export default function VoicePage() {
               <div className="flex flex-1 flex-col gap-4 min-w-[260px]">
                 <div className="grid gap-2">
                   <InfoRow label="Your number" value={line.did_number ? formatDid(line.did_number) : '—'} />
-                  <InfoRow label="SIP username" value={line.sip_username ?? '—'} mono />
-                  <InfoRow label="SIP password" value={line.sip_password ?? '—'} mono />
+                  <InfoRow label="SIP username" value={line.sip_username ? (revealSip ? line.sip_username : maskSecret(line.sip_username)) : '—'} mono />
+                  <InfoRow label="SIP password" value={line.sip_password ? (revealSip ? line.sip_password : maskSecret(line.sip_password)) : '—'} mono />
                   <InfoRow label="Registration server" value={line.registration_server} mono />
                 </div>
+                <Button type="button" variant="ghost" size="sm" className="w-fit -mt-1 text-muted-foreground" onClick={() => setRevealSip((v) => !v)}>
+                  {revealSip ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />} {revealSip ? 'Hide' : 'Show'} SIP credentials
+                </Button>
 
                 {cscUrl && (
                   <Button asChild size="sm" className="self-start">
@@ -369,10 +380,13 @@ export default function VoicePage() {
       <div className="flex flex-col gap-3">
         <h2 className="text-lg font-semibold tracking-tight">Call History</h2>
 
+        {/* GOLDEN-STANDARD FIX: previously read "Magnus is not configured — set MAGNUS_URL,
+            MAGNUS_API_KEY, MAGNUS_API_SECRET" — exposed the internal engine name and raw
+            env var names directly to the customer. Replaced with plain, actionable copy. */}
         {!configured && (
           <Alert>
             <AlertDescription>
-              Magnus is not configured — set MAGNUS_URL, MAGNUS_API_KEY, MAGNUS_API_SECRET to see call records.
+              Call history isn't set up yet for this line. Contact support to finish connecting it.
             </AlertDescription>
           </Alert>
         )}
@@ -391,7 +405,7 @@ export default function VoicePage() {
           <Card>
             <CardContent className="flex flex-col items-center gap-2 py-12 text-center text-muted-foreground">
               <Phone className="size-8 opacity-40" />
-              <p className="text-sm">{configured ? 'No calls found.' : 'Configure Magnus to see call records.'}</p>
+              <p className="text-sm">{configured ? 'No calls found.' : 'Call history isn\'t set up yet — contact support.'}</p>
             </CardContent>
           </Card>
         ) : (

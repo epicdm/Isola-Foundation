@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { ArrowRight, MessageCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { MarketingHeader, MarketingFooter } from '@/components/foh/chrome';
-import { ReadinessBadge } from '@/components/foh/readiness';
+import { CustomerAvailabilityBadge } from '@/components/foh/readiness';
 import { emit } from '@/lib/foh/analytics';
 import { WA_URL } from '@/lib/foh/catalog';
 

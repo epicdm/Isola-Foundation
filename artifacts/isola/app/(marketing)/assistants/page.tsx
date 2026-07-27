@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react';
 import { Sparkles, Check, X } from 'lucide-react';
 import { MarketingHeader, MarketingFooter } from '@/components/foh/chrome';
-import { ReadinessBadge } from '@/components/foh/readiness';
+import { CustomerAvailabilityBadge } from '@/components/foh/readiness';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -17,7 +17,7 @@ function AssistantCard({ a }: { a: Assistant }) {
   const [consent, setConsent] = useState(false);
   return (
     <div className="rounded-xl border bg-card p-6 shadow-sm">
-      <div className="flex items-start justify-between gap-2"><h3 className="text-lg font-bold">{a.title}</h3><ReadinessBadge state={a.state} /></div>
+      <div className="flex items-start justify-between gap-2"><h3 className="text-lg font-bold">{a.title}</h3><CustomerAvailabilityBadge state={a.state} /></div>
       <p className="mt-1 text-[13px] text-muted-foreground">{a.job}</p>
       <ul className="mt-3.5 grid gap-2.5">{a.outcomes.slice(0, 4).map((t, i) => <li key={i} className="flex items-start gap-2.5 text-[13.5px] text-muted-foreground"><Check className="mt-0.5 size-4 shrink-0 text-primary" />{t}</li>)}</ul>
       <div className="mt-3.5 flex flex-wrap gap-1.5">{a.works.map((w) => <Badge key={w} variant="secondary">{w}</Badge>)}</div>
@@ -28,10 +28,11 @@ function AssistantCard({ a }: { a: Assistant }) {
         </label>
       </div>
       <div className="mt-3.5 flex items-center justify-between">
-        <span className="text-lg font-extrabold">{a.price.label}{a.price.unit && <span className="text-[13px] font-semibold text-muted-foreground">{a.price.unit}</span>}</span>
-        <Button size="sm" disabled={state.phase === 'loading'} onClick={() => run(a.cta, { consent, contact })}>{state.phase === 'loading' ? <Sparkles className="animate-pulse" /> : <Sparkles />} Enquire</Button>
+        <span className="text-lg font-extrabold">{a.price.label}{a.price.unit && <span className="text-[13px] font-semibold text-muted-foreground">{a.price.unit}</span>}{a.price.recurring && <span className="ml-1 text-[13px] font-semibold text-muted-foreground">{a.price.recurring}</span>}</span>
+        <Button size="sm" disabled={state.phase === 'loading'} onClick={() => run(a.cta, { consent, contact, planned: a.state === 'Planned' })}>{state.phase === 'loading' ? <Sparkles className="animate-pulse" /> : <Sparkles />} {a.state === 'Planned' ? 'Not available yet' : 'Enquire'}</Button>
       </div>
       {state.phase === 'validation' && <div className="mt-2.5 flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 p-3 text-[13px] text-warning-foreground"><X className="size-4 shrink-0" /> {state.msg}</div>}
+      {state.phase === 'waitlisted' && <div className="mt-2.5 flex items-start gap-2 rounded-md border border-border bg-muted p-3 text-[13px] text-muted-foreground"><Check className="size-4 shrink-0" /> {state.msg}</div>}
       {state.phase === 'success' && <div className="mt-2.5 flex items-start gap-2 rounded-md border border-success/25 bg-success/10 p-3 text-[13px] text-success"><Check className="size-4 shrink-0" /> Request received — EPIC will confirm scope, channels and permissions.</div>}
       {state.phase === 'error' && <div className="mt-2.5 flex items-start gap-2 rounded-md border border-destructive/25 bg-destructive/10 p-3 text-[13px] text-destructive"><X className="size-4 shrink-0" /> Could not submit — <a href={WA_URL} target="_blank" rel="noreferrer" className="underline">message EPIC</a></div>}
     </div>

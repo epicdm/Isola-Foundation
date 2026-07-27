@@ -12,10 +12,14 @@ import { Alert } from '@/components/ui/alert';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 
+// GOLDEN-STANDARD FIX: tier labels/descriptions previously named the underlying model
+// ("Claude Haiku/Sonnet/Opus") and raw per-token pricing directly to the customer —
+// internal runtime/model jargon on a customer-facing settings page. Reworded to outcome
+// language; the `value` (wired to the backend) is unchanged.
 const TIERS = [
-  { value: 'standard', label: 'Standard — Claude Haiku',   desc: 'Fastest replies, lowest cost (~$0.80/M tokens)' },
-  { value: 'advanced', label: 'Advanced — Claude Sonnet',  desc: 'Balanced quality and speed (~$3/M tokens)' },
-  { value: 'expert',   label: 'Expert — Claude Opus',      desc: 'Highest capability, best for complex queries (~$15/M tokens)' },
+  { value: 'standard', label: 'Standard', desc: 'Fast, everyday replies — the best fit for most businesses.' },
+  { value: 'advanced', label: 'Advanced', desc: 'Balanced quality and speed for higher enquiry volume.' },
+  { value: 'expert',   label: 'Expert',   desc: 'Highest-capability replies for complex or high-value conversations.' },
 ];
 
 const TIMEZONES = [

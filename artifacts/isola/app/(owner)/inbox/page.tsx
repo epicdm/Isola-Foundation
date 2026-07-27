@@ -4,8 +4,9 @@ import { getSession } from '@/lib/session';
 import { prisma } from '@/lib/prisma';
 import { InboxDataTable, type ConversationRow } from '@/components/inbox-data-table';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
 import { MessageCircle } from 'lucide-react';
+import { OwnerPageHeader } from '@/components/composite/owner-page-header';
+import { EmptyState } from '@/components/composite/empty-state';
 
 export const metadata = { title: 'Inbox' };
 export const revalidate = 0;
@@ -65,10 +66,7 @@ export default async function InboxPage({
 
   return (
     <div className="flex flex-col gap-5">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Inbox</h1>
-        <p className="text-sm text-muted-foreground">WhatsApp conversations routed through your AI agent.</p>
-      </div>
+      <OwnerPageHeader title="Inbox" eyebrow="WhatsApp conversations routed through your AI agent" />
 
       <div className="flex gap-2">
         {[
@@ -83,15 +81,12 @@ export default async function InboxPage({
       </div>
 
       {conversations.length === 0 ? (
-        <Card>
-          <CardContent className="flex flex-col items-center gap-2 py-16 text-center">
-            <MessageCircle className="size-8 text-muted-foreground" />
-            <div>No {statusFilter === 'all' ? '' : statusFilter} conversations yet.</div>
-            <div className="text-sm text-muted-foreground">
-              Messages will appear here once WhatsApp is connected.
-            </div>
-          </CardContent>
-        </Card>
+        <EmptyState
+          icon={MessageCircle}
+          title={`No ${statusFilter === 'all' ? '' : statusFilter + ' '}conversations yet`}
+          body="Messages will appear here once WhatsApp is connected."
+          variant="page"
+        />
       ) : (
         <InboxDataTable data={rows} />
       )}

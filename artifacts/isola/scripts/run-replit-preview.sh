@@ -73,6 +73,14 @@ done
 
 echo "[preview] starting web app on 0.0.0.0:$WEB_PORT"
 cd "$ROOT/artifacts/isola"
+
+# Replit starts its own `next dev` for this artifact alongside this workflow.
+# Sharing one .next directory corrupts the webpack pack cache and yields spurious
+# 404/5xx. Give the preview its own build directory; next.config.ts reads this and
+# falls back to .next when unset (build, start, deployment).
+export NEXT_DIST_DIR="${NEXT_DIST_DIR:-.next-preview}"
+echo "[preview] dist_dir=$NEXT_DIST_DIR"
+
 npx next dev -H 0.0.0.0 -p "$WEB_PORT" \
   > >(tee -a "$LOG_DIR/web.log") 2>&1 &
 web_pid=$!

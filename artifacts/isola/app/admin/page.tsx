@@ -4,10 +4,17 @@ import { prisma } from '@/lib/prisma';
 import { NewTenantForm } from './NewTenantForm';
 import { TenantsDataTable, type TenantRow } from '@/components/tenants-data-table';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { OwnerPageHeader } from '@/components/composite/owner-page-header';
+import { OutcomeMetricCard, type OutcomeMetric } from '@/components/composite/outcome-metric-card';
+import { Users, CheckCircle2, Crown, TrendingUp } from 'lucide-react';
 
 export const metadata = { title: 'Admin — Tenants' };
 export const revalidate = 0;
 
+// GOLDEN-STANDARD PASS: same OutcomeMetricCard/OwnerPageHeader composite layer used on the
+// tenant-side dashboard/team/workspace, applied here to the separate operator console —
+// this is a visual-consistency pass only. Realm separation (admin vs owner) is unchanged:
+// this route is still gated by session.isAdmin and renders none of the tenant nav/shell.
 export default async function AdminPage() {
   const session = await getSession();
   if (!session?.isAdmin) redirect('/');
@@ -22,11 +29,11 @@ export default async function AdminPage() {
     orderBy: { created_at: 'desc' },
   });
 
-  const stats = [
-    { label: 'Total tenants', value: tenants.length },
-    { label: 'Active', value: tenants.filter((t) => t.status === 'active').length },
-    { label: 'Pro plan', value: tenants.filter((t) => t.plan === 'pro').length },
-    { label: 'Growth plan', value: tenants.filter((t) => t.plan === 'growth').length },
+  const metrics: OutcomeMetric[] = [
+    { label: 'Total tenants', value: String(tenants.length), icon: Users },
+    { label: 'Active', value: String(tenants.filter((t) => t.status === 'active').length), icon: CheckCircle2, trendTone: 'positive', trend: 'Currently active' },
+    { label: 'Pro plan', value: String(tenants.filter((t) => t.plan === 'pro').length), icon: Crown },
+    { label: 'Growth plan', value: String(tenants.filter((t) => t.plan === 'growth').length), icon: TrendingUp },
   ];
 
   const rows: TenantRow[] = tenants.map((t) => ({
@@ -46,26 +53,10 @@ export default async function AdminPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Tenants</h1>
-        <p className="text-sm text-muted-foreground">
-          {tenants.length} tenant{tenants.length !== 1 ? 's' : ''} on the platform
-        </p>
-      </div>
+      <OwnerPageHeader title="Tenants" eyebrow={`${tenants.length} tenant${tenants.length !== 1 ? 's' : ''} on the platform`} />
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {stats.map((s) => (
-          <Card key={s.label}>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                {s.label}
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold tracking-tight">{s.value}</div>
-            </CardContent>
-          </Card>
-        ))}
+        {metrics.map((m) => <OutcomeMetricCard key={m.label} metric={m} />)}
       </div>
 
       <Card>

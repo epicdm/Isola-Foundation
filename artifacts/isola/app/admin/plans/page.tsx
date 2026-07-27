@@ -10,6 +10,10 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 export const metadata = { title: 'Admin — Plans & Rates' };
 export const revalidate = 0;
 
+// GOLDEN-STANDARD PASS (visual only): consistent hover elevation on plan cards, matching
+// the depth language used elsewhere. This is the internal operator console — Magnus is
+// correctly named here (technical truth for admins is fine; only customer/owner-facing
+// surfaces must hide it), so no wording changes were made.
 export default async function PlansPage() {
   const session = await getSession();
   if (!session?.isAdmin) redirect('/');
@@ -44,7 +48,7 @@ export default async function PlansPage() {
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {plans!.map((p) => (
             <Link key={p.id} href={`/admin/plans/${p.id}`}>
-              <Card className="transition-colors hover:border-primary/50">
+              <Card className="shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/50 hover:shadow-md">
                 <CardHeader className="pb-2">
                   <CardTitle className="text-base">{p.name}</CardTitle>
                 </CardHeader>
@@ -67,7 +71,7 @@ function Header() {
       <Link href="/admin" className="mb-1 flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
         <ArrowLeft className="size-3.5" /> Admin
       </Link>
-      <h1 className="text-2xl font-semibold tracking-tight">Plans &amp; Rates</h1>
+      <h1 className="text-2xl font-semibold tracking-tight">Plans & Rates</h1>
       <p className="text-sm text-muted-foreground">
         Live Magnus rate plans. Open a plan to view and edit its per-destination sell rates.
       </p>

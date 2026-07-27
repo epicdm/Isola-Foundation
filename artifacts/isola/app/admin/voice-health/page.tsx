@@ -5,10 +5,15 @@ import { getVoiceHealthReport } from '@/lib/voice-health-report';
 import { VoiceHealthTable } from './VoiceHealthTable';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { OwnerPageHeader } from '@/components/composite/owner-page-header';
+import { OutcomeMetricCard, type OutcomeMetric } from '@/components/composite/outcome-metric-card';
+import { Phone, CircleCheck, CircleAlert, CircleX, CircleDashed } from 'lucide-react';
 
 export const metadata = { title: 'Admin — Voice Health' };
 export const revalidate = 0;
 
+// GOLDEN-STANDARD PASS (visual only, same reasoning as plans/page.tsx): OutcomeMetricCard
+// replaces the flat 5-stat grid. "Magnus" stays — correct for this internal console.
 export default async function VoiceHealthPage() {
   const guard = await requireAdmin();
   if (!guard.ok) redirect('/');
@@ -27,36 +32,20 @@ export default async function VoiceHealthPage() {
   const report = await getVoiceHealthReport();
   const { summary } = report;
 
-  const stats = [
-    { label: 'Total lines', value: summary.total },
-    { label: 'Green', value: summary.green },
-    { label: 'Amber', value: summary.amber },
-    { label: 'Red', value: summary.red },
-    { label: 'Retired', value: summary.gray },
+  const metrics: OutcomeMetric[] = [
+    { label: 'Total lines', value: String(summary.total), icon: Phone },
+    { label: 'Green', value: String(summary.green), icon: CircleCheck, trendTone: 'positive', trend: 'Healthy' },
+    { label: 'Amber', value: String(summary.amber), icon: CircleAlert },
+    { label: 'Red', value: String(summary.red), icon: CircleX },
+    { label: 'Retired', value: String(summary.gray), icon: CircleDashed },
   ];
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Voice Health</h1>
-        <p className="text-sm text-muted-foreground">
-          Live per-line status, cross-checked against Magnus (voice00). Read-only.
-        </p>
-      </div>
+      <OwnerPageHeader title="Voice Health" eyebrow="Live per-line status, cross-checked against Magnus (voice00). Read-only." />
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-        {stats.map((s) => (
-          <Card key={s.label}>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                {s.label}
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold tracking-tight">{s.value}</div>
-            </CardContent>
-          </Card>
-        ))}
+        {metrics.map((m) => <OutcomeMetricCard key={m.label} metric={m} />)}
       </div>
 
       <Card>
