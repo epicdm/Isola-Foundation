@@ -83,7 +83,12 @@ export default async function TenantDetailPage({
    * no account-only lookup, no unordered findFirst.
    */
   const tenantIsActive = tenant.status === 'active';
-  const normalizeBase = (u: string) => u.replace(/\/+$/, '');
+  // P2: trim BEFORE normalising. isUsableBase validates `u.trim()`, so a base_url carrying
+  // surrounding whitespace passed validation and was marked `ok`, while the link was composed
+  // from the untrimmed value -- producing a malformed host/path on a door the operator was told
+  // was usable. Validation and composition must operate on the same string. Trailing-slash
+  // stripping is unchanged, and no other door semantics are touched.
+  const normalizeBase = (u: string) => u.trim().replace(/\/+$/, '');
 
   /**
    * A base_url is usable only when it is a non-blank absolute http(s) URL. Blank, whitespace and

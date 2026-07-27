@@ -29,7 +29,7 @@ function AssistantCard({ a }: { a: Assistant }) {
       </div>
       <div className="mt-3.5 flex items-center justify-between">
         <span className="text-lg font-extrabold">{a.price.label}{a.price.unit && <span className="text-[13px] font-semibold text-muted-foreground">{a.price.unit}</span>}{a.price.recurring && <span className="ml-1 text-[13px] font-semibold text-muted-foreground">{a.price.recurring}</span>}</span>
-        <Button size="sm" disabled={state.phase === 'loading'} onClick={() => run(a.cta, { consent, contact, planned: a.state === 'Planned' })}>{state.phase === 'loading' ? <Sparkles className="animate-pulse" /> : <Sparkles />} {a.state === 'Planned' ? 'Join the waitlist' : 'Enquire'}</Button>
+        <Button size="sm" disabled={state.phase === 'loading'} onClick={() => run(a.cta, { consent, contact, planned: a.state === 'Planned' })}>{state.phase === 'loading' ? <Sparkles className="animate-pulse" /> : <Sparkles />} {a.state === 'Planned' ? 'Not available yet' : 'Enquire'}</Button>
       </div>
       {state.phase === 'validation' && <div className="mt-2.5 flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 p-3 text-[13px] text-warning-foreground"><X className="size-4 shrink-0" /> {state.msg}</div>}
       {state.phase === 'waitlisted' && <div className="mt-2.5 flex items-start gap-2 rounded-md border border-border bg-muted p-3 text-[13px] text-muted-foreground"><Check className="size-4 shrink-0" /> {state.msg}</div>}

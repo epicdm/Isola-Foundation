@@ -37,9 +37,20 @@ export function MarketingFooter() {
         </div>
         <div><h4 className="mb-3 text-xs font-bold uppercase tracking-wide">Phone services</h4>{['business_line','hosted_pbx','connect_pbx','personal_line'].map((k) => <Link key={k} href={PRODUCTS[k].route} className="block py-1 text-[13.5px] text-muted-foreground hover:text-foreground">{PRODUCTS[k].eyebrow.split('· ')[1]}</Link>)}</div>
         <div><h4 className="mb-3 text-xs font-bold uppercase tracking-wide">Assistants</h4><Link href="/assistants" className="block py-1 text-[13.5px] text-muted-foreground hover:text-foreground">All assistants</Link><Link href="/solutions/smart-front-desk" className="block py-1 text-[13.5px] text-muted-foreground hover:text-foreground">Smart Front Desk</Link></div>
-        <div><h4 className="mb-3 text-xs font-bold uppercase tracking-wide">Company</h4><a href={WA_URL} target="_blank" rel="noreferrer" className="block py-1 text-[13.5px] text-muted-foreground hover:text-foreground">Talk to EPIC on WhatsApp</a><Link href="/auth/login" className="block py-1 text-[13.5px] text-muted-foreground hover:text-foreground">Customer sign in</Link><Link href="/legal/terms" className="block py-1 text-[13.5px] text-muted-foreground hover:text-foreground">Terms of service</Link><Link href="/legal/privacy" className="block py-1 text-[13.5px] text-muted-foreground hover:text-foreground">Privacy policy</Link></div>
+        {/*
+          Terms of service / Privacy policy links are HIDDEN, not removed as a feature.
+          `artifacts/isola/app/legal` does not exist, so /legal/terms and /legal/privacy both
+          resolved to Next's 404. A Terms link that 404s is a false claim of having terms, which
+          is worse than no link. Both links are new to this chain (0 occurrences on main), so
+          hiding them restores main's exact behaviour -- a revert to known-good, not the removal
+          of something customers previously had.
+          Real Terms and Privacy pages are a genuine business need and are tracked as a separate
+          owner item. Restore these links in the same commit that adds the routes.
+        */}
+        <div><h4 className="mb-3 text-xs font-bold uppercase tracking-wide">Company</h4><a href={WA_URL} target="_blank" rel="noreferrer" className="block py-1 text-[13.5px] text-muted-foreground hover:text-foreground">Talk to EPIC on WhatsApp</a><Link href="/auth/login" className="block py-1 text-[13.5px] text-muted-foreground hover:text-foreground">Customer sign in</Link></div>
       </div>
-      <div className="mx-auto mt-6 flex max-w-[1120px] flex-wrap justify-between gap-2 border-t pt-4 text-xs text-muted-foreground"><span>© 2026 EPIC · Powered by Isola · <Link href="/legal/terms" className="underline hover:text-foreground">Terms</Link> · <Link href="/legal/privacy" className="underline hover:text-foreground">Privacy</Link></span><span>Controlled launch · assisted setup by EPIC</span></div>
+      <div className="mx-auto mt-6 flex max-w-[1120px] flex-wrap justify-between gap-2 border-t pt-4 text-xs text-muted-foreground">{/* Terms / Privacy hidden here for the same reason as the Company column above: the routes do not exist. */}
+        <span>© 2026 EPIC · Powered by Isola</span><span>Controlled launch · assisted setup by EPIC</span></div>
     </footer>
   );
 }
