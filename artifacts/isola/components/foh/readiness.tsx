@@ -35,7 +35,7 @@ const CUSTOMER_LABEL: Record<string, string> = {
   Live: 'Available',
   Assisted: 'Assisted setup by EPIC',
   Conditional: 'Available with assisted setup',
-  Planned: 'Join the waitlist',
+  Planned: 'Not available yet',
   'Not offered': 'Not offered',
 };
 const CUSTOMER_CLASS: Record<string, string> = {
