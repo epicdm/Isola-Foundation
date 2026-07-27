@@ -80,12 +80,42 @@ export function useCta() {
       });
     }
 
-    // Registry-driven destination: a WhatsApp deep link opens WhatsApp directly and fires
-    // only the contract's own configured events (e.g. wa_conversation_start) — no intent call.
+    // Registry-driven destination: a wa:* deep link opens WhatsApp directly.
+    // P1: a wa:* destination must NOT short-circuit the contract's frontendCalls.
+    //
+    // The previous shortcut returned before any adapter ran, so cta_talk_sales_assistant
+    // (frontendCalls: createIntent) stored no intent and cta_contact_support
+    // (frontendCalls: supportRequest) created no ticket -- while reporting success. It also
+    // emitted the contract's remaining events against baseProps alone, and all three were bad:
+    //   intent_created      schema trigger is "createIntent success", required [cta, customerType].
+    //                       No intent was created, so emitting it is a FALSE event; it was also
+    //                       rejected for missing customerType.
+    //   support_requested   schema trigger is "supportRequest", required [customerId]. No request
+    //                       was made and no customer exists -- likewise false, and rejected.
+    //   wa_conversation_start  is not in contracts/analytics-schema.json at all, so emit()
+    //                       returns UNKNOWN_EVENT and drops it.
+    // A rejected or false event is worse than no event: it reads as success and records nothing.
+    // The schema is NOT weakened to make any of these pass.
+    //
+    // Opening WhatsApp is a real action, so it still happens and is described as exactly that.
+    // The adapter call is honoured whenever its inputs genuinely exist: with a validated contact
+    // we fall through to the contracted frontendCalls path below, which creates the real record
+    // and emits with the required properties. Without one we do not invent a contact -- we report
+    // only what actually happened and record nothing.
+    //
+    // To make the no-contact case recordable, the wa:* flow needs an adapter that opens a
+    // conversation from a WhatsApp deep link without a pre-collected contact and returns an id.
+    // No such adapter exists on IsolaServices today; adding one is a separate authorized packet.
     if (rec.destination?.startsWith('wa:')) {
       if (typeof window !== 'undefined') window.open(WA_URL, '_blank', 'noreferrer');
-      emitAll(rec.analytics.filter((e) => e !== 'cta_click'), { ...baseProps, correlationId: undefined });
-      return setState({ phase: 'success', msg: 'Opening WhatsApp\u2026 a person will pick up the conversation.' });
+      if (!isValidContact(opts.contact)) {
+        return setState({
+          phase: 'success',
+          code: 'WA_OPENED_NOT_RECORDED',
+          msg: 'Opening WhatsApp\u2026 send your message there and a person will pick it up. Nothing was saved on your account \u2014 the WhatsApp conversation itself is the record.',
+        });
+      }
+      // A validated contact exists, so the contracted adapter can and must run: fall through.
     }
 
     const front = rec.frontendCalls[0] ?? 'createIntent';

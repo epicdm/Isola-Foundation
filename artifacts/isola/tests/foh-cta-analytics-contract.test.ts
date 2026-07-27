@@ -1,13 +1,17 @@
 import { describe, it, expect } from 'vitest';
-import { emit } from '../lib/foh/analytics';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { emit, EVENT_NAMES } from '../lib/foh/analytics';
 import { conversionProps } from '../lib/foh/use-cta';
 import schema from '../contracts/analytics-schema.json';
+
+const USE_CTA_SOURCE = readFileSync(join(__dirname, '..', 'lib', 'foh', 'use-cta.ts'), 'utf8');
 
 // Regression coverage for DISPATCH-003 F1 and F2.
 // These assert against the ACCEPTED contract in contracts/analytics-schema.json — the schema is
 // never weakened to make a test pass; the emitted properties are corrected to satisfy it.
 
-const EVENTS = (schema as { events: { name: string; required?: string[] }[] }).events;
+const EVENTS = (schema as { events: { name: string; required?: string[]; trigger?: string }[] }).events;
 const requiredFor = (n: string) => EVENTS.find((e) => e.name === n)?.required ?? [];
 
 // The props every CTA emits before the fix — what `baseProps` alone contains.
@@ -73,6 +77,60 @@ describe('F1 — conversionProps satisfies the contract for both events', () => 
         expect(props[key], `${name} requires ${key}`).toBeTruthy();
       }
     }
+  });
+});
+
+describe('P1 — the wa:* branch could not honestly emit any of its configured events', () => {
+  // cta_talk_sales_assistant declares analytics ['cta_click','intent_created','wa_conversation_start']
+  // and frontendCalls ['createIntent']; cta_contact_support declares ['cta_click','support_requested']
+  // and frontendCalls ['supportRequest']. The old shortcut returned before either adapter ran, then
+  // emitted the remaining events against baseProps. Each assertion below is why that was wrong.
+
+  it('wa_conversation_start is NOT in the accepted contract at all', () => {
+    expect(EVENTS.find((e) => e.name === 'wa_conversation_start')).toBeUndefined();
+  });
+
+  it('emitting wa_conversation_start is dropped as UNKNOWN_EVENT', () => {
+    const r = emit('wa_conversation_start', baseProps);
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.error).toBe('UNKNOWN_EVENT');
+  });
+
+  it('intent_created asserts "createIntent success" — emitting it without the adapter is a false event', () => {
+    expect(EVENTS.find((e) => e.name === 'intent_created')?.trigger).toBe('createIntent success');
+  });
+
+  it('support_requested asserts "supportRequest" and needs a customerId no wa: click can supply', () => {
+    expect(EVENTS.find((e) => e.name === 'support_requested')?.trigger).toBe('supportRequest');
+    const r = emit('support_requested', baseProps);
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.error).toBe('MISSING:customerId');
+  });
+
+  it('the schema was NOT weakened to let any of them pass', () => {
+    // wa_conversation_start must stay absent, and the two real events must keep their required keys.
+    expect(EVENT_NAMES).not.toContain('wa_conversation_start');
+    expect(requiredFor('intent_created')).toEqual(['cta', 'customerType']);
+    expect(requiredFor('support_requested')).toEqual(['customerId']);
+  });
+
+  // Source proof. The wa:* branch lives inside a React hook with no runtime signal in this
+  // node-environment suite, so it is asserted the same way Screen B proves its forbidden
+  // patterns (B21-B23): a statement about code that cannot otherwise be observed.
+  // These two FAIL against the pre-fix source and pass after.
+  const WA_BRANCH = (() => {
+    const start = USE_CTA_SOURCE.indexOf("rec.destination?.startsWith('wa:')");
+    expect(start).toBeGreaterThan(-1);
+    return USE_CTA_SOURCE.slice(start, start + 900);
+  })();
+
+  it('the wa:* branch no longer emits the contract events (no emitAll inside it)', () => {
+    expect(WA_BRANCH).not.toMatch(/emitAll\s*\(/);
+  });
+
+  it('the wa:* branch no longer returns unconditional success — it gates on a validated contact', () => {
+    expect(WA_BRANCH).toMatch(/isValidContact\s*\(\s*opts\.contact\s*\)/);
+    expect(WA_BRANCH).toContain('WA_OPENED_NOT_RECORDED');
   });
 });
 

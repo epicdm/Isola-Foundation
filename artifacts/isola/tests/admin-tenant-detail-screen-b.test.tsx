@@ -175,6 +175,30 @@ describe('Screen B — door resolution', () => {
     expect(html).not.toContain('inbox.epic.dm///app');
   });
 
+  it('B14b: surrounding whitespace is trimmed, so a door marked ok never yields a malformed link', async () => {
+    // The regression this pins: isUsableBase validates u.trim(), so a padded base_url passed
+    // validation and the door was marked `ok` — but the link was composed from the UNTRIMMED
+    // value, producing a broken host/path on a door the operator was told was usable.
+    // Validation and composition must agree on the same string.
+    const html = await render({ chatwoot_bindings: [binding({ base_url: '  https://inbox.epic.dm  ' })] });
+    expect(html).toContain('href="https://inbox.epic.dm/app/accounts/5/inbox/3"');
+    expect(html).not.toContain('no usable base_url');
+    expect(html).not.toMatch(/href="\s+https/);
+    expect(html).not.toContain('inbox.epic.dm  /app');
+  });
+
+  it('B14c: whitespace and trailing slashes normalize together', async () => {
+    const html = await render({ chatwoot_bindings: [binding({ base_url: '\t https://inbox.epic.dm//  ' })] });
+    expect(html).toContain('href="https://inbox.epic.dm/app/accounts/5/inbox/3"');
+  });
+
+  it('B14d: a whitespace-only base_url is still INVALID, not a trimmed-away pass', async () => {
+    // Trimming must not turn a blank door into a usable one: '   ' trims to '' and stays invalid.
+    const html = await render({ chatwoot_bindings: [binding({ base_url: '  \t ' })] });
+    expect(html).toContain('no usable base_url');
+    expect(html).not.toContain('href="https://');
+  });
+
   it('B15: only absolute http(s) bases are usable', async () => {
     for (const bad of ['ftp://inbox.epic.dm', '/app/accounts', 'inbox.epic.dm', 'javascript:alert(1)']) {
       const html = await render({ chatwoot_bindings: [binding({ base_url: bad })] });
