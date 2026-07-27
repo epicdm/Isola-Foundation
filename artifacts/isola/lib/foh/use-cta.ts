@@ -36,6 +36,18 @@ function emitAll(names: string[], props: Record<string, unknown>) {
   names.forEach((n) => emit(n, props));
 }
 
+// F1: the property set emitted for a successful createIntent. Exported so the schema contract
+// can be regression-tested directly -- previously these props were assembled inline and the
+// omission of customerType/intentId could only be observed as silently dropped analytics.
+export function conversionProps(
+  rec: { customerType?: unknown; offer?: unknown; service?: unknown; assistant?: unknown },
+  baseProps: Record<string, unknown>,
+  intentId: string | undefined,
+  correlationId: string | undefined,
+): Record<string, unknown> {
+  return { ...baseProps, customerType: rec.customerType, intentId, correlationId };
+}
+
 export function useCta() {
   const [state, setState] = useState<CtaState>({ phase: 'idle' });
   const reset = useCallback(() => setState({ phase: 'idle' }), []);
@@ -48,9 +60,24 @@ export function useCta() {
     if (rec.consentRequired && !opts.consent) return setState({ phase: 'validation', code: 'CONSENT_REQUIRED', msg: 'Please agree to be contacted so EPIC can follow up.' });
 
     // Planned products never behave like a live sales request — waitlist only, no intent created.
+    // F2: this must NOT claim enrolment. Nothing persists a waitlist entry -- the contract
+    // exposes no waitlist adapter, opts.contact is neither validated nor stored here, and no
+    // call is made. Telling the visitor they were "on the interest list" was false: a visitor
+    // who entered details and consented left no usable record anywhere.
+    //
+    // The contract's remaining events are not emitted either. They describe outcomes that did
+    // not occur, and support_requested would in any case be rejected by emit() for a missing
+    // customerId. cta_click has already fired above and remains true.
+    //
+    // Required to make enrolment real: an IsolaServices waitlist adapter that stores the
+    // contact and returns a record id. That is a separate authorized packet; until it exists
+    // and is proven, this renders the honest-unavailable state.
     if (opts.planned) {
-      emitAll(rec.analytics.filter((e) => e !== 'cta_click'), baseProps);
-      return setState({ phase: 'waitlisted', msg: 'You\u2019re on the interest list. This product is not available yet.' });
+      return setState({
+        phase: 'waitlisted',
+        code: 'WAITLIST_UNAVAILABLE',
+        msg: 'This product isn\u2019t available yet, and we can\u2019t add you to a list yet \u2014 nothing was saved. Message EPIC on WhatsApp and a person will note your interest.',
+      });
     }
 
     // Registry-driven destination: a WhatsApp deep link opens WhatsApp directly and fires
@@ -95,7 +122,14 @@ export function useCta() {
       }
       const intentId = res.data?.intentId as string;
       // ONLY the CTA's own configured events beyond cta_click (typically intent_created; demo_requested for demo CTAs, etc).
-      emitAll(rec.analytics.filter((e) => e !== 'cta_click'), { ...baseProps, correlationId: corr });
+      //
+      // F1: baseProps alone carries neither customerType nor intentId, so emit() rejected
+      // intent_created (required: cta, customerType) and demo_requested (required: intentId)
+      // against contracts/analytics-schema.json. Successful leads rendered in the UI but
+      // vanished from conversion analytics and experiment results. Both values are already
+      // known here -- rec.customerType is on the CTA contract and intentId is returned by
+      // createIntent -- so they are passed through rather than the schema being weakened.
+      emitAll(rec.analytics.filter((e) => e !== 'cta_click'), conversionProps(rec, baseProps, intentId, corr));
       setState({
         phase: 'success', intentId, corr,
         resume: async () => { const rr = await IsolaServices.resumeJourney({ intentId }); setState((s) => ({ ...s, resumeUrl: rr.data?.resumeUrl })); },
