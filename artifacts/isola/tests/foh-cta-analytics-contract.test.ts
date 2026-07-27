@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { emit, EVENT_NAMES } from '../lib/foh/analytics';
 import { conversionProps } from '../lib/foh/use-cta';
@@ -205,6 +205,35 @@ describe('P1c/P1d — no path confirms success it cannot back', () => {
       expect(line, 'renderer must handle the waitlisted phase').toBeTruthy();
       expect(line).toContain('state.msg');
     }
+  });
+});
+
+describe('Ruling 1/2 — the UI must not claim what the code does not do', () => {
+  const ASSISTANTS = readFileSync(
+    join(__dirname, '..', 'app', '(marketing)', 'assistants', 'page.tsx'), 'utf8',
+  );
+  const CHROME = readFileSync(join(__dirname, '..', 'components', 'foh', 'chrome.tsx'), 'utf8');
+
+  it('R1: a Planned assistant CTA does not advertise joining a waitlist', () => {
+    // useCta's planned branch stores nothing and returns WAITLIST_UNAVAILABLE, so a button
+    // reading "Join the waitlist" was a claim the code cannot back.
+    expect(ASSISTANTS).not.toMatch(/Join the waitlist/i);
+    expect(ASSISTANTS).toContain('Not available yet');
+  });
+
+  it('R2: the footer links no route that does not exist', () => {
+    // artifacts/isola/app/legal does not exist, so these resolved to 404. A Terms link that
+    // 404s is a false claim of having terms. Both were new to this chain; hiding them restores
+    // main's behaviour. Restore them in the same commit that adds the routes.
+    //
+    // Assert on the LINK, not on the substring: the paths are named in the comment that
+    // documents why they are hidden, so a bare substring check would fail on its own
+    // documentation (the same trap Screen B's B13 records).
+    expect(CHROME).not.toMatch(/href=\{?["'`]\/legal\//);
+  });
+
+  it('R2: the legal routes genuinely do not exist, so hiding is the correct remedy', () => {
+    expect(existsSync(join(__dirname, '..', 'app', 'legal'))).toBe(false);
   });
 });
 
