@@ -2,17 +2,27 @@
 // ratified set {750, 375, 249, 250, 99, 149, 187.5, 124.5, 499.5} and
 // EC$0.27/min. Anything else => "Contact EPIC".
 export type Readiness = 'Live' | 'Assisted' | 'Conditional' | 'Planned' | 'Not offered';
-export interface Price { label: string; unit?: string; note: string }
+// `recurring` is a v7.2.1 presentation addition: the marketing surfaces render the
+// setup figure and the monthly figure as separate typographic elements. It is a
+// DISPLAY field only — it introduces no new amount. Every value below already exists
+// in the ratified set above and in claim-guard.ts RATIFIED_EC_AMOUNTS.
+export interface Price { label: string; unit?: string; note: string; recurring?: string }
 
 export const PRICE: Record<string, Price> = {
   contact: { label: 'Contact EPIC', note: 'Pricing confirmed by EPIC before any work begins.' },
   sfd: {
     label: 'EC$750',
     unit: ' setup',
+    recurring: '+ EC$249/mo',
+    // Founding-promo sentence is ratified repository truth and is retained verbatim.
+    // The v7.2.1 package copy omitted it and narrowed the ratified set; that copy is
+    // stale and was NOT applied. See dec/d41 and claim-guard.ts.
     note: 'Two EC$375 installments — before work, then at acceptance · EC$249/mo · voice balance separate. Founding promo (first 3 customers): EC$375 setup (two EC$187.50 installments) · EC$124.50/mo for months 1–3, then EC$249/mo.',
   },
-  war: { label: 'EC$250', unit: ' setup', note: 'EC$149/mo · no new voice line or PBX included.' },
-  pbxup: { label: 'EC$250', unit: ' setup', note: 'EC$99/mo · existing voice charges separate.' },
+  war: { label: 'EC$250', unit: ' setup', recurring: '+ EC$149/mo', note: 'EC$149/mo · no new voice line or PBX included.' },
+  pbxup: { label: 'EC$250', unit: ' setup', recurring: '+ EC$99/mo', note: 'EC$99/mo · existing voice charges separate.' },
+  // Wallet-first language retained per d41-wallet-first-architecture. The package copy
+  // dropped "Prepaid wallet"; current repository truth wins.
   personal: { label: 'EC$0.27', unit: '/min', note: 'Prepaid wallet · calling billed per minute.' },
 };
 
@@ -25,8 +35,8 @@ export interface Product {
 
 export const PRODUCTS: Record<string, Product> = {
   business_line: { key:'business_line', route:'/business-line', kind:'Communications service', eyebrow:'Communications · Business Line',
-    title:'A business line that answers — even when you can’t.',
-    sub:'A business WhatsApp number and supported calling for your team, set up and managed by EPIC. No assistant required.',
+    title:'One business line for your whole team.',
+    sub:'A business WhatsApp number and supported calling for your team, set up and managed by EPIC. No assistant required — add after-hours answering as an optional Business Receptionist upgrade.',
     engine:'Live', isola:'Assisted', price:PRICE.contact,
     included:['Business WhatsApp and supported calling configuration','One or more approved SIP accounts','Acrobits or endpoint access','Optional PSTN DID','Prepaid calling wallet','Voicemail, forwarding and approved fallback'],
     optional:['Add a Business Receptionist assistant (optional)','Upgrade to a complete Smart Front Desk'],

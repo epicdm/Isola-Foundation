@@ -1,19 +1,29 @@
+'use client';
 import Link from 'next/link';
+import { useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { MessageCircle } from 'lucide-react';
+import { MessageCircle, Menu, X } from 'lucide-react';
 import { PRODUCTS, WA_URL } from '@/lib/foh/catalog';
 const NAV = [['/products','Overview'],['/communications','Phone services'],['/assistants','Assistants'],['/solutions','Solutions']] as const;
 export function MarketingHeader() {
+  const [open, setOpen] = useState(false);
   return (
     <nav className="sticky top-0 z-50 border-b bg-background/85 backdrop-blur-md">
       <div className="mx-auto flex h-15 max-w-[1120px] items-center gap-4 px-6">
         <Link href="/products" className="flex items-center gap-2 text-[17px] font-bold"><span className="flex size-7 items-center justify-center rounded-lg bg-primary font-extrabold text-primary-foreground">I</span> Isola</Link>
         <div className="ml-6 hidden gap-5 md:flex">{NAV.map(([h,l]) => <Link key={h} href={h} className="text-sm font-medium text-muted-foreground hover:text-foreground">{l}</Link>)}</div>
         <div className="ml-auto flex items-center gap-2">
-          <Button asChild variant="ghost" size="sm"><Link href="/auth/login">Sign in</Link></Button>
-          <Button asChild size="sm"><Link href="/products">Explore Isola</Link></Button>
+          <Button asChild variant="ghost" size="sm" className="hidden sm:inline-flex"><Link href="/auth/login">Sign in</Link></Button>
+          <Button asChild size="sm" className="hidden sm:inline-flex"><Link href="/products">Explore Isola</Link></Button>
+          <button aria-label="Menu" onClick={() => setOpen((v) => !v)} className="flex size-9 items-center justify-center rounded-md border md:hidden">{open ? <X className="size-4" /> : <Menu className="size-4" />}</button>
         </div>
       </div>
+      {open && (
+        <div className="border-t bg-background px-6 py-3 md:hidden">
+          {NAV.map(([h,l]) => <Link key={h} href={h} onClick={() => setOpen(false)} className="block py-2 text-sm font-medium text-foreground">{l}</Link>)}
+          <Link href="/auth/login" onClick={() => setOpen(false)} className="block py-2 text-sm font-medium text-muted-foreground">Sign in</Link>
+        </div>
+      )}
     </nav>
   );
 }
@@ -27,9 +37,9 @@ export function MarketingFooter() {
         </div>
         <div><h4 className="mb-3 text-xs font-bold uppercase tracking-wide">Phone services</h4>{['business_line','hosted_pbx','connect_pbx','personal_line'].map((k) => <Link key={k} href={PRODUCTS[k].route} className="block py-1 text-[13.5px] text-muted-foreground hover:text-foreground">{PRODUCTS[k].eyebrow.split('· ')[1]}</Link>)}</div>
         <div><h4 className="mb-3 text-xs font-bold uppercase tracking-wide">Assistants</h4><Link href="/assistants" className="block py-1 text-[13.5px] text-muted-foreground hover:text-foreground">All assistants</Link><Link href="/solutions/smart-front-desk" className="block py-1 text-[13.5px] text-muted-foreground hover:text-foreground">Smart Front Desk</Link></div>
-        <div><h4 className="mb-3 text-xs font-bold uppercase tracking-wide">Company</h4><a href={WA_URL} target="_blank" rel="noreferrer" className="block py-1 text-[13.5px] text-muted-foreground hover:text-foreground">Talk to EPIC on WhatsApp</a><Link href="/auth/login" className="block py-1 text-[13.5px] text-muted-foreground hover:text-foreground">Customer sign in</Link></div>
+        <div><h4 className="mb-3 text-xs font-bold uppercase tracking-wide">Company</h4><a href={WA_URL} target="_blank" rel="noreferrer" className="block py-1 text-[13.5px] text-muted-foreground hover:text-foreground">Talk to EPIC on WhatsApp</a><Link href="/auth/login" className="block py-1 text-[13.5px] text-muted-foreground hover:text-foreground">Customer sign in</Link><Link href="/legal/terms" className="block py-1 text-[13.5px] text-muted-foreground hover:text-foreground">Terms of service</Link><Link href="/legal/privacy" className="block py-1 text-[13.5px] text-muted-foreground hover:text-foreground">Privacy policy</Link></div>
       </div>
-      <div className="mx-auto mt-6 flex max-w-[1120px] flex-wrap justify-between gap-2 border-t pt-4 text-xs text-muted-foreground"><span>© 2026 EPIC · Powered by Isola</span><span>Controlled launch · assisted setup by EPIC</span></div>
+      <div className="mx-auto mt-6 flex max-w-[1120px] flex-wrap justify-between gap-2 border-t pt-4 text-xs text-muted-foreground"><span>© 2026 EPIC · Powered by Isola · <Link href="/legal/terms" className="underline hover:text-foreground">Terms</Link> · <Link href="/legal/privacy" className="underline hover:text-foreground">Privacy</Link></span><span>Controlled launch · assisted setup by EPIC</span></div>
     </footer>
   );
 }

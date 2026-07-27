@@ -3,7 +3,7 @@ import { useEffect } from 'react';
 import Link from 'next/link';
 import { ArrowRight } from 'lucide-react';
 import { MarketingHeader, MarketingFooter } from '@/components/foh/chrome';
-import { ReadinessBadge } from '@/components/foh/readiness';
+import { CustomerAvailabilityBadge } from '@/components/foh/readiness';
 import { emit } from '@/lib/foh/analytics';
 import { PRICE, PRODUCTS } from '@/lib/foh/catalog';
 const SOL = [
@@ -24,9 +24,9 @@ export default function Page() {
     <section className="py-8"><div className="mx-auto grid max-w-[1120px] grid-cols-1 gap-4.5 px-6 md:grid-cols-2">
       {SOL.map((s) => (
         <Link key={s.name} href={s.to} className="rounded-xl border bg-card p-6 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
-          <div className="flex items-start justify-between gap-2.5"><h3 className="text-lg font-bold">{s.name}</h3><ReadinessBadge state={s.state} /></div>
+          <div className="flex items-start justify-between gap-2.5"><h3 className="text-lg font-bold">{s.name}</h3><CustomerAvailabilityBadge state={s.state} /></div>
           <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{s.combo}</p>
-          {s.priced ? <div className="mt-3.5 text-xl font-extrabold">{PRICE.sfd.label}<span className="text-[13px] font-semibold text-muted-foreground">{PRICE.sfd.unit}</span></div> : <div className="mt-3.5 text-sm text-muted-foreground">Contact EPIC</div>}
+          {s.priced ? <div className="mt-3.5 text-xl font-extrabold">{PRICE.sfd.label}<span className="text-[13px] font-semibold text-muted-foreground">{PRICE.sfd.unit} {PRICE.sfd.recurring}</span></div> : <div className="mt-3.5 text-sm text-muted-foreground">Contact EPIC</div>}
           <div className="mt-2.5 flex items-center gap-1.5 text-sm font-semibold text-primary">View <ArrowRight className="size-4" /></div>
         </Link>
       ))}

@@ -9,10 +9,12 @@ import { cn } from '@/lib/utils';
 
 export const metadata = { title: 'Plan & Usage' };
 
-const PLAN_INFO: Record<string, { price: number; features: string[]; limits: { ai_turns: number; minutes: number } }> = {
-  starter: { price: 39, features: ['AI Agent', 'WhatsApp inbox', '500 AI turns/mo', '100 mins/mo'], limits: { ai_turns: 500, minutes: 100 } },
-  growth:  { price: 89, features: ['2 000 AI turns/mo', '500 mins/mo', 'CRM integration'], limits: { ai_turns: 2000, minutes: 500 } },
-  pro:     { price: 179, features: ['Unlimited AI turns', '2 000 mins/mo', 'Priority support'], limits: { ai_turns: -1, minutes: 2000 } },
+// GOLDEN-STANDARD FIX (item 7 alignment): "AI turns" -> "AI usage (tokens)"/"tokens" to
+// match the wording now used on Dashboard/Wallet. Limits/prices/keys unchanged.
+const PLAN_INFO: Record<string, { price: number; features: string[]; limits: { ai_usage: number; minutes: number } }> = {
+  starter: { price: 39, features: ['AI Agent', 'WhatsApp inbox', '500 AI usage (tokens, in thousands)/mo', '100 mins/mo'], limits: { ai_usage: 500, minutes: 100 } },
+  growth:  { price: 89, features: ['2 000 AI usage (tokens, in thousands)/mo', '500 mins/mo', 'CRM integration'], limits: { ai_usage: 2000, minutes: 500 } },
+  pro:     { price: 179, features: ['Unlimited AI usage', '2 000 mins/mo', 'Priority support'], limits: { ai_usage: -1, minutes: 2000 } },
 };
 
 function UsageBar({ used, limit, label, unit }: { used: number; limit: number; label: string; unit: string }) {
@@ -58,8 +60,8 @@ export default async function PlanPage() {
   return (
     <>
       <div className="mb-6">
-        <h1 className="text-2xl font-bold tracking-tight">Plan &amp; Usage</h1>
-        <p className="text-muted-foreground text-sm mt-1">Current subscription and this month&apos;s consumption.</p>
+        <h1 className="text-2xl font-bold tracking-tight">Plan & Usage</h1>
+        <p className="text-muted-foreground text-sm mt-1">Current subscription and this month's consumption.</p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
@@ -96,20 +98,20 @@ export default async function PlanPage() {
         {/* This month's costs */}
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-base">This month&apos;s costs</CardTitle>
+            <CardTitle className="text-base">This month's costs</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="text-4xl font-extrabold tracking-tight mb-1">
               US${((usage?.tokens_cost ?? 0) + (usage?.minutes_cost ?? 0)).toFixed(2)}
             </div>
             <p className="text-xs text-muted-foreground mb-6">
-              AI tokens ${(usage?.tokens_cost ?? 0).toFixed(2)} + Calls ${(usage?.minutes_cost ?? 0).toFixed(2)}
+              AI usage US${(usage?.tokens_cost ?? 0).toFixed(2)} + Calls US${(usage?.minutes_cost ?? 0).toFixed(2)}
             </p>
             <UsageBar
-              label="AI turns"
+              label="AI usage (tokens)"
               used={Math.round((usage?.tokens_used ?? 0) / 800)}
-              limit={planInfo.limits.ai_turns}
-              unit="turns"
+              limit={planInfo.limits.ai_usage}
+              unit="k tokens"
             />
             <UsageBar
               label="Call minutes"

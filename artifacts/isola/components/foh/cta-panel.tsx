@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
 import { byId } from '@/lib/foh/cta-registry';
 import { useCta } from '@/lib/foh/use-cta';
-import { DualState } from './readiness';
+import { CustomerAvailabilityBadge } from './readiness';
 import { WA_URL, type Product } from '@/lib/foh/catalog';
 
 export function CtaPanel({ product }: { product: Product }) {
@@ -17,9 +17,10 @@ export function CtaPanel({ product }: { product: Product }) {
 
   return (
     <aside className="sticky top-20 rounded-xl border bg-card p-6 shadow-sm">
-      <DualState engine={product.engine} isola={product.isola} />
+      <CustomerAvailabilityBadge state={product.isola} />
       <div className="mt-4 text-[28px] font-extrabold tracking-tight">{product.price.label}
-        {product.price.unit && <span className="text-[13px] font-semibold text-muted-foreground">{product.price.unit}</span>}</div>
+        {product.price.unit && <span className="text-[13px] font-semibold text-muted-foreground">{product.price.unit}</span>}
+        {product.price.recurring && <span className="ml-1.5 text-[15px] font-bold text-muted-foreground">{product.price.recurring}</span>}</div>
       <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">{product.price.note}</p>
 
       <div className="mt-3.5 rounded-lg border bg-muted p-4">
@@ -35,7 +36,7 @@ export function CtaPanel({ product }: { product: Product }) {
         <Button size="lg" disabled={state.phase === 'loading'} onClick={() => run(product.primary, { consent, contact })}>
           {state.phase === 'loading' ? <Loader2 className="animate-spin" /> : <ArrowRight />}{rec?.label ?? 'Get started'}
         </Button>
-        <Button variant="outline" onClick={() => run(product.secondary, { consent: true, contact })}>{sec?.label ?? 'Talk to sales'}</Button>
+        <Button variant="outline" onClick={() => run(product.secondary, { consent, contact })}>{sec?.label ?? 'Talk to sales'}</Button>
       </div>
       <Button asChild variant="ghost" size="sm" className="mt-2 w-full text-muted-foreground">
         <a href={WA_URL} target="_blank" rel="noreferrer"><MessageCircle /> Talk to a person on WhatsApp</a>
@@ -52,6 +53,7 @@ export function CtaState({ state, reset }: { state: ReturnType<typeof useCta>['s
   if (state.phase === 'loading') return <div className={box + ' bg-muted text-muted-foreground'}><Loader2 className="size-4 shrink-0 animate-spin" /> Sending your request to EPIC…</div>;
   if (state.phase === 'validation') return <div className={box + ' border-warning/30 bg-warning/10 text-warning-foreground'}><AlertTriangle className="size-4 shrink-0" /> {state.msg}</div>;
   if (state.phase === 'recovery') return <div className={box + ' border-warning/30 bg-warning/10 text-warning-foreground'}><RotateCcw className="size-4 shrink-0" /> Your setup was paused. Pick up where you left off — nothing was lost.</div>;
+  if (state.phase === 'waitlisted') return <div className={box + ' bg-muted text-muted-foreground'}><Check className="size-4 shrink-0" /> {state.msg}</div>;
   if (state.phase === 'error') return (
     <div className={box + ' border-destructive/25 bg-destructive/10 text-destructive'}>
       <X className="size-4 shrink-0" />
