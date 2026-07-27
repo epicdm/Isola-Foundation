@@ -109,8 +109,16 @@ export function useCta() {
     if (rec.destination?.startsWith('wa:')) {
       if (typeof window !== 'undefined') window.open(WA_URL, '_blank', 'noreferrer');
       if (!isValidContact(opts.contact)) {
+        // P1d: this must NOT use phase 'success'. Both renderers -- components/foh/cta-panel.tsx
+        // and app/(marketing)/assistants/page.tsx -- handle 'success' with fixed copy
+        // ("Request received ... EPIC will follow up") and IGNORE state.msg, so the honest
+        // "nothing was saved" text never reached the visitor and they saw a false submission
+        // confirmation instead. A brand-new phase would render nothing at all in those two
+        // components, which is worse. 'waitlisted' is this codebase's existing honest-unavailable
+        // channel -- it is what F2 uses above -- and BOTH renderers display state.msg for it, so
+        // the real outcome is what the visitor actually sees.
         return setState({
-          phase: 'success',
+          phase: 'waitlisted',
           code: 'WA_OPENED_NOT_RECORDED',
           msg: 'Opening WhatsApp\u2026 send your message there and a person will pick it up. Nothing was saved on your account \u2014 the WhatsApp conversation itself is the record.',
         });
@@ -136,6 +144,23 @@ export function useCta() {
         // To make support_requested valid, supportRequest must return a customerId, or the
         // contract needs a pre-customer support event -- both are contract decisions, not a
         // display fix, and the schema is NOT weakened here to let an invalid payload pass.
+        //
+        // P1c: an adapter error must NOT be confirmed as success. This branch previously treated
+        // every response identically, so a status:'error' response still told the visitor "A person
+        // will help you on WhatsApp" when no ticket had been created. The wa:* fall-through above
+        // newly routes cta_contact_support here, which makes that reachable. Mirrors the
+        // createIntent error path below: log, surface a recoverable error, offer retry.
+        if (r.status === 'error') {
+          // eslint-disable-next-line no-console
+          console.error('[cta:' + ctaId + '] supportRequest', r.code, r.message, r.correlationId);
+          return setState({
+            phase: 'error',
+            code: r.code,
+            msg: GENERIC_ERROR,
+            corr: r.correlationId,
+            retry: () => run(ctaId, opts),
+          });
+        }
         return setState({ phase: 'success', corr: r.correlationId, msg: 'A person will help you on WhatsApp.' });
       }
       if (front === 'resumeJourney') {

@@ -118,10 +118,14 @@ describe('P1 — the wa:* branch could not honestly emit any of its configured e
   // node-environment suite, so it is asserted the same way Screen B proves its forbidden
   // patterns (B21-B23): a statement about code that cannot otherwise be observed.
   // These two FAIL against the pre-fix source and pass after.
+  // Slice to the next statement rather than a fixed character window, so adding commentary
+  // inside the branch cannot silently shorten what these assertions actually inspect.
   const WA_BRANCH = (() => {
     const start = USE_CTA_SOURCE.indexOf("rec.destination?.startsWith('wa:')");
+    const end = USE_CTA_SOURCE.indexOf('const front = rec.frontendCalls[0]');
     expect(start).toBeGreaterThan(-1);
-    return USE_CTA_SOURCE.slice(start, start + 900);
+    expect(end).toBeGreaterThan(start);
+    return USE_CTA_SOURCE.slice(start, end);
   })();
 
   it('the wa:* branch no longer emits the contract events (no emitAll inside it)', () => {
@@ -162,6 +166,45 @@ describe('P1 (third instance) — the supportRequest branch no longer emits a re
     );
     expect(sites).toHaveLength(1);
     expect(sites[0]).toContain('conversionProps(');
+  });
+});
+
+describe('P1c/P1d — no path confirms success it cannot back', () => {
+  const SUPPORT_BRANCH = USE_CTA_SOURCE.slice(
+    USE_CTA_SOURCE.indexOf("front === 'supportRequest'"),
+    USE_CTA_SOURCE.indexOf("front === 'resumeJourney'"),
+  );
+  const WA_BRANCH = USE_CTA_SOURCE.slice(
+    USE_CTA_SOURCE.indexOf("rec.destination?.startsWith('wa:')"),
+    USE_CTA_SOURCE.indexOf("const front = rec.frontendCalls[0]"),
+  );
+
+  it('P1c: the supportRequest branch checks the adapter status before confirming', () => {
+    // A status:'error' response previously produced "A person will help you on WhatsApp" with no
+    // ticket created — and the wa:* fall-through made that reachable for cta_contact_support.
+    expect(SUPPORT_BRANCH).toMatch(/r\.status\s*===\s*'error'/);
+    // the error branch must come before the success setState
+    expect(SUPPORT_BRANCH.indexOf("r.status === 'error'"))
+      .toBeLessThan(SUPPORT_BRANCH.indexOf("phase: 'success'"));
+  });
+
+  it('P1d: the WhatsApp-only outcome does not use a phase whose renderers ignore state.msg', () => {
+    // cta-panel.tsx and assistants/page.tsx both render fixed copy for 'success' and ignore msg.
+    expect(WA_BRANCH).toContain('WA_OPENED_NOT_RECORDED');
+    expect(WA_BRANCH).not.toMatch(/phase:\s*'success'/);
+    expect(WA_BRANCH).toMatch(/phase:\s*'waitlisted'/);
+  });
+
+  it('P1d: both renderers display state.msg for the phase actually used', () => {
+    const panel = readFileSync(join(__dirname, '..', 'components', 'foh', 'cta-panel.tsx'), 'utf8');
+    const assistants = readFileSync(
+      join(__dirname, '..', 'app', '(marketing)', 'assistants', 'page.tsx'), 'utf8',
+    );
+    for (const src of [panel, assistants]) {
+      const line = src.split('\n').find((l) => l.includes("state.phase === 'waitlisted'"));
+      expect(line, 'renderer must handle the waitlisted phase').toBeTruthy();
+      expect(line).toContain('state.msg');
+    }
   });
 });
 
