@@ -251,7 +251,15 @@ export default async function TenantDetailPage({
             {tenant.subscription ? <Badge variant="outline">{tenant.subscription.status}</Badge> : null}
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        {/*
+          Cross-axis alignment is items-start, NOT items-center. TenantActions is a tall
+          stacked block (act-as / reactivate / plan select / credit adjustment) and becomes
+          this row's height driver; items-center vertically centred the two context actions
+          against it, stranding them mid-band and opening a large void under the tenant name.
+          The golden reference places this action pair on the header line. Presentation only —
+          both buttons keep their existing disabled state, titles and behaviour.
+        */}
+        <div className="flex flex-wrap items-start gap-2">
           {/*
             "View full conversation" needs a real Chatwoot conversation id. None is resolvable here,
             so it ships disabled. Inbox-level access is offered per exact door in the conversations
