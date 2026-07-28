@@ -330,6 +330,24 @@ export async function completeVerificationActivity(
 }
 
 /**
+ * Derive the staff actions that are valid for a record right now, based only on
+ * what Odoo says about its current state. Used to give an informative reply when
+ * a START/RESUME is refused — the caller never needs to consult Foundation-side
+ * state; the record fields from Odoo are sufficient.
+ *
+ * Returns `string[]` (not a typed union) to avoid a dependency on staff-action.ts,
+ * which is a pure parser module with no knowledge of Odoo records.
+ */
+export function deriveValidNextActions(record: OdooWorkRecord): string[] {
+  // mail.activity carries no project stage and does not support blocking.
+  if (record.odooModel === 'mail.activity') {
+    return ['ack', 'update', 'done', 'correct']
+  }
+  // project.task / helpdesk.ticket: all standard write actions apply.
+  return ['ack', 'start', 'update', 'blocked', 'done', 'correct']
+}
+
+/**
  * Move a `project.task` to a named stage within its own project. Stages are
  * per-project rows, so the name must be resolved against THIS task's project —
  * a stage id borrowed from another project silently corrupts the board.

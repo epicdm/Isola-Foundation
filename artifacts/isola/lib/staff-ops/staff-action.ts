@@ -37,7 +37,7 @@
 
 import { isWorkRefModel, type WorkRefModel } from './work-ref'
 
-export const STAFF_ACTIONS = ['ack', 'update', 'blocked', 'done', 'help', 'correct'] as const
+export const STAFF_ACTIONS = ['ack', 'update', 'blocked', 'done', 'help', 'correct', 'start'] as const
 export type StaffActionKind = (typeof STAFF_ACTIONS)[number]
 
 /** Verb spellings a human actually types, mapped to the canonical action. */
@@ -58,6 +58,12 @@ const VERB_ALIASES: Record<string, StaffActionKind> = {
   help: 'help',
   correct: 'correct',
   correction: 'correct',
+  start: 'start',
+  starting: 'start',
+  began: 'start',
+  begin: 'start',
+  resume: 'start',
+  resuming: 'start',
 }
 
 /**
@@ -65,7 +71,7 @@ const VERB_ALIASES: Record<string, StaffActionKind> = {
  * `DONE the printer was replaced` is still a DONE, and the remainder is kept as
  * a note, but the ACTION never depends on the remainder.
  */
-const NOTE_BEARING: ReadonlySet<StaffActionKind> = new Set(['update', 'blocked', 'correct', 'done'])
+const NOTE_BEARING: ReadonlySet<StaffActionKind> = new Set(['update', 'blocked', 'correct', 'done', 'start'])
 
 export interface OpenWorkRefCandidate {
   odooModel: WorkRefModel
@@ -134,6 +140,98 @@ function parseExplicitRef(token: string | undefined): { model?: WorkRefModel; id
 }
 
 /**
+ * Normalise a string for label comparison: lowercase, collapse whitespace,
+ * trim, strip surrounding non-alphanumeric characters.
+ */
+function normalizeLabel(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')
+}
+
+/**
+ * True when ch is a word-boundary character — the set of characters that are
+ * allowed to immediately follow a label prefix in a longer label string.
+ * End-of-string (undefined) is also a boundary.
+ */
+function isWordBoundary(ch: string | undefined): boolean {
+  return ch === undefined || ch === ' ' || ch === '-' || ch === ':' || ch === '/'
+}
+
+/**
+ * Test whether a normalised label string matches a normalised query string
+ * under the label-reference rules:
+ *   • exact equality, or
+ *   • the label begins with the query and the next character is a word boundary.
+ *
+ * This is what stops "DW 206" from matching "DW 2060 — …" — the character at
+ * position query.length in the label is "0", not a boundary.
+ */
+function labelTextMatches(normLabel: string, normQuery: string): boolean {
+  if (!normQuery) return false
+  if (normLabel === normQuery) return true
+  if (normLabel.startsWith(normQuery)) {
+    return isWordBoundary(normLabel[normQuery.length])
+  }
+  return false
+}
+
+interface LabelMatchHit {
+  matched: true
+  candidates: OpenWorkRefCandidate[]
+  /** How many tokens from the remainder were consumed as the label. */
+  consumedLen: number
+}
+
+/**
+ * Try to match a prefix of `remainder` tokens against the labels of
+ * `openWork`. Tries prefix lengths from longest to shortest so that a more
+ * specific (longer) label takes precedence over a shorter one.
+ *
+ * `noteAllowed` controls whether a match that leaves trailing tokens is
+ * accepted. For non-note-bearing verbs (ACK) the entire remainder must be
+ * consumed by the label; for note-bearing verbs (UPDATE, DONE, …) any
+ * trailing tokens become the note.
+ *
+ * Returns on the first prefix length that produces a USABLE hit. When some
+ * prefix produced hits but they were all rejected due to trailing tokens
+ * (`!noteAllowed`), `anyHit` is set to true so the caller can return
+ * `unknown_reference` rather than silently falling through to the bare-verb
+ * path — preventing "ACK DW 206" from resolving as if the user typed bare
+ * "ACK" with no reference at all.
+ *
+ * Matching only within the supplied list — never outside it — is what keeps
+ * closed, stale, unassigned and other-tenant work unreachable.
+ */
+function matchByLabel(
+  remainder: string[],
+  openWork: OpenWorkRefCandidate[],
+  noteAllowed: boolean,
+): LabelMatchHit | { matched: false; anyHit: boolean } {
+  let anyHit = false
+  for (let len = remainder.length; len >= 1; len--) {
+    const query = normalizeLabel(remainder.slice(0, len).join(' '))
+    if (!query) continue
+    const hits = openWork.filter((w) => labelTextMatches(normalizeLabel(w.label ?? ''), query))
+    if (hits.length === 0) continue
+
+    const hasTrailing = len < remainder.length
+    if (hasTrailing && !noteAllowed) {
+      // Prefix matched, but we cannot absorb the trailing tokens as a note
+      // for this verb. Record the hit so the caller can signal unknown_reference
+      // rather than fall through to sole-open-work.
+      anyHit = true
+      continue
+    }
+
+    return { matched: true, candidates: hits, consumedLen: len }
+  }
+  return { matched: false, anyHit }
+}
+
+/**
  * The pure decision core. No I/O, no clock, no randomness.
  */
 export function parseStaffCommand(input: ParseStaffCommandInput): ParseStaffCommandResult {
@@ -179,6 +277,46 @@ export function parseStaffCommand(input: ParseStaffCommandInput): ParseStaffComm
     // at their only other task. It fails closed.
     if (!target) return { matched: false, reason: 'unknown_reference', action }
     return { matched: true, action, target, note, resolution: 'explicit_ref', grammar: 'strict' }
+  }
+
+  // Label matching — when the text after the verb is not a numeric/model
+  // reference, try to match it against the labels of the sender's open work.
+  // Tries prefix lengths longest-first so that a longer label consumes as many
+  // tokens as possible, leaving the rest as the note.
+  // Matching only within openWork — never outside it — keeps closed, stale,
+  // unassigned and other-tenant work unreachable without any extra checks.
+  const noteAllowed = NOTE_BEARING.has(action)
+  const labelMatch = matchByLabel(tokens.slice(1), input.openWork, noteAllowed)
+  if (labelMatch.matched) {
+    const labelNoteTokens = tokens.slice(1 + labelMatch.consumedLen)
+    const labelRawNote = labelNoteTokens.join(' ').trim()
+    const labelNote = noteAllowed && labelRawNote ? labelRawNote : null
+    if (labelMatch.candidates.length === 1) {
+      return {
+        matched: true,
+        action,
+        target: labelMatch.candidates[0],
+        note: labelNote,
+        resolution: 'explicit_ref',
+        grammar: 'strict',
+      }
+    }
+    return { matched: false, reason: 'needs_disambiguation', action, candidates: labelMatch.candidates }
+  }
+
+  // Some prefix matched a label but was rejected because trailing tokens
+  // cannot be a note for this verb. Signal unknown_reference so the sender
+  // learns their reference was not recognised rather than getting a bare-verb
+  // response that ignores what they typed.
+  if (labelMatch.anyHit) return { matched: false, reason: 'unknown_reference', action }
+
+  // For non-note-bearing verbs (ACK), ANY non-empty remainder that reached
+  // this point without matching a label was an attempt to name a task that
+  // failed. Fail closed — same rule as for an unheld numeric reference.
+  // Note-bearing verbs (UPDATE, BLOCKED, DONE, CORRECT) are exempt: their
+  // remainder is ordinary prose that becomes the note, not a reference.
+  if (!noteAllowed && tokens.slice(1).length > 0) {
+    return { matched: false, reason: 'unknown_reference', action }
   }
 
   if (input.openWork.length === 0) return { matched: false, reason: 'no_open_work', action }

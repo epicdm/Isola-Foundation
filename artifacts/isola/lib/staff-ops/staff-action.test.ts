@@ -59,12 +59,13 @@ describe('parseStaffCommand — the shapes a human actually sends', () => {
       expect(blocked.note).toBe('no access to the site')
     }
 
+    // ACK is non-note-bearing. Any remainder is an attempted task reference;
+    // if it does not match a label it must fail closed, not silently resolve
+    // to the sender's only open task. unknown_reference is the correct outcome.
     const ack = parseStaffCommand({ text: 'ACK will start this afternoon', openWork: [TASK_A] })
-    expect(ack.matched).toBe(true)
-    if (ack.matched) {
-      expect(ack.action).toBe('ack')
-      // ACK's meaning never depends on the remainder.
-      expect(ack.note).toBeNull()
+    expect(ack.matched).toBe(false)
+    if (!ack.matched) {
+      expect(ack.reason).toBe('unknown_reference')
     }
   })
 
@@ -149,10 +150,118 @@ describe('parseStaffCommand — failing closed instead of guessing', () => {
 
   it('treats an unparseable model as not-a-reference rather than a wildcard', () => {
     const r = parseStaffCommand({ text: 'ACK epic_work_items#53', openWork: [TASK_A] })
-    // Not a valid model -> not a reference -> falls through to sole-open-work.
+    // Not a valid model -> not a label match -> ACK is non-note-bearing so
+    // the non-empty remainder fails closed as unknown_reference rather than
+    // being silently retargeted at the sender's only open task.
     // It must NOT resolve to some EpicWorkItem, because none exist here at all.
+    expect(r.matched).toBe(false)
+    if (!r.matched) expect(r.reason).toBe('unknown_reference')
+  })
+})
+
+// ── Label-matching fixtures ────────────────────────────────────────────────────
+
+const LABEL_A: OpenWorkRefCandidate = {
+  odooModel: 'project.task',
+  odooId: 3001,
+  correlationId: 'sw-t1-task-3001-cccc',
+  label: 'DW 2060 — Printer replacement',
+}
+const LABEL_B: OpenWorkRefCandidate = {
+  odooModel: 'project.task',
+  odooId: 3002,
+  correlationId: 'sw-t1-task-3002-dddd',
+  label: 'DW 2080 — Stock count',
+}
+
+describe('parseStaffCommand — label matching', () => {
+  it('resolves a business label to the right task', () => {
+    const r = parseStaffCommand({ text: 'ACK DW 2060', openWork: [LABEL_A, LABEL_B] })
     expect(r.matched).toBe(true)
-    if (r.matched) expect(r.target.odooId).toBe(2292)
+    if (!r.matched) return
+    expect(r.target.odooId).toBe(3001)
+    expect(r.resolution).toBe('explicit_ref')
+    expect(r.grammar).toBe('strict')
+  })
+
+  it('is case and whitespace insensitive', () => {
+    for (const text of ['ack dw 2060', 'ACK DW 2060', 'Ack Dw 2060', 'ack  DW  2060']) {
+      const r = parseStaffCommand({ text, openWork: [LABEL_A, LABEL_B] })
+      expect(r.matched, `expected "${text}" to match`).toBe(true)
+      if (r.matched) expect(r.target.odooId).toBe(3001)
+    }
+  })
+
+  it('returns needs_disambiguation when a prefix matches two labels', () => {
+    // "DW" is a prefix of both "DW 2060 — …" and "DW 2080 — …", next char is
+    // a space in both — boundary rule passes for both, so it is ambiguous.
+    const r = parseStaffCommand({ text: 'ACK DW', openWork: [LABEL_A, LABEL_B] })
+    expect(r.matched).toBe(false)
+    if (r.matched) return
+    expect(r.reason).toBe('needs_disambiguation')
+    expect(r.candidates).toHaveLength(2)
+  })
+
+  it('boundary rule: a shorter numeric prefix does not match a longer label', () => {
+    // "DW 206" — the character at position 6 in "dw 2060 — …" is "0", not a
+    // word boundary, so the match must NOT fire.
+    const r = parseStaffCommand({ text: 'ACK DW 206', openWork: [LABEL_A, LABEL_B] })
+    expect(r.matched).toBe(false)
+    if (!r.matched) expect(r.reason).toBe('unknown_reference')
+  })
+
+  it('returns unknown_reference when the label is not in the open list', () => {
+    // LABEL_B is not in the actor's list; typing its label must not reach it.
+    const r = parseStaffCommand({ text: 'ACK DW 2080', openWork: [LABEL_A] })
+    expect(r.matched).toBe(false)
+    if (!r.matched) expect(r.reason).toBe('unknown_reference')
+  })
+
+  it('record id and hash forms still resolve exactly as before', () => {
+    for (const text of ['ACK #3001', 'ACK 3001', 'ACK project.task#3001']) {
+      const r = parseStaffCommand({ text, openWork: [LABEL_A, LABEL_B] })
+      expect(r.matched, `expected "${text}" to match`).toBe(true)
+      if (r.matched) {
+        expect(r.target.odooId).toBe(3001)
+        expect(r.resolution).toBe('explicit_ref')
+      }
+    }
+  })
+
+  it('captures the note from tokens after the matched label', () => {
+    const r = parseStaffCommand({ text: 'UPDATE DW 2060 parts fitted', openWork: [LABEL_A, LABEL_B] })
+    expect(r.matched).toBe(true)
+    if (!r.matched) return
+    expect(r.target.odooId).toBe(3001)
+    expect(r.note).toBe('parts fitted')
+  })
+
+  it('produces no note when the label consumes the entire remainder', () => {
+    const r = parseStaffCommand({ text: 'DONE DW 2060', openWork: [LABEL_A, LABEL_B] })
+    expect(r.matched).toBe(true)
+    if (!r.matched) return
+    expect(r.target.odooId).toBe(3001)
+    expect(r.note).toBeNull()
+  })
+
+  it('a label belonging to work not in the open list is unreachable', () => {
+    // Holding only LABEL_B; LABEL_A's label must not be reachable.
+    const r = parseStaffCommand({ text: 'ACK DW 2060', openWork: [LABEL_B] })
+    expect(r.matched).toBe(false)
+    if (!r.matched) expect(r.reason).toBe('unknown_reference')
+  })
+
+  it('a note-carrying action with free-text prose resolves via the bare-verb path with the note captured', () => {
+    // The non-note-bearing fix must not affect verbs that carry a note.
+    // "no access to the site" matches no label — it is a note, not a reference
+    // — so the sole open task must receive the action and the note must land.
+    const r = parseStaffCommand({ text: 'BLOCKED no access to the site', openWork: [TASK_A] })
+    expect(r.matched).toBe(true)
+    if (!r.matched) return
+    expect(r.action).toBe('blocked')
+    expect(r.target.odooId).toBe(TASK_A.odooId)
+    expect(r.note).toBe('no access to the site')
+    expect(r.resolution).toBe('sole_open_work')
   })
 })
 
