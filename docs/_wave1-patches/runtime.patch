@@ -1,0 +1,95 @@
+diff --git a/artifacts/isola/app/api/webhooks/whatsapp/route.ts b/artifacts/isola/app/api/webhooks/whatsapp/route.ts
+index c0f2ba7..0719811 100644
+--- a/artifacts/isola/app/api/webhooks/whatsapp/route.ts
++++ b/artifacts/isola/app/api/webhooks/whatsapp/route.ts
+@@ -156,6 +156,37 @@ async function processWebhook(body: Record<string, unknown>) {
+         continue;
+       }
+ 
++      // ── Wave 1: delivery-status callbacks ────────────────────────────────
++      //
++      // Meta delivers `statuses` on the same `messages` field as inbound
++      // messages. Foundation previously read only `messages` and dropped every
++      // status on the floor — which is the same shape of gap that let a failed
++      // send keep reading as though it had gone out.
++      //
++      // NOTE ON THE 9043 IGNORE GUARD ABOVE: status callbacks for the internal
++      // staff number are still ignored, because that number is owned by BFF
++      // until the Wave 1 cutover. Removing 9043 from the ignore list IS the
++      // cutover switch for this half. It must happen in the same owner-gated
++      // step that disables the BFF staff processor — never before, or both
++      // platforms process the same event.
++      if (Array.isArray(value?.statuses) && value.statuses.length > 0) {
++        try {
++          const { ingestDeliveryStatuses } = await import('@/lib/staff-ops/status-ingest');
++          const { createStatusIngestPorts } = await import('@/lib/staff-ops/status-ingest-ports');
++          const outcome = await ingestDeliveryStatuses(
++            { entry: [{ changes: [{ field: 'messages', value: { statuses: value.statuses } }] }] },
++            createStatusIngestPorts(),
++          );
++          console.log(
++            `[webhook/wa][status] phone_number_id=${phoneNumberId} events=${outcome.events} applied=${outcome.applied} ignored=${outcome.ignored} unmatched=${outcome.unmatched}`,
++          );
++        } catch (err) {
++          // A status-ingestion failure must not stop inbound messages in the
++          // same batch from being processed.
++          console.error('[webhook/wa][status] ingestion error:', err);
++        }
++      }
++
+       const messages: any[] = value?.messages ?? [];
+ 
+       for (const msg of messages) {
+diff --git a/artifacts/isola/lib/notify-drain.ts b/artifacts/isola/lib/notify-drain.ts
+index d4d0189..a3ba594 100644
+--- a/artifacts/isola/lib/notify-drain.ts
++++ b/artifacts/isola/lib/notify-drain.ts
+@@ -74,9 +74,38 @@ export async function drainNotificationOutbox(): Promise<DrainNotificationOutbox
+         throw new Error(send.error || `send failed (status ${send.status})`);
+       }
+ 
++      // Wave 1: a send that reports success with no provider message id is
++      // UNRECONCILABLE FOREVER — there is no join key, so no wa-status callback
++      // can ever reach this row and its true delivery state stays unknown for
++      // good. That has to be a logged, queryable failure rather than a silent
++      // pass. It does NOT fail the send (the message may well have gone), but
++      // it is recorded on the audit trail, not merely shouted into stdout.
++      if (!send.externalRef) {
++        console.error(
++          `[notify-drain][wamid_missing] outbox=${row.id} tenant=${row.tenant_id} template=${row.template} — send reported ok with no provider message id; this row can never be reconciled`,
++        );
++        await audit({
++          tenantId: row.tenant_id,
++          actorId: 'system:notify-drain',
++          action: 'notification_outbox.wamid_missing',
++          entity: 'NotificationOutbox',
++          entityId: row.id,
++          meta: { channel: row.channel, template: row.template, status: send.status },
++        });
++      }
++
+       await prisma.notificationOutbox.update({
+         where: { id: row.id },
+-        data: { state: 'sent', sent_at: new Date(), external_ref: send.externalRef },
++        data: {
++          state: 'sent',
++          sent_at: new Date(),
++          external_ref: send.externalRef,
++          // `accepted` — Meta returned 2xx and gave us a wamid. NOT delivered.
++          // The provider's own callback is the only thing allowed to move this
++          // further; see lib/staff-ops/delivery-status.ts for why the outbox's
++          // `state` and the provider's `provider_status` are kept apart.
++          provider_status: 'accepted',
++        },
+       });
+ 
+       await audit({
+@@ -85,7 +114,7 @@ export async function drainNotificationOutbox(): Promise<DrainNotificationOutbox
+         action: 'notification_outbox.sent',
+         entity: 'NotificationOutbox',
+         entityId: row.id,
+-        meta: { channel: row.channel, externalRef: send.externalRef },
++        meta: { channel: row.channel, externalRef: send.externalRef, providerStatus: 'accepted' },
+       });
+ 
+       result.sent++;

@@ -1,0 +1,202 @@
+diff --git a/artifacts/isola/prisma/schema.prisma b/artifacts/isola/prisma/schema.prisma
+index f9b9ffd..e9aecd6 100644
+--- a/artifacts/isola/prisma/schema.prisma
++++ b/artifacts/isola/prisma/schema.prisma
+@@ -86,6 +86,8 @@ model Tenant {
+   approval_requests   ApprovalRequest[]
+   escalation_refs     EscalationRef[]
+   notification_outbox NotificationOutbox[]
++  staff_bindings      StaffBinding[]
++  staff_work_actions  StaffWorkAction[]
+ }
+ 
+ // ── Per-tenant voicemail catches (AI missed-call catcher) ────────────────────
+@@ -679,17 +681,47 @@ model NotificationOutbox {
+   attempt_count   Int       @default(0)
+   max_attempts    Int       @default(5)
+   next_attempt_at DateTime? // retry backoff; drain picks up when <= now
+-  external_ref    String? // provider message id once sent
++  external_ref    String? // provider message id once sent — the Meta wamid; the ONLY join key back from a wa-status callback
+   failure_reason  String?
+   sent_at         DateTime?
+   created_at      DateTime  @default(now())
+   updated_at      DateTime  @updatedAt
+ 
++  // ── Wave 1 (spine/wave1-internal-operations): delivery truth + work correlation ──
++  //
++  // All additive and nullable, and deliberately NOT back-filled. Rows written
++  // before these columns existed have an unknown provider outcome and an
++  // unknown work correlation; inventing either would fabricate history — the
++  // same constraint that keeps OPS-000015/53/54/55 untouched in BFF.
++  //
++  // WHY provider_status IS SEPARATE FROM `state`: `state` is the OUTBOX's own
++  // lifecycle (did we manage to hand this to Meta). provider_status is what
++  // Meta later said actually happened. Collapsing them is exactly the mistake
++  // that let `sent` be read as "the staff member has it" for three weeks —
++  // see FINDINGS-wa-status-join-key-and-guard-blindspot-2026-07-27.
++  // `accepted` = Graph 200 + a wamid, nothing more. Only `delivered` and
++  // `failed` are outcomes.
++  provider_status       String? // accepted | sent | delivered | read | failed
++  provider_error_code   String? // Meta error code, e.g. "131047" (Re-engagement message)
++  provider_error_detail String?
++  delivered_at          DateTime?
++  failed_at             DateTime? // when the failure was ESTABLISHED — not created_at; a
++  // callback can fail a send minutes after the row was written.
++
++  // Odoo-only WorkRef correlation (dec-wave1-workref-odoo-only-2026-07-28).
++  // These are an Odoo model/id and Foundation's own correlation id. There is
++  // deliberately no EpicWorkItem id, no OPS- reference and no BFF linkage here.
++  work_ref_model String? // project.task | mail.activity | helpdesk.ticket
++  work_ref_id    Int?
++  correlation_id String?
++
+   tenant Tenant @relation(fields: [tenant_id], references: [id])
+ 
+   @@unique([tenant_id, dedupe_key])
+   @@index([state, next_attempt_at])
+   @@index([tenant_id, created_at])
++  @@index([external_ref])
++  @@index([correlation_id])
+ }
+ 
+ // ── Drizzle-managed auth tables (DO NOT DROP) ────────────────────────────────
+@@ -750,12 +782,13 @@ model Identity {
+   created_at DateTime @default(now())
+   updated_at DateTime @updatedAt
+ 
+-  memberships Membership[]
+-  voice_lines VoiceLine[]
+-  wallets     Wallet[]
+-  wallet_txns WalletTxn[]
+-  audit_logs  AuditLog[]
+-  users       User[]
++  memberships    Membership[]
++  voice_lines    VoiceLine[]
++  wallets        Wallet[]
++  wallet_txns    WalletTxn[]
++  audit_logs     AuditLog[]
++  users          User[]
++  staff_bindings StaffBinding[]
+ }
+ 
+ model Membership {
+@@ -801,3 +834,119 @@ model VoiceLine {
+   @@index([identity_id])
+   @@index([tenant_id])
+ }
++
++// ═══════════════════════════════════════════════════════════════════════════
++// Wave 1 — internal staff operations (spine/wave1-internal-operations)
++//
++// AUTHORITY: dec-bff-freeze-spine-consolidation-execution-2026-07-28 and
++// dec-wave1-workref-odoo-only-2026-07-28.
++//
++// READ THIS BEFORE ADDING A COLUMN HERE. Neither model below is a task. Odoo
++// is the task system of record. StaffBinding answers "who is this person and
++// may they act", StaffWorkAction answers "did we already apply this exact
++// request" — that is all. The moment either grows a title, a due date, a
++// state machine or an assignee-of-record, Foundation has quietly acquired a
++// second task authority, which is the precise thing the consolidation
++// programme exists to remove. There is deliberately no EpicWorkItem id, no
++// `OPS-` reference, no mirror table and no BFF database dependency anywhere
++// in this section.
++// ═══════════════════════════════════════════════════════════════════════════
++
++/// Who a staff member is, across Foundation, Odoo and their approved channel.
++///
++/// NAMING, DELIBERATELY: `odoo_res_user_id` — NOT `odooUserOrEmployeeId`. The
++/// legacy column's ambiguous name caused three live rows to be seeded with
++/// hr.employee ids in a field consumed as a res.users id, so Phillip's ACK
++/// would have read back against Eric's user and Kimberly's against an inactive
++/// system account (ev-staff-inbound-ack-routing-2026-07-27 §4). The two ids are
++/// separate columns here and the res.users one says so in its name.
++model StaffBinding {
++  id        String @id @default(cuid())
++  tenant_id String
++
++  /// Foundation identity, when the person has one. Nullable: a staff member is
++  /// bound and can be dispatched to before they have ever signed in.
++  identity_id String?
++
++  /// THE join key. project.task.user_ids holds res.users ids, so this is what
++  /// every task read and every assignment check uses.
++  odoo_res_user_id Int
++
++  /// hr.employee id, for roster/HR reads only. Never used as an assignment key.
++  odoo_employee_id Int?
++
++  display_name String
++  work_email   String?
++
++  /// Manager, as a res.users id in the same Odoo. Nullable — not everyone has
++  /// one, and inventing one would be worse than leaving it unset.
++  manager_odoo_res_user_id Int?
++
++  /// Approved communication identities. `wa_id` is Meta's form: E.164 digits,
++  /// no leading '+'. Unique per tenant so one number cannot be two people.
++  wa_id       String?
++  telegram_id String?
++
++  role   String  @default("staff") // staff | manager | owner
++  active Boolean @default(true)
++
++  /// Set when the person has explicitly acknowledged onboarding on their own
++  /// channel. No ACK means not activated — an unverified binding may be read
++  /// but must not be treated as a proven delivery target.
++  verified_at DateTime?
++
++  created_at DateTime @default(now())
++  updated_at DateTime @updatedAt
++
++  tenant   Tenant    @relation(fields: [tenant_id], references: [id])
++  identity Identity? @relation(fields: [identity_id], references: [id])
++
++  work_actions StaffWorkAction[]
++
++  @@unique([tenant_id, odoo_res_user_id])
++  @@unique([tenant_id, wa_id])
++  @@index([tenant_id])
++  @@index([wa_id])
++}
++
++/// A staff action that was requested against an authoritative Odoo record, and
++/// whether it was applied. This is an idempotency and audit ledger, not work
++/// state: it records the REQUEST and the Odoo RESULT, and stores nothing that
++/// could be mistaken for the task itself.
++model StaffWorkAction {
++  id               String @id @default(cuid())
++  tenant_id        String
++  staff_binding_id String
++
++  /// Odoo-only WorkRef. `work_ref_model` is constrained by application code to
++  /// project.task | mail.activity | helpdesk.ticket.
++  work_ref_model String
++  work_ref_id    Int
++  correlation_id String
++
++  action      String // ack | update | blocked | done | help | correct
++  note        String?
++  source      String  @default("whatsapp")
++  actor_wa_id String?
++
++  /// Idempotency. Primary discriminator is the provider message id, so a Meta
++  /// webhook retry collapses to one action while two genuinely different
++  /// UPDATEs on the same task both land.
++  idempotency_key String
++
++  /// Null until Odoo has actually accepted the write. A row with applied_at
++  /// null is a request we did NOT complete — it must never be read as done.
++  applied_at     DateTime?
++  odoo_result    Json?
++  failure_reason String?
++
++  created_at DateTime @default(now())
++
++  tenant        Tenant       @relation(fields: [tenant_id], references: [id])
++  staff_binding StaffBinding @relation(fields: [staff_binding_id], references: [id])
++
++  @@unique([tenant_id, idempotency_key])
++  @@index([tenant_id, work_ref_model, work_ref_id])
++  @@index([correlation_id])
++  @@index([staff_binding_id])
++}
