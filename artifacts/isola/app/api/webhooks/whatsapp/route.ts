@@ -111,21 +111,33 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ ok: true });
 }
 
-// Per-phone-number-id ignore list (Port defect-foundation-must-ignore-hermes-
-// 9043-2026-07-23). Foundation and bff-v2 (EPIC_BFF) are BOTH subscribed to
-// the same WABA, so Meta delivers every event to both. Hermes's internal
-// WhatsApp number (+1 767-818-9043, phone_number_id 1029700810228517) is
-// owned exclusively by bff-v2/EPIC_BFF — Foundation must acknowledge but
-// never process it: no tenant resolution, no Flowise/agent invocation, no
-// DB writes, no send.
+// ── Per-number ignore and status-passthrough lists ────────────────────────────
 //
-// 1029700810228517 (Hermes 9043) is a HARDCODED floor, not just an env var —
-// this exact number already leaked through once because an earlier fix set
-// WEBHOOK_IGNORE_PHONE_IDS without any code reading it (env presence was
-// mistaken for enforcement). WEBHOOK_IGNORE_PHONE_IDS still works and can add
-// further ids on top, but 9043 is never dependent on it alone.
-// Read fresh on every call (not module-level) so an env change takes effect
-// on next request without a code deploy.
+// Foundation and bff-v2 (EPIC_BFF) are BOTH subscribed to the same WABA, so
+// Meta delivers every event to both. The two lists below govern what Foundation
+// does with each phone_number_id.
+//
+// INBOUND MESSAGES — any number in the ignore list is acknowledged and dropped:
+// no tenant resolution, no Flowise/agent invocation, no DB writes, no send.
+// 1029700810228517 (Hermes 9043, +1 767-818-9043) is a HARDCODED permanent
+// floor and is never solely dependent on the env var — that number leaked
+// through once already because an env var was set without any code reading it.
+// WEBHOOK_IGNORE_PHONE_IDS adds further ids on top but cannot remove 9043.
+//
+// DELIVERY-STATUS CALLBACKS — a number on the ignore list can still have its
+// status events ingested by adding it to WEBHOOK_STATUS_PASSTHROUGH_PHONE_IDS.
+// That env var defaults to empty, so this change turns nothing on by itself.
+// A number not in the passthrough list keeps today's behaviour: all events
+// (messages and statuses alike) are dropped.
+//
+// Cutover procedure for 9043:
+//   • Inbound messages stay ignored permanently — BFF owns that path.
+//   • Status callbacks: add 1029700810228517 to WEBHOOK_STATUS_PASSTHROUGH_PHONE_IDS
+//     in the same owner-gated window that BFF's staff processor is disabled.
+//     Never before, or both platforms will ingest the same status event.
+//
+// Both lists are read fresh per request so an env change takes effect on the
+// next request without a code deploy.
 const HERMES_9043_PHONE_NUMBER_ID = '1029700810228517';
 
 function getIgnoredPhoneNumberIds(): Set<string> {
@@ -134,6 +146,18 @@ function getIgnoredPhoneNumberIds(): Set<string> {
     .map((s) => s.trim())
     .filter(Boolean);
   return new Set([HERMES_9043_PHONE_NUMBER_ID, ...fromEnv]);
+}
+
+/** Phone number ids whose delivery-status callbacks are ingested even when the
+ *  number is on the ignore list. Inbound messages from those numbers are still
+ *  dropped. Defaults to empty. */
+function getStatusPassthroughPhoneNumberIds(): Set<string> {
+  return new Set(
+    (process.env.WEBHOOK_STATUS_PASSTHROUGH_PHONE_IDS ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
 }
 
 async function processWebhook(body: Record<string, unknown>) {
@@ -147,13 +171,23 @@ async function processWebhook(body: Record<string, unknown>) {
       const value = change.value as Record<string, any>;
       const phoneNumberId: string = value?.metadata?.phone_number_id ?? '';
 
-      // Early ignore guard — filtered per-change so a batched webhook
-      // containing both an ignored (9043) and an allowed (e.g. 6737)
-      // change still processes the allowed one. No tenant/agent
-      // resolution, no Flowise, no DB write, no send for an ignored id.
-      if (phoneNumberId && ignoredPhoneNumberIds.has(phoneNumberId)) {
-        console.log('[webhook/wa] ignore-phone-id', phoneNumberId, '— acknowledged, zero downstream processing (not owned by Foundation)');
-        continue;
+      // Ignore guard — filtered per-change so a batched webhook containing
+      // both an ignored and an allowed change still processes the allowed one.
+      //
+      // Inbound messages from an ignored number are always dropped here.
+      // Delivery-status callbacks are exempt when the number also appears in
+      // WEBHOOK_STATUS_PASSTHROUGH_PHONE_IDS — see the block comment above for
+      // the full cutover procedure.
+      const isIgnored = !!(phoneNumberId && ignoredPhoneNumberIds.has(phoneNumberId));
+      if (isIgnored) {
+        const hasStatuses = Array.isArray(value?.statuses) && value.statuses.length > 0;
+        if (!hasStatuses || !getStatusPassthroughPhoneNumberIds().has(phoneNumberId)) {
+          console.log('[webhook/wa] ignore-phone-id', phoneNumberId, '— acknowledged, zero downstream processing (not owned by Foundation)');
+          continue;
+        }
+        // Number is on the ignore list but has statuses and is in the
+        // passthrough list — fall through to status ingestion only.
+        // Messages are skipped by the guard below.
       }
 
       // ── Wave 1: delivery-status callbacks ────────────────────────────────
@@ -162,13 +196,6 @@ async function processWebhook(body: Record<string, unknown>) {
       // messages. Foundation previously read only `messages` and dropped every
       // status on the floor — which is the same shape of gap that let a failed
       // send keep reading as though it had gone out.
-      //
-      // NOTE ON THE 9043 IGNORE GUARD ABOVE: status callbacks for the internal
-      // staff number are still ignored, because that number is owned by BFF
-      // until the Wave 1 cutover. Removing 9043 from the ignore list IS the
-      // cutover switch for this half. It must happen in the same owner-gated
-      // step that disables the BFF staff processor — never before, or both
-      // platforms process the same event.
       if (Array.isArray(value?.statuses) && value.statuses.length > 0) {
         try {
           const { ingestDeliveryStatuses } = await import('@/lib/staff-ops/status-ingest');
@@ -186,6 +213,10 @@ async function processWebhook(body: Record<string, unknown>) {
           console.error('[webhook/wa][status] ingestion error:', err);
         }
       }
+
+      // Inbound messages are never processed for ignored numbers, even when the
+      // status passthrough list allowed status events to be ingested above.
+      if (isIgnored) continue;
 
       const messages: any[] = value?.messages ?? [];
 
