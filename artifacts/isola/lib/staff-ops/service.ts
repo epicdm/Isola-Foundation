@@ -194,6 +194,49 @@ export interface ResolveInboundResult {
 }
 
 /**
+ * Work that is actually IN PLAY with this person right now: dispatched to them
+ * and not yet reported DONE.
+ *
+ * FOUND BY THE SHADOW RUN, 2026-07-28. A bare `ACK` from the owner resolved to
+ * `needs_disambiguation` across 25 open Odoo tasks, because he genuinely has 25
+ * open tasks. Failing closed there is correct — the parser must never guess —
+ * but asking a human to choose between 25 items over WhatsApp is not a working
+ * loop, it is a broken one that happens to be safe.
+ *
+ * The fix is not to loosen the parser. It is to notice that "open in Odoo" and
+ * "in play in this conversation" are different sets. A bare verb means "the
+ * thing we were just talking about", so it resolves against what was actually
+ * dispatched. An explicit reference still reaches anything the person holds.
+ */
+async function filterInPlay(binding: StaffBindingRow, openWork: OpenWorkItem[]): Promise<OpenWorkItem[]> {
+  if (openWork.length === 0 || !binding.waId) return []
+
+  const correlationIds = openWork.map((w) => w.correlationId)
+  const dispatched = await prisma.notificationOutbox.findMany({
+    where: { tenant_id: binding.tenantId, contact: binding.waId, correlation_id: { in: correlationIds } },
+    select: { correlation_id: true },
+  })
+  const dispatchedIds = new Set(dispatched.map((d) => d.correlation_id).filter((c): c is string => !!c))
+  if (dispatchedIds.size === 0) return []
+
+  // A completed episode leaves play. ACK and UPDATE do not — a staff member may
+  // legitimately send several updates on one task before finishing it.
+  const finished = await prisma.staffWorkAction.findMany({
+    where: {
+      tenant_id: binding.tenantId,
+      staff_binding_id: binding.id,
+      action: 'done',
+      applied_at: { not: null },
+      correlation_id: { in: [...dispatchedIds] },
+    },
+    select: { correlation_id: true },
+  })
+  const finishedIds = new Set(finished.map((f) => f.correlation_id))
+
+  return openWork.filter((w) => dispatchedIds.has(w.correlationId) && !finishedIds.has(w.correlationId))
+}
+
+/**
  * Resolve an inbound staff message to a route. Reads only — applying the action
  * is a separate, explicit call, so a caller can inspect the decision (and a
  * shadow/parity run can compare it) without causing a write.
@@ -210,13 +253,30 @@ export async function resolveInboundStaffMessage(input: ResolveInboundInput): Pr
   // Identity failed — no point reading Odoo, and we must not.
   if (provisional.route === 'exception') return { route: provisional, openWork: [] }
 
-  const openWork = await listOpenWorkForStaff(provisional.binding)
-  const route = decideInboundRoute({
-    text: input.text,
-    bindingCandidates: candidates,
-    channelTenantId: input.channelTenantId,
-    openWork,
-  })
+  const binding = provisional.binding
+  const openWork = await listOpenWorkForStaff(binding)
+  const decide = (work: OpenWorkItem[]) =>
+    decideInboundRoute({
+      text: input.text,
+      bindingCandidates: candidates,
+      channelTenantId: input.channelTenantId,
+      openWork: work,
+    })
+
+  // First pass over everything the person holds, so an explicit reference can
+  // reach any of their work.
+  const route = decide(openWork)
+
+  // Only a bare verb can land here. Narrow to what is actually in play and try
+  // once more; if that resolves to exactly one episode, it is what they meant.
+  if (route.route === 'staff_disambiguation') {
+    const inPlay = await filterInPlay(binding, openWork)
+    if (inPlay.length > 0 && inPlay.length < openWork.length) {
+      const narrowed = decide(inPlay)
+      if (narrowed.route !== 'exception') return { route: narrowed, openWork: inPlay }
+    }
+  }
+
   return { route, openWork }
 }
 
