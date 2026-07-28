@@ -176,3 +176,158 @@ export async function sendAuthTemplate(
   })
 }
 
+
+/**
+ * ── Interactive messages ────────────────────────────────────────────────────
+ *
+ * IN-WINDOW ONLY. Like `sendText`, these deliver only inside the 24-hour
+ * customer-service window; outside it Meta answers 200 and then fails the
+ * message asynchronously with 131047. The first proactive contact must still be
+ * a template — see lib/staff-ops/staff-notification.ts for that policy.
+ *
+ * A tap returns the developer-defined `id` verbatim on the inbound webhook, so
+ * the id is the contract: it carries the action AND the work reference, which
+ * is what removes typed references from the staff loop.
+ */
+
+export interface WhatsAppInteractiveButton {
+  /** Echoed back on tap. Max 256 chars. */
+  id: string
+  /** Visible label. Max 20 chars — Meta rejects longer, it does not truncate. */
+  title: string
+}
+
+export interface WhatsAppSendButtonsInput {
+  phoneId: string
+  token: string
+  to: string
+  body: string
+  buttons: WhatsAppInteractiveButton[]
+  header?: string
+  footer?: string
+}
+
+/**
+ * sendInteractiveButtons — up to THREE inline reply buttons.
+ *
+ * Validates before sending rather than after: a fourth button, an over-long
+ * title or an empty body is a 400 from Meta that would otherwise be recorded as
+ * a delivery failure against the staff member, which reads as "unreachable"
+ * instead of "we built a bad payload".
+ */
+export async function sendInteractiveButtons(
+  config: WhatsAppConfig,
+  input: WhatsAppSendButtonsInput,
+): Promise<WhatsAppSendResult> {
+  if (!input.body?.trim()) {
+    return { ok: false, status: 0, error: 'empty interactive body — nothing sent' }
+  }
+  if (input.buttons.length < 1 || input.buttons.length > 3) {
+    return { ok: false, status: 0, error: `interactive buttons must be 1..3, got ${input.buttons.length}` }
+  }
+  for (const b of input.buttons) {
+    if (!b.id || b.id.length > 256) {
+      return { ok: false, status: 0, error: `button id must be 1..256 chars: ${b.id?.length ?? 0}` }
+    }
+    if (!b.title?.trim() || b.title.length > 20) {
+      return { ok: false, status: 0, error: `button title must be 1..20 chars: "${b.title}"` }
+    }
+  }
+
+  return postToGraph(config, input.phoneId, input.token, {
+    messaging_product: 'whatsapp',
+    to: input.to,
+    type: 'interactive',
+    interactive: {
+      type: 'button',
+      ...(input.header ? { header: { type: 'text', text: input.header } } : {}),
+      body: { text: input.body },
+      ...(input.footer ? { footer: { text: input.footer } } : {}),
+      action: {
+        buttons: input.buttons.map((b) => ({
+          type: 'reply',
+          reply: { id: b.id, title: b.title },
+        })),
+      },
+    },
+  })
+}
+
+export interface WhatsAppListRow {
+  id: string
+  /** Max 24 chars. */
+  title: string
+  /** Max 72 chars. */
+  description?: string
+}
+
+export interface WhatsAppSendListInput {
+  phoneId: string
+  token: string
+  to: string
+  body: string
+  /** Label on the button that opens the list. Max 20 chars. */
+  buttonText: string
+  rows: WhatsAppListRow[]
+  sectionTitle?: string
+  header?: string
+  footer?: string
+}
+
+/**
+ * sendInteractiveList — up to TEN rows behind a single "open menu" button.
+ *
+ * Used when more actions are valid than will fit in three buttons. The trade is
+ * deliberate: a list hides the options behind one tap, so buttons stay the
+ * default for the common two-or-three-action case.
+ */
+export async function sendInteractiveList(
+  config: WhatsAppConfig,
+  input: WhatsAppSendListInput,
+): Promise<WhatsAppSendResult> {
+  if (!input.body?.trim()) {
+    return { ok: false, status: 0, error: 'empty interactive body — nothing sent' }
+  }
+  if (!input.buttonText?.trim() || input.buttonText.length > 20) {
+    return { ok: false, status: 0, error: `list button text must be 1..20 chars: "${input.buttonText}"` }
+  }
+  if (input.rows.length < 1 || input.rows.length > 10) {
+    return { ok: false, status: 0, error: `list rows must be 1..10, got ${input.rows.length}` }
+  }
+  for (const r of input.rows) {
+    if (!r.id || r.id.length > 200) {
+      return { ok: false, status: 0, error: `row id must be 1..200 chars: ${r.id?.length ?? 0}` }
+    }
+    if (!r.title?.trim() || r.title.length > 24) {
+      return { ok: false, status: 0, error: `row title must be 1..24 chars: "${r.title}"` }
+    }
+    if (r.description && r.description.length > 72) {
+      return { ok: false, status: 0, error: `row description must be <=72 chars: ${r.description.length}` }
+    }
+  }
+
+  return postToGraph(config, input.phoneId, input.token, {
+    messaging_product: 'whatsapp',
+    to: input.to,
+    type: 'interactive',
+    interactive: {
+      type: 'list',
+      ...(input.header ? { header: { type: 'text', text: input.header } } : {}),
+      body: { text: input.body },
+      ...(input.footer ? { footer: { text: input.footer } } : {}),
+      action: {
+        button: input.buttonText,
+        sections: [
+          {
+            title: input.sectionTitle ?? 'Actions',
+            rows: input.rows.map((r) => ({
+              id: r.id,
+              title: r.title,
+              ...(r.description ? { description: r.description } : {}),
+            })),
+          },
+        ],
+      },
+    },
+  })
+}
