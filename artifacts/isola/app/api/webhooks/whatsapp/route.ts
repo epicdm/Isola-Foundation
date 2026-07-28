@@ -17,6 +17,7 @@
 import crypto from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { handleInboundWhatsApp } from '@/lib/agent';
+import { prisma } from '@/lib/prisma';
 
 // ── Signature helpers ─────────────────────────────────────────────────────────
 
@@ -160,6 +161,174 @@ function getStatusPassthroughPhoneNumberIds(): Set<string> {
   );
 }
 
+// ── Staff-operations inbound path ─────────────────────────────────────────────
+//
+// When a phone_number_id appears in STAFF_INBOUND_PHONE_NUMBER_IDS its inbound
+// text messages are handled exclusively by the staff-operations resolution
+// logic. The customer-facing agent (handleInboundWhatsApp) is NEVER called for
+// these numbers — not on a recognised command, not on an unrecognised sender,
+// not on an exception. Silence is the correct outcome when the staff path
+// cannot resolve a message; a wrong brain replying is not.
+//
+// Defaults to empty: when the env var is unset, behaviour is byte-for-byte
+// identical to today for every number. Read fresh per request.
+
+function getStaffInboundPhoneNumberIds(): Set<string> {
+  return new Set(
+    (process.env.STAFF_INBOUND_PHONE_NUMBER_IDS ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+}
+
+/** Short confirmation sent back to a staff member after their action is applied. */
+function buildStaffAckReply(action: string, deduped: boolean): string {
+  if (deduped) return '✓ Already recorded.';
+  switch (action) {
+    case 'ack':     return '✓ Acknowledged.';
+    case 'done':    return '✓ Done recorded.';
+    case 'update':  return '✓ Update recorded.';
+    case 'blocked': return '✓ Blocked status recorded.';
+    case 'correct': return '✓ Correction recorded.';
+    default:        return '✓ Recorded.';
+  }
+}
+
+async function handleStaffInboundMessage(params: {
+  phoneNumberId: string;
+  from: string;
+  body: string;
+  waMessageId: string;
+}) {
+  const { phoneNumberId, from, body, waMessageId } = params;
+
+  // Resolve the tenant that owns this channel.
+  const channelNumber = await prisma.whatsAppNumber.findUnique({
+    where: { phone_number_id: phoneNumberId },
+    select: { tenant_id: true },
+  });
+  if (!channelNumber) {
+    console.error(
+      `[webhook/wa][staff] phone_number_id=${phoneNumberId} not in WhatsAppNumber — cannot resolve tenant, message dropped`,
+    );
+    return;
+  }
+  const tenantId = channelNumber.tenant_id;
+
+  // Resolve inbound route (reads only — apply is an explicit separate step).
+  const { resolveInboundStaffMessage, applyStaffAction } = await import('@/lib/staff-ops/service');
+  const resolved = await resolveInboundStaffMessage({
+    waId: from,
+    text: body,
+    channelTenantId: tenantId,
+  });
+
+  if (resolved.route.route !== 'staff_action') {
+    // Unknown sender, inactive binding, disambiguation needed, help request,
+    // non-command prose — all are operator concerns. Log and stop.
+    // The customer agent is never involved.
+    const r = resolved.route;
+    const detail =
+      r.route === 'exception'           ? `why=${r.why}` :
+      r.route === 'staff_disambiguation' ? `action=${r.action} candidates=${r.candidates.length}` :
+      r.route === 'staff_help'          ? `why=${r.why}` : 'non_command';
+    console.error(
+      `[webhook/wa][staff] unresolved phone_number_id=${phoneNumberId} sender=${from} route=${r.route} ${detail} — dropped, no reply`,
+    );
+    return;
+  }
+
+  const route = resolved.route;
+
+  const applied = await applyStaffAction({
+    binding:       route.binding,
+    action:        route.action,
+    workRefModel:  route.target.odooModel,
+    workRefId:     route.target.odooId,
+    correlationId: route.target.correlationId,
+    note:          route.note,
+    providerMessageId: waMessageId,
+    source: 'whatsapp',
+  });
+
+  if (!applied.ok) {
+    console.error(
+      `[webhook/wa][staff] apply failed phone_number_id=${phoneNumberId} sender=${from} action=${route.action} reason=${applied.reason} — no reply`,
+    );
+    return;
+  }
+
+  console.log(
+    `[webhook/wa][staff] applied phone_number_id=${phoneNumberId} sender=${from} action=${route.action} deduped=${applied.deduped} actionId=${applied.actionId}`,
+  );
+
+  // Reply with free-form text if the service window is open.
+  // The inbound message itself opens/refreshes the 24-hour window, so
+  // lastInboundAt = now gives age = 0 — hasOpenServiceWindow returns true.
+  // Respecting the predicate regardless guards against clock skew or any
+  // future change to the window rule.
+  const { hasOpenServiceWindow } = await import('@/lib/staff-ops/staff-notification');
+  const now = new Date();
+  if (!hasOpenServiceWindow({ lastInboundAt: now, now })) {
+    console.log(`[webhook/wa][staff] service window closed for sender=${from} — reply suppressed`);
+    return;
+  }
+
+  // Resolve FROM number and token — mirrors the logic in notify-whatsapp.ts,
+  // including the STAFF_NOTIFICATION_PHONE_NUMBER_ID pinned-number behaviour.
+  // A pinned number that does not belong to this tenant is a hard stop with no
+  // fallback — same rule as the drain.
+  const pinnedId = process.env.STAFF_NOTIFICATION_PHONE_NUMBER_ID;
+  const fromNumber = await (pinnedId
+    ? prisma.whatsAppNumber.findFirst({
+        where: { phone_number_id: pinnedId, tenant_id: tenantId },
+        select: { phone_number_id: true, access_token: true, token_env: true },
+      })
+    : prisma.whatsAppNumber.findFirst({
+        where: { tenant_id: tenantId },
+        orderBy: { created_at: 'asc' },
+        select: { phone_number_id: true, access_token: true, token_env: true },
+      }));
+
+  if (!fromNumber) {
+    const why = pinnedId
+      ? `STAFF_NOTIFICATION_PHONE_NUMBER_ID=${pinnedId} not found for tenant ${tenantId} — refusing to fall back`
+      : `no WhatsAppNumber for tenant ${tenantId}`;
+    console.error(`[webhook/wa][staff] reply suppressed — ${why}`);
+    return;
+  }
+
+  const token = fromNumber.token_env
+    ? process.env[fromNumber.token_env]
+    : fromNumber.access_token;
+  if (!token) {
+    console.error(
+      `[webhook/wa][staff] reply suppressed — no token for phone_number_id=${fromNumber.phone_number_id} tenant=${tenantId}`,
+    );
+    return;
+  }
+
+  const { sendText } = await import('@/engines/whatsapp');
+  const { getWhatsAppConfig } = await import('@/lib/engines');
+  const replyResult = await sendText(getWhatsAppConfig(), {
+    phoneId: fromNumber.phone_number_id,
+    token,
+    to: from.replace(/^\+/, ''), // Meta expects E.164 digits without '+'
+    body: buildStaffAckReply(route.action, applied.deduped),
+  });
+
+  if (!replyResult.ok) {
+    console.error(
+      `[webhook/wa][staff] reply failed phone_number_id=${fromNumber.phone_number_id} sender=${from} status=${replyResult.status} error=${replyResult.error}`,
+    );
+  } else {
+    console.log(
+      `[webhook/wa][staff] reply sent phone_number_id=${fromNumber.phone_number_id} sender=${from} wamid=${replyResult.messageId}`,
+    );
+  }
+}
+
 async function processWebhook(body: Record<string, unknown>) {
   const entries = (body?.entry as any[]) ?? [];
   const ignoredPhoneNumberIds = getIgnoredPhoneNumberIds();
@@ -219,6 +388,26 @@ async function processWebhook(body: Record<string, unknown>) {
       if (isIgnored) continue;
 
       const messages: any[] = value?.messages ?? [];
+
+      // Staff-operations path — mutually exclusive with the customer-agent
+      // path below. A number in STAFF_INBOUND_PHONE_NUMBER_IDS NEVER reaches
+      // handleInboundWhatsApp. The explicit `continue` below is the hard
+      // barrier; it is there intentionally and must not be removed.
+      if (phoneNumberId && getStaffInboundPhoneNumberIds().has(phoneNumberId)) {
+        for (const msg of messages) {
+          if (msg.type !== 'text') {
+            console.log('[webhook/wa][staff] ignoring non-text message type:', msg.type);
+            continue;
+          }
+          await handleStaffInboundMessage({
+            phoneNumberId,
+            from: String(msg.from ?? ''),
+            body: String(msg.text?.body ?? ''),
+            waMessageId: String(msg.id ?? ''),
+          });
+        }
+        continue; // hard barrier — never fall through to customer-agent path
+      }
 
       for (const msg of messages) {
         // Only handle text messages in Build 1
