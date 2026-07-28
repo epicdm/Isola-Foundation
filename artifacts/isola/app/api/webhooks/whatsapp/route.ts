@@ -18,6 +18,7 @@ import crypto from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { handleInboundWhatsApp } from '@/lib/agent';
 import { prisma } from '@/lib/prisma';
+import { claimInboundMessageId } from '@/lib/inbound-dedup';
 
 // ── Signature helpers ─────────────────────────────────────────────────────────
 
@@ -229,6 +230,31 @@ function buildStaffDisambiguationReply(action: string, candidates: { odooId: num
   return `Which task? Resend ${action.toUpperCase()} #<id>:\n${list.join('\n')}`;
 }
 
+/**
+ * Reply when the sender typed a task reference we do not have on their list.
+ * Shown instead of the generic command list so the person knows exactly what
+ * went wrong and can immediately pick the correct id from their open work.
+ */
+function buildStaffUnknownRefReply(
+  originalText: string,
+  openWork: { odooId: number; label?: string; projectName?: string | null }[],
+): string {
+  // Echo back the second token (the ref they typed, e.g. "#2292" or "project.task#999").
+  const ref = originalText.trim().split(/\s+/)[1] ?? '(unknown)';
+
+  const taskLines =
+    openWork.length === 0
+      ? ['No open tasks right now.']
+      : openWork.slice(0, 10).map((w, i) => {
+          const label = w.label ?? '(untitled)';
+          const proj  = w.projectName ? ` · ${w.projectName}` : '';
+          return `${i + 1}. ${label}${proj} #${w.odooId}`;
+        });
+  if (openWork.length > 10) taskLines.push(`… and ${openWork.length - 10} more`);
+
+  return `"${ref}" is not on your open task list.\n\nYour open tasks:\n${taskLines.join('\n')}`;
+}
+
 /** Reply when the action was recognised but could not be written to the record. */
 function buildStaffApplyFailedReply(): string {
   return "⚠️ Couldn't record that — please try again.";
@@ -241,6 +267,18 @@ async function handleStaffInboundMessage(params: {
   waMessageId: string;
 }) {
   const { phoneNumberId, from, body, waMessageId } = params;
+
+  // Cross-path inbound idempotency gate — must be the first operation.
+  // Two Meta apps are subscribed to the same WABA, so every inbound message
+  // is delivered twice. The gate claims the wamid on a unique-constrained
+  // table; the second delivery finds it already claimed and returns true.
+  // This is the same gate the customer-facing handler uses (lib/inbound-dedup.ts).
+  if (await claimInboundMessageId(waMessageId)) {
+    console.log(
+      `[webhook/wa][staff] duplicate wamid=${waMessageId} sender=${from} — already claimed, dropped`,
+    );
+    return;
+  }
 
   // Resolve the tenant that owns this channel.
   const channelNumber = await prisma.whatsAppNumber.findUnique({
@@ -281,7 +319,12 @@ async function handleStaffInboundMessage(params: {
     console.log(
       `[webhook/wa][staff] help route phone_number_id=${phoneNumberId} sender=${from} why=${r.why} openWork=${resolved.openWork.length}`,
     );
-    replyText = buildStaffHelpReply(resolved.openWork);
+    // unknown_reference: they typed a valid command but with a task id we don't
+    // have on their list. Show a targeted message echoing the bad ref plus their
+    // actual open tasks — not the generic command list, which would be noise here.
+    replyText = r.why === 'unknown_reference'
+      ? buildStaffUnknownRefReply(body, resolved.openWork)
+      : buildStaffHelpReply(resolved.openWork);
 
   } else if (r.route === 'staff_disambiguation') {
     console.log(
