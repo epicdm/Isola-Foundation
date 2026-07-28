@@ -195,6 +195,45 @@ function buildStaffAckReply(action: string, deduped: boolean): string {
   }
 }
 
+/** Reply when the sender is a known staff member but sent help / a non-command. */
+function buildStaffHelpReply(openWork: { odooId: number; label?: string; projectName?: string | null }[]): string {
+  const cmds =
+    'ACK — acknowledge receipt\n' +
+    'DONE [note] — mark complete\n' +
+    'UPDATE <note> — progress update\n' +
+    'BLOCKED <note> — report a blocker\n' +
+    'CORRECT <note> — correction\n' +
+    'HELP — show this list';
+
+  if (openWork.length === 0) {
+    return `Commands:\n${cmds}\n\nNo open tasks right now.`;
+  }
+
+  const taskLines = openWork.slice(0, 10).map((w, i) => {
+    const label = w.label ?? '(untitled)';
+    const proj  = w.projectName ? ` · ${w.projectName}` : '';
+    return `${i + 1}. ${label}${proj} #${w.odooId}`;
+  });
+  if (openWork.length > 10) taskLines.push(`… and ${openWork.length - 10} more`);
+
+  return `Commands:\n${cmds}\n\nYour open tasks:\n${taskLines.join('\n')}\n\nTo act: ACK #<id>  or  DONE #<id>`;
+}
+
+/** Reply when the command is clear but we cannot tell which task it refers to. */
+function buildStaffDisambiguationReply(action: string, candidates: { odooId: number; label?: string }[]): string {
+  const list = candidates.slice(0, 10).map((c, i) => {
+    const label = c.label ?? '(untitled)';
+    return `${i + 1}. ${label} #${c.odooId}`;
+  });
+  if (candidates.length > 10) list.push(`… and ${candidates.length - 10} more`);
+  return `Which task? Resend ${action.toUpperCase()} #<id>:\n${list.join('\n')}`;
+}
+
+/** Reply when the action was recognised but could not be written to the record. */
+function buildStaffApplyFailedReply(): string {
+  return "⚠️ Couldn't record that — please try again.";
+}
+
 async function handleStaffInboundMessage(params: {
   phoneNumberId: string;
   from: string;
@@ -224,44 +263,59 @@ async function handleStaffInboundMessage(params: {
     channelTenantId: tenantId,
   });
 
-  if (resolved.route.route !== 'staff_action') {
-    // Unknown sender, inactive binding, disambiguation needed, help request,
-    // non-command prose — all are operator concerns. Log and stop.
-    // The customer agent is never involved.
-    const r = resolved.route;
-    const detail =
-      r.route === 'exception'           ? `why=${r.why}` :
-      r.route === 'staff_disambiguation' ? `action=${r.action} candidates=${r.candidates.length}` :
-      r.route === 'staff_help'          ? `why=${r.why}` : 'non_command';
+  const r = resolved.route;
+
+  // ── Identity failures: silence is correct, nothing to reply to. ─────────────
+  if (r.route === 'exception') {
     console.error(
-      `[webhook/wa][staff] unresolved phone_number_id=${phoneNumberId} sender=${from} route=${r.route} ${detail} — dropped, no reply`,
+      `[webhook/wa][staff] unresolved phone_number_id=${phoneNumberId} sender=${from} route=exception why=${r.why} — dropped, no reply`,
     );
     return;
   }
 
-  const route = resolved.route;
+  // ── Determine reply text for all other outcomes. ─────────────────────────────
+  // The send path is shared by all three; it runs once, below.
+  let replyText: string;
 
-  const applied = await applyStaffAction({
-    binding:       route.binding,
-    action:        route.action,
-    workRefModel:  route.target.odooModel,
-    workRefId:     route.target.odooId,
-    correlationId: route.target.correlationId,
-    note:          route.note,
-    providerMessageId: waMessageId,
-    source: 'whatsapp',
-  });
-
-  if (!applied.ok) {
-    console.error(
-      `[webhook/wa][staff] apply failed phone_number_id=${phoneNumberId} sender=${from} action=${route.action} reason=${applied.reason} — no reply`,
+  if (r.route === 'staff_help') {
+    console.log(
+      `[webhook/wa][staff] help route phone_number_id=${phoneNumberId} sender=${from} why=${r.why} openWork=${resolved.openWork.length}`,
     );
-    return;
+    replyText = buildStaffHelpReply(resolved.openWork);
+
+  } else if (r.route === 'staff_disambiguation') {
+    console.log(
+      `[webhook/wa][staff] disambiguation phone_number_id=${phoneNumberId} sender=${from} action=${r.action} candidates=${r.candidates.length}`,
+    );
+    replyText = buildStaffDisambiguationReply(r.action, r.candidates);
+
+  } else {
+    // staff_action — apply then decide text based on outcome.
+    const applied = await applyStaffAction({
+      binding:           r.binding,
+      action:            r.action,
+      workRefModel:      r.target.odooModel,
+      workRefId:         r.target.odooId,
+      correlationId:     r.target.correlationId,
+      note:              r.note,
+      providerMessageId: waMessageId,
+      source:            'whatsapp',
+    });
+
+    if (!applied.ok) {
+      console.error(
+        `[webhook/wa][staff] apply failed phone_number_id=${phoneNumberId} sender=${from} action=${r.action} reason=${applied.reason}`,
+      );
+      replyText = buildStaffApplyFailedReply();
+    } else {
+      console.log(
+        `[webhook/wa][staff] applied phone_number_id=${phoneNumberId} sender=${from} action=${r.action} deduped=${applied.deduped} actionId=${applied.actionId}`,
+      );
+      replyText = buildStaffAckReply(r.action, applied.deduped);
+    }
   }
 
-  console.log(
-    `[webhook/wa][staff] applied phone_number_id=${phoneNumberId} sender=${from} action=${route.action} deduped=${applied.deduped} actionId=${applied.actionId}`,
-  );
+  // ── Single shared send path. ─────────────────────────────────────────────────
 
   // Reply with free-form text if the service window is open.
   // The inbound message itself opens/refreshes the 24-hour window, so
@@ -315,7 +369,7 @@ async function handleStaffInboundMessage(params: {
     phoneId: fromNumber.phone_number_id,
     token,
     to: from.replace(/^\+/, ''), // Meta expects E.164 digits without '+'
-    body: buildStaffAckReply(route.action, applied.deduped),
+    body: replyText,
   });
 
   if (!replyResult.ok) {
