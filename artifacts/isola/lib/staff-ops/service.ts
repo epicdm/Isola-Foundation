@@ -40,6 +40,7 @@ import {
   INTERNAL_TASK_TEMPLATE,
   buildStaffNotification,
   decideDispatchMode,
+  staffContactE164,
 } from './staff-notification'
 import { mintCorrelationId, type WorkRefModel } from './work-ref'
 
@@ -214,7 +215,7 @@ async function filterInPlay(binding: StaffBindingRow, openWork: OpenWorkItem[]):
 
   const correlationIds = openWork.map((w) => w.correlationId)
   const dispatched = await prisma.notificationOutbox.findMany({
-    where: { tenant_id: binding.tenantId, contact: binding.waId, correlation_id: { in: correlationIds } },
+    where: { tenant_id: binding.tenantId, contact: staffContactE164(binding.waId), correlation_id: { in: correlationIds } },
     select: { correlation_id: true },
   })
   const dispatchedIds = new Set(dispatched.map((d) => d.correlation_id).filter((c): c is string => !!c))
@@ -619,14 +620,16 @@ export async function buildOwnerBrief(tenantId: string): Promise<StaffBriefRow[]
   const out: StaffBriefRow[] = []
   for (const b of bindings) {
     const binding = toBindingRow(b)
+    // Same canonical key the dispatch writes with — see staffContactE164.
+    const contactKey = binding.waId ? staffContactE164(binding.waId) : '__none__'
     const [openWork, dispatched, awaiting, failed, actions] = await Promise.all([
       listOpenWorkForStaff(binding).then((w) => w.length).catch(() => 0),
-      prisma.notificationOutbox.count({ where: { tenant_id: tenantId, contact: binding.waId ?? '__none__' } }),
+      prisma.notificationOutbox.count({ where: { tenant_id: tenantId, contact: contactKey } }),
       prisma.notificationOutbox.count({
-        where: { tenant_id: tenantId, contact: binding.waId ?? '__none__', provider_status: { in: ['accepted', 'sent'] } },
+        where: { tenant_id: tenantId, contact: contactKey, provider_status: { in: ['accepted', 'sent'] } },
       }),
       prisma.notificationOutbox.count({
-        where: { tenant_id: tenantId, contact: binding.waId ?? '__none__', provider_status: 'failed' },
+        where: { tenant_id: tenantId, contact: contactKey, provider_status: 'failed' },
       }),
       prisma.staffWorkAction.count({ where: { tenant_id: tenantId, staff_binding_id: binding.id, applied_at: { not: null } } }),
     ])

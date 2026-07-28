@@ -143,6 +143,32 @@ export interface StaffNotificationEnvelope {
 }
 
 /**
+ * The canonical contact key for a staff member.
+ *
+ * `StaffBinding.wa_id` holds a WhatsApp wa_id — bare digits, no `+`
+ * (`17673173398`). `Consent.phone` is declared "E.164 with leading +" in
+ * prisma/schema.prisma, and `enqueueNotification` (lib/notify.ts) keys its
+ * fail-closed consent lookup on exactly that value. Handing the bare wa_id to
+ * the outbox therefore CANNOT match a Consent row: every staff dispatch
+ * returned `consent_denied`. Configured, but not effective — same family as
+ * the four defects found during cutover.
+ *
+ * One function, used by every read AND every write that joins a binding to
+ * `NotificationOutbox.contact` or `Consent.phone`, so the write key and the
+ * read key cannot drift apart again. Normalising only the write would have
+ * been worse than the bug: `filterInPlay` reads the outbox back by contact to
+ * decide what is in play, and a mismatch there sends every bare ACK back to
+ * needs_disambiguation across all open tasks.
+ *
+ * The customer path already applies this same rule in `checkWaSendGate`
+ * (lib/agent-tools.ts); the send adapter strips the `+` again on the way out
+ * (lib/notify-whatsapp.ts), so `+`-prefixed is safe end to end.
+ */
+export function staffContactE164(waId: string): string {
+  return `+${waId.replace(/\D/g, '')}`
+}
+
+/**
  * Build the enqueue envelope. Pure — the caller hands it to
  * `enqueueNotification`, which owns consent, idempotency and durability.
  *
@@ -167,7 +193,7 @@ export function buildStaffNotification(params: {
   const templateParams = buildStaffTaskTemplateParams(params.templateInput)
   return {
     tenantId: params.tenantId,
-    contact: params.toWaId,
+    contact: staffContactE164(params.toWaId),
     channel: 'whatsapp',
     consentBasis: 'internal_staff_directive',
     template: params.template,

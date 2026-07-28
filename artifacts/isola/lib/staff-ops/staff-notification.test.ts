@@ -6,6 +6,7 @@ import {
   buildStaffTaskTemplateParams,
   decideDispatchMode,
   hasOpenServiceWindow,
+  staffContactE164,
   staffNotificationDedupeKey,
 } from './staff-notification'
 
@@ -140,5 +141,54 @@ describe('buildStaffNotification — the enqueue envelope', () => {
 
   it('keys dedupe on the correlation id so one episode dispatches once', () => {
     expect(envelope.dedupeKey).toBe('staff:task_dispatch:sw-epic-task-2292-aaaa')
+  })
+})
+
+describe('staffContactE164 — the write key and the read key are one key', () => {
+  it('prefixes a bare wa_id so it matches the Consent.phone format', () => {
+    expect(staffContactE164('17673173398')).toBe('+17673173398')
+  })
+
+  it('is idempotent — an already-normalised value survives unchanged', () => {
+    expect(staffContactE164('+17673173398')).toBe('+17673173398')
+  })
+
+  it('strips separators a human or an import might have left in', () => {
+    expect(staffContactE164('+1 (767) 317-3398')).toBe('+17673173398')
+  })
+})
+
+describe('the enqueued contact matches the Consent key format', () => {
+  const fromBareWaId = buildStaffNotification({
+    tenantId: 'tenant-epic',
+    toWaId: '17673173398',
+    correlationId: 'sw-epic-task-2588-bbbb',
+    workRefModel: 'project.task',
+    workRefId: 2588,
+    template: INTERNAL_TASK_TEMPLATE,
+    templateInput: {
+      staffName: 'Hakeem Dalrymple',
+      workTitle: 'Wave 1 pilot task',
+      projectName: 'EPIC Internal',
+      dueDate: null,
+    },
+    purpose: 'task_dispatch',
+  })
+
+  it('enqueues E.164 with a leading +, not the bare wa_id', () => {
+    expect(fromBareWaId.contact).toBe('+17673173398')
+    expect(fromBareWaId.contact).not.toBe('17673173398')
+  })
+
+  it('produces a contact that satisfies the Consent.phone shape', () => {
+    // prisma/schema.prisma: Consent.phone is "E.164 with leading +", and
+    // lib/notify.ts keys tenant_id_phone on exactly this value. A contact that
+    // fails this regex can never match a Consent row, so enqueueNotification
+    // returns consent_denied for every staff dispatch — the Wave 1 defect.
+    expect(fromBareWaId.contact).toMatch(/^\+[1-9]\d{7,14}$/)
+  })
+
+  it('routes through the same helper the outbox readers use', () => {
+    expect(fromBareWaId.contact).toBe(staffContactE164('17673173398'))
   })
 })
