@@ -156,6 +156,37 @@ async function processWebhook(body: Record<string, unknown>) {
         continue;
       }
 
+      // ── Wave 1: delivery-status callbacks ────────────────────────────────
+      //
+      // Meta delivers `statuses` on the same `messages` field as inbound
+      // messages. Foundation previously read only `messages` and dropped every
+      // status on the floor — which is the same shape of gap that let a failed
+      // send keep reading as though it had gone out.
+      //
+      // NOTE ON THE 9043 IGNORE GUARD ABOVE: status callbacks for the internal
+      // staff number are still ignored, because that number is owned by BFF
+      // until the Wave 1 cutover. Removing 9043 from the ignore list IS the
+      // cutover switch for this half. It must happen in the same owner-gated
+      // step that disables the BFF staff processor — never before, or both
+      // platforms process the same event.
+      if (Array.isArray(value?.statuses) && value.statuses.length > 0) {
+        try {
+          const { ingestDeliveryStatuses } = await import('@/lib/staff-ops/status-ingest');
+          const { createStatusIngestPorts } = await import('@/lib/staff-ops/status-ingest-ports');
+          const outcome = await ingestDeliveryStatuses(
+            { entry: [{ changes: [{ field: 'messages', value: { statuses: value.statuses } }] }] },
+            createStatusIngestPorts(),
+          );
+          console.log(
+            `[webhook/wa][status] phone_number_id=${phoneNumberId} events=${outcome.events} applied=${outcome.applied} ignored=${outcome.ignored} unmatched=${outcome.unmatched}`,
+          );
+        } catch (err) {
+          // A status-ingestion failure must not stop inbound messages in the
+          // same batch from being processed.
+          console.error('[webhook/wa][status] ingestion error:', err);
+        }
+      }
+
       const messages: any[] = value?.messages ?? [];
 
       for (const msg of messages) {
