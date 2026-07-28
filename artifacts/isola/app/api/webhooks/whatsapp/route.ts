@@ -192,6 +192,7 @@ function buildStaffAckReply(action: string, deduped: boolean): string {
     case 'update':  return '✓ Update recorded.';
     case 'blocked': return '✓ Blocked status recorded.';
     case 'correct': return '✓ Correction recorded.';
+    case 'start':   return '✓ Started.';
     default:        return '✓ Recorded.';
   }
 }
@@ -200,6 +201,7 @@ function buildStaffAckReply(action: string, deduped: boolean): string {
 function buildStaffHelpReply(openWork: { odooId: number; label?: string; projectName?: string | null }[]): string {
   const cmds =
     'ACK — acknowledge receipt\n' +
+    'START [note] — begin working (RESUME is an alias)\n' +
     'DONE [note] — mark complete\n' +
     'UPDATE <note> — progress update\n' +
     'BLOCKED <note> — report a blocker\n' +
@@ -258,6 +260,16 @@ function buildStaffUnknownRefReply(
 /** Reply when the action was recognised but could not be written to the record. */
 function buildStaffApplyFailedReply(): string {
   return "⚠️ Couldn't record that — please try again.";
+}
+
+/**
+ * Reply when a START/RESUME is refused (e.g. not assigned, record not found).
+ * Shows the actions that ARE valid right now, derived from the Odoo record,
+ * so the sender knows what they can actually do without a back-and-forth.
+ */
+function buildStaffInvalidStartReply(validNextActions: string[]): string {
+  const actions = validNextActions.map((a) => a.toUpperCase()).join(' · ');
+  return `⚠️ Can't start that task right now.\n\nValid actions: ${actions}`;
 }
 
 async function handleStaffInboundMessage(params: {
@@ -349,7 +361,13 @@ async function handleStaffInboundMessage(params: {
       console.error(
         `[webhook/wa][staff] apply failed phone_number_id=${phoneNumberId} sender=${from} action=${r.action} reason=${applied.reason}`,
       );
-      replyText = buildStaffApplyFailedReply();
+      // START/RESUME failures carry validNextActions derived from the Odoo
+      // record so the sender learns what they can do instead of getting
+      // a bare refusal.
+      const validNextActions = 'validNextActions' in applied ? applied.validNextActions : undefined;
+      replyText = validNextActions?.length
+        ? buildStaffInvalidStartReply(validNextActions)
+        : buildStaffApplyFailedReply();
     } else {
       console.log(
         `[webhook/wa][staff] applied phone_number_id=${phoneNumberId} sender=${from} action=${r.action} deduped=${applied.deduped} actionId=${applied.actionId}`,

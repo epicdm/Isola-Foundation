@@ -26,6 +26,7 @@ const h = vi.hoisted(() => {
     chatterOk: true,
     chatterReason: 'odoo unreachable',
     verificationOk: true,
+    stageMoveResult: { ok: true as const, detail: { stageId: 42 } } as any,
   }
   return { calls, rows, odoo }
 })
@@ -86,6 +87,10 @@ vi.mock('./odoo-work', async (importOriginal) => {
         ? { ok: true as const, detail: { activityId: 99 }, activityId: 99 }
         : { ok: false as const, reason: 'activity create failed' }
     },
+    moveTaskToStage: async () => {
+      h.calls.push('odoo.stageMove')
+      return h.odoo.stageMoveResult
+    },
   }
 })
 
@@ -133,6 +138,8 @@ beforeEach(() => {
   odooState.record = taskAssignedTo([2])
   odooState.chatterOk = true
   odooState.verificationOk = true
+  odooState.stageMoveResult = { ok: true, detail: { stageId: 42 } }
+  delete process.env.STAFF_START_STAGE_NAME
   vi.clearAllMocks()
 })
 
@@ -258,5 +265,85 @@ describe('applyStaffAction — DONE and manager verification', () => {
     odooState.record = taskAssignedTo([6])
     await applyStaffAction({ ...baseAction, action: 'ack', binding: KIM })
     expect(calls).not.toContain('odoo.verification')
+  })
+})
+
+describe('applyStaffAction — START', () => {
+  it('START records a chatter note and stamps applied_at', async () => {
+    const r = await applyStaffAction({ ...baseAction, action: 'start', binding: ERIC })
+    expect(r.ok).toBe(true)
+    expect(calls).toContain('odoo.chatter')
+    expect(calls).toContain('sa.update.applied')
+  })
+
+  it('START captures the note — different notes on the same task are distinct actions', async () => {
+    const a = await applyStaffAction({ ...baseAction, action: 'start', note: 'picking up from Kim', binding: ERIC })
+    const b = await applyStaffAction({ ...baseAction, action: 'start', note: 'starting fresh', binding: ERIC })
+    expect(a.ok && !a.deduped).toBe(true)
+    expect(b.ok && !b.deduped).toBe(true)
+    expect(calls.filter((c) => c === 'odoo.chatter').length).toBe(2)
+  })
+
+  it('idempotency key is claimed before Odoo is touched', async () => {
+    const r = await applyStaffAction({ ...baseAction, action: 'start', binding: ERIC, providerMessageId: 'wamid.S1' })
+    expect(r.ok).toBe(true)
+    expect(calls.indexOf('sa.create')).toBeLessThan(calls.indexOf('odoo.read'))
+    expect(calls.indexOf('sa.create')).toBeLessThan(calls.indexOf('odoo.chatter'))
+  })
+
+  it('applied_at is stamped only after Odoo accepted the chatter write', async () => {
+    await applyStaffAction({ ...baseAction, action: 'start', binding: ERIC })
+    expect(calls.indexOf('odoo.chatter')).toBeLessThan(calls.indexOf('sa.update.applied'))
+  })
+
+  it('an unauthorised actor is refused before any chatter write', async () => {
+    odooState.record = taskAssignedTo([5]) // not Eric
+    const r = await applyStaffAction({ ...baseAction, action: 'start', binding: ERIC })
+    expect(r.ok).toBe(false)
+    expect(calls).not.toContain('odoo.chatter')
+    expect(calls).not.toContain('sa.update.applied')
+  })
+
+  it('an invalid START returns valid next actions derived from the Odoo record', async () => {
+    odooState.record = taskAssignedTo([5]) // project.task — Eric not assigned
+    const r = await applyStaffAction({ ...baseAction, action: 'start', binding: ERIC })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    // validNextActions is derived from the Odoo record — never from Foundation state
+    expect(r.validNextActions).toBeDefined()
+    expect(r.validNextActions).toContain('ack')
+    expect(r.validNextActions).toContain('start')
+  })
+
+  it('with no STAFF_START_STAGE_NAME configured, stage is untouched and result says so', async () => {
+    // STAFF_START_STAGE_NAME is deleted in beforeEach
+    const r = await applyStaffAction({ ...baseAction, action: 'start', binding: ERIC })
+    expect(r.ok).toBe(true)
+    if (!r.ok || r.deduped) return
+    expect(r.odooResult.stageMove).toMatchObject({ moved: false, why: 'STAFF_START_STAGE_NAME_not_configured' })
+    expect(calls).not.toContain('odoo.stageMove')
+  })
+
+  it('with STAFF_START_STAGE_NAME configured, the stage move is attempted after the note', async () => {
+    process.env.STAFF_START_STAGE_NAME = 'In Progress'
+    const r = await applyStaffAction({ ...baseAction, action: 'start', binding: ERIC })
+    expect(r.ok).toBe(true)
+    expect(calls).toContain('odoo.stageMove')
+    // Stage move happens after chatter, never before
+    expect(calls.indexOf('odoo.chatter')).toBeLessThan(calls.indexOf('odoo.stageMove'))
+    if (!r.ok || r.deduped) return
+    expect(r.odooResult.stageMove).toMatchObject({ moved: true })
+  })
+
+  it('a failed stage move leaves the action applied and reports the failure — note is not rolled back', async () => {
+    process.env.STAFF_START_STAGE_NAME = 'In Progress'
+    odooState.stageMoveResult = { ok: false, reason: 'stage "In Progress" not found in project 53' }
+    const r = await applyStaffAction({ ...baseAction, action: 'start', binding: ERIC })
+    // The chatter note IS the durable record of the action — it was written.
+    // A subsequent stage-move failure must not undo a true fact.
+    expect(r.ok).toBe(true)
+    expect(calls).toContain('sa.update.applied')
+    if (!r.ok || r.deduped) return
+    expect(r.odooResult.stageMove).toMatchObject({ moved: false })
   })
 })

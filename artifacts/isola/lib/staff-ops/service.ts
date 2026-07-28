@@ -17,6 +17,7 @@ import { resolveOdooConfigForTenant } from '../engine-bindings'
 import {
   checkActorMayAct,
   completeVerificationActivity,
+  deriveValidNextActions,
   listOpenTasksForUser,
   moveTaskToStage,
   postStaffActionNote,
@@ -294,7 +295,18 @@ export interface ApplyStaffActionInput {
 export type ApplyStaffActionResult =
   | { ok: true; deduped: true; actionId: string }
   | { ok: true; deduped: false; actionId: string; odooResult: Record<string, unknown> }
-  | { ok: false; reason: string; actionId?: string }
+  | {
+      ok: false
+      reason: string
+      actionId?: string
+      /**
+       * Populated only when a START/RESUME is refused because the actor is not
+       * authorised on the record right now. Derived from what Odoo says about
+       * the record's current state — never from Foundation-side work state.
+       * Used by the WhatsApp reply to tell the sender what they CAN do instead.
+       */
+      validNextActions?: string[]
+    }
 
 /**
  * Apply a staff action to the authoritative Odoo record.
@@ -346,7 +358,7 @@ export async function applyStaffAction(input: ApplyStaffActionInput): Promise<Ap
       select: { id: true, applied_at: true },
     }))
 
-  const fail = async (reason: string): Promise<ApplyStaffActionResult> => {
+  const fail = async (reason: string, validNextActions?: string[]): Promise<ApplyStaffActionResult> => {
     await prisma.staffWorkAction.update({ where: { id: row.id }, data: { failure_reason: reason } })
     await audit({
       tenantId: input.binding.tenantId,
@@ -356,13 +368,18 @@ export async function applyStaffAction(input: ApplyStaffActionInput): Promise<Ap
       entityId: row.id,
       meta: { reason, workRefModel: input.workRefModel, workRefId: input.workRefId, correlationId: input.correlationId },
     })
-    return { ok: false, reason, actionId: row.id }
+    return { ok: false, reason, actionId: row.id, ...(validNextActions !== undefined ? { validNextActions } : {}) }
   }
 
   const config = await resolveOdooConfigForTenant(input.binding.tenantId)
   const record = await readWorkRecord(config, { odooModel: input.workRefModel, odooId: input.workRefId })
   const allowed = checkActorMayAct(record, input.binding.odooResUserId)
-  if (!allowed.allowed) return fail(allowed.reason)
+  if (!allowed.allowed) {
+    // For START/RESUME, include the valid actions Odoo currently allows on this
+    // record so the reply can tell the sender what they can actually do.
+    const validNextActions = input.action === 'start' && record ? deriveValidNextActions(record) : undefined
+    return fail(allowed.reason, validNextActions)
+  }
 
   const chatter = await postStaffActionNote(
     config,
@@ -381,6 +398,10 @@ export async function applyStaffAction(input: ApplyStaffActionInput): Promise<Ap
 
   if (input.action === 'done' && record && record.odooModel === 'project.task') {
     odooResult.verification = await applyDoneVerification(config, record, input)
+  }
+
+  if (input.action === 'start' && record && record.odooModel === 'project.task') {
+    odooResult.stageMove = await applyStartStageMove(config, record)
   }
 
   const applied = await prisma.staffWorkAction.update({
@@ -404,6 +425,32 @@ export async function applyStaffAction(input: ApplyStaffActionInput): Promise<Ap
   })
 
   return { ok: true, deduped: false, actionId: applied.id, odooResult }
+}
+
+/**
+ * Optionally move the task to the configured start stage.
+ *
+ * The stage name is read from STAFF_START_STAGE_NAME at runtime.  When the env
+ * var is not set, START records its chatter note and does NOT touch the stage;
+ * the result carries `moved: false, why: 'STAFF_START_STAGE_NAME_not_configured'`
+ * so nobody reads the outcome as more than it was.
+ *
+ * A failed move does NOT roll back the chatter note: the note is a true fact
+ * about what the staff member did, and the failure is reported on `stageMove`
+ * rather than escalating to a full action failure.
+ */
+async function applyStartStageMove(
+  config: Awaited<ReturnType<typeof resolveOdooConfigForTenant>>,
+  record: OdooWorkRecord,
+): Promise<Record<string, unknown>> {
+  const stageName = (process.env.STAFF_START_STAGE_NAME ?? '').trim()
+  if (!stageName) {
+    return { moved: false, why: 'STAFF_START_STAGE_NAME_not_configured' }
+  }
+  const result = await moveTaskToStage(config, record, stageName)
+  return result.ok
+    ? { moved: true, ...result.detail }
+    : { moved: false, why: result.reason }
 }
 
 /**

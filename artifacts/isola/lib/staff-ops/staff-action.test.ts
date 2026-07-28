@@ -265,6 +265,44 @@ describe('parseStaffCommand — label matching', () => {
   })
 })
 
+describe('parseStaffCommand — START and RESUME', () => {
+  it('START resolves to the start action on a sole open task', () => {
+    const r = parseStaffCommand({ text: 'START', openWork: [TASK_A] })
+    expect(r.matched).toBe(true)
+    if (!r.matched) return
+    expect(r.action).toBe('start')
+    expect(r.target.odooId).toBe(TASK_A.odooId)
+    expect(r.resolution).toBe('sole_open_work')
+  })
+
+  it('RESUME and all natural spellings resolve to the same start action', () => {
+    for (const text of ['RESUME', 'resume', 'Resuming', 'began', 'begin', 'starting', 'START']) {
+      const r = parseStaffCommand({ text, openWork: [TASK_A] })
+      expect(r.matched, `expected "${text}" to match`).toBe(true)
+      if (r.matched) expect(r.action).toBe('start')
+    }
+  })
+
+  it('captures a free-text note after START', () => {
+    // START is note-bearing: prose after the verb that matches no label becomes the note.
+    const r = parseStaffCommand({ text: 'START picking up from Kim', openWork: [TASK_A] })
+    expect(r.matched).toBe(true)
+    if (!r.matched) return
+    expect(r.action).toBe('start')
+    expect(r.note).toBe('picking up from Kim')
+    expect(r.resolution).toBe('sole_open_work')
+  })
+
+  it('resolves an explicit record reference after RESUME', () => {
+    const r = parseStaffCommand({ text: 'RESUME #2478', openWork: [TASK_A, TASK_B] })
+    expect(r.matched).toBe(true)
+    if (!r.matched) return
+    expect(r.action).toBe('start')
+    expect(r.target.odooId).toBe(2478)
+    expect(r.resolution).toBe('explicit_ref')
+  })
+})
+
 describe('staffActionIdempotencyKey', () => {
   it('collapses a webhook retry of the same inbound to one action', () => {
     const a = staffActionIdempotencyKey({
