@@ -343,20 +343,35 @@ async function processWebhook(body: Record<string, unknown>) {
       // Ignore guard — filtered per-change so a batched webhook containing
       // both an ignored and an allowed change still processes the allowed one.
       //
-      // Inbound messages from an ignored number are always dropped here.
-      // Delivery-status callbacks are exempt when the number also appears in
-      // WEBHOOK_STATUS_PASSTHROUGH_PHONE_IDS — see the block comment above for
-      // the full cutover procedure.
+      // "Ignored" means "not handled by the customer-facing agent". It does NOT
+      // mean "silently discarded in all cases". Two explicit redirections can
+      // keep a change alive past this guard:
+      //
+      //   • WEBHOOK_STATUS_PASSTHROUGH_PHONE_IDS — delivery-status callbacks for
+      //     this number are ingested by Foundation even though its inbound
+      //     messages are not owned here.
+      //   • STAFF_INBOUND_PHONE_NUMBER_IDS — inbound messages are redirected to
+      //     the staff-operations handler. This is NOT a hole in the ignore rule:
+      //     the staff handler is a completely different destination, not the
+      //     customer agent. The customer agent is permanently unreachable for any
+      //     ignored number regardless of which other lists it appears in.
+      //
+      // A change that qualifies for neither redirection is fully dropped here.
+      // See the block comment above for the cutover procedure for each list.
       const isIgnored = !!(phoneNumberId && ignoredPhoneNumberIds.has(phoneNumberId));
+      const isStaffInbound = !!(phoneNumberId && getStaffInboundPhoneNumberIds().has(phoneNumberId));
       if (isIgnored) {
         const hasStatuses = Array.isArray(value?.statuses) && value.statuses.length > 0;
-        if (!hasStatuses || !getStatusPassthroughPhoneNumberIds().has(phoneNumberId)) {
+        const statusPassthrough = hasStatuses && getStatusPassthroughPhoneNumberIds().has(phoneNumberId);
+        if (!statusPassthrough && !isStaffInbound) {
           console.log('[webhook/wa] ignore-phone-id', phoneNumberId, '— acknowledged, zero downstream processing (not owned by Foundation)');
           continue;
         }
-        // Number is on the ignore list but has statuses and is in the
-        // passthrough list — fall through to status ingestion only.
-        // Messages are skipped by the guard below.
+        // At least one redirection is active — fall through. The status block
+        // below is guarded so it only fires when statusPassthrough is active,
+        // preventing staff-inbound membership from accidentally enabling status
+        // ingestion. The second guard below ensures messages never reach the
+        // customer agent regardless of which lists the number is on.
       }
 
       // ── Wave 1: delivery-status callbacks ────────────────────────────────
@@ -365,7 +380,8 @@ async function processWebhook(body: Record<string, unknown>) {
       // messages. Foundation previously read only `messages` and dropped every
       // status on the floor — which is the same shape of gap that let a failed
       // send keep reading as though it had gone out.
-      if (Array.isArray(value?.statuses) && value.statuses.length > 0) {
+      if (Array.isArray(value?.statuses) && value.statuses.length > 0 &&
+          (!isIgnored || getStatusPassthroughPhoneNumberIds().has(phoneNumberId))) {
         try {
           const { ingestDeliveryStatuses } = await import('@/lib/staff-ops/status-ingest');
           const { createStatusIngestPorts } = await import('@/lib/staff-ops/status-ingest-ports');
@@ -383,9 +399,12 @@ async function processWebhook(body: Record<string, unknown>) {
         }
       }
 
-      // Inbound messages are never processed for ignored numbers, even when the
-      // status passthrough list allowed status events to be ingested above.
-      if (isIgnored) continue;
+      // Inbound messages from an ignored number never reach the customer agent.
+      // Staff-inbound numbers are exempt from this drop — their messages
+      // continue to the staff routing block below, which is the only other
+      // destination. The customer agent remains unreachable for all ignored
+      // numbers regardless of staff-inbound membership.
+      if (isIgnored && !isStaffInbound) continue;
 
       const messages: any[] = value?.messages ?? [];
 
