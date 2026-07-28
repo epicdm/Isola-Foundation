@@ -63,11 +63,19 @@ export async function drainNotificationOutbox(): Promise<DrainNotificationOutbox
         throw new Error(`unsupported channel: ${row.channel}`);
       }
 
+      // When STAFF_NOTIFICATION_PHONE_NUMBER_ID is set and this row carries a
+      // work reference (the marker Wave 1 sets on internal staff notifications),
+      // pin the send to that specific number. For every other notification the
+      // field is absent and pinnedPhoneNumberId stays undefined, preserving
+      // today's earliest-created-number behaviour exactly.
+      const staffPhoneNumberId = process.env.STAFF_NOTIFICATION_PHONE_NUMBER_ID;
       const send = await sendWhatsApp({
         tenantId: row.tenant_id,
         contact: row.contact,
         template: row.template,
         payload: row.payload,
+        pinnedPhoneNumberId:
+          staffPhoneNumberId && row.work_ref_model ? staffPhoneNumberId : undefined,
       });
 
       if (!send.ok) {

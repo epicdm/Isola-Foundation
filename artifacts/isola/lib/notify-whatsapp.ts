@@ -17,6 +17,12 @@ export interface SendWhatsAppInput {
   contact: string; // destination phone, leading '+' optional
   template: string;
   payload: unknown; // v1 contract: { summaryLine: string, ... }
+  /** When set, send FROM this specific phone_number_id instead of the
+   *  tenant's earliest-created number. The number must belong to tenantId —
+   *  if it does not exist or belongs to another tenant the send fails hard
+   *  with no fallback. Set by the drain for internal staff notifications when
+   *  STAFF_NOTIFICATION_PHONE_NUMBER_ID is configured. */
+  pinnedPhoneNumberId?: string;
 }
 
 export interface SendWhatsAppResult {
@@ -27,18 +33,39 @@ export interface SendWhatsAppResult {
 }
 
 export async function sendWhatsApp(input: SendWhatsAppInput): Promise<SendWhatsAppResult> {
-  const { tenantId, contact, template, payload } = input;
+  const { tenantId, contact, template, payload, pinnedPhoneNumberId } = input;
 
-  // Resolve the tenant's own WhatsApp number to send FROM. Most tenants
-  // have exactly one; if there are several, the earliest-created wins
-  // (matches the "primary number" assumption used elsewhere in this app).
-  const waNumber = await prisma.whatsAppNumber.findFirst({
-    where: { tenant_id: tenantId },
-    orderBy: { created_at: 'asc' },
-    select: { phone_number_id: true, access_token: true, token_env: true },
-  });
-  if (!waNumber) {
-    return { ok: false, status: 0, error: `no WhatsAppNumber configured for tenant ${tenantId}` };
+  // Resolve the tenant's own WhatsApp number to send FROM.
+  //
+  // When pinnedPhoneNumberId is set (internal staff notifications), look up
+  // that exact number scoped to this tenant. If it does not exist or belongs
+  // to a different tenant, fail with a clear error — no silent fallback.
+  //
+  // When it is unset, keep the original behaviour: earliest-created number
+  // wins (matches the "primary number" assumption used elsewhere in this app).
+  let waNumber: { phone_number_id: string; access_token: string | null; token_env: string | null } | null;
+
+  if (pinnedPhoneNumberId) {
+    waNumber = await prisma.whatsAppNumber.findFirst({
+      where: { phone_number_id: pinnedPhoneNumberId, tenant_id: tenantId },
+      select: { phone_number_id: true, access_token: true, token_env: true },
+    });
+    if (!waNumber) {
+      return {
+        ok: false,
+        status: 0,
+        error: `STAFF_NOTIFICATION_PHONE_NUMBER_ID=${pinnedPhoneNumberId} does not exist or does not belong to tenant ${tenantId} — refusing to fall back to tenant default number`,
+      };
+    }
+  } else {
+    waNumber = await prisma.whatsAppNumber.findFirst({
+      where: { tenant_id: tenantId },
+      orderBy: { created_at: 'asc' },
+      select: { phone_number_id: true, access_token: true, token_env: true },
+    });
+    if (!waNumber) {
+      return { ok: false, status: 0, error: `no WhatsAppNumber configured for tenant ${tenantId}` };
+    }
   }
   const token = waNumber.token_env ? process.env[waNumber.token_env] : waNumber.access_token;
   if (!token) {
