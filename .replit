@@ -68,3 +68,6 @@ EMA_OTP_WHATSAPP_PHONE_NUMBER_ID = "1023804347491554"
 
 [nix]
 channel = "stable-25_05"
+
+[objectStorage]
+defaultBucketID = "replit-objstore-f2339c21-1f5b-439d-8df5-a224e6519de8"
