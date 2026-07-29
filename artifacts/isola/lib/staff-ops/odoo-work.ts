@@ -16,6 +16,10 @@
  *   - `project.task`: `write` of `stage_id` only
  *   - `mail.activity`: `create` (request manager verification),
  *     `action_feedback` (manager verifies / returns)
+ * Plus the READS manager verification needs in order to resolve authoritative
+ * ids instead of guessing them: `ir.model`, `ir.model.data`,
+ * `mail.activity.type` and `res.users`. All `search_read`, all filtered, none
+ * of them a write.
  * Nothing else. Every write is preceded by an assignment check against the
  * acting Odoo user, mirroring the guarantee the legacy bridge made.
  */
@@ -23,6 +27,11 @@
 import { json2Call, type OdooConfig } from '@/engines/odoo'
 import type { WorkRef, WorkRefModel } from './work-ref'
 import { classifyStage, type StageConcept } from './stage-classifier'
+import {
+  isVerificationTargetModel,
+  splitXmlId,
+  type VerificationTargetModel,
+} from './manager-verification'
 
 /** Odoo many2one arrives as [id, name] (classic) or {id, display_name} (JSON-2). */
 function displayNameOf(value: unknown): string | null {
@@ -255,26 +264,339 @@ export async function postStaffActionNote(
 }
 
 /**
- * Request manager verification by creating a `mail.activity` on the
- * authoritative record, assigned to the manager.
+ * ── Manager-verification: resolve, create, prove ─────────────────────────────
  *
- * `mail.activity` is Odoo-native, is already in live use on this tenant, and is
- * one of the three models the ratified WorkRef permits — so the verification
- * object is itself addressable as a WorkRef and the manager's reply routes
- * through exactly the same path as any other staff action. No parallel
- * approval model is introduced.
+ * Everything in this section exists because of
+ * `def-spine-manager-verification-activity-never-created-2026-07-29`. The code
+ * it replaces created a `mail.activity` by writing the STRING `res_model`,
+ * which on this Odoo is `readonly` and merely `related` to `res_model_id`. The
+ * record link never formed, Odoo refused every create with "Activities have to
+ * be linked to records with a not null res_id", and the manager loop had
+ * therefore never once worked.
+ *
+ * The fix is not "add a field". Every id the record needs is resolved from Odoo
+ * at runtime, the target and the assignee are proven to exist before the write,
+ * and the created record is read back and compared against what was asked for.
+ * `dec-foundation-native-manager-verification-activity-2026-07-29` keeps all of
+ * that in Foundation; nothing here calls BFF-v2.
  */
-export async function requestManagerVerification(
+
+/**
+ * Resolution caches, keyed per (url, db) because ids are per-database.
+ *
+ * The key deliberately excludes the API key: a key rotation must not silently
+ * create a second cache entry, and no secret belongs in a map key.
+ */
+const odooModelIdCache = new Map<string, number>()
+const odooActivityTypeCache = new Map<string, ResolvedActivityType>()
+
+/** Test hook — the caches are process-global, so tests must be able to clear them. */
+export function __resetOdooResolutionCaches(): void {
+  odooModelIdCache.clear()
+  odooActivityTypeCache.clear()
+}
+
+function resolutionCacheKey(config: OdooConfig, suffix: string): string {
+  return `${config.url}|${config.db}|${suffix}`
+}
+
+/**
+ * Resolve `res_model_id`, the authoritative link column on `mail.activity`.
+ *
+ * The allowlist is checked BEFORE Odoo is touched, so an unexpected model never
+ * reaches `ir.model` at all. A caller-supplied model *id* is never accepted
+ * anywhere — this function is the only way an id enters the create.
+ */
+export async function resolveVerificationModelId(
   config: OdooConfig,
-  ref: Pick<WorkRef, 'odooModel' | 'odooId'>,
-  params: {
-    managerOdooResUserId: number
-    summary: string
-    note: string
-    activityTypeId: number
-    dateDeadline?: string
-  },
-): Promise<OdooWriteOutcome & { activityId?: number }> {
+  model: string,
+): Promise<number | null> {
+  if (!isVerificationTargetModel(model)) return null
+
+  const key = resolutionCacheKey(config, `ir.model:${model}`)
+  const cached = odooModelIdCache.get(key)
+  if (cached) return cached
+
+  const rows = (await json2Call(
+    config,
+    'ir.model',
+    'search_read',
+    { domain: [['model', '=', model]], fields: ['id', 'model'], limit: 1 },
+    15000,
+  ).catch(() => [])) as Record<string, unknown>[]
+
+  const row = rows?.[0]
+  if (!row || String(row.model ?? '') !== model) return null
+  const id = Number(row.id)
+  if (!Number.isInteger(id) || id <= 0) return null
+
+  odooModelIdCache.set(key, id)
+  return id
+}
+
+/** The target record, read authoritatively, with everything needed to validate it. */
+export interface OdooTaskContext {
+  taskId: number
+  name: string
+  projectId: number | null
+  projectName: string | null
+  stageName: string | null
+  assigneeUserIds: number[]
+}
+
+/**
+ * Existence check that actually checks existence.
+ *
+ * DO NOT replace this with `read({ ids: [id], fields: ['id'] })`. Proven
+ * against this Odoo on 2026-07-29: `project.task.read` for id `99999999`
+ * returns `[{"id": 99999999}]` — the id is echoed straight back, so a by-id
+ * read selecting only `id` reports that every record exists. `search_read`
+ * with an `id =` domain returns `[]` for the same input. A regression test
+ * pins both halves of that so this cannot be reintroduced.
+ */
+export async function findTaskForVerification(
+  config: OdooConfig,
+  taskId: number,
+): Promise<OdooTaskContext | null> {
+  if (!Number.isInteger(taskId) || taskId <= 0) return null
+
+  const rows = (await json2Call(
+    config,
+    'project.task',
+    'search_read',
+    {
+      domain: [['id', '=', taskId]],
+      fields: ['id', 'name', 'project_id', 'stage_id', 'user_ids'],
+      limit: 1,
+    },
+    15000,
+  ).catch(() => [])) as Record<string, unknown>[]
+
+  const row = rows?.[0]
+  if (!row) return null
+  const id = Number(row.id)
+  if (id !== taskId) return null
+
+  return {
+    taskId: id,
+    name: String(row.name ?? ''),
+    projectId: idOf(row.project_id),
+    projectName: displayNameOf(row.project_id),
+    stageName: displayNameOf(row.stage_id),
+    assigneeUserIds: Array.isArray(row.user_ids)
+      ? (row.user_ids as unknown[]).filter((n): n is number => typeof n === 'number')
+      : [],
+  }
+}
+
+export interface OdooUserRow {
+  userId: number
+  name: string
+  login: string
+}
+
+/**
+ * The manager, as Odoo currently holds them.
+ *
+ * `active = true` is part of the domain rather than a field to inspect
+ * afterwards: an archived user can still be referenced by id, and assigning
+ * verification work to someone who has left is a silent dead end.
+ */
+export async function findActiveOdooUser(
+  config: OdooConfig,
+  odooResUserId: number,
+): Promise<OdooUserRow | null> {
+  if (!Number.isInteger(odooResUserId) || odooResUserId <= 0) return null
+
+  const rows = (await json2Call(
+    config,
+    'res.users',
+    'search_read',
+    {
+      domain: [
+        ['id', '=', odooResUserId],
+        ['active', '=', true],
+      ],
+      fields: ['id', 'name', 'login'],
+      limit: 1,
+    },
+    15000,
+  ).catch(() => [])) as Record<string, unknown>[]
+
+  const row = rows?.[0]
+  if (!row) return null
+  const id = Number(row.id)
+  if (id !== odooResUserId) return null
+  return { userId: id, name: String(row.name ?? ''), login: String(row.login ?? '') }
+}
+
+export interface ResolvedActivityType {
+  activityTypeId: number
+  name: string
+  /** How it was resolved, so an operator can see which source won. */
+  via: 'xml_id' | 'configured_id' | 'name'
+}
+
+/**
+ * Read one `mail.activity.type` and confirm it is usable on our target model.
+ *
+ * A type carrying its own `res_model` is scoped to that model — `Time Off
+ * Approval` exists on this database and belongs to `hr.leave`. Using one on a
+ * `project.task` would be a nonsense record, so a scoped type is only accepted
+ * when its scope is a model we actually target.
+ */
+async function readUsableActivityType(
+  config: OdooConfig,
+  activityTypeId: number,
+): Promise<{ activityTypeId: number; name: string } | null> {
+  if (!Number.isInteger(activityTypeId) || activityTypeId <= 0) return null
+
+  const rows = (await json2Call(
+    config,
+    'mail.activity.type',
+    'search_read',
+    { domain: [['id', '=', activityTypeId]], fields: ['id', 'name', 'res_model'], limit: 1 },
+    15000,
+  ).catch(() => [])) as Record<string, unknown>[]
+
+  const row = rows?.[0]
+  if (!row) return null
+  const id = Number(row.id)
+  if (id !== activityTypeId) return null
+
+  const scope = row.res_model
+  if (typeof scope === 'string' && scope.length > 0 && !isVerificationTargetModel(scope)) return null
+
+  return { activityTypeId: id, name: String(row.name ?? '') }
+}
+
+/**
+ * Resolve `activity_type_id` at runtime, in this order:
+ *   1. the configured (or default) XML id, via `ir.model.data`;
+ *   2. an explicitly configured numeric id — still verified to exist;
+ *   3. an allowlisted type name.
+ *
+ * A database id is never assumed. The code this replaces returned the literal
+ * `4`, which is correct on this tenant and would be silently wrong on the next
+ * one. When nothing resolves the answer is null, and the caller must refuse —
+ * creating an activity with a bogus type is worse than not creating one.
+ */
+export async function resolveVerificationActivityType(
+  config: OdooConfig,
+  opts: {
+    xmlId?: string | null
+    configuredId?: number | null
+    names?: readonly string[]
+  } = {},
+): Promise<ResolvedActivityType | null> {
+  const xmlId = (opts.xmlId ?? '').trim()
+  const names = opts.names ?? []
+  const key = resolutionCacheKey(
+    config,
+    `activity_type:${xmlId}|${opts.configuredId ?? ''}|${names.join(',')}`,
+  )
+  const cached = odooActivityTypeCache.get(key)
+  if (cached) return cached
+
+  const remember = (r: ResolvedActivityType): ResolvedActivityType => {
+    odooActivityTypeCache.set(key, r)
+    return r
+  }
+
+  // 1. XML id — the stable, database-independent handle.
+  const parts = xmlId ? splitXmlId(xmlId) : null
+  if (parts) {
+    const dataRows = (await json2Call(
+      config,
+      'ir.model.data',
+      'search_read',
+      {
+        domain: [
+          ['module', '=', parts.module],
+          ['name', '=', parts.name],
+          ['model', '=', 'mail.activity.type'],
+        ],
+        fields: ['id', 'res_id'],
+        limit: 1,
+      },
+      15000,
+    ).catch(() => [])) as Record<string, unknown>[]
+
+    const resId = Number(dataRows?.[0]?.res_id ?? 0)
+    if (Number.isInteger(resId) && resId > 0) {
+      const usable = await readUsableActivityType(config, resId)
+      if (usable) return remember({ ...usable, via: 'xml_id' })
+    }
+  }
+
+  // 2. Explicitly configured id — verified, never trusted on sight.
+  if (opts.configuredId) {
+    const usable = await readUsableActivityType(config, opts.configuredId)
+    if (usable) return remember({ ...usable, via: 'configured_id' })
+  }
+
+  // 3. Allowlisted name.
+  if (names.length > 0) {
+    const rows = (await json2Call(
+      config,
+      'mail.activity.type',
+      'search_read',
+      { domain: [['name', 'in', [...names]]], fields: ['id', 'name', 'res_model'], limit: 10 },
+      15000,
+    ).catch(() => [])) as Record<string, unknown>[]
+
+    for (const row of rows ?? []) {
+      const scope = row.res_model
+      if (typeof scope === 'string' && scope.length > 0 && !isVerificationTargetModel(scope)) continue
+      const id = Number(row.id)
+      if (Number.isInteger(id) && id > 0) {
+        return remember({ activityTypeId: id, name: String(row.name ?? ''), via: 'name' })
+      }
+    }
+  }
+
+  return null
+}
+
+export interface CreateVerificationActivityInput {
+  resModel: VerificationTargetModel
+  resModelId: number
+  resId: number
+  activityTypeId: number
+  managerOdooResUserId: number
+  summary: string
+  note: string
+  /** `date_deadline` is REQUIRED on mail.activity — always supplied, never defaulted server-side. */
+  dateDeadline: string
+}
+
+export type CreateVerificationActivityResult =
+  | { ok: true; activity: OdooVerificationActivity }
+  | { ok: false; reason: string; activityId?: number }
+
+/**
+ * Create the manager-verification activity, then read it back.
+ *
+ * `res_model` is NOT written. It is readonly and related to `res_model_id` on
+ * this Odoo, and writing it is the entire defect. Only resolved ids go in.
+ *
+ * The readback is not decoration: a create that reports an id but stored
+ * something else is the same class of untruth as a stage move that claims to
+ * have happened. On a readback failure the id we did get is returned alongside
+ * the refusal, so an activity that exists but could not be proven is traceable
+ * rather than lost.
+ */
+export async function createManagerVerificationActivity(
+  config: OdooConfig,
+  input: CreateVerificationActivityInput,
+): Promise<CreateVerificationActivityResult> {
+  if (!isVerificationTargetModel(input.resModel)) return { ok: false, reason: 'model_not_allowlisted' }
+  if (!Number.isInteger(input.resModelId) || input.resModelId <= 0) return { ok: false, reason: 'res_model_id_unresolved' }
+  if (!Number.isInteger(input.resId) || input.resId <= 0) return { ok: false, reason: 'res_id_invalid' }
+  if (!Number.isInteger(input.activityTypeId) || input.activityTypeId <= 0) return { ok: false, reason: 'activity_type_unresolved' }
+  if (!Number.isInteger(input.managerOdooResUserId) || input.managerOdooResUserId <= 0) return { ok: false, reason: 'user_id_invalid' }
+
+  let activityId: number
   try {
     const created = (await json2Call(
       config,
@@ -283,27 +605,31 @@ export async function requestManagerVerification(
       {
         vals_list: [
           {
-            res_model: ref.odooModel,
-            res_id: ref.odooId,
-            activity_type_id: params.activityTypeId,
-            summary: params.summary,
-            note: params.note,
-            user_id: params.managerOdooResUserId,
-            ...(params.dateDeadline ? { date_deadline: params.dateDeadline } : {}),
+            res_model_id: input.resModelId,
+            res_id: input.resId,
+            activity_type_id: input.activityTypeId,
+            user_id: input.managerOdooResUserId,
+            summary: input.summary,
+            note: input.note,
+            date_deadline: input.dateDeadline,
           },
         ],
       },
       20000,
     )) as number[] | number
 
-    const activityId = Array.isArray(created) ? created[0] : created
-    if (typeof activityId !== 'number') {
+    const id = Array.isArray(created) ? created[0] : created
+    if (typeof id !== 'number' || !Number.isInteger(id) || id <= 0) {
       return { ok: false, reason: 'mail.activity create returned no id' }
     }
-    return { ok: true, detail: { activityId }, activityId }
+    activityId = id
   } catch (err) {
     return { ok: false, reason: err instanceof Error ? err.message : 'mail.activity create failed' }
   }
+
+  const activity = await readVerificationActivity(config, activityId)
+  if (!activity) return { ok: false, reason: 'activity_readback_failed', activityId }
+  return { ok: true, activity }
 }
 
 /**
@@ -345,11 +671,15 @@ export interface OdooVerificationActivity {
   activityId: number
   /** The model the activity hangs on. Only `project.task` is actionable here. */
   resModel: string
+  /** `res_model_id` - the AUTHORITATIVE link column. `res_model` only mirrors it. */
+  resModelId: number | null
   /** The record the activity hangs on. */
   resId: number
   /** The Odoo user the activity is assigned to — the ONLY person who may resolve it. */
   userId: number | null
   summary: string | null
+  /** The activity type Odoo actually stored, so a readback can be compared. */
+  activityTypeId: number | null
 }
 
 /**
@@ -372,7 +702,7 @@ export async function readVerificationActivity(
     'search_read',
     {
       domain: [['id', '=', activityId]],
-      fields: ['id', 'summary', 'user_id', 'res_model', 'res_id'],
+      fields: ['id', 'summary', 'user_id', 'res_model', 'res_model_id', 'res_id', 'activity_type_id'],
       limit: 1,
     },
     15000,
@@ -382,9 +712,11 @@ export async function readVerificationActivity(
   return {
     activityId: Number(row.id),
     resModel: String(row.res_model ?? ''),
+    resModelId: idOf(row.res_model_id),
     resId: Number(row.res_id ?? 0),
     userId: idOf(row.user_id),
     summary: typeof row.summary === 'string' ? row.summary : null,
+    activityTypeId: idOf(row.activity_type_id),
   }
 }
 

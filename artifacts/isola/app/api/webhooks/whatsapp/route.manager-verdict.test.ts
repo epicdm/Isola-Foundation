@@ -263,6 +263,24 @@ describe('staff DONE notifies the manager', () => {
     expect(h.sentButtons.filter((b) => b.to === WA_PHILLIP)).toHaveLength(0);
   });
 
+  it('a verification already created for THIS episode sends no second notice', async () => {
+    // The Foundation operation claim found the episode already complete, so the
+    // activity is real and the manager was told the first time round. A second
+    // notice would be the duplicate the claim exists to prevent.
+    h.applyResult = {
+      ok: true,
+      deduped: false,
+      actionId: 'a1',
+      odooResult: {
+        chatter: {},
+        verification: { requested: true, deduped: true, activityId: ACTIVITY },
+      },
+    };
+    await POST(req([buttonTap(WA_HAKEEM, donePayload, 'w.d7')]));
+    expect(h.calls).not.toContain('lookup.manager');
+    expect(h.sentButtons.filter((b: any) => b.to === WA_PHILLIP)).toHaveLength(0);
+  });
+
   it('no verification raised (no manager) means no notice and no invented recipient', async () => {
     h.applyResult = { ok: true, deduped: false, actionId: 'a1', odooResult: { chatter: {}, verification: { requested: false, why: 'staff_member_has_no_manager' } } };
     await POST(req([buttonTap(WA_HAKEEM, donePayload, 'w.d4')]));

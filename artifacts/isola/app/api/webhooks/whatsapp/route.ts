@@ -627,12 +627,19 @@ async function notifyManagerOfVerification(params: {
   taskLabel: string;
 }): Promise<void> {
   const verification = (params.odooResult?.verification ?? null) as
-    | { requested?: boolean; activityId?: number; why?: string }
+    | { requested?: boolean; activityId?: number; why?: string; deduped?: boolean }
     | null;
 
   if (!verification?.requested || !verification.activityId) {
     // No verification was raised — most often `staff_member_has_no_manager`.
     // There is nobody to tell, and inventing a recipient would be worse.
+    return;
+  }
+
+  if (verification.deduped) {
+    // The activity already existed for THIS verification episode, so the
+    // manager has already been asked. Telling them a second time is exactly the
+    // duplicate the Foundation operation claim exists to prevent.
     return;
   }
 

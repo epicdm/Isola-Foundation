@@ -30,7 +30,7 @@ const MANAGER_ID_PREFIX = 'mv'
  * Encode a manager verdict against a verification activity.
  *
  * Format: `mv:<verdict>:<activityId>`. The activity is the Odoo-native object
- * created by `requestManagerVerification`, so the tap lands on exactly the
+ * created by `createManagerVerificationActivity`, so the tap lands on exactly the
  * verification episode that was raised — not on the task, which may carry
  * several over its life.
  */

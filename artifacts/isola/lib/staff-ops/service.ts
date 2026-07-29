@@ -17,7 +17,10 @@ import { resolveOdooConfigForTenant } from '../engine-bindings'
 import {
   checkActorMayAct,
   completeVerificationActivity,
+  createManagerVerificationActivity,
   deriveValidNextActions,
+  findActiveOdooUser,
+  findTaskForVerification,
   listOpenTasksForUser,
   moveTaskToConceptStage,
   moveTaskToStage,
@@ -25,7 +28,8 @@ import {
   readVerificationActivity,
   readWorkRecord,
   renderChatterNote,
-  requestManagerVerification,
+  resolveVerificationActivityType,
+  resolveVerificationModelId,
   type OdooVerificationActivity,
   type OdooWorkRecord,
 } from './odoo-work'
@@ -47,14 +51,40 @@ import {
 } from './staff-notification'
 import { mintCorrelationId, type WorkRefModel } from './work-ref'
 import { buildMenu, type ManagerVerdict, type MenuRendering, type StaffMenuAction } from './staff-menu'
+import {
+  MANAGER_VERIFICATION_OPERATION,
+  VERIFICATION_ACTIVITY_TYPE_NAMES,
+  VERIFICATION_ACTIVITY_TYPE_XML_ID,
+  VERIFICATION_DEADLINE_DAYS_DEFAULT,
+  managerVerificationOperationId,
+  operationConflict,
+  readbackMismatch,
+  verificationDeadline,
+  verificationNote,
+  verificationSummary,
+  type VerificationRefusal,
+} from './manager-verification'
 
 /**
- * Odoo activity type used to request manager verification. 4 is "To-Do" on
- * this tenant. Overridable because activity-type ids are per-database.
+ * Optional overrides for manager-verification activity-type resolution.
+ *
+ * Both are VERIFIED against Odoo before use. The code this replaces returned
+ * the literal `4`, which is correct on this tenant and silently wrong on the
+ * next one; resolution now happens at runtime and a configured id that does not
+ * exist is a refusal, never a guess.
  */
-function verificationActivityTypeId(): number {
+function verificationActivityTypeXmlId(): string {
+  return (process.env.STAFF_VERIFICATION_ACTIVITY_TYPE_XMLID ?? '').trim() || VERIFICATION_ACTIVITY_TYPE_XML_ID
+}
+
+function configuredVerificationActivityTypeId(): number | null {
   const raw = Number(process.env.STAFF_VERIFICATION_ACTIVITY_TYPE_ID)
-  return Number.isInteger(raw) && raw > 0 ? raw : 4
+  return Number.isInteger(raw) && raw > 0 ? raw : null
+}
+
+function verificationDeadlineDays(): number {
+  const raw = Number(process.env.STAFF_VERIFICATION_DEADLINE_DAYS)
+  return Number.isInteger(raw) && raw > 0 ? raw : VERIFICATION_DEADLINE_DAYS_DEFAULT
 }
 
 /**
@@ -501,7 +531,7 @@ export async function applyStaffAction(input: ApplyStaffActionInput): Promise<Ap
   const odooResult: Record<string, unknown> = { chatter: chatter.detail }
 
   if (input.action === 'done' && record && record.odooModel === 'project.task') {
-    odooResult.verification = await applyDoneVerification(config, record, input)
+    odooResult.verification = await applyDoneVerification(config, record, input, row.id)
   }
 
   if (input.action === 'start' && record && record.odooModel === 'project.task') {
@@ -597,34 +627,368 @@ async function applyStartStageMove(
 }
 
 /**
- * DONE is not automatically final. When the staff member has a manager, a
- * `mail.activity` is created for that manager on the same record, so the
- * verification object is Odoo-native and is itself addressable as a WorkRef.
- * No parallel approval model is introduced.
+ * The action verb for the Foundation-owned verification operation row.
+ *
+ * It shares the StaffWorkAction ledger deliberately —
+ * `dec-foundation-native-manager-verification-activity-2026-07-29` asks for the
+ * EXISTING dedup/audit substrate, not a second framework. It is not a verb a
+ * staff member can send, and the staff-facing counter in `staffOpsBrief`
+ * excludes it, so "actions recorded" still means actions the person took.
+ *
+ * WHY A FOUNDATION ROW AND NOT THE ODOO ACTIVITY ITSELF: Odoo's
+ * `action_feedback` UNLINKS a completed `mail.activity`. Anything that used the
+ * activity as its own dedup record would forget the operation the moment the
+ * manager answered, and a retry would create a second one. This row survives.
+ */
+const VERIFY_REQUEST_ACTION = 'verify_request'
+
+interface VerificationRequestFacts {
+  operation: string
+  operationId: string
+  episodeId: string
+  tenantId: string
+  workRefId: number
+  managerOdooResUserId: number
+}
+
+type VerificationClaim =
+  | { state: 'claimed'; rowId: string }
+  | { state: 'completed'; rowId: string; activityId: number }
+  | { state: 'in_flight'; rowId: string }
+  | { state: 'conflict'; rowId: string; why: string }
+
+/**
+ * Claim the operation BEFORE Odoo is touched.
+ *
+ * `create` is the claim, not `findUnique` then `create`: the unique index on
+ * (tenant_id, idempotency_key) is what makes a concurrent retry lose the race
+ * in the database rather than in application logic, so at most one caller ever
+ * reaches the Odoo create.
+ */
+async function claimVerificationOperation(params: {
+  tenantId: string
+  staffBindingId: string
+  taskId: number
+  correlationId: string
+  source: string
+  actorWaId: string | null
+  operationId: string
+  episodeId: string
+  managerOdooResUserId: number
+}): Promise<VerificationClaim> {
+  const request: VerificationRequestFacts = {
+    operation: MANAGER_VERIFICATION_OPERATION,
+    operationId: params.operationId,
+    episodeId: params.episodeId,
+    tenantId: params.tenantId,
+    workRefId: params.taskId,
+    managerOdooResUserId: params.managerOdooResUserId,
+  }
+
+  try {
+    const created = await prisma.staffWorkAction.create({
+      data: {
+        tenant_id: params.tenantId,
+        staff_binding_id: params.staffBindingId,
+        work_ref_model: 'project.task',
+        work_ref_id: params.taskId,
+        correlation_id: params.correlationId,
+        action: VERIFY_REQUEST_ACTION,
+        source: params.source,
+        actor_wa_id: params.actorWaId,
+        idempotency_key: params.operationId,
+        odoo_result: { request } as never,
+      },
+      select: { id: true },
+    })
+    return { state: 'claimed', rowId: created.id }
+  } catch (err) {
+    // Only a unique-constraint collision means "already claimed". Anything else
+    // is a real failure and must not be dressed up as a duplicate.
+    if ((err as { code?: string })?.code !== 'P2002') throw err
+  }
+
+  const existing = await prisma.staffWorkAction.findUnique({
+    where: {
+      tenant_id_idempotency_key: { tenant_id: params.tenantId, idempotency_key: params.operationId },
+    },
+    select: {
+      id: true,
+      tenant_id: true,
+      work_ref_id: true,
+      applied_at: true,
+      failure_reason: true,
+      odoo_result: true,
+    },
+  })
+  if (!existing) return { state: 'conflict', rowId: '', why: 'claim_vanished' }
+
+  const stored = (existing.odoo_result ?? null) as {
+    request?: Partial<VerificationRequestFacts>
+    activity?: { activityId?: number }
+  } | null
+
+  const conflict = operationConflict(
+    {
+      tenantId: existing.tenant_id,
+      workRefId: existing.work_ref_id,
+      managerOdooResUserId: stored?.request?.managerOdooResUserId,
+      episodeId: stored?.request?.episodeId,
+    },
+    {
+      tenantId: params.tenantId,
+      workRefId: params.taskId,
+      managerOdooResUserId: params.managerOdooResUserId,
+      episodeId: params.episodeId,
+    },
+  )
+  if (conflict) return { state: 'conflict', rowId: existing.id, why: conflict }
+
+  if (existing.applied_at) {
+    const activityId = Number(stored?.activity?.activityId ?? 0)
+    if (Number.isInteger(activityId) && activityId > 0) {
+      return { state: 'completed', rowId: existing.id, activityId }
+    }
+    return { state: 'conflict', rowId: existing.id, why: 'completed_without_activity_id' }
+  }
+
+  // Not applied. A RECORDED failure means the previous attempt stopped at or
+  // before creation and is safe to retry on the same row — the same
+  // claim/recovery rule `applyStaffAction` already uses. No recorded failure
+  // means an attempt is genuinely in flight, and creating a second activity is
+  // exactly the duplicate this mechanism exists to prevent.
+  if (existing.failure_reason) return { state: 'claimed', rowId: existing.id }
+  return { state: 'in_flight', rowId: existing.id }
+}
+
+/**
+ * DONE is not automatically final. When the staff member has a manager,
+ * Foundation creates a `mail.activity` for that manager on the same record, so
+ * the verification object is Odoo-native and is itself addressable as a
+ * WorkRef. No parallel approval model is introduced.
+ *
+ * THE FIX THIS FUNCTION CARRIES —
+ * `def-spine-manager-verification-activity-never-created-2026-07-29`. The old
+ * body called straight through to a create that wrote the STRING `res_model`.
+ * That field is readonly on this Odoo, so the record link never formed and
+ * every create was refused. It had never worked; it was invisible only because
+ * the sole person who had ever pressed DONE was the owner, who has no manager,
+ * so the short-circuit above fired first and the create was never reached.
+ *
+ * The sequence is now: claim the operation → resolve every id from Odoo →
+ * prove the target and the assignee exist → create → read back → only then
+ * report `requested: true`. Every refusal is recorded and returned truthfully,
+ * and no refusal ever produces a manager notice, because a notice about a
+ * verification that does not exist is worse than silence.
  */
 async function applyDoneVerification(
   config: Awaited<ReturnType<typeof resolveOdooConfigForTenant>>,
   record: OdooWorkRecord,
   input: ApplyStaffActionInput,
+  episodeId: string,
 ): Promise<Record<string, unknown>> {
-  if (!input.binding.managerOdooResUserId) {
+  const managerOdooResUserId = input.binding.managerOdooResUserId
+  if (!managerOdooResUserId) {
     return { requested: false, why: 'staff_member_has_no_manager' }
   }
-  const activity = await requestManagerVerification(
-    config,
-    { odooModel: 'project.task', odooId: record.odooId },
-    {
-      managerOdooResUserId: input.binding.managerOdooResUserId,
-      summary: `Verify completion: ${record.name}`.slice(0, 120),
-      note: `${input.binding.displayName} reported this DONE via ${input.source ?? 'whatsapp'}.${
-        input.note ? ` Note: ${input.note}` : ''
-      } Isola correlation: ${input.correlationId}`,
-      activityTypeId: verificationActivityTypeId(),
-    },
-  )
-  return activity.ok
-    ? { requested: true, activityId: activity.activityId }
-    : { requested: false, why: activity.reason }
+
+  const operationId = managerVerificationOperationId({
+    tenantId: input.binding.tenantId,
+    workRefModel: 'project.task',
+    workRefId: record.odooId,
+    episodeId,
+    managerOdooResUserId,
+  })
+
+  try {
+    const claim = await claimVerificationOperation({
+      tenantId: input.binding.tenantId,
+      staffBindingId: input.binding.id,
+      taskId: record.odooId,
+      correlationId: input.correlationId,
+      source: input.source ?? 'whatsapp',
+      actorWaId: input.binding.waId,
+      operationId,
+      episodeId,
+      managerOdooResUserId,
+    })
+
+    if (claim.state === 'conflict') {
+      return { requested: false, why: 'operation_id_conflict', detail: claim.why, operationId }
+    }
+    if (claim.state === 'in_flight') {
+      return { requested: false, why: 'verification_in_flight', operationId }
+    }
+    if (claim.state === 'completed') {
+      // This episode already has its activity. Truthful about the activity, and
+      // `deduped` is what stops the caller telling the manager a second time.
+      return { requested: true, deduped: true, activityId: claim.activityId, operationId }
+    }
+
+    const rowId = claim.rowId
+    const refuse = async (why: VerificationRefusal, detail?: unknown): Promise<Record<string, unknown>> => {
+      await prisma.staffWorkAction.update({ where: { id: rowId }, data: { failure_reason: why } })
+      await audit({
+        tenantId: input.binding.tenantId,
+        actorId: `staff:${input.binding.id}`,
+        action: 'staff_verification.refused',
+        entity: 'StaffWorkAction',
+        entityId: rowId,
+        meta: {
+          why,
+          detail: detail ?? null,
+          operationId,
+          episodeId,
+          taskId: record.odooId,
+          managerOdooResUserId,
+        },
+      })
+      return {
+        requested: false,
+        why,
+        ...(detail !== undefined ? { detail } : {}),
+        operationId,
+      }
+    }
+
+    // 1. res_model_id — resolved and allowlisted. Never a text model name, and
+    //    never an id supplied by anything outside this process.
+    const resModelId = await resolveVerificationModelId(config, 'project.task')
+    if (!resModelId) return refuse('model_not_resolvable_in_odoo')
+
+    // 2. The target really exists, and is the record this DONE is about. The
+    //    existence check is a filtering search_read — a by-id read echoes back
+    //    ids that do not exist (see findTaskForVerification).
+    const task = await findTaskForVerification(config, record.odooId)
+    if (!task) return refuse('task_not_found')
+    if (record.projectId != null && task.projectId !== record.projectId) {
+      return refuse('task_is_not_the_current_work_ref', {
+        taskProjectId: task.projectId,
+        workRefProjectId: record.projectId,
+      })
+    }
+    if (!task.assigneeUserIds.includes(input.binding.odooResUserId)) {
+      return refuse('task_not_assigned_to_staff_member', { assignees: task.assigneeUserIds })
+    }
+
+    // 3. The manager. Foundation's own tenant-scoped binding first, so a user id
+    //    belonging to another tenant's Odoo can never be assigned to; then Odoo,
+    //    because a binding can outlive the account it points at.
+    const managerBinding = await findBindingByOdooUser(input.binding.tenantId, managerOdooResUserId)
+    if (!managerBinding || !managerBinding.active) return refuse('manager_not_bound_in_this_tenant')
+    const managerUser = await findActiveOdooUser(config, managerOdooResUserId)
+    if (!managerUser) return refuse('manager_not_active_in_odoo')
+
+    // 4. The activity type, resolved at runtime rather than hardcoded.
+    const activityType = await resolveVerificationActivityType(config, {
+      xmlId: verificationActivityTypeXmlId(),
+      configuredId: configuredVerificationActivityTypeId(),
+      names: VERIFICATION_ACTIVITY_TYPE_NAMES,
+    })
+    if (!activityType) return refuse('activity_type_not_resolvable')
+
+    // 5. Create.
+    const created = await createManagerVerificationActivity(config, {
+      resModel: 'project.task',
+      resModelId,
+      resId: task.taskId,
+      activityTypeId: activityType.activityTypeId,
+      managerOdooResUserId,
+      summary: verificationSummary(task.name || record.name),
+      note: verificationNote({
+        staffName: input.binding.displayName,
+        source: input.source ?? 'whatsapp',
+        note: input.note ?? null,
+        correlationId: input.correlationId,
+        operationId,
+      }),
+      dateDeadline: verificationDeadline(new Date(), verificationDeadlineDays()),
+    })
+    if (!created.ok) {
+      const why: VerificationRefusal =
+        created.reason === 'activity_readback_failed' ? 'activity_readback_failed' : 'activity_create_failed'
+      return refuse(why, { reason: created.reason, orphanActivityId: created.activityId ?? null })
+    }
+
+    // 6. The readback must agree with what was asked for.
+    const mismatch = readbackMismatch(
+      {
+        resModel: 'project.task',
+        resModelId,
+        resId: task.taskId,
+        userId: managerOdooResUserId,
+        activityTypeId: activityType.activityTypeId,
+      },
+      created.activity,
+    )
+    if (mismatch) {
+      return refuse('activity_readback_mismatch', {
+        mismatch,
+        orphanActivityId: created.activity.activityId,
+      })
+    }
+
+    const activity = {
+      activityId: created.activity.activityId,
+      resModel: created.activity.resModel,
+      resModelId: created.activity.resModelId,
+      resId: created.activity.resId,
+      userId: created.activity.userId,
+      activityTypeId: created.activity.activityTypeId,
+      activityTypeVia: activityType.via,
+      managerBindingId: managerBinding.id,
+    }
+
+    await prisma.staffWorkAction.update({
+      where: { id: rowId },
+      data: {
+        applied_at: new Date(),
+        failure_reason: null,
+        odoo_result: {
+          request: {
+            operation: MANAGER_VERIFICATION_OPERATION,
+            operationId,
+            episodeId,
+            tenantId: input.binding.tenantId,
+            workRefId: record.odooId,
+            managerOdooResUserId,
+          },
+          activity,
+        } as never,
+      },
+    })
+
+    await audit({
+      tenantId: input.binding.tenantId,
+      actorId: `staff:${input.binding.id}`,
+      action: 'staff_verification.requested',
+      entity: 'mail.activity',
+      entityId: String(activity.activityId),
+      meta: { operationId, episodeId, taskId: record.odooId, correlationId: input.correlationId, activity },
+    })
+
+    return {
+      requested: true,
+      activityId: activity.activityId,
+      operationId,
+      episodeId,
+      resModelId,
+      resId: task.taskId,
+      managerOdooResUserId,
+      activityTypeId: activity.activityTypeId,
+      activityTypeVia: activityType.via,
+    }
+  } catch (err) {
+    // Nothing proven, so nothing claimed. The DONE's chatter note still stands —
+    // it is a true fact about what the staff member did — and the failure is
+    // reported here rather than escalating the whole action to a failure.
+    return {
+      requested: false,
+      why: 'verification_failed',
+      detail: err instanceof Error ? err.message : String(err),
+      operationId,
+    }
+  }
 }
 
 export interface ManagerVerdictInput {
@@ -897,7 +1261,16 @@ export async function buildOwnerBrief(tenantId: string): Promise<StaffBriefRow[]
       prisma.notificationOutbox.count({
         where: { tenant_id: tenantId, contact: contactKey, provider_status: 'failed' },
       }),
-      prisma.staffWorkAction.count({ where: { tenant_id: tenantId, staff_binding_id: binding.id, applied_at: { not: null } } }),
+      prisma.staffWorkAction.count({
+        where: {
+          tenant_id: tenantId,
+          staff_binding_id: binding.id,
+          applied_at: { not: null },
+          // Foundation-owned operations share this ledger but are not actions
+          // the staff member took, so they must not inflate their count.
+          action: { not: VERIFY_REQUEST_ACTION },
+        },
+      }),
     ])
 
     out.push({

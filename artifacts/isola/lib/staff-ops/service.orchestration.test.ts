@@ -56,7 +56,21 @@ vi.mock('../prisma', () => ({
       count: async () => 0,
     },
     notificationOutbox: { findMany: async () => [], update: async () => ({}), count: async () => 0 },
-    staffBinding: { findMany: async () => [], findUnique: async () => null },
+    staffBinding: {
+      findMany: async () => [],
+      // The verifier lookup manager verification performs. Returns the manager
+      // the binding points at, in the SAME tenant.
+      findUnique: async ({ where }: any) => ({
+        id: 'sb-manager',
+        tenant_id: where.tenant_id_odoo_res_user_id.tenant_id,
+        odoo_res_user_id: where.tenant_id_odoo_res_user_id.odoo_res_user_id,
+        display_name: 'Manager',
+        wa_id: '17672351274',
+        role: 'manager',
+        active: true,
+        manager_odoo_res_user_id: null,
+      }),
+    },
   },
 }))
 
@@ -81,10 +95,35 @@ vi.mock('./odoo-work', async (importOriginal) => {
         ? { ok: true as const, detail: { messagePost: true } }
         : { ok: false as const, reason: h.odoo.chatterReason }
     },
-    requestManagerVerification: async () => {
+    resolveVerificationModelId: async () => 727,
+    findTaskForVerification: async () =>
+      h.odoo.record
+        ? {
+            taskId: h.odoo.record.odooId,
+            name: h.odoo.record.name,
+            projectId: h.odoo.record.projectId,
+            projectName: h.odoo.record.projectName,
+            stageName: h.odoo.record.stageName,
+            assigneeUserIds: h.odoo.record.assigneeUserIds,
+          }
+        : null,
+    findActiveOdooUser: async (_c: any, id: number) => ({ userId: id, name: 'Manager', login: 'manager@epic.dm' }),
+    resolveVerificationActivityType: async () => ({ activityTypeId: 4, name: 'To-Do', via: 'xml_id' as const }),
+    createManagerVerificationActivity: async (_c: any, i: any) => {
       h.calls.push('odoo.verification')
       return h.odoo.verificationOk
-        ? { ok: true as const, detail: { activityId: 99 }, activityId: 99 }
+        ? {
+            ok: true as const,
+            activity: {
+              activityId: 99,
+              resModel: 'project.task',
+              resModelId: i.resModelId,
+              resId: i.resId,
+              userId: i.managerOdooResUserId,
+              summary: i.summary,
+              activityTypeId: i.activityTypeId,
+            },
+          }
         : { ok: false as const, reason: 'activity create failed' }
     },
     moveTaskToStage: async () => {
@@ -233,7 +272,7 @@ describe('applyStaffAction — DONE and manager verification', () => {
     const r = await applyStaffAction({ ...baseAction, action: 'done', binding: KIM })
     expect(r.ok).toBe(true)
     if (r.ok && !r.deduped) {
-      expect(r.odooResult.verification).toEqual({ requested: true, activityId: 99 })
+      expect(r.odooResult.verification).toMatchObject({ requested: true, activityId: 99 })
     }
     expect(calls).toContain('odoo.verification')
   })
