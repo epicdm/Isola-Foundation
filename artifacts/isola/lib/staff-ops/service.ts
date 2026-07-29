@@ -22,9 +22,11 @@ import {
   moveTaskToConceptStage,
   moveTaskToStage,
   postStaffActionNote,
+  readVerificationActivity,
   readWorkRecord,
   renderChatterNote,
   requestManagerVerification,
+  type OdooVerificationActivity,
   type OdooWorkRecord,
 } from './odoo-work'
 import {
@@ -44,7 +46,7 @@ import {
   staffContactE164,
 } from './staff-notification'
 import { mintCorrelationId, type WorkRefModel } from './work-ref'
-import { buildMenu, type MenuRendering, type StaffMenuAction } from './staff-menu'
+import { buildMenu, type ManagerVerdict, type MenuRendering, type StaffMenuAction } from './staff-menu'
 
 /**
  * Odoo activity type used to request manager verification. 4 is "To-Do" on
@@ -541,30 +543,57 @@ export async function applyStaffAction(input: ApplyStaffActionInput): Promise<Ap
  * about what the staff member did, and the failure is reported on `stageMove`
  * rather than escalating to a full action failure.
  */
-async function applyStartStageMove(
+/**
+ * Move a task to a CONCEPT, letting an explicitly configured stage name win
+ * only where that stage genuinely exists on this task's own board.
+ *
+ * This is the rule proven live for START on 2026-07-29 (task 2291: the
+ * configured `In-Progress` missed on project 53, the concept fallback found
+ * `In Development`, and the reply named the stage actually reached). It is a
+ * shared function rather than two copies precisely so START and the manager
+ * verdict cannot drift apart — the START defect was one code path silently
+ * disagreeing with what the reply claimed, and two hand-maintained copies of
+ * this logic would reintroduce that by construction.
+ *
+ * `explicitMiss` is reported, never swallowed: an operator must be able to see
+ * that a configured stage name is wrong for a board without reading code.
+ */
+async function moveToConceptWithExplicit(
   config: Awaited<ReturnType<typeof resolveOdooConfigForTenant>>,
   record: OdooWorkRecord,
+  concept: 'new' | 'active' | 'blocked' | 'terminal',
+  explicit: string,
 ): Promise<Record<string, unknown>> {
-  // An explicit stage name still wins — but only when that stage really exists
-  // in THIS project. A global name is an operator hint, not a guarantee.
-  const explicit = (process.env.STAFF_START_STAGE_NAME ?? '').trim()
   if (explicit) {
     const named = await moveTaskToStage(config, record, explicit)
     if (named.ok) return { moved: true, via: 'explicit', ...named.detail }
 
     // The configured name does not exist on this board. Fall back to the
-    // board's own active stage rather than reporting a move that never
-    // happened — this is the case that produced the live defect on project 53.
-    const byConcept = await moveTaskToConceptStage(config, record, 'active')
+    // board's own stage for this concept rather than reporting a move that
+    // never happened — this is the case that produced the live defect on
+    // project 53.
+    const byConcept = await moveTaskToConceptStage(config, record, concept)
     return byConcept.ok
       ? { moved: true, via: 'concept', explicitMiss: named.reason, ...byConcept.detail }
       : { moved: false, via: 'concept', why: byConcept.reason, explicitMiss: named.reason }
   }
 
-  const result = await moveTaskToConceptStage(config, record, 'active')
+  const result = await moveTaskToConceptStage(config, record, concept)
   return result.ok
     ? { moved: true, via: 'concept', ...result.detail }
     : { moved: false, via: 'concept', why: result.reason }
+}
+
+async function applyStartStageMove(
+  config: Awaited<ReturnType<typeof resolveOdooConfigForTenant>>,
+  record: OdooWorkRecord,
+): Promise<Record<string, unknown>> {
+  return moveToConceptWithExplicit(
+    config,
+    record,
+    'active',
+    (process.env.STAFF_START_STAGE_NAME ?? '').trim(),
+  )
 }
 
 /**
@@ -603,9 +632,12 @@ export interface ManagerVerdictInput {
   activityId: number
   approved: boolean
   feedback?: string | null
-  /** The task the activity hangs on, so an approval can also move the stage. */
+  /** The task the activity hangs on, so a verdict can also move the stage. */
   taskId?: number | null
+  /** Explicit stage for APPROVE. Honoured only where it exists on the board. */
   approvedStageName?: string
+  /** Explicit stage for RETURN. Honoured only where it exists on the board. */
+  returnStageName?: string
 }
 
 /**
@@ -623,11 +655,53 @@ export async function applyManagerVerdict(input: ManagerVerdictInput): Promise<{
   )
   if (!closed.ok) return { ok: false, detail: closed.reason }
 
-  let stage: unknown = { moved: false }
-  if (input.approved && input.taskId && input.approvedStageName) {
+  // STAGE HANDLING — the START lesson, applied.
+  //
+  // This previously called `moveTaskToStage` with a single global name, which
+  // matches an EXACT name inside the task's own project. That is the identical
+  // construct behind
+  // `def-spine-start-reports-started-without-odoo-stage-move-2026-07-29`: on
+  // project 53 (`In Development` / `Under Investigation`) no global "approved"
+  // name exists, so the move silently did nothing while the manager was told
+  // the work had been approved. It also only ran for APPROVE, so a RETURN never
+  // moved anything at all.
+  //
+  // Approve resolves the board's TERMINAL concept, Return resolves its ACTIVE
+  // one, and an explicit configured name wins only where it truly exists.
+  let stage: Record<string, unknown> = { moved: false, why: 'no_task_reference' }
+  let stageNameAfter: string | null = null
+  let readbackOk = true
+
+  if (input.taskId) {
     const task = await readWorkRecord(config, { odooModel: 'project.task', odooId: input.taskId })
-    if (task) stage = await moveTaskToStage(config, task, input.approvedStageName)
+    if (!task) {
+      stage = { moved: false, why: 'task_not_found' }
+      readbackOk = false
+    } else {
+      const explicit = (
+        (input.approved
+          ? (input.approvedStageName ?? process.env.STAFF_APPROVED_STAGE_NAME)
+          : (input.returnStageName ?? process.env.STAFF_RETURN_STAGE_NAME)) ?? ''
+      ).trim()
+      stage = await moveToConceptWithExplicit(
+        config,
+        task,
+        input.approved ? 'terminal' : 'active',
+        explicit,
+      )
+
+      // POST-WRITE READBACK. The reply must name the stage Odoo actually holds
+      // now, not the one we asked for. A move that reports `moved: true` but
+      // reads back unchanged is exactly the class of lie this packet exists to
+      // prevent, so the caller gets the observed value and an explicit flag
+      // when the readback itself failed.
+      const after = await readWorkRecord(config, { odooModel: 'project.task', odooId: input.taskId })
+      if (after) stageNameAfter = after.stageName
+      else readbackOk = false
+    }
   }
+  stage.stageNameAfter = stageNameAfter
+  stage.readbackOk = readbackOk
 
   await audit({
     tenantId: input.manager.tenantId,
@@ -639,6 +713,85 @@ export async function applyManagerVerdict(input: ManagerVerdictInput): Promise<{
   })
 
   return { ok: true, detail: { closed: closed.detail, stage } }
+}
+
+/**
+ * Resolve a MANAGER's Approve / Return tap to an authorised verdict, or refuse.
+ *
+ * The mirror of `resolveInboundStaffTap`, and fail-closed for the same reason:
+ * the payload rode out to a handset and came back, so it is an identifier and
+ * never a permission. Every fact it asserts is re-established from Odoo before
+ * anything is written.
+ *
+ * The checks, in order, and why each one is here rather than assumed:
+ *
+ *  1. IDENTITY, via the same `decideInboundRoute` the staff path uses. A number
+ *     bound in two tenants is refused as cross-tenant, and an inactive binding
+ *     is refused — neither is folded into "unknown sender".
+ *  2. ROLE. Only `manager` or `owner` may render a verdict. The internal API
+ *     already enforces this; the WhatsApp path must not be the softer door.
+ *  3. THE ACTIVITY EXISTS AND IS OPEN. Read from the Odoo config resolved from
+ *     the BINDING's tenant — never a tenant supplied by the caller.
+ *  4. THE ACTIVITY IS THIS MANAGER'S. `user_id` must match. A frozen button
+ *     outlives its episode and can be forwarded; another manager's activity id
+ *     must bounce.
+ *  5. THE ACTIVITY HANGS ON A TASK. Without `res_model` / `res_id` a verdict
+ *     could move a record the manager was never shown.
+ *
+ * No step trusts the button label, the phone number alone, or any task id the
+ * client supplied — the task comes from the activity, not from the payload.
+ */
+export type ManagerTapRefusal =
+  | 'identity'
+  | 'not_a_manager'
+  | 'activity_not_open'
+  | 'not_this_manager'
+  | 'wrong_object'
+
+export type ResolveManagerTapResult =
+  | { ok: true; binding: StaffBindingRow; activity: OdooVerificationActivity; taskId: number }
+  | { ok: false; refusal: ManagerTapRefusal; why?: string; binding?: StaffBindingRow }
+
+export async function resolveInboundManagerTap(input: {
+  waId: string
+  verdict: ManagerVerdict
+  activityId: number
+  channelTenantId: string | null
+}): Promise<ResolveManagerTapResult> {
+  const candidates = await findBindingsByWaId(input.waId)
+
+  // Identity only — the empty text can never match a command, so this decides
+  // nothing except "who is this, and may they act at all".
+  const provisional = decideInboundRoute({
+    text: '',
+    bindingCandidates: candidates,
+    channelTenantId: input.channelTenantId,
+    openWork: [],
+  })
+  if (provisional.route === 'exception') {
+    // Identity failed — no Odoo read, and we must not.
+    return { ok: false, refusal: 'identity', why: provisional.why }
+  }
+
+  const binding = provisional.binding
+  if (binding.role !== 'manager' && binding.role !== 'owner') {
+    return { ok: false, refusal: 'not_a_manager', why: binding.role, binding }
+  }
+
+  const config = await resolveOdooConfigForTenant(binding.tenantId)
+  const activity = await readVerificationActivity(config, input.activityId)
+  if (!activity) {
+    // Gone or already resolved — indistinguishable here, and both refuse.
+    return { ok: false, refusal: 'activity_not_open', binding }
+  }
+  if (activity.userId !== binding.odooResUserId) {
+    return { ok: false, refusal: 'not_this_manager', binding }
+  }
+  if (activity.resModel !== 'project.task' || !activity.resId) {
+    return { ok: false, refusal: 'wrong_object', why: activity.resModel, binding }
+  }
+
+  return { ok: true, binding, activity, taskId: activity.resId }
 }
 
 export interface DispatchWorkInput {

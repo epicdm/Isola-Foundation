@@ -331,6 +331,64 @@ export async function completeVerificationActivity(
 }
 
 /**
+ * A verification activity, read back from Odoo as the authority on who owns it
+ * and what it hangs on.
+ *
+ * `readWorkRecord` already handles `mail.activity`, but it flattens the row
+ * into an `OdooWorkRecord` and DISCARDS `res_model` / `res_id` — there is no
+ * field on that shape to carry them. That loss matters: without the parent
+ * reference there is no way to prove a tapped activity actually belongs to the
+ * task a verdict is about to move, so a manager could be shown one task and
+ * silently act on another. This read exists to close that gap.
+ */
+export interface OdooVerificationActivity {
+  activityId: number
+  /** The model the activity hangs on. Only `project.task` is actionable here. */
+  resModel: string
+  /** The record the activity hangs on. */
+  resId: number
+  /** The Odoo user the activity is assigned to — the ONLY person who may resolve it. */
+  userId: number | null
+  summary: string | null
+}
+
+/**
+ * Read an open verification activity.
+ *
+ * Returns null when the activity does not exist OR is no longer open. Odoo's
+ * `action_feedback` removes a completed `mail.activity` (it becomes a
+ * `mail.message`), so "already resolved" and "never existed" are genuinely
+ * indistinguishable at this layer — and both must refuse. Callers must say
+ * "already resolved or no longer open" rather than guessing which one it was.
+ */
+export async function readVerificationActivity(
+  config: OdooConfig,
+  activityId: number,
+): Promise<OdooVerificationActivity | null> {
+  if (!Number.isInteger(activityId) || activityId <= 0) return null
+  const rows = (await json2Call(
+    config,
+    'mail.activity',
+    'search_read',
+    {
+      domain: [['id', '=', activityId]],
+      fields: ['id', 'summary', 'user_id', 'res_model', 'res_id'],
+      limit: 1,
+    },
+    15000,
+  ).catch(() => [])) as Record<string, unknown>[]
+  const row = rows?.[0]
+  if (!row) return null
+  return {
+    activityId: Number(row.id),
+    resModel: String(row.res_model ?? ''),
+    resId: Number(row.res_id ?? 0),
+    userId: idOf(row.user_id),
+    summary: typeof row.summary === 'string' ? row.summary : null,
+  }
+}
+
+/**
  * Derive the staff actions that are valid for a record right now, based only on
  * what Odoo says about its current state. Used to give an informative reply when
  * a START/RESUME is refused — the caller never needs to consult Foundation-side
