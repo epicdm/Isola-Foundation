@@ -88,6 +88,8 @@ model Tenant {
   notification_outbox NotificationOutbox[]
   staff_bindings      StaffBinding[]
   staff_work_actions  StaffWorkAction[]
+
+  conversation_ownership_transitions ConversationOwnershipTransition[]
 }
 
 // ── Per-tenant voicemail catches (AI missed-call catcher) ────────────────────
@@ -401,8 +403,48 @@ model Conversation {
   customer_name            String?
   status                   String    @default("open") // open | resolved
   agent_took_over          Boolean   @default(false)
-  human_handling           Boolean   @default(false) // true when a human agent has replied in Chatwoot
+  // COMPATIBILITY PROJECTION, NO LONGER AUTHORITATIVE (Commit 2).
+  // Derived from `ownership_state` by lib/ownership/state.ts
+  // projectHumanHandling(); written only by the ownership engine
+  // (lib/ownership/transitions.ts). Retained because dashboards, counters
+  // and every non-authoritative ("legacy regime") door still read it, and
+  // because dropping a live boolean in the same commit that replaces it
+  // would make the change irreversible. See lib/ownership/authority.ts for
+  // which doors the state governs and which still route on this flag.
+  human_handling           Boolean   @default(false)
   last_message_at          DateTime?
+
+  // ── Episode-aware conversation ownership (Commit 2) ──────────────────────
+  //
+  // The authoritative answer to "who owns the response right now", replacing
+  // `human_handling` as the sole authority.
+  //
+  // A boolean cannot express an EPISODE, and without an episode a late or
+  // replayed handback for a conversation that has since been escalated again
+  // would silently resume an automated brain into a live human conversation.
+  // It also cannot express HANDING_BACK (reconciling, nobody speaks), and it
+  // cannot distinguish "a human is here" from "Chatwoot's status changed" —
+  // which is why resolution used to hand the microphone straight back to the
+  // AI with no reconciliation and no record.
+  //
+  // Values are the OWNERSHIP_STATES vocabulary already declared in
+  // lib/clawith/contract.ts, so the wire contract and the store speak one
+  // language. Kept as String rather than a Prisma enum deliberately: the
+  // vocabulary is shared with an external contract, and a Postgres enum
+  // makes every future value a locking DDL migration on a live table.
+  ownership_state                   String    @default("AI_OWNED")
+  // Increments once per span of human involvement. Identity for exactly-once
+  // is tenant + conversation + episode.
+  ownership_episode                 Int       @default(0)
+  ownership_changed_at              DateTime?
+  ownership_reason                  String?
+  // Non-secret reference to the operator/agent that caused the transition.
+  ownership_actor_ref               String?
+  ownership_correlation_id          String?
+  // Identity of the escalation / handback operations that own the current
+  // episode — the same values claimed in ConversationOwnershipTransition.
+  ownership_escalation_operation_id String?
+  ownership_handback_operation_id   String?
 
   // Authoritative snapshot of the exact Chatwoot inbox/binding this
   // conversation lives in, captured from the live webhook's inbox_id (see
@@ -424,8 +466,11 @@ model Conversation {
   messages         Message[]
   escalation_refs  EscalationRef[]
 
+  ownership_transitions ConversationOwnershipTransition[]
+
   @@unique([tenant_id, chatwoot_conversation_id])
   @@index([tenant_id, status])
+  @@index([tenant_id, ownership_state])
   @@index([tenant_id, last_message_at])
   @@index([chatwoot_binding_id])
 }
@@ -949,4 +994,63 @@ model StaffWorkAction {
   @@index([tenant_id, work_ref_model, work_ref_id])
   @@index([correlation_id])
   @@index([staff_binding_id])
+}
+
+/// The conversation-ownership transition ledger — and the exactly-once claim
+/// substrate for every change of response authority.
+///
+/// Two jobs in one table, deliberately:
+///
+///   1. CLAIM. `@@unique([tenant_id, conversation_id, operation_id])` is what
+///      makes escalation, assignment, handoff and handback exactly-once. A
+///      replayed Chatwoot webhook, a retried MCP tool call and a
+///      double-clicked dashboard button all present the same operation id, so
+///      the second attempt loses the insert and performs no side effect. Same
+///      shape as StaffWorkAction's idempotency key — a proven pattern here,
+///      not a new one.
+///
+///   2. AUDIT. Every transition records where the conversation came from,
+///      where it went, which episode it belonged to, why, who caused it and
+///      under which correlation id. Ownership questions after the fact
+///      ("could the AI have replied here?") are answerable from rows rather
+///      than from logs.
+///
+/// This is NOT a second conversation-state platform: the CURRENT state lives
+/// on Conversation and is read from there on every hot path. This table is
+/// the append-only history of how it got there.
+model ConversationOwnershipTransition {
+  id              String @id @default(cuid())
+  tenant_id       String
+  conversation_id String
+
+  /// The episode this transition belongs to. Stale-handback rejection compares
+  /// against Conversation.ownership_episode.
+  episode    Int
+  from_state String
+  to_state   String
+  reason     String
+
+  /// Caller-supplied operation identity. THE claim key. For the governed
+  /// escalate_to_human endpoint this is the scoped ref's own correlation id;
+  /// for a human dashboard reply it is Chatwoot's message id; for a handback
+  /// it is the operation id the authorized caller supplied.
+  operation_id   String
+  operation_kind String
+
+  /// Non-secret reference to the authoritative operator/agent, e.g. `user:<id>`.
+  actor_ref      String?
+  correlation_id String?
+
+  created_at DateTime @default(now())
+
+  tenant       Tenant       @relation(fields: [tenant_id], references: [id])
+  conversation Conversation @relation(fields: [conversation_id], references: [id])
+
+  // Explicit map: Prisma's default name for this compound unique exceeds
+  // Postgres's 63-character identifier limit and would be truncated, drifting
+  // from the hand-written migration.
+  @@unique([tenant_id, conversation_id, operation_id], map: "ConversationOwnershipTransition_tenant_conv_op_key")
+  @@index([conversation_id, episode])
+  @@index([tenant_id, created_at])
+  @@index([correlation_id])
 }

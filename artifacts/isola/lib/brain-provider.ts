@@ -41,6 +41,7 @@ import { detectEscalationIntent } from './escalation-intent';
 import { detectEscalationClaim } from './escalation-claim';
 import { audit } from './audit';
 import { isAiLoopGatedDoor } from './clawith/gate';
+import type { OwnershipState } from './ownership/state';
 import { invokeClawithGated } from './clawith/invoke';
 import type { ClawithFailureRecord } from './clawith/invoke';
 import type { ClawithToolDefinition } from './clawith/contract';
@@ -166,6 +167,15 @@ export interface GatedLoopContext {
   knowledgeScopeIds?: string[];
   /** Tools Foundation will authorise THIS turn. Empty until Commit 3. */
   allowedTools?: ClawithToolDefinition[];
+  /**
+   * The conversation's AUTHORITATIVE ownership state, read from
+   * Conversation.ownership_state (Commit 2). Required, not defaulted: a
+   * caller that cannot say who owns the conversation must not be able to get
+   * a customer-facing turn by omission. buildClawithRequest() rejects every
+   * non-AI state, so a HUMAN state reaching here fails the request closed
+   * rather than producing a reply into a conversation a person owns.
+   */
+  ownershipState: OwnershipState;
   timezone?: string;
   locale?: string;
 }
@@ -293,9 +303,10 @@ export async function generateReply(params: {
       designatedAgentId: clawithBinding?.clawith_agent_id ?? '',
       knowledgeScopeIds: gatedLoop.knowledgeScopeIds,
       allowedTools: gatedLoop.allowedTools,
-      // Commit 2 replaces this literal with the authoritative episode state.
-      // Until then the gate is off, so no live conversation observes it.
-      ownershipState: 'AI_OWNED',
+      // The authoritative episode state, supplied by the caller from
+      // Conversation.ownership_state. buildClawithRequest() refuses any state
+      // that does not permit an AI customer reply.
+      ownershipState: gatedLoop.ownershipState,
       correlationId: escalationCorrelationId ?? `corr-${sessionId}-${gatedLoop.inboundMessageId}`,
       locale: gatedLoop.locale,
       timezone: gatedLoop.timezone,

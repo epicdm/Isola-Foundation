@@ -9,6 +9,7 @@
  */
 
 import { prisma } from './prisma';
+import { legacyHumanHandlingSuppresses } from './ownership/state';
 import { TIER_MODELS } from './ai';
 import { generateReply } from './brain-provider';
 import { getChatwootConfig } from './engines';
@@ -182,7 +183,13 @@ export async function handleInboundWhatsApp(params: {
 
   // ── 8b. Per-conversation human takeover ───────────────────────────────────
   // A human agent has claimed this conversation in Chatwoot — mirror only, no AI.
-  if (conversation.human_handling) {
+  //
+  // This is the DIRECT WhatsApp path: there is no Chatwoot account/inbox door
+  // here, so it is always the LEGACY regime and the projection is the reply
+  // gate, exactly as before Commit 2. The read is routed through a named
+  // helper so an audit of "what decides whether the bot speaks" finds this
+  // call site explicitly instead of an anonymous boolean test.
+  if (legacyHumanHandlingSuppresses(conversation)) {
     console.log('[agent] Human handling active for conversation', conversation.id, '— no AI reply');
     return;
   }

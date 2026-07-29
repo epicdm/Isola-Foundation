@@ -39,7 +39,12 @@
  *   • If Chatwoot shows "pending", toggles to "open" (cosmetic UI fix).
  *
  * conversation_status_changed / conversation_resolved
- *   • Sets human_handling = false so AI resumes on the next incoming message.
+ *   • Records the resolution. On a door where the ownership model is
+ *     authoritative (lib/ownership/authority.ts) it does NOT return response
+ *     authority to the AI — only an explicit authorized handback does that.
+ *     On a legacy door the historical human_handling clear is preserved
+ *     exactly, applied to the ownership state as well so the two cannot
+ *     drift.
  *
  * All other events: 200 no-op.
  *
@@ -84,6 +89,13 @@ import {
 } from '@/lib/chatwoot-webhook-signature';
 import { buildEscalationCard } from '@/lib/escalation-card';
 import { detectEscalationIntent } from '@/lib/escalation-intent';
+import { ownershipIsAuthoritative } from '@/lib/ownership/authority';
+import {
+  legacyHumanHandlingSuppresses,
+  readOwnership,
+  suppressesAutomatedReply,
+} from '@/lib/ownership/state';
+import { recordHumanReply, recordResolution, settleResumed } from '@/lib/ownership/transitions';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -321,7 +333,36 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
         data:  { human_handling: true },
       });
       if (updated.count > 0) {
-        console.log(`[agent-bot] Human reply in conv cw#${cwConvId} — human_handling=true`);
+        // The boolean write above is the LEGACY-REGIME FAIL-SAFE and is kept
+        // deliberately: on a non-authoritative door it IS the reply gate, so
+        // it must not become conditional on the new machinery succeeding. The
+        // ownership transition below records the same fact durably, with an
+        // episode, and writes the identical projection value.
+        const local = await prisma.conversation.findFirst({
+          where:  { tenant_id: binding.tenant.id, chatwoot_conversation_id: cwConvId },
+          select: {
+            id: true, ownership_state: true, ownership_episode: true, human_handling: true,
+          },
+        });
+        if (local) {
+          const view = readOwnership(local);
+          const claimed = await recordHumanReply({
+            tenantId:       binding.tenant.id,
+            conversationId: local.id,
+            // One physical human reply → one transition, however many times
+            // Chatwoot redelivers the event.
+            operationId:    `human_reply:${cwMsgId ?? 'unknown'}`,
+            currentState:   view.state,
+            currentEpisode: view.episode,
+            actorRef:       body.sender?.id != null ? `chatwoot_user:${body.sender.id}` : 'chatwoot_user:unknown',
+          });
+          console.log(
+            `[agent-bot] Human reply in conv cw#${cwConvId} — human_handling=true, ` +
+              `ownership=${claimed.state} episode=${claimed.episode} claim=${claimed.status}`,
+          );
+        } else {
+          console.log(`[agent-bot] Human reply in conv cw#${cwConvId} — human_handling=true`);
+        }
       } else {
         console.log(`[agent-bot] Outgoing for unknown local conv cw#${cwConvId} — no local record yet`);
       }
@@ -399,11 +440,32 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
     },
   });
 
-  // ── Human-handling gate (replaces status-based gating) ───────────────────
+  // ── Response-authority gate ──────────────────────────────────────────────
   // Do NOT consult Chatwoot conversation status here — it is unreliable due to
   // "open by system due to agent error" flips caused by webhook timeouts.
-  if (conversation.human_handling) {
-    console.log(`[agent-bot] Conv cw#${cwConvId} human_handling=true — bot silent`);
+  //
+  // Two regimes, one predicate (lib/ownership/authority.ts):
+  //
+  //   AUTHORITATIVE door — the ownership STATE decides. HUMAN_REQUESTED,
+  //     HUMAN_OWNED and HANDING_BACK each suppress every automated reply, and
+  //     a row that cannot be read as a consistent ownership fact suppresses
+  //     too (readOwnership fails closed). Resolution cannot have re-armed the
+  //     bot here, because resolution no longer moves ownership.
+  //
+  //   LEGACY door — the pre-Commit-2 boolean decides, byte-for-byte as it does
+  //     in production today. With ISOLA_AI_LOOP_ENABLED off this is EVERY
+  //     door, which is precisely why this commit changes no live routing.
+  const ownershipAuthoritative = ownershipIsAuthoritative(accountId, inboxId);
+  const ownership = readOwnership(conversation);
+  const suppressed = ownershipAuthoritative
+    ? suppressesAutomatedReply(ownership.state) || ownership.diverged
+    : legacyHumanHandlingSuppresses(conversation);
+  if (suppressed) {
+    console.log(
+      `[agent-bot] Conv cw#${cwConvId} bot silent — authority=` +
+        `${ownershipAuthoritative ? 'ownership' : 'legacy'} state=${ownership.state} ` +
+        `episode=${ownership.episode} diverged=${ownership.diverged}`,
+    );
     return 200;
   }
 
@@ -679,6 +741,21 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
     // ── Meter tokens ─────────────────────────────────────────────────────────
     await meterTokens(tenantId, tokensUsed, model);
 
+    // ── Settle a resumed conversation ───────────────────────────────────────
+    // AI_RESUMED exists so that "the next customer message invoked the brain
+    // once after handback" is an OBSERVABLE fact rather than an assumption.
+    // Once that turn has been consumed the conversation settles back to
+    // AI_OWNED. Authoritative doors only — on a legacy door ownership is
+    // recorded but does not govern, and settling it would be noise.
+    if (ownershipAuthoritative && ownership.state === 'AI_RESUMED') {
+      await settleResumed({
+        tenantId,
+        conversationId: conversation.id,
+        operationId:    `resumed_settled:${incomingMsgId}`,
+        episode:        ownership.episode,
+      });
+    }
+
     return 200;
   } finally {
     // Always clear typing, even on early return / thrown error — an agent
@@ -690,7 +767,18 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
 }
 
 // ── conversation_status_changed / conversation_resolved handler ───────────────
-// Resolved → clear human_handling so AI resumes on the next incoming message.
+//
+// Resolution is an OBSERVATION about a Chatwoot UI state, not a grant of
+// response authority. THIS IS THE BEHAVIOUR COMMIT 2 EXISTS TO CHANGE: the
+// previous implementation set human_handling=false here, so closing a ticket
+// — or a Chatwoot automation rule closing it — handed the microphone straight
+// back to an automated brain with no reconciliation, no human outcome in
+// context, and no record that it had happened.
+//
+// On an authoritative door ownership does not move. On a legacy door the
+// historical clear is preserved exactly and applied to BOTH the state and its
+// projection, so gate-OFF behaviour is unchanged and the two stores never
+// disagree.
 
 async function handleStatusChanged(body: Record<string, any>, event: string) {
   const isResolved = event === 'conversation_resolved' || body.status === 'resolved';
@@ -711,12 +799,40 @@ async function handleStatusChanged(body: Record<string, any>, event: string) {
     return;
   }
 
-  const updated = await prisma.conversation.updateMany({
-    where: { chatwoot_conversation_id: cwConvId, customer_phone: customerPhone },
-    data:  { human_handling: false, status: 'resolved' },
+  // Resolved per-row rather than in one updateMany: the regime (authoritative
+  // vs legacy) is a property of the conversation's own door, and the ledger
+  // claim is per conversation.
+  const locals = await prisma.conversation.findMany({
+    where:  { chatwoot_conversation_id: cwConvId, customer_phone: customerPhone },
+    select: {
+      id: true, tenant_id: true, chatwoot_inbox_id: true,
+      chatwoot_binding_id: true, ownership_episode: true,
+    },
   });
-  if (updated.count > 0) {
-    console.log(`[agent-bot] Conv cw#${cwConvId} resolved — human_handling cleared, AI resumes`);
+  for (const local of locals) {
+    let resolvedAccountId: string | null = null;
+    if (local.chatwoot_binding_id) {
+      const b = await prisma.chatwootBinding.findUnique({
+        where:  { id: local.chatwoot_binding_id },
+        select: { account_id: true },
+      });
+      resolvedAccountId = b?.account_id ?? null;
+    }
+    // No resolvable account id → cannot prove this is an authoritative door →
+    // legacy regime. Fail towards the behaviour that is already live.
+    const authoritative =
+      resolvedAccountId !== null && ownershipIsAuthoritative(resolvedAccountId, local.chatwoot_inbox_id);
+    const outcome = await recordResolution({
+      tenantId:       local.tenant_id,
+      conversationId: local.id,
+      operationId:    `resolution:${cwConvId}:${local.ownership_episode ?? 0}`,
+      authoritative,
+    });
+    console.log(
+      `[agent-bot] Conv cw#${cwConvId} resolved — authority=` +
+        `${authoritative ? 'ownership' : 'legacy'} state=${outcome.state} ` +
+        `legacy_cleared=${outcome.legacyCleared} claim=${outcome.status}`,
+    );
   }
 }
 
