@@ -352,6 +352,130 @@ function extractStaffTapId(msg: any): string {
   return '';
 }
 
+/**
+ * The ONE outbound path for the staff WhatsApp channel.
+ *
+ * Extracted verbatim out of `handleStaffInboundMessage` so that a second caller
+ * — the manager-verification notice — cannot become a second send path. Two
+ * send paths is how "exactly one reply" quietly becomes two, and that is the
+ * defect class this packet exists to eliminate. The alternative considered and
+ * rejected was duplicating these ~90 lines at the manager call site.
+ *
+ * Behaviour is unchanged from the inline version:
+ *   - the service-window predicate is still consulted even though the inbound
+ *     message has just refreshed it, which guards against clock skew;
+ *   - a pinned STAFF_NOTIFICATION_PHONE_NUMBER_ID that does not belong to this
+ *     tenant is still a hard stop with NO fallback, same rule as the drain;
+ *   - a failed interactive send still falls back to plain text, because the
+ *     text is the part that carries the fact — the menu is the extra.
+ *
+ * `to` is the Meta sender id exactly as it arrived; the '+' strip happens here,
+ * as it did before, so callers never have to remember it.
+ */
+async function sendStaffChannelReply(params: {
+  tenantId: string;
+  to: string;
+  text: string;
+  menu: MenuRendering;
+}): Promise<void> {
+  const { tenantId, to, text, menu } = params;
+
+  // Reply with free-form text if the service window is open.
+  // The inbound message itself opens/refreshes the 24-hour window, so
+  // lastInboundAt = now gives age = 0 — hasOpenServiceWindow returns true.
+  // Respecting the predicate regardless guards against clock skew or any
+  // future change to the window rule.
+  const { hasOpenServiceWindow } = await import('@/lib/staff-ops/staff-notification');
+  const now = new Date();
+  if (!hasOpenServiceWindow({ lastInboundAt: now, now })) {
+    console.log(`[webhook/wa][staff] service window closed for sender=${to} — reply suppressed`);
+    return;
+  }
+
+  // Resolve FROM number and token — mirrors the logic in notify-whatsapp.ts,
+  // including the STAFF_NOTIFICATION_PHONE_NUMBER_ID pinned-number behaviour.
+  // A pinned number that does not belong to this tenant is a hard stop with no
+  // fallback — same rule as the drain.
+  const pinnedId = process.env.STAFF_NOTIFICATION_PHONE_NUMBER_ID;
+  const fromNumber = await (pinnedId
+    ? prisma.whatsAppNumber.findFirst({
+        where: { phone_number_id: pinnedId, tenant_id: tenantId },
+        select: { phone_number_id: true, access_token: true, token_env: true },
+      })
+    : prisma.whatsAppNumber.findFirst({
+        where: { tenant_id: tenantId },
+        orderBy: { created_at: 'asc' },
+        select: { phone_number_id: true, access_token: true, token_env: true },
+      }));
+
+  if (!fromNumber) {
+    const why = pinnedId
+      ? `STAFF_NOTIFICATION_PHONE_NUMBER_ID=${pinnedId} not found for tenant ${tenantId} — refusing to fall back`
+      : `no WhatsAppNumber for tenant ${tenantId}`;
+    console.error(`[webhook/wa][staff] reply suppressed — ${why}`);
+    return;
+  }
+
+  const token = fromNumber.token_env
+    ? process.env[fromNumber.token_env]
+    : fromNumber.access_token;
+  if (!token) {
+    console.error(
+      `[webhook/wa][staff] reply suppressed — no token for phone_number_id=${fromNumber.phone_number_id} tenant=${tenantId}`,
+    );
+    return;
+  }
+
+  const { sendText, sendInteractiveButtons, sendInteractiveList } = await import('@/engines/whatsapp');
+  const { getWhatsAppConfig } = await import('@/lib/engines');
+  const waConfig = getWhatsAppConfig();
+  const sendCtx = {
+    phoneId: fromNumber.phone_number_id,
+    token,
+    to: to.replace(/^\+/, ''), // Meta expects E.164 digits without '+'
+  };
+
+  // Interactive when there is a menu, plain text otherwise.
+  let replyResult =
+    menu.kind === 'buttons'
+      ? await sendInteractiveButtons(waConfig, {
+          ...sendCtx,
+          body: text,
+          buttons: menu.items.map((i) => ({ id: i.id, title: i.title })),
+        })
+      : menu.kind === 'list'
+        ? await sendInteractiveList(waConfig, {
+            ...sendCtx,
+            body: text,
+            buttonText: 'Choose action',
+            rows: menu.items.map((i) => ({
+              id: i.id,
+              title: i.title,
+              description: i.description,
+            })),
+          })
+        : await sendText(waConfig, { ...sendCtx, body: text });
+
+  // A menu problem must never cost the staff member their confirmation — the
+  // text is the part that carries the fact, so it is the floor, not the extra.
+  if (!replyResult.ok && menu.kind !== 'none') {
+    console.error(
+      `[webhook/wa][staff] interactive reply failed kind=${menu.kind} sender=${to} status=${replyResult.status} error=${replyResult.error} — falling back to text`,
+    );
+    replyResult = await sendText(waConfig, { ...sendCtx, body: text });
+  }
+
+  if (!replyResult.ok) {
+    console.error(
+      `[webhook/wa][staff] reply failed phone_number_id=${fromNumber.phone_number_id} sender=${to} status=${replyResult.status} error=${replyResult.error}`,
+    );
+  } else {
+    console.log(
+      `[webhook/wa][staff] reply sent phone_number_id=${fromNumber.phone_number_id} sender=${to} wamid=${replyResult.messageId}`,
+    );
+  }
+}
+
 async function handleStaffInboundMessage(params: {
   phoneNumberId: string;
   from: string;
@@ -493,102 +617,8 @@ async function handleStaffInboundMessage(params: {
     }
   }
 
-  // ── Single shared send path. ─────────────────────────────────────────────────
-
-  // Reply with free-form text if the service window is open.
-  // The inbound message itself opens/refreshes the 24-hour window, so
-  // lastInboundAt = now gives age = 0 — hasOpenServiceWindow returns true.
-  // Respecting the predicate regardless guards against clock skew or any
-  // future change to the window rule.
-  const { hasOpenServiceWindow } = await import('@/lib/staff-ops/staff-notification');
-  const now = new Date();
-  if (!hasOpenServiceWindow({ lastInboundAt: now, now })) {
-    console.log(`[webhook/wa][staff] service window closed for sender=${from} — reply suppressed`);
-    return;
-  }
-
-  // Resolve FROM number and token — mirrors the logic in notify-whatsapp.ts,
-  // including the STAFF_NOTIFICATION_PHONE_NUMBER_ID pinned-number behaviour.
-  // A pinned number that does not belong to this tenant is a hard stop with no
-  // fallback — same rule as the drain.
-  const pinnedId = process.env.STAFF_NOTIFICATION_PHONE_NUMBER_ID;
-  const fromNumber = await (pinnedId
-    ? prisma.whatsAppNumber.findFirst({
-        where: { phone_number_id: pinnedId, tenant_id: tenantId },
-        select: { phone_number_id: true, access_token: true, token_env: true },
-      })
-    : prisma.whatsAppNumber.findFirst({
-        where: { tenant_id: tenantId },
-        orderBy: { created_at: 'asc' },
-        select: { phone_number_id: true, access_token: true, token_env: true },
-      }));
-
-  if (!fromNumber) {
-    const why = pinnedId
-      ? `STAFF_NOTIFICATION_PHONE_NUMBER_ID=${pinnedId} not found for tenant ${tenantId} — refusing to fall back`
-      : `no WhatsAppNumber for tenant ${tenantId}`;
-    console.error(`[webhook/wa][staff] reply suppressed — ${why}`);
-    return;
-  }
-
-  const token = fromNumber.token_env
-    ? process.env[fromNumber.token_env]
-    : fromNumber.access_token;
-  if (!token) {
-    console.error(
-      `[webhook/wa][staff] reply suppressed — no token for phone_number_id=${fromNumber.phone_number_id} tenant=${tenantId}`,
-    );
-    return;
-  }
-
-  const { sendText, sendInteractiveButtons, sendInteractiveList } = await import('@/engines/whatsapp');
-  const { getWhatsAppConfig } = await import('@/lib/engines');
-  const waConfig = getWhatsAppConfig();
-  const sendCtx = {
-    phoneId: fromNumber.phone_number_id,
-    token,
-    to: from.replace(/^\+/, ''), // Meta expects E.164 digits without '+'
-  };
-
-  // Interactive when there is a menu, plain text otherwise.
-  let replyResult =
-    replyMenu.kind === 'buttons'
-      ? await sendInteractiveButtons(waConfig, {
-          ...sendCtx,
-          body: replyText,
-          buttons: replyMenu.items.map((i) => ({ id: i.id, title: i.title })),
-        })
-      : replyMenu.kind === 'list'
-        ? await sendInteractiveList(waConfig, {
-            ...sendCtx,
-            body: replyText,
-            buttonText: 'Choose action',
-            rows: replyMenu.items.map((i) => ({
-              id: i.id,
-              title: i.title,
-              description: i.description,
-            })),
-          })
-        : await sendText(waConfig, { ...sendCtx, body: replyText });
-
-  // A menu problem must never cost the staff member their confirmation — the
-  // text is the part that carries the fact, so it is the floor, not the extra.
-  if (!replyResult.ok && replyMenu.kind !== 'none') {
-    console.error(
-      `[webhook/wa][staff] interactive reply failed kind=${replyMenu.kind} sender=${from} status=${replyResult.status} error=${replyResult.error} — falling back to text`,
-    );
-    replyResult = await sendText(waConfig, { ...sendCtx, body: replyText });
-  }
-
-  if (!replyResult.ok) {
-    console.error(
-      `[webhook/wa][staff] reply failed phone_number_id=${fromNumber.phone_number_id} sender=${from} status=${replyResult.status} error=${replyResult.error}`,
-    );
-  } else {
-    console.log(
-      `[webhook/wa][staff] reply sent phone_number_id=${fromNumber.phone_number_id} sender=${from} wamid=${replyResult.messageId}`,
-    );
-  }
+  // ── Single shared send path. ─────────────────────────────────────────────
+  await sendStaffChannelReply({ tenantId, to: from, text: replyText, menu: replyMenu });
 }
 
 async function processWebhook(body: Record<string, unknown>) {
