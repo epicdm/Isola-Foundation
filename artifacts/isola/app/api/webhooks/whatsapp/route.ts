@@ -319,6 +319,39 @@ function buildStaffInvalidStartReply(validNextActions: string[]): string {
   return `⚠️ Can't start that task right now.\n\nValid actions: ${actions}`;
 }
 
+/**
+ * Normalise every shape a staff TAP can arrive in to one developer-defined id.
+ *
+ * Three envelopes, one fact:
+ *   • `interactive.button_reply.id` — free-form inline buttons (24h window)
+ *   • `interactive.list_reply.id`   — free-form list rows      (24h window)
+ *   • `button.payload`              — a TEMPLATE quick reply
+ *
+ * The third is the one that was silently dropped. A template quick-reply tap
+ * does not arrive as `interactive.button_reply`, so interactive-only
+ * extraction let it fall into the non-text guard and die there — which is why
+ * `isola_staff_task_v1` was deliberately submitted text-only. Normalising here
+ * rather than branching to a second handler is the point: one dedup gate, one
+ * resolver, one authority check, one reply.
+ *
+ * `msg.button.text` is deliberately NOT used as a fallback command. The whole
+ * value of a developer-defined id is that the tapped path never does label
+ * matching; treating a visible label as typed text would reintroduce exactly
+ * the ambiguity the id was minted to remove — and template labels are frozen
+ * copy an approver chose, not a command vocabulary this system controls. A
+ * payload that will not decode falls through to text resolution with an empty
+ * body and earns help, which is the honest answer, rather than a guess.
+ */
+function extractStaffTapId(msg: any): string {
+  if (msg?.type === 'interactive') {
+    return String(msg.interactive?.button_reply?.id ?? msg.interactive?.list_reply?.id ?? '');
+  }
+  if (msg?.type === 'button') {
+    return String(msg.button?.payload ?? '');
+  }
+  return '';
+}
+
 async function handleStaffInboundMessage(params: {
   phoneNumberId: string;
   from: string;
@@ -643,9 +676,10 @@ async function processWebhook(body: Record<string, unknown>) {
       // barrier; it is there intentionally and must not be removed.
       if (phoneNumberId && getStaffInboundPhoneNumberIds().has(phoneNumberId)) {
         for (const msg of messages) {
-          // A menu tap arrives as type `interactive`, echoing back the
-          // developer id minted in the menu. Extract it here and let it
-          // through.
+          // A tap arrives as type `interactive` (free-form menu) or type
+          // `button` (TEMPLATE quick reply), each echoing back the developer
+          // id minted when the menu or template was sent. `extractStaffTapId`
+          // reduces all three envelopes to one id.
           //
           // NOTE THE ORDER. This block does NOT act on the tap — it only
           // classifies it. The cross-path idempotency gate inside
@@ -654,14 +688,7 @@ async function processWebhook(body: Record<string, unknown>) {
           // to this WABA, so taps are delivered twice as well. Branching to a
           // handler ahead of that gate would reproduce cutover defect 4 on the
           // exact number where it was already solved once.
-          const tapId =
-            msg.type === 'interactive'
-              ? String(
-                  msg.interactive?.button_reply?.id ??
-                    msg.interactive?.list_reply?.id ??
-                    '',
-                )
-              : '';
+          const tapId = extractStaffTapId(msg);
 
           if (msg.type !== 'text' && !tapId) {
             console.log('[webhook/wa][staff] ignoring non-actionable message type:', msg.type);

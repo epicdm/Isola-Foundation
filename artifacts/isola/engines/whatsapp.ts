@@ -55,6 +55,17 @@ export interface WhatsAppSendTemplateInput {
   name:     string
   language: string     // e.g. 'en_US'
   params?:  string[]   // positional body-text params, in order
+  /**
+   * Developer-defined payloads for the template's QUICK_REPLY buttons, in
+   * button order. Meta freezes a template's button LABELS at approval time,
+   * but the payload is supplied per send — that is what lets a frozen button
+   * carry a per-episode correlation id.
+   *
+   * A tap on one of these arrives inbound as `msg.type === 'button'` with
+   * `msg.button.payload`, NOT as `interactive.button_reply`. Both shapes are
+   * normalised to the same tap id at the webhook boundary.
+   */
+  quickReplyPayloads?: string[]
 }
 
 export interface WhatsAppSendAuthTemplateInput {
@@ -129,9 +140,23 @@ export async function sendTemplate(
   input: WhatsAppSendTemplateInput,
 ): Promise<WhatsAppSendResult> {
   const params = input.params ?? []
-  const components = params.length
+  const components: Record<string, unknown>[] = params.length
     ? [{ type: 'body', parameters: params.map((t) => ({ type: 'text', text: t })) }]
     : []
+
+  // One component per quick-reply button. Meta indexes buttons positionally
+  // and rejects the ENTIRE send if an index has no matching button on the
+  // approved template, so payloads must be passed in button order.
+  const quickReplies = input.quickReplyPayloads ?? []
+  quickReplies.forEach((payload, index) => {
+    components.push({
+      type: 'button',
+      sub_type: 'quick_reply',
+      index: String(index),
+      parameters: [{ type: 'payload', payload }],
+    })
+  })
+
   return postToGraph(config, input.phoneId, input.token, {
     messaging_product: 'whatsapp',
     to: input.to,

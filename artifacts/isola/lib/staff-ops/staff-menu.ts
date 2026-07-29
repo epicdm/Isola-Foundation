@@ -46,6 +46,14 @@ export const WA_LIMITS = {
   rowDescription: 72,
   maxButtons: 3,
   maxRows: 10,
+  /**
+   * A TEMPLATE quick-reply payload is capped at 128 — HALF the free-form
+   * interactive button-id limit. Same codec, tighter ceiling, so it is
+   * asserted separately rather than assumed to pass because `buttonId` did.
+   */
+  templateButtonPayload: 128,
+  /** Meta allows at most three quick-reply buttons on one template. */
+  maxTemplateButtons: 3,
 } as const
 
 /**
@@ -78,6 +86,33 @@ export function decodeMenuId(
   if (!correlationId) return null
   if (!isStaffMenuAction(action)) return null
   return { action, correlationId }
+}
+
+/**
+ * Mint a TEMPLATE quick-reply payload.
+ *
+ * Deliberately the SAME codec as `encodeMenuId`, because a template tap and a
+ * free-form interactive tap must decode through the same `decodeMenuId` and
+ * reach the same resolver. Two codecs would mean two state machines, and the
+ * second one would be the one nobody tests.
+ *
+ * Template button LABELS are frozen at approval time, but the payload is
+ * supplied per send — which is the only reason a frozen template button can
+ * carry a per-episode correlation id at all. Meta caps that payload at 128
+ * characters rather than 256, so the ceiling is asserted here: a payload that
+ * would 400 at send time fails in a test instead of on a staff handset.
+ */
+export function encodeTemplateQuickReplyPayload(
+  action: StaffMenuAction,
+  correlationId: string,
+): string {
+  const payload = encodeMenuId(action, correlationId)
+  if (payload.length > WA_LIMITS.templateButtonPayload) {
+    throw new Error(
+      `template quick-reply payload exceeds ${WA_LIMITS.templateButtonPayload} chars: ${payload.length}`,
+    )
+  }
+  return payload
 }
 
 function isStaffMenuAction(v: string): v is StaffMenuAction {
