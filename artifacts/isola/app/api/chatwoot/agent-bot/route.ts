@@ -601,6 +601,20 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
       tokensUsed  = result.tokensUsed;
       model       = result.model;
       needsHandoff = result.needsHandoff === true;
+
+      // ── Fail-closed suppression (GATED AI-LOOP ONLY) ────────────────────
+      // `suppressCustomerReply` is set exclusively by the gated inbox-46 path
+      // in lib/brain-provider.ts, which is unreachable while
+      // ISOLA_AI_LOOP_ENABLED is off. It means: the brain failed or had
+      // nothing to say, and Foundation must not put words in its mouth.
+      // Recorded truthfully; nothing is sent.
+      if (result.suppressCustomerReply === true) {
+        console.warn(
+          `[agent-bot] gated AI loop suppressed the reply for conv cw#${cwConvId} — ` +
+            `kind=${result.clawithFailure?.kind ?? 'none'} corr=${result.clawithFailure?.correlationId ?? '-'}`,
+        );
+        return 200;
+      }
     } catch (err: any) {
       console.error('[agent-bot] AI error:', err?.message ?? err);
       return 200; // do not reply with an error message

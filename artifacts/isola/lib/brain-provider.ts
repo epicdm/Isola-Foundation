@@ -40,6 +40,10 @@ import { guardReply, SALES_TENANT_IDS, DEFLECTION as GUARD_ERROR_DEFLECTION } fr
 import { detectEscalationIntent } from './escalation-intent';
 import { detectEscalationClaim } from './escalation-claim';
 import { audit } from './audit';
+import { isAiLoopGatedDoor } from './clawith/gate';
+import { invokeClawithGated } from './clawith/invoke';
+import type { ClawithFailureRecord } from './clawith/invoke';
+import type { ClawithToolDefinition } from './clawith/contract';
 
 const FLOWISE_TIMEOUT_MS = 20_000;
 // Hermes agent replies in ~10-45s; 50s gives headroom before falling back to
@@ -131,6 +135,39 @@ export interface BrainReplyResult {
   /** Opaque action payload some providers may return alongside the reply.
    * Not acted on by Foundation today — this socket remains text-only I/O. */
   actions?: unknown;
+  /** GATED AI-LOOP ONLY. True when Foundation must send the customer NOTHING
+   *  this turn — a recorded failure or a tool-only turn. Never set while the
+   *  ISOLA_AI_LOOP_ENABLED gate is off, so no existing caller can observe it.
+   *  Callers that ignore it fall back to the pre-existing `if (!reply) return`
+   *  behaviour, which is the same outcome by a weaker route. */
+  suppressCustomerReply?: boolean;
+  /** GATED AI-LOOP ONLY. The classified Clawith failure behind a safe
+   *  unavailability reply or a suppressed turn. Present ONLY when the brain
+   *  genuinely failed — its absence on a `provider:'clawith'` result means
+   *  Clawith actually answered. */
+  clawithFailure?: ClawithFailureRecord;
+}
+
+/** GATED AI-LOOP ONLY. The conversation-identifying context the structured
+ *  contract requires and the legacy text bridge never carried. Optional on
+ *  purpose: every existing caller of generateReply() omits it and is therefore
+ *  bit-for-bit unaffected. */
+export interface GatedLoopContext {
+  chatwootAccountId: string;
+  inboxId: string | null;
+  /** Tenant recorded on the ChatwootBinding that received this message. */
+  bindingTenantId: string;
+  /** Tenant recorded on the local Conversation row. */
+  conversationTenantId: string;
+  conversationId: string;
+  inboundMessageId: string;
+  contactRef: string;
+  businessId: string;
+  knowledgeScopeIds?: string[];
+  /** Tools Foundation will authorise THIS turn. Empty until Commit 3. */
+  allowedTools?: ClawithToolDefinition[];
+  timezone?: string;
+  locale?: string;
 }
 
 export interface BrainAgent {
@@ -186,11 +223,16 @@ export async function generateReply(params: {
    *  the Isola bridge for cross-system tracing. Never used to resolve
    *  ownership; distinct from conversationRef itself. */
   escalationCorrelationId?: string | null;
+  /** GATED AI-LOOP ONLY — see GatedLoopContext. Absent for every existing caller. */
+  gatedLoop?: GatedLoopContext | null;
 }): Promise<BrainReplyResult> {
-  const { agent, system, messages, sessionId, phoneNumberId, senderPhone, tenantId, clawithBinding, odooBinding, conversationRef, escalationCorrelationId } = params;
+  const { agent, system, messages, sessionId, phoneNumberId, senderPhone, tenantId, clawithBinding, odooBinding, conversationRef, escalationCorrelationId, gatedLoop } = params;
   const model = TIER_MODELS[agent.intelligence_tier] ?? TIER_MODELS['standard'];
 
   let result: BrainReplyResult | null = null;
+  /** Set only on the gated inbox-46 path. While true, the native fallback
+   *  below is UNREACHABLE — that is the entire point of §6. */
+  let gatedFailClosed = false;
 
   if (agent.brain_provider === 'flowise' && agent.flowise_flow_id) {
     const flowiseResult = await tryFlowise({
@@ -220,7 +262,68 @@ export async function generateReply(params: {
     }
   }
 
-  if (!result && agent.brain_provider === 'clawith') {
+  // ── GATED AI-LOOP PATH (default OFF) ──────────────────────────────────────
+  // Reached only when ISOLA_AI_LOOP_ENABLED === 'true' AND this exact
+  // Chatwoot account/inbox door is listed. With the gate off this whole block
+  // is dead code and behaviour below is byte-for-byte what shipped before.
+  //
+  // Inside it there is no `native` branch at all. Between 2026-07-25 00:34Z
+  // and this commit, every inbox-46 message reached the bridge, was rejected
+  // 401, and was answered by native Claude — a working-looking EPIC agent that
+  // was not EPIC's agent. A brain outage has to look like an outage.
+  if (
+    !result &&
+    agent.brain_provider === 'clawith' &&
+    gatedLoop &&
+    isAiLoopGatedDoor(gatedLoop.chatwootAccountId, gatedLoop.inboxId)
+  ) {
+    gatedFailClosed = true;
+    const outcome = await invokeClawithGated({
+      tenantId,
+      bindingTenantId: gatedLoop.bindingTenantId,
+      conversationTenantId: gatedLoop.conversationTenantId,
+      businessId: gatedLoop.businessId,
+      chatwootAccountId: gatedLoop.chatwootAccountId,
+      inboxId: gatedLoop.inboxId ?? '',
+      conversationId: gatedLoop.conversationId,
+      inboundMessageId: gatedLoop.inboundMessageId,
+      contactRef: gatedLoop.contactRef,
+      customerMessage: [...messages].reverse().find((m) => m.role === 'user')?.content ?? '',
+      history: messages,
+      designatedAgentId: clawithBinding?.clawith_agent_id ?? '',
+      knowledgeScopeIds: gatedLoop.knowledgeScopeIds,
+      allowedTools: gatedLoop.allowedTools,
+      // Commit 2 replaces this literal with the authoritative episode state.
+      // Until then the gate is off, so no live conversation observes it.
+      ownershipState: 'AI_OWNED',
+      correlationId: escalationCorrelationId ?? `corr-${sessionId}-${gatedLoop.inboundMessageId}`,
+      locale: gatedLoop.locale,
+      timezone: gatedLoop.timezone,
+    });
+
+    if (outcome.kind === 'suppressed') {
+      return {
+        text: '',
+        tokensUsed: 0,
+        model: 'clawith',
+        provider: 'clawith',
+        needsHandoff: false,
+        suppressCustomerReply: true,
+        clawithFailure: outcome.failure,
+      };
+    }
+
+    result = {
+      text: outcome.text ?? '',
+      tokensUsed: 0,
+      model: 'clawith',
+      provider: 'clawith',
+      needsHandoff: outcome.needsHandoff,
+      ...(outcome.kind === 'safe_unavailable' ? { clawithFailure: outcome.failure } : {}),
+    };
+  }
+
+  if (!result && !gatedFailClosed && agent.brain_provider === 'clawith') {
     if (!clawithBinding) {
       console.warn(
         '[brain-provider] brain_provider=clawith but no ClawithBinding for this tenant — falling back to native',
@@ -267,6 +370,30 @@ export async function generateReply(params: {
   }
 
   if (!result) {
+    // NOT reachable on the gated path: the block above either returns or
+    // assigns `result`. Kept as an explicit typed guard rather than a comment
+    // so that a future edit which adds a path out of that block fails CLOSED
+    // here — silently reaching `chatComplete` below is the exact regression §6
+    // exists to make impossible.
+    if (gatedFailClosed) {
+      console.error('[brain-provider] gated path produced no result — suppressing rather than answering natively');
+      return {
+        text: '',
+        tokensUsed: 0,
+        model: 'clawith',
+        provider: 'clawith',
+        needsHandoff: false,
+        suppressCustomerReply: true,
+        clawithFailure: {
+          kind: 'invalid_response',
+          detail: 'gated Clawith path produced no result',
+          status: null,
+          correlationId: escalationCorrelationId ?? '',
+          conversationId: gatedLoop?.conversationId ?? '',
+          inboundMessageId: gatedLoop?.inboundMessageId ?? '',
+        },
+      };
+    }
     const native = await chatComplete({ model, system, messages, maxTokens: 4096 });
     result = {
       text: native.text,
