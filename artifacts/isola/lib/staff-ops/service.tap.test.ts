@@ -234,7 +234,19 @@ describe('buildStaffReplyMenu — the menu follows the record, at read time', ()
     expect(menu.kind).toBe('buttons')
     if (menu.kind !== 'buttons') throw new Error('unreachable')
     expect(menu.items.map((i) => i.action)).toEqual(['ack', 'start', 'blocked'])
-    expect(menu.items.every((i) => i.id === encodeMenuId(i.action, CORR))).toBe(true)
+    expect(
+      menu.items.every(
+        (i) =>
+          // `MenuItem.action` widened to `StaffMenuAction | ManagerVerdict` when
+          // the manager-verification menu landed. This narrows EXPLICITLY rather
+          // than casting: a staff menu must never carry a manager verdict, so if
+          // one ever leaks in, this assertion fails instead of silently encoding
+          // a verdict as though it were a staff action.
+          i.action !== 'approve' &&
+          i.action !== 'return' &&
+          i.id === encodeMenuId(i.action, CORR),
+      ),
+    ).toBe(true)
   })
 
   it('AFTER a start moved the stage, the SAME call returns In-Progress’s menu', async () => {

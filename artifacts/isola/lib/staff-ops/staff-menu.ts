@@ -35,6 +35,26 @@ import { classifyStage } from './stage-classifier'
  *  absent — it is a repair verb for a mistaken entry, not a normal next step. */
 export type StaffMenuAction = 'ack' | 'start' | 'update' | 'blocked' | 'done'
 
+/**
+ * The two outcomes a MANAGER can reach from a verification menu.
+ *
+ * Declared here rather than in `manager-verdict.ts` so that `MenuItem` can name
+ * it without this module importing that one — the dependency runs one way only,
+ * and a cycle between the menu model and the verdict codec would be a hazard
+ * with no upside. The codec itself lives in `manager-verdict.ts` and re-exports
+ * this type.
+ */
+export type ManagerVerdict = 'approve' | 'return'
+
+/**
+ * Anything a tap can carry. Staff actions and manager verdicts share the menu
+ * MODEL — one id codec shape, one rendering, one send path — while remaining
+ * separate vocabularies with separate authority rules. Widening here is what
+ * lets a manager menu reuse `MenuRendering` instead of growing a parallel type
+ * that would then need its own renderer and its own send path.
+ */
+export type MenuAction = StaffMenuAction | ManagerVerdict
+
 /** Namespace prefix so a menu id can never be confused with any other payload. */
 const MENU_ID_PREFIX = 'sa'
 
@@ -204,7 +224,8 @@ export interface MenuItem {
   id: string
   title: string
   description: string
-  action: StaffMenuAction
+  /** Staff action or manager verdict — see `MenuAction`. */
+  action: MenuAction
 }
 
 export type MenuRendering =
