@@ -19,6 +19,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { handleInboundWhatsApp } from '@/lib/agent';
 import { prisma } from '@/lib/prisma';
 import { claimInboundMessageId } from '@/lib/inbound-dedup';
+import type { MenuRendering } from '@/lib/staff-ops/staff-menu';
 
 // ── Signature helpers ─────────────────────────────────────────────────────────
 
@@ -277,8 +278,10 @@ async function handleStaffInboundMessage(params: {
   from: string;
   body: string;
   waMessageId: string;
+  /** Developer id echoed back by a menu tap, or null for a typed message. */
+  tapId?: string | null;
 }) {
-  const { phoneNumberId, from, body, waMessageId } = params;
+  const { phoneNumberId, from, body, waMessageId, tapId } = params;
 
   // Cross-path inbound idempotency gate — must be the first operation.
   // Two Meta apps are subscribed to the same WABA, so every inbound message
@@ -306,12 +309,32 @@ async function handleStaffInboundMessage(params: {
   const tenantId = channelNumber.tenant_id;
 
   // Resolve inbound route (reads only — apply is an explicit separate step).
-  const { resolveInboundStaffMessage, applyStaffAction } = await import('@/lib/staff-ops/service');
-  const resolved = await resolveInboundStaffMessage({
-    waId: from,
-    text: body,
-    channelTenantId: tenantId,
-  });
+  //
+  // A menu tap carries its own action and correlation id, so it bypasses the
+  // text grammar entirely — but NOT the authority check, which is identical.
+  // `decodeMenuId` fails closed: a foreign or malformed id decodes to null and
+  // falls through to text resolution rather than being guessed at.
+  const {
+    resolveInboundStaffMessage,
+    resolveInboundStaffTap,
+    applyStaffAction,
+    buildStaffReplyMenu,
+  } = await import('@/lib/staff-ops/service');
+  const { decodeMenuId } = await import('@/lib/staff-ops/staff-menu');
+
+  const tap = decodeMenuId(tapId);
+  const resolved = tap
+    ? await resolveInboundStaffTap({
+        waId: from,
+        action: tap.action,
+        correlationId: tap.correlationId,
+        channelTenantId: tenantId,
+      })
+    : await resolveInboundStaffMessage({
+        waId: from,
+        text: body,
+        channelTenantId: tenantId,
+      });
 
   const r = resolved.route;
 
@@ -326,6 +349,11 @@ async function handleStaffInboundMessage(params: {
   // ── Determine reply text for all other outcomes. ─────────────────────────────
   // The send path is shared by all three; it runs once, below.
   let replyText: string;
+
+  // Only a successfully applied action earns a menu. It is the one outcome
+  // where the record's stage may have just moved, and therefore the one where
+  // the next actions are known rather than guessed.
+  let replyMenu: MenuRendering = { kind: 'none' };
 
   if (r.route === 'staff_help') {
     console.log(
@@ -373,6 +401,9 @@ async function handleStaffInboundMessage(params: {
         `[webhook/wa][staff] applied phone_number_id=${phoneNumberId} sender=${from} action=${r.action} deduped=${applied.deduped} actionId=${applied.actionId}`,
       );
       replyText = buildStaffAckReply(r.action, applied.deduped);
+      // Fresh read, after the write: a START has already moved the stage, so
+      // the menu that comes back is the NEW stage's menu, not the old one's.
+      replyMenu = await buildStaffReplyMenu({ binding: r.binding, target: r.target });
     }
   }
 
@@ -424,14 +455,44 @@ async function handleStaffInboundMessage(params: {
     return;
   }
 
-  const { sendText } = await import('@/engines/whatsapp');
+  const { sendText, sendInteractiveButtons, sendInteractiveList } = await import('@/engines/whatsapp');
   const { getWhatsAppConfig } = await import('@/lib/engines');
-  const replyResult = await sendText(getWhatsAppConfig(), {
+  const waConfig = getWhatsAppConfig();
+  const sendCtx = {
     phoneId: fromNumber.phone_number_id,
     token,
     to: from.replace(/^\+/, ''), // Meta expects E.164 digits without '+'
-    body: replyText,
-  });
+  };
+
+  // Interactive when there is a menu, plain text otherwise.
+  let replyResult =
+    replyMenu.kind === 'buttons'
+      ? await sendInteractiveButtons(waConfig, {
+          ...sendCtx,
+          body: replyText,
+          buttons: replyMenu.items.map((i) => ({ id: i.id, title: i.title })),
+        })
+      : replyMenu.kind === 'list'
+        ? await sendInteractiveList(waConfig, {
+            ...sendCtx,
+            body: replyText,
+            buttonText: 'Choose action',
+            rows: replyMenu.items.map((i) => ({
+              id: i.id,
+              title: i.title,
+              description: i.description,
+            })),
+          })
+        : await sendText(waConfig, { ...sendCtx, body: replyText });
+
+  // A menu problem must never cost the staff member their confirmation — the
+  // text is the part that carries the fact, so it is the floor, not the extra.
+  if (!replyResult.ok && replyMenu.kind !== 'none') {
+    console.error(
+      `[webhook/wa][staff] interactive reply failed kind=${replyMenu.kind} sender=${from} status=${replyResult.status} error=${replyResult.error} — falling back to text`,
+    );
+    replyResult = await sendText(waConfig, { ...sendCtx, body: replyText });
+  }
 
   if (!replyResult.ok) {
     console.error(
@@ -529,15 +590,37 @@ async function processWebhook(body: Record<string, unknown>) {
       // barrier; it is there intentionally and must not be removed.
       if (phoneNumberId && getStaffInboundPhoneNumberIds().has(phoneNumberId)) {
         for (const msg of messages) {
-          if (msg.type !== 'text') {
-            console.log('[webhook/wa][staff] ignoring non-text message type:', msg.type);
+          // A menu tap arrives as type `interactive`, echoing back the
+          // developer id minted in the menu. Extract it here and let it
+          // through.
+          //
+          // NOTE THE ORDER. This block does NOT act on the tap — it only
+          // classifies it. The cross-path idempotency gate inside
+          // handleStaffInboundMessage still runs first, because a tap carries
+          // a wamid like any other inbound and two Meta apps remain subscribed
+          // to this WABA, so taps are delivered twice as well. Branching to a
+          // handler ahead of that gate would reproduce cutover defect 4 on the
+          // exact number where it was already solved once.
+          const tapId =
+            msg.type === 'interactive'
+              ? String(
+                  msg.interactive?.button_reply?.id ??
+                    msg.interactive?.list_reply?.id ??
+                    '',
+                )
+              : '';
+
+          if (msg.type !== 'text' && !tapId) {
+            console.log('[webhook/wa][staff] ignoring non-actionable message type:', msg.type);
             continue;
           }
+
           await handleStaffInboundMessage({
             phoneNumberId,
             from: String(msg.from ?? ''),
             body: String(msg.text?.body ?? ''),
             waMessageId: String(msg.id ?? ''),
+            tapId: tapId || null,
           });
         }
         continue; // hard barrier — never fall through to customer-agent path

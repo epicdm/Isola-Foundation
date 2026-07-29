@@ -43,6 +43,7 @@ import {
   staffContactE164,
 } from './staff-notification'
 import { mintCorrelationId, type WorkRefModel } from './work-ref'
+import { buildMenu, type MenuRendering, type StaffMenuAction } from './staff-menu'
 
 /**
  * Odoo activity type used to request manager verification. 4 is "To-Do" on
@@ -280,6 +281,105 @@ export async function resolveInboundStaffMessage(input: ResolveInboundInput): Pr
   }
 
   return { route, openWork }
+}
+
+export interface ResolveInboundTapInput {
+  waId: string
+  action: StaffMenuAction
+  correlationId: string
+  channelTenantId?: string | null
+}
+
+/**
+ * Resolve a MENU TAP to a route.
+ *
+ * A tap carries its own action and its own correlation id, so there is no
+ * grammar, no label matching, no disambiguation and no `unknown_reference`
+ * caused by a typo — the reference cannot be mistyped because it was never
+ * typed.
+ *
+ * What a tap does NOT skip is the authority check, which is identical to the
+ * typed path: the sender must resolve to exactly one active binding, and the
+ * episode must be open work Odoo says belongs to that person RIGHT NOW. The id
+ * travels out to a handset and back; it is an identifier, not a secret. A tap
+ * naming anything else is refused, not trusted.
+ *
+ * Reads only. Applying the action stays a separate, explicit call — same as
+ * `resolveInboundStaffMessage`, so a caller can inspect the decision without
+ * causing a write.
+ */
+export async function resolveInboundStaffTap(input: ResolveInboundTapInput): Promise<ResolveInboundResult> {
+  const candidates = await findBindingsByWaId(input.waId)
+
+  // Identity only — the empty text can never match a command, so this call
+  // decides nothing except "who is this, and may they act at all".
+  const provisional = decideInboundRoute({
+    text: '',
+    bindingCandidates: candidates,
+    channelTenantId: input.channelTenantId,
+    openWork: [],
+  })
+
+  // Identity failed — no point reading Odoo, and we must not.
+  if (provisional.route === 'exception') return { route: provisional, openWork: [] }
+
+  const binding = provisional.binding
+  const openWork = await listOpenWorkForStaff(binding)
+  const target = openWork.find((w) => w.correlationId === input.correlationId)
+
+  // Fail closed: the tap names an episode this person does not currently hold.
+  // Help — with their real open work — is the honest answer; acting would mean
+  // trusting an id we did not just verify against Odoo.
+  if (!target) {
+    return {
+      route: { route: 'staff_help', binding, attemptedAction: input.action, why: 'unknown_reference' },
+      openWork,
+    }
+  }
+
+  return {
+    route: {
+      route: 'staff_action',
+      binding,
+      action: input.action,
+      target,
+      note: null,
+      resolution: 'explicit_ref',
+      grammar: 'tap',
+    },
+    openWork,
+  }
+}
+
+/**
+ * The menu to attach to a reply, built from what Odoo says about the record
+ * NOW.
+ *
+ * Called AFTER the action has been applied, deliberately. A START moves the
+ * record New -> In-Progress, so the actions that come back must be
+ * In-Progress's actions. Building the menu from the pre-write record would
+ * hand the person a "Start work" button for work they just started — the same
+ * class of defect as advertising a command the system does not implement.
+ *
+ * Best-effort by design: any failure returns `none` and the caller sends plain
+ * text. A menu problem must never cost a staff member the confirmation, which
+ * is the part that carries the fact.
+ */
+export async function buildStaffReplyMenu(input: {
+  binding: StaffBindingRow
+  target: Pick<OpenWorkRefCandidate, 'odooModel' | 'odooId' | 'correlationId'>
+}): Promise<MenuRendering> {
+  try {
+    const config = await resolveOdooConfigForTenant(input.binding.tenantId)
+    const record = await readWorkRecord(config, {
+      odooModel: input.target.odooModel,
+      odooId: input.target.odooId,
+    })
+    if (!record) return { kind: 'none' }
+    return buildMenu(record, input.target.correlationId)
+  } catch {
+    return { kind: 'none' }
+  }
 }
 
 export interface ApplyStaffActionInput {

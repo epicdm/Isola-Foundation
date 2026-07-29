@@ -103,7 +103,17 @@ export type InboundRoute =
       target: OpenWorkRefCandidate
       note: string | null
       resolution: 'explicit_ref' | 'sole_open_work'
-      grammar: 'strict' | 'bare'
+      /**
+       * How the target was named. `strict` and `bare` come from the text
+       * parser. `tap` means the reference was never typed at all — it arrived
+       * inside a menu id, so there was no label matching and no opportunity to
+       * mistype a reference.
+       *
+       * Widened HERE and not in staff-action.ts on purpose: the text parser
+       * can never produce `tap`, and keeping its union narrow keeps that
+       * guarantee in the type rather than in a comment.
+       */
+      grammar: 'strict' | 'bare' | 'tap'
     }
   | {
       route: 'staff_disambiguation'
