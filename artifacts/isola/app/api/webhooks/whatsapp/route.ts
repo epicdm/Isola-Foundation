@@ -476,6 +476,191 @@ async function sendStaffChannelReply(params: {
   }
 }
 
+/**
+ * Reply to a manager whose verdict was refused.
+ *
+ * Refusals are told plainly. A manager who taps a stale button and gets silence
+ * assumes it worked; a manager who is told "already resolved" goes and looks.
+ * Identity failures are handled separately and stay silent — there is nobody we
+ * can safely reply to.
+ */
+function buildManagerRefusalReply(refusal: string): string {
+  switch (refusal) {
+    case 'not_a_manager':
+      return '⚠️ You are not set up to verify work. Ask the owner if that is wrong.';
+    case 'activity_not_open':
+      // Odoo removes a completed mail.activity, so "already resolved" and
+      // "never existed" are indistinguishable. Say both rather than guess.
+      return '⚠️ That verification is already resolved, or is no longer open.';
+    case 'not_this_manager':
+      return '⚠️ That verification belongs to another manager.';
+    case 'wrong_object':
+      return '⚠️ That verification is not attached to a task this system can act on.';
+    default:
+      return '⚠️ Could not action that.';
+  }
+}
+
+/**
+ * A verdict reply must never read stronger than what Odoo actually holds.
+ *
+ * `stage.stageNameAfter` is the POST-WRITE readback, so it is preferred over
+ * the stage we asked for. When the move did not happen, or the readback could
+ * not confirm it, the sentence says so instead of naming a stage. This is the
+ * same rule as `buildStartReply` and it exists for the same reason:
+ * `def-spine-start-reports-started-without-odoo-stage-move-2026-07-29`.
+ */
+function buildManagerVerdictReply(
+  verdict: 'approve' | 'return',
+  result: { ok: boolean; detail?: unknown },
+): string {
+  const verb = verdict === 'approve' ? '✓ Approved' : '↩️ Returned for rework';
+
+  if (!result.ok) {
+    return `⚠️ Could not record that verdict — nothing changed in Odoo. Please try again.`;
+  }
+
+  const stage = ((result.detail as any)?.stage ?? null) as
+    | { moved?: boolean; stageName?: string; stageNameAfter?: string | null; readbackOk?: boolean }
+    | null;
+
+  if (!stage?.moved) return `${verb} — recorded on the task.`;
+  if (stage.readbackOk === false) {
+    return `${verb} — recorded, but the board could not be re-read to confirm the stage.`;
+  }
+  const name = stage.stageNameAfter ?? stage.stageName;
+  return name ? `${verb} — moved to ${name}.` : `${verb} — recorded on the task.`;
+}
+
+/**
+ * Handle a manager's Approve / Return tap.
+ *
+ * NOT a second webhook processor. It is reached from inside
+ * `handleStaffInboundMessage`, AFTER the cross-path wamid dedup claim and after
+ * tenant resolution, and it replies through the same `sendStaffChannelReply`
+ * every staff reply uses. One gate, one send, one reply.
+ *
+ * No menu comes back with a verdict: the episode is over for this manager, and
+ * offering Approve again on work already approved is the same class of defect
+ * as advertising a command the system cannot honour.
+ */
+async function handleManagerVerdictTap(params: {
+  phoneNumberId: string;
+  from: string;
+  tenantId: string;
+  verdict: 'approve' | 'return';
+  activityId: number;
+}): Promise<void> {
+  const { phoneNumberId, from, tenantId, verdict, activityId } = params;
+  const { resolveInboundManagerTap, applyManagerVerdict } = await import('@/lib/staff-ops/service');
+
+  const resolved = await resolveInboundManagerTap({
+    waId: from,
+    verdict,
+    activityId,
+    channelTenantId: tenantId,
+  });
+
+  if (!resolved.ok) {
+    if (resolved.refusal === 'identity') {
+      // Same rule as the staff path: an unresolved sender gets no reply,
+      // because we cannot vouch for who would receive it.
+      console.error(
+        `[webhook/wa][manager] unresolved sender=${from} phone_number_id=${phoneNumberId} why=${resolved.why} — dropped, no reply`,
+      );
+      return;
+    }
+    console.log(
+      `[webhook/wa][manager] refused sender=${from} activity=${activityId} refusal=${resolved.refusal}`,
+    );
+    await sendStaffChannelReply({
+      tenantId,
+      to: from,
+      text: buildManagerRefusalReply(resolved.refusal),
+      menu: { kind: 'none' },
+    });
+    return;
+  }
+
+  const result = await applyManagerVerdict({
+    manager: resolved.binding,
+    activityId,
+    approved: verdict === 'approve',
+    taskId: resolved.taskId,
+  });
+
+  console.log(
+    `[webhook/wa][manager] verdict=${verdict} sender=${from} activity=${activityId} task=${resolved.taskId} ok=${result.ok}`,
+  );
+
+  await sendStaffChannelReply({
+    tenantId,
+    to: from,
+    text: buildManagerVerdictReply(verdict, result),
+    menu: { kind: 'none' },
+  });
+}
+
+/**
+ * Tell the manager that work is waiting on their verdict.
+ *
+ * Before this, a staff DONE created a `mail.activity` in Odoo and stopped
+ * there — the manager found out only by opening Odoo, which in practice means
+ * not at all. Creating the record and leaving the person unaware is the
+ * completion half of the same defect class this packet exists to eliminate.
+ *
+ * DUPLICATE SUPPRESSION IS STRUCTURAL, NOT A FLAG. This reads
+ * `applied.odooResult.verification`, which only exists on a FRESHLY applied
+ * action. A duplicate webhook delivery is stopped by the wamid dedup claim; a
+ * re-sent DONE hits `applyStaffAction`'s idempotency key and returns
+ * `{deduped: true}` with no `odooResult` at all. Both therefore reach here with
+ * nothing to send, without needing a separate "already notified" table.
+ *
+ * Sends through the shared helper so a manager notice cannot become a second
+ * send path.
+ */
+async function notifyManagerOfVerification(params: {
+  tenantId: string;
+  staffName: string;
+  managerOdooResUserId: number | null;
+  odooResult: Record<string, unknown> | null | undefined;
+  taskLabel: string;
+}): Promise<void> {
+  const verification = (params.odooResult?.verification ?? null) as
+    | { requested?: boolean; activityId?: number; why?: string }
+    | null;
+
+  if (!verification?.requested || !verification.activityId) {
+    // No verification was raised — most often `staff_member_has_no_manager`.
+    // There is nobody to tell, and inventing a recipient would be worse.
+    return;
+  }
+
+  const managerUserId = params.managerOdooResUserId;
+  if (!managerUserId) return;
+
+  const { findBindingByOdooUser } = await import('@/lib/staff-ops/service');
+  const manager = await findBindingByOdooUser(params.tenantId, managerUserId);
+  if (!manager?.waId) {
+    // Loud, because the Odoo activity DOES exist and now nobody knows.
+    console.error(
+      `[webhook/wa][manager] verification ${verification.activityId} raised for odoo user ${managerUserId} tenant=${params.tenantId} but that manager has no reachable WhatsApp binding — nobody was notified`,
+    );
+    return;
+  }
+
+  const { buildManagerVerdictMenu } = await import('@/lib/staff-ops/manager-verdict');
+  console.log(
+    `[webhook/wa][manager] notifying manager=${manager.waId} activity=${verification.activityId} tenant=${params.tenantId}`,
+  );
+  await sendStaffChannelReply({
+    tenantId: params.tenantId,
+    to: manager.waId,
+    text: `${params.staffName} reported this finished:\n\n${params.taskLabel}\n\nApprove it, or send it back for rework.`,
+    menu: buildManagerVerdictMenu(verification.activityId),
+  });
+}
+
 async function handleStaffInboundMessage(params: {
   phoneNumberId: string;
   from: string;
@@ -510,6 +695,28 @@ async function handleStaffInboundMessage(params: {
     return;
   }
   const tenantId = channelNumber.tenant_id;
+
+  // ── Manager verdict ────────────────────────────────────────────────────────
+  //
+  // A manager verdict is a different vocabulary (`mv:`) naming a different Odoo
+  // object (a verification activity, not a work episode) under a different
+  // authority rule, so it decodes separately. It is NOT a separate processor:
+  // the cross-path wamid dedup claim above has already run, the tenant is
+  // already resolved, and the reply leaves through the same send helper as
+  // every staff reply. `decodeManagerVerdictId` fails closed, so a staff id or
+  // a foreign payload falls straight through to the staff path below.
+  const { decodeManagerVerdictId } = await import('@/lib/staff-ops/manager-verdict');
+  const verdictTap = decodeManagerVerdictId(tapId);
+  if (verdictTap) {
+    await handleManagerVerdictTap({
+      phoneNumberId,
+      from,
+      tenantId,
+      verdict: verdictTap.verdict,
+      activityId: verdictTap.activityId,
+    });
+    return;
+  }
 
   // Resolve inbound route (reads only — apply is an explicit separate step).
   //
@@ -614,6 +821,20 @@ async function handleStaffInboundMessage(params: {
       // Fresh read, after the write: a START has already moved the stage, so
       // the menu that comes back is the NEW stage's menu, not the old one's.
       replyMenu = await buildStaffReplyMenu({ binding: r.binding, target: r.target });
+
+      // A DONE that raised a verification must actually reach the manager.
+      // Creating the Odoo activity and stopping there is how finished work sits
+      // unseen. Deliberately AFTER the apply and its readback, so nothing is
+      // announced that Odoo did not accept.
+      if (r.action === 'done') {
+        await notifyManagerOfVerification({
+          tenantId,
+          staffName: r.binding.displayName,
+          managerOdooResUserId: r.binding.managerOdooResUserId,
+          odooResult: 'odooResult' in applied ? applied.odooResult : null,
+          taskLabel: r.target.label ?? `#${r.target.odooId}`,
+        });
+      }
     }
   }
 
