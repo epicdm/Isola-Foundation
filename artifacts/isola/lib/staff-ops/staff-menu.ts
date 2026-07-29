@@ -29,6 +29,7 @@
  */
 
 import type { OdooWorkRecord } from './odoo-work'
+import { classifyStage } from './stage-classifier'
 
 /** Actions a staff member can reach from a menu. `correct` is deliberately
  *  absent — it is a repair verb for a mistaken entry, not a normal next step. */
@@ -83,11 +84,6 @@ function isStaffMenuAction(v: string): v is StaffMenuAction {
   return v === 'ack' || v === 'start' || v === 'update' || v === 'blocked' || v === 'done'
 }
 
-/** Lowercase + collapse whitespace, so `In-Progress` and `in progress` agree. */
-function normStage(s: string | null | undefined): string {
-  return (s ?? '').toLowerCase().replace(/[\s_-]+/g, ' ').trim()
-}
-
 /**
  * The actions that make sense for this record RIGHT NOW.
  *
@@ -106,18 +102,34 @@ export function deriveStageMenu(record: OdooWorkRecord): StaffMenuAction[] {
   // mail.activity has no project stage and does not support blocking.
   if (record.odooModel === 'mail.activity') return ['ack', 'update', 'done']
 
-  const stage = normStage(record.stageName)
-
-  // Terminal stages offer nothing — the episode is over for the staff member.
-  if (/\b(done|solved|closed|cancelled|canceled)\b/.test(stage)) return []
-
-  if (/\bblock/.test(stage)) return ['start', 'update', 'done']
-  if (/progress|doing|active|wip/.test(stage)) return ['update', 'done', 'blocked']
-  if (/\b(new|inbox|to do|todo|backlog|assigned|open)\b/.test(stage)) {
-    return ['ack', 'start', 'blocked']
+  switch (classifyStage(record.stageName)) {
+    // The episode is over for the staff member.
+    case 'terminal':
+      return []
+    case 'blocked':
+      return ['start', 'update', 'done']
+    case 'active':
+      return ['update', 'done', 'blocked']
+    case 'new':
+      return ['ack', 'start', 'blocked']
+    default:
+      // UNKNOWN VOCABULARY — reduced and safe, never the full set.
+      //
+      // The old fallback offered every action, which meant a stage nobody had
+      // classified advertised DONE and BLOCKED as if they were known-valid. The
+      // owner ruled that unacceptable, and it is the same defect as advertising
+      // a command the system cannot honour.
+      //
+      // ACK and UPDATE are the only two actions that are true regardless of
+      // where the record sits: "I have seen it" and "here is progress". START,
+      // BLOCKED and DONE all assert something about the current state, so they
+      // are withheld until the stage can actually be classified. The staff
+      // member can still type any command explicitly.
+      console.warn(
+        `[staff-menu] unclassified Odoo stage "${record.stageName ?? '(none)'}" on ${record.odooModel}#${record.odooId} — offering reduced menu`,
+      )
+      return ['ack', 'update']
   }
-
-  return ['ack', 'start', 'update', 'blocked', 'done']
 }
 
 /** Button/row copy. `start` reads as "Resume" once work was blocked, because
@@ -181,7 +193,7 @@ export function buildMenu(
   const chosen = actions ?? deriveStageMenu(record)
   if (chosen.length === 0) return { kind: 'none' }
 
-  const resuming = /\bblock/.test(normStage(record.stageName))
+  const resuming = classifyStage(record.stageName) === 'blocked'
   const items: MenuItem[] = chosen.slice(0, WA_LIMITS.maxRows).map((action) => {
     const title = menuLabel(action, { resuming })
     if (title.length > WA_LIMITS.rowTitle) {

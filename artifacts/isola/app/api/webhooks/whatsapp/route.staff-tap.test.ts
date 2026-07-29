@@ -252,7 +252,7 @@ describe('staff webhook — interactive taps', () => {
     expect(h.sentTexts).toHaveLength(0);
     const sent = h.sentButtons[0];
     expect(sent.to).toBe(WA_ERIC);
-    expect(sent.body).toBe('✓ Started.');
+    expect(sent.body).toBe('✓ Started — logged on the task.');
     // In-Progress's menu — no "start" button comes back on work just started.
     expect(sent.buttons.map((b: any) => b.id)).toEqual([
       encodeMenuId('update', CORR),
@@ -267,7 +267,7 @@ describe('staff webhook — interactive taps', () => {
 
     expect(h.sentButtons).toHaveLength(1);
     expect(h.sentTexts).toHaveLength(1);
-    expect(h.sentTexts[0].body).toBe('✓ Started.');
+    expect(h.sentTexts[0].body).toBe('✓ Started — logged on the task.');
   });
 
   it('when there is no menu the reply is plain text — no empty interactive payload', async () => {

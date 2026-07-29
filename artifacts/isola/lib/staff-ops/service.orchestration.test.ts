@@ -315,12 +315,17 @@ describe('applyStaffAction — START', () => {
     expect(r.validNextActions).toContain('start')
   })
 
-  it('with no STAFF_START_STAGE_NAME configured, stage is untouched and result says so', async () => {
-    // STAFF_START_STAGE_NAME is deleted in beforeEach
+  it('with no STAFF_START_STAGE_NAME configured, the board\'s own active stage decides', async () => {
+    // Changed deliberately. Previously an unset global name meant START silently
+    // did not touch the stage at all. The concept resolver now reads the
+    // project's real vocabulary instead. This fixture is already In Development,
+    // which classifies as `active`, so the truthful outcome is a no-op — and it
+    // is reported as one rather than as a move.
     const r = await applyStaffAction({ ...baseAction, action: 'start', binding: ERIC })
     expect(r.ok).toBe(true)
     if (!r.ok || r.deduped) return
-    expect(r.odooResult.stageMove).toMatchObject({ moved: false, why: 'STAFF_START_STAGE_NAME_not_configured' })
+    expect(r.odooResult.stageMove).toMatchObject({ moved: true, via: 'concept', noop: true })
+    // No exact-name write was attempted, because no exact name was configured.
     expect(calls).not.toContain('odoo.stageMove')
   })
 
@@ -344,6 +349,11 @@ describe('applyStaffAction — START', () => {
     expect(r.ok).toBe(true)
     expect(calls).toContain('sa.update.applied')
     if (!r.ok || r.deduped) return
-    expect(r.odooResult.stageMove).toMatchObject({ moved: false })
+    // Changed deliberately. A global name that does not exist on this board is
+    // an operator hint that missed, not a dead end: the concept resolver takes
+    // over. The miss is still reported on `explicitMiss` so it is visible in
+    // audit rather than silently swallowed.
+    expect(r.odooResult.stageMove).toMatchObject({ via: 'concept' })
+    expect(String((r.odooResult.stageMove as Record<string, unknown>).explicitMiss)).toContain('not found')
   })
 })

@@ -19,6 +19,7 @@ import {
   completeVerificationActivity,
   deriveValidNextActions,
   listOpenTasksForUser,
+  moveTaskToConceptStage,
   moveTaskToStage,
   postStaffActionNote,
   readWorkRecord,
@@ -544,14 +545,26 @@ async function applyStartStageMove(
   config: Awaited<ReturnType<typeof resolveOdooConfigForTenant>>,
   record: OdooWorkRecord,
 ): Promise<Record<string, unknown>> {
-  const stageName = (process.env.STAFF_START_STAGE_NAME ?? '').trim()
-  if (!stageName) {
-    return { moved: false, why: 'STAFF_START_STAGE_NAME_not_configured' }
+  // An explicit stage name still wins — but only when that stage really exists
+  // in THIS project. A global name is an operator hint, not a guarantee.
+  const explicit = (process.env.STAFF_START_STAGE_NAME ?? '').trim()
+  if (explicit) {
+    const named = await moveTaskToStage(config, record, explicit)
+    if (named.ok) return { moved: true, via: 'explicit', ...named.detail }
+
+    // The configured name does not exist on this board. Fall back to the
+    // board's own active stage rather than reporting a move that never
+    // happened — this is the case that produced the live defect on project 53.
+    const byConcept = await moveTaskToConceptStage(config, record, 'active')
+    return byConcept.ok
+      ? { moved: true, via: 'concept', explicitMiss: named.reason, ...byConcept.detail }
+      : { moved: false, via: 'concept', why: byConcept.reason, explicitMiss: named.reason }
   }
-  const result = await moveTaskToStage(config, record, stageName)
+
+  const result = await moveTaskToConceptStage(config, record, 'active')
   return result.ok
-    ? { moved: true, ...result.detail }
-    : { moved: false, why: result.reason }
+    ? { moved: true, via: 'concept', ...result.detail }
+    : { moved: false, via: 'concept', why: result.reason }
 }
 
 /**

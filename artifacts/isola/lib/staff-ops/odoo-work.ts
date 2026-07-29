@@ -22,6 +22,7 @@
 
 import { json2Call, type OdooConfig } from '@/engines/odoo'
 import type { WorkRef, WorkRefModel } from './work-ref'
+import { classifyStage, type StageConcept } from './stage-classifier'
 
 /** Odoo many2one arrives as [id, name] (classic) or {id, display_name} (JSON-2). */
 function displayNameOf(value: unknown): string | null {
@@ -387,7 +388,64 @@ export async function moveTaskToStage(
     }
 
     await json2Call(config, 'project.task', 'write', { ids: [task.odooId], vals: { stage_id: stageId } }, 20000)
-    return { ok: true, detail: { stageId } }
+    return { ok: true, detail: { stageId, stageName } }
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : 'stage write failed' }
+  }
+}
+
+/**
+ * Move a task to whichever stage in ITS OWN project means `concept`.
+ *
+ * `moveTaskToStage` above matches an exact name, which cannot work across
+ * boards: Odoo stage names are per-project free text, so a single global
+ * `In-Progress` finds nothing on a board whose stages are `In Development` and
+ * `Under Investigation` — and the move then fails silently while the staff
+ * member is told it succeeded
+ * (`def-spine-start-reports-started-without-odoo-stage-move-2026-07-29`).
+ *
+ * This reads the project's real stage list and classifies each name, so the
+ * board's own vocabulary decides. When nothing classifies, the reason carries
+ * the stage names that WERE found — an operator should never have to guess why
+ * a move did not happen.
+ */
+export async function moveTaskToConceptStage(
+  config: OdooConfig,
+  task: OdooWorkRecord,
+  concept: StageConcept,
+): Promise<OdooWriteOutcome> {
+  if (task.odooModel !== 'project.task') return { ok: false, reason: 'stage_move_only_on_project_task' }
+  if (!task.projectId) return { ok: false, reason: 'task_has_no_project' }
+
+  if (classifyStage(task.stageName) === concept) {
+    return { ok: true, detail: { noop: true, reason: 'already_in_concept', stageName: task.stageName } }
+  }
+
+  try {
+    const stages = (await json2Call(
+      config,
+      'project.task.type',
+      'search_read',
+      {
+        domain: [['project_ids', 'in', [task.projectId]]],
+        fields: ['id', 'name', 'sequence'],
+        order: 'sequence asc',
+        limit: 60,
+      },
+      15000,
+    )) as { id: number; name: string }[]
+
+    const match = (stages ?? []).find((s) => classifyStage(s.name) === concept)
+    if (!match) {
+      const seen = (stages ?? []).map((s) => s.name).join(' | ')
+      return {
+        ok: false,
+        reason: `no ${concept} stage in project ${task.projectId} (stages: ${seen || 'none'})`,
+      }
+    }
+
+    await json2Call(config, 'project.task', 'write', { ids: [task.odooId], vals: { stage_id: match.id } }, 20000)
+    return { ok: true, detail: { stageId: match.id, stageName: match.name } }
   } catch (err) {
     return { ok: false, reason: err instanceof Error ? err.message : 'stage write failed' }
   }

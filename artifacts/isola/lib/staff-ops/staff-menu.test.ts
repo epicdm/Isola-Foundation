@@ -78,9 +78,14 @@ describe('deriveStageMenu — the board decides what is offered', () => {
     }
   })
 
-  it('falls through to the full set on an unrecognised stage', () => {
-    expect(deriveStageMenu(task('Awaiting Parts'))).toHaveLength(5)
-    expect(deriveStageMenu(task(null))).toHaveLength(5)
+  it('offers a REDUCED, safe menu on an unrecognised stage — never the full set', () => {
+    // Changed deliberately. The old fallback offered all five actions, which
+    // advertised DONE and BLOCKED as if they were known-valid on a stage nobody
+    // had classified — the same defect as advertising a command the system
+    // cannot honour. ACK and UPDATE are the only two that are true wherever the
+    // record sits; the rest assert something about state we do not know.
+    expect(deriveStageMenu(task('Awaiting Parts'))).toEqual(['ack', 'update'])
+    expect(deriveStageMenu(task(null))).toEqual(['ack', 'update'])
   })
 
   it('never offers blocked on a mail.activity, which cannot carry one', () => {
@@ -99,7 +104,10 @@ describe('buildMenu — buttons up to three, list beyond', () => {
   })
 
   it('renders more than three as a list, because a fourth button is a 400', () => {
-    const m = buildMenu(task('Awaiting Parts'), CORR)
+    // No stage concept yields more than three actions any more, so the list
+    // path is exercised with an explicit action set — which is how a caller
+    // would request one.
+    const m = buildMenu(task('New'), CORR, ['ack', 'start', 'update', 'blocked', 'done'])
     expect(m.kind).toBe('list')
     if (m.kind !== 'list') throw new Error('expected list')
     expect(m.items).toHaveLength(5)

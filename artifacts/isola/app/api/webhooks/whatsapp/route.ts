@@ -185,7 +185,11 @@ function getStaffInboundPhoneNumberIds(): Set<string> {
 }
 
 /** Short confirmation sent back to a staff member after their action is applied. */
-function buildStaffAckReply(action: string, deduped: boolean): string {
+function buildStaffAckReply(
+  action: string,
+  deduped: boolean,
+  odooResult?: Record<string, unknown> | null,
+): string {
   if (deduped) return '✓ Already recorded.';
   switch (action) {
     case 'ack':     return '✓ Acknowledged.';
@@ -193,9 +197,28 @@ function buildStaffAckReply(action: string, deduped: boolean): string {
     case 'update':  return '✓ Update recorded.';
     case 'blocked': return '✓ Blocked status recorded.';
     case 'correct': return '✓ Correction recorded.';
-    case 'start':   return '✓ Started.';
+    case 'start':   return buildStartReply(odooResult);
     default:        return '✓ Recorded.';
   }
+}
+
+/**
+ * START must never claim a transition that did not happen.
+ *
+ * The live round on 2026-07-29 replied "✓ Started." while Odoo task 2292 stayed
+ * in `In Development`, because the configured stage name did not exist on that
+ * board. The chatter note was true; the stage sentence was not. This reads
+ * `stageMove` and says only what actually occurred.
+ */
+function buildStartReply(odooResult?: Record<string, unknown> | null): string {
+  const move = (odooResult?.stageMove ?? null) as
+    | { moved?: boolean; noop?: boolean; stageName?: string }
+    | null;
+
+  if (!move?.moved) return '✓ Started — logged on the task.';
+
+  const stage = move.stageName ? ` ${move.stageName}` : ' the active stage';
+  return move.noop ? `✓ Started — already in${stage}.` : `✓ Started — moved to${stage}.`;
 }
 
 /** Reply when the sender is a known staff member but sent help / a non-command. */
@@ -426,7 +449,11 @@ async function handleStaffInboundMessage(params: {
       console.log(
         `[webhook/wa][staff] applied phone_number_id=${phoneNumberId} sender=${from} action=${r.action} deduped=${applied.deduped} actionId=${applied.actionId}`,
       );
-      replyText = buildStaffAckReply(r.action, applied.deduped);
+      replyText = buildStaffAckReply(
+        r.action,
+        applied.deduped,
+        'odooResult' in applied ? applied.odooResult : null,
+      );
       // Fresh read, after the write: a START has already moved the stage, so
       // the menu that comes back is the NEW stage's menu, not the old one's.
       replyMenu = await buildStaffReplyMenu({ binding: r.binding, target: r.target });
