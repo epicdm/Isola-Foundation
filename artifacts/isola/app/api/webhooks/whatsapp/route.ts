@@ -207,6 +207,7 @@ function buildStaffHelpReply(openWork: { odooId: number; label?: string; project
     'UPDATE <note> — progress update\n' +
     'BLOCKED <note> — report a blocker\n' +
     'CORRECT <note> — correction\n' +
+    'MY TASKS — list your open tasks\n' +
     'HELP — show this list';
 
   if (openWork.length === 0) {
@@ -221,6 +222,28 @@ function buildStaffHelpReply(openWork: { odooId: number; label?: string; project
   if (openWork.length > 10) taskLines.push(`… and ${openWork.length - 10} more`);
 
   return `Commands:\n${cmds}\n\nYour open tasks:\n${taskLines.join('\n')}\n\nTo act: ACK #<id>  or  DONE #<id>`;
+}
+
+/**
+ * Reply to MY TASKS — the open-work list on its own.
+ *
+ * Deliberately NOT the help text. Someone who asked what they are holding wants
+ * the answer, not the command contract wrapped around it.
+ */
+function buildStaffTaskListReply(
+  openWork: { odooId: number; label?: string; projectName?: string | null; stageName?: string | null }[],
+): string {
+  if (openWork.length === 0) return 'You have no open tasks right now.';
+
+  const lines = openWork.slice(0, 10).map((w, i) => {
+    const label = w.label ?? '(untitled)';
+    const proj = w.projectName ? ` · ${w.projectName}` : '';
+    const stage = w.stageName ? ` [${w.stageName}]` : '';
+    return `${i + 1}. ${label}${proj}${stage} #${w.odooId}`;
+  });
+  if (openWork.length > 10) lines.push(`… and ${openWork.length - 10} more`);
+
+  return `Your open tasks (${openWork.length}):\n${lines.join('\n')}\n\nTo act: ACK #<id>  ·  START #<id>  ·  DONE #<id>`;
 }
 
 /** Reply when the command is clear but we cannot tell which task it refers to. */
@@ -362,9 +385,12 @@ async function handleStaffInboundMessage(params: {
     // unknown_reference: they typed a valid command but with a task id we don't
     // have on their list. Show a targeted message echoing the bad ref plus their
     // actual open tasks — not the generic command list, which would be noise here.
-    replyText = r.why === 'unknown_reference'
-      ? buildStaffUnknownRefReply(body, resolved.openWork)
-      : buildStaffHelpReply(resolved.openWork);
+    replyText =
+      r.why === 'task_list'
+        ? buildStaffTaskListReply(resolved.openWork)
+        : r.why === 'unknown_reference'
+          ? buildStaffUnknownRefReply(body, resolved.openWork)
+          : buildStaffHelpReply(resolved.openWork);
 
   } else if (r.route === 'staff_disambiguation') {
     console.log(

@@ -126,7 +126,7 @@ export type InboundRoute =
       binding: StaffBindingRow
       /** Set when the sender used a verb but we could not target it. */
       attemptedAction?: StaffActionKind
-      why: 'no_open_work' | 'unknown_reference' | 'explicit_help' | 'non_command'
+      why: 'no_open_work' | 'unknown_reference' | 'explicit_help' | 'non_command' | 'task_list'
     }
   | {
       route: 'exception'
@@ -177,6 +177,10 @@ export function decideInboundRoute(input: DecideInboundRouteInput): InboundRoute
   }
 
   switch (parsed.reason) {
+    case 'list_request':
+      // Identity already resolved above, so this is a known staff member asking
+      // to see their own work. Reply with the list, write nothing.
+      return { route: 'staff_help', binding, attemptedAction: 'tasks', why: 'task_list' }
     case 'needs_disambiguation':
       return {
         route: 'staff_disambiguation',

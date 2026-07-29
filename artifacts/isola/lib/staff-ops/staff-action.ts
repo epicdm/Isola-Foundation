@@ -37,7 +37,7 @@
 
 import { isWorkRefModel, type WorkRefModel } from './work-ref'
 
-export const STAFF_ACTIONS = ['ack', 'update', 'blocked', 'done', 'help', 'correct', 'start'] as const
+export const STAFF_ACTIONS = ['ack', 'update', 'blocked', 'done', 'help', 'correct', 'start', 'tasks'] as const
 export type StaffActionKind = (typeof STAFF_ACTIONS)[number]
 
 /** Verb spellings a human actually types, mapped to the canonical action. */
@@ -64,6 +64,11 @@ const VERB_ALIASES: Record<string, StaffActionKind> = {
   begin: 'start',
   resume: 'start',
   resuming: 'start',
+  // MY TASKS is advertised by epic_internal_task_v1. `my tasks` is collapsed to
+  // this single token in parseStaffCommand before the lookup.
+  mytasks: 'tasks',
+  tasks: 'tasks',
+  task: 'tasks',
 }
 
 /**
@@ -109,6 +114,9 @@ export type ParseStaffCommandResult =
         | 'needs_disambiguation'
         | 'no_open_work'
         | 'unknown_reference'
+        /** A listing request (MY TASKS). Not a failure — there is simply no
+         *  record to target, because the sender asked to SEE their work. */
+        | 'list_request'
     }
       & { action?: StaffActionKind; candidates?: OpenWorkRefCandidate[] }
 
@@ -241,6 +249,16 @@ export function parseStaffCommand(input: ParseStaffCommandInput): ParseStaffComm
   // Strip trailing punctuation from the first token only — "ACK." and "ACK!"
   // are the same intent as "ACK".
   const tokens = raw.split(/\s+/)
+
+  // "MY TASKS" is two words carrying one intent, and it is the exact phrase the
+  // approved template tells staff to send. Collapse it before the verb lookup so
+  // it resolves like any other verb rather than failing as `not_a_command` —
+  // advertising a command the parser cannot recognise is the defect this whole
+  // packet exists to stop.
+  if (tokens.length >= 2 && /^my$/i.test(tokens[0]) && /^tasks?[.!,;:]*$/i.test(tokens[1])) {
+    tokens.splice(0, 2, 'mytasks')
+  }
+
   const verbToken = tokens[0].toLowerCase().replace(/[.!,;:]+$/, '')
   const action = VERB_ALIASES[verbToken]
   if (!action) return { matched: false, reason: 'not_a_command' }
@@ -249,6 +267,14 @@ export function parseStaffCommand(input: ParseStaffCommandInput): ParseStaffComm
   const noteTokens = explicit ? tokens.slice(2) : tokens.slice(1)
   const rawNote = noteTokens.join(' ').trim()
   const note = NOTE_BEARING.has(action) && rawNote ? rawNote : null
+
+  // TASKS is a pure listing request: show me what I hold. It never targets a
+  // record and never applies anything, so it short-circuits before reference
+  // resolution — including the sole-open-work path that HELP uses. A listing
+  // request must never become an action on the one task someone happens to have.
+  if (action === 'tasks') {
+    return { matched: false, reason: 'list_request', action }
+  }
 
   // HELP never targets a record — it is a request for the command contract.
   // It is reported as matched with a synthetic target only when there is one;
