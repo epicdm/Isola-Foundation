@@ -379,6 +379,12 @@ export async function enqueueManagerVerificationNotification(
     workRefId: input.workRefId,
     templateParams: message.params,
     buttonPayloads: message.buttonPayloads,
+    // The SAME payloads, ordered to the approved template's button order:
+    // index 0 = "Approve", index 1 = "Return for rework". `buttonPayloads` is
+    // the readable map for operators; this is the array the send adapter needs,
+    // because Meta indexes button components positionally and rejects the whole
+    // send if an index has no matching approved button.
+    quickReplyPayloads: [message.buttonPayloads.approve, message.buttonPayloads.return],
     // Human-readable line for operators reading the outbox. States the ASK, and
     // never that a verdict has been reached.
     summaryLine: `Verification needed for #${input.workRefId} - ${message.params[2]} (completed by ${message.params[1]})`,

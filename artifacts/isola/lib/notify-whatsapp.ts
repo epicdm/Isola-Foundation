@@ -78,6 +78,32 @@ export function selectTemplateParams(payload: unknown): string[] {
   return summaryLine ? [summaryLine] : [];
 }
 
+/**
+ * Choose the QUICK_REPLY button payloads for this send.
+ *
+ * Same shape of rule as `selectTemplateParams`, and the same reason: only the
+ * builder that knows WHICH approved template this row targets knows how many
+ * buttons it has. Meta indexes button components positionally and rejects the
+ * ENTIRE send if an index has no matching approved button, so an absent or
+ * malformed array must mean "send no button components at all" — never a
+ * partial or invented one.
+ *
+ * Returns undefined rather than [] so `sendTemplate` emits no button component
+ * for every template that has no buttons, byte-for-byte as before.
+ */
+export function selectQuickReplyPayloads(payload: unknown): string[] | undefined {
+  const raw = (payload as { quickReplyPayloads?: unknown } | null | undefined)
+    ?.quickReplyPayloads;
+  if (
+    Array.isArray(raw) &&
+    raw.length > 0 &&
+    raw.every((p) => typeof p === 'string' && p.trim().length > 0)
+  ) {
+    return raw as string[];
+  }
+  return undefined;
+}
+
 export async function sendWhatsApp(input: SendWhatsAppInput): Promise<SendWhatsAppResult> {
   const { tenantId, contact, template, payload, pinnedPhoneNumberId } = input;
 
@@ -134,6 +160,7 @@ export async function sendWhatsApp(input: SendWhatsAppInput): Promise<SendWhatsA
     name: template,
     language: TEMPLATE_LANGUAGE,
     params: selectTemplateParams(payload),
+    quickReplyPayloads: selectQuickReplyPayloads(payload),
   });
 
   return { ok: result.ok, status: result.status, externalRef: result.messageId, error: result.error };

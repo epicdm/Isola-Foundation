@@ -21,10 +21,40 @@
  * template, and the only thing a 200 licenses us to write is `accepted`.
  */
 
+import { encodeTemplateQuickReplyPayload, type StaffMenuAction } from './staff-menu'
 import type { WorkRefModel } from './work-ref'
 
-/** The approved internal staff task template. */
-export const INTERNAL_TASK_TEMPLATE = 'epic_internal_task_v1'
+/**
+ * The approved internal staff task template.
+ *
+ * `isola_staff_task_v2`, not `epic_internal_task_v1`. Both are APPROVED on WABA
+ * 272252189309178 (the WABA that owns the 9043 staff sender), and both say the
+ * same thing — but v1 has NO BUTTONS component, so its body has to spell out
+ * `ACK {{1}} / START {{1}} / DONE {{1}} <result>` and the staff member has to
+ * TYPE them. v2 carries three QUICK_REPLY buttons whose labels are exactly
+ * `menuLabel('ack' | 'start' | 'blocked')`, so the first proactive message is a
+ * tap like every message after it.
+ *
+ * The buttons were approved at Meta before this constant was pointed at them;
+ * the payloads are supplied per send by `encodeTemplateQuickReplyPayload`, which
+ * is why a frozen button can still carry this episode's correlation id.
+ */
+export const INTERNAL_TASK_TEMPLATE = 'isola_staff_task_v2'
+
+/**
+ * The template's QUICK_REPLY buttons, IN APPROVED BUTTON ORDER.
+ *
+ * Meta indexes button components positionally and rejects the ENTIRE send if an
+ * index has no matching approved button, so this order is a contract with the
+ * template, not a preference. It matches `deriveStageMenu` for a `new` record —
+ * the stage every proactive dispatch is in — so the tap a staff member gets
+ * first is the same tap they would get from the in-window menu.
+ */
+export const INTERNAL_TASK_TEMPLATE_QUICK_REPLIES: readonly StaffMenuAction[] = [
+  'ack',
+  'start',
+  'blocked',
+]
 
 export type DispatchMode = 'template' | 'freeform'
 
@@ -105,20 +135,22 @@ export interface StaffTaskTemplateInput {
 }
 
 /**
- * Positional body parameters required by the APPROVED `epic_internal_task_v1`
+ * Positional body parameters required by the APPROVED `isola_staff_task_v2`
  * template, read from the Meta Business Management API on 2026-07-30:
  *
  *   parameter_format: POSITIONAL
- *   BODY: "EPIC Task {{1}} — {{2}} priority\n\nTitle: {{3}}\n
- *          Acknowledge by: {{4}}\nDue by: {{5}}\n\nReply:\nACK {{1}}\n
- *          START {{1}}\nBLOCKED {{1}} <reason>\nDONE {{1}} <result>\n
- *          MY TASKS\nHELP"
+ *   BODY: "EPIC task {{1}} — {{2}}\n\nBoard: {{3}}\n\nTap a button below to
+ *          respond. You can also reply MY TASKS to see everything you hold, or
+ *          HELP for the full list of commands."
+ *   BUTTONS: QUICK_REPLY ["Acknowledge", "Start work", "I'm blocked"]
  *
- * Five. Not four, not one. Sending any other count is Meta error #132000
- * ("Number of parameters does not match the expected number of params") — a
- * hard reject, so the staff member receives nothing at all.
+ * Three. The previous template (`epic_internal_task_v1`) needed five, because
+ * two of its slots existed only to print the typed commands the buttons now
+ * replace. Sending any other count is Meta error #132000 ("Number of parameters
+ * does not match the expected number of params") — a hard reject, so the staff
+ * member receives nothing at all.
  */
-export const INTERNAL_TASK_TEMPLATE_PARAM_COUNT = 5
+export const INTERNAL_TASK_TEMPLATE_PARAM_COUNT = 3
 
 /**
  * Flatten a value into something Meta will accept as a body parameter.
@@ -152,10 +184,8 @@ export function flattenForTemplate(value: string | null | undefined, fallback: s
 export function buildStaffTaskTemplateParams(input: StaffTaskTemplateInput): string[] {
   const params = [
     `#${input.workRefId}`,
-    flattenForTemplate(input.priority, 'NORMAL'),
     flattenForTemplate(input.workTitle, 'Assigned work'),
-    flattenForTemplate(input.acknowledgeBy, 'ASAP'),
-    flattenForTemplate(input.dueDate, 'No due date'),
+    flattenForTemplate(input.projectName, 'General'),
   ]
   if (params.length !== INTERNAL_TASK_TEMPLATE_PARAM_COUNT) {
     throw new Error(
@@ -204,6 +234,13 @@ export interface StaffNotificationEnvelope {
     workRefModel: WorkRefModel
     workRefId: number
     templateParams: string[]
+    /**
+     * Tap payloads for the template's QUICK_REPLY buttons, in approved button
+     * order. Carried on the outbox row so the send adapter does not have to
+     * re-derive them — and so an operator reading the row can see exactly what
+     * a tap will resolve to.
+     */
+    quickReplyPayloads: string[]
     summaryLine: string
   }
 }
@@ -277,10 +314,17 @@ export function buildStaffNotification(params: {
       workRefModel: params.workRefModel,
       workRefId: params.workRefId,
       templateParams,
+      // One payload per approved QUICK_REPLY button, in button order. The
+      // correlation id rides inside each payload, which is the whole reason a
+      // template button frozen at approval time can still resolve to THIS
+      // episode when it is tapped.
+      quickReplyPayloads: INTERNAL_TASK_TEMPLATE_QUICK_REPLIES.map((action) =>
+        encodeTemplateQuickReplyPayload(action, params.correlationId),
+      ),
       // Title — project (due X). Built from the INPUT, not from positional
       // indices, so a template slot reorder cannot silently rewrite the
       // human-readable summary into nonsense.
-      summaryLine: `${templateParams[2]} — ${flattenForTemplate(params.templateInput.projectName, 'General')} (due ${templateParams[4]})`,
+      summaryLine: `${templateParams[1]} — ${templateParams[2]} (due ${flattenForTemplate(params.templateInput.dueDate, 'No due date')})`,
     },
   }
 }

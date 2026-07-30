@@ -69,11 +69,11 @@ describe('buildStaffTaskTemplateParams — Meta rejects empty parameters', () =>
       projectName: null,
       dueDate: null,
     })
-    expect(params).toEqual(['#2589', 'NORMAL', 'Assigned work', 'ASAP', 'No due date'])
+    expect(params).toEqual(['#2589', 'Assigned work', 'General'])
     for (const p of params) expect(p.trim().length).toBeGreaterThan(0)
   })
 
-  it('builds exactly the five slots the approved template declares', () => {
+  it('builds exactly the three slots the approved template declares', () => {
     const params = buildStaffTaskTemplateParams({
       workRefId: 2590,
       staffName: 'Hakeem Dalrymple',
@@ -82,7 +82,7 @@ describe('buildStaffTaskTemplateParams — Meta rejects empty parameters', () =>
       dueDate: null,
     })
     expect(params).toHaveLength(INTERNAL_TASK_TEMPLATE_PARAM_COUNT)
-    expect(INTERNAL_TASK_TEMPLATE_PARAM_COUNT).toBe(5)
+    expect(INTERNAL_TASK_TEMPLATE_PARAM_COUNT).toBe(3)
   })
 
   it('puts the record reference in slot 1 so the reply commands resolve', () => {
