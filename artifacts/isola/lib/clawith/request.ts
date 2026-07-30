@@ -36,6 +36,18 @@ export interface BuildClawithRequestInput {
   bindingTenantId: string;
   /** Tenant recorded on the local Conversation row. */
   conversationTenantId: string;
+  /**
+   * The CLAWITH-side company identifier — NOT an Isola tenant cuid.
+   *
+   * Ratified 2026-07-30: callers supply `ClawithBinding.paperclip_company_id`,
+   * the same binding that supplies `designatedAgentId`
+   * (`clawith_agent_id`). The two ids belong to one namespace and must be
+   * drawn from one row. Passing a tenant cuid here produces a payload that
+   * looks populated and resolves to nothing on the far side.
+   *
+   * requireNonEmpty: a door that cannot name its business does not get a
+   * customer-facing turn.
+   */
   businessId: string;
   chatwootAccountId: string;
   inboxId: string;

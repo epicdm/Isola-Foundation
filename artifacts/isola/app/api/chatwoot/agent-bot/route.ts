@@ -632,6 +632,64 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
       escalationCorrelationId = mint.correlationId;
     }
 
+    // ── Authoritative gated-loop context (AI-LOOP WIRING) ──────────────────
+    //
+    // Commit 1 built the structured Foundation->Clawith path; Commit 2 built
+    // episode-aware ownership. Neither was REACHABLE, because nothing in the
+    // codebase ever passed `gatedLoop` and lib/brain-provider.ts's gated
+    // branch requires it. `grep -rn gatedLoop app lib` hit exactly one file.
+    // This is the single call site permitted to pass it: the Chatwoot-mediated
+    // door. The direct-WhatsApp caller in lib/agent.ts deliberately does NOT,
+    // because a second caller into the gated loop would be exactly the second
+    // customer-message pipeline the design forbids.
+    //
+    // Every field below comes from the verified webhook envelope, the resolved
+    // ChatwootBinding, or the local Conversation row. NOTHING is derived from
+    // model output, and nothing is synthesised when a source is absent: an
+    // empty value reaches buildClawithRequest(), whose requireNonEmpty()
+    // rejects it and suppresses the turn. Absent context must cost us a reply,
+    // never buy the agent a guess.
+
+    // The Chatwoot CONTACT id — never the phone number. The agent receives
+    // refs, never raw customer identifiers (same discipline as
+    // lib/escalation-ref.ts): a phone number in the bridge payload is both a
+    // PII leak and a directly contactable handle.
+    const gatedContactRef: string =
+      body.sender?.id != null       ? String(body.sender.id) :
+      conv.meta?.sender?.id != null ? String(conv.meta.sender.id) :
+      '';
+
+    const gatedLoop: import('@/lib/brain-provider').GatedLoopContext = {
+      chatwootAccountId:    accountId,
+      inboxId,
+      bindingTenantId:      binding.tenant_id,
+      conversationTenantId: conversation.tenant_id,
+      conversationId:       conversation.id,
+      // The Chatwoot message id — the same key lib/inbound-dedup.ts claims
+      // on, so Foundation's dedup ref and the bridge's refer to one event. An
+      // incoming event with no numeric id already returned 200 far above, so
+      // this is never a synthesised id standing in for a missing one.
+      inboundMessageId:     cwMsgId != null ? String(cwMsgId) : '',
+      contactRef:           gatedContactRef,
+      // NAMESPACE, ratified 2026-07-30: `businessId` is the CLAWITH-side
+      // company identifier, not an Isola tenant cuid. It pairs with
+      // designatedAgentId (clawith_agent_id) drawn from this same
+      // ClawithBinding. Passing a tenant cuid here would send Clawith an id
+      // from the wrong namespace — a value that resolves to nothing while
+      // looking populated. Absent => empty => the turn fails closed.
+      businessId:           clawithBindingRow?.paperclip_company_id ?? '',
+      // The ownership value the suppression gate above ALREADY decided on.
+      // Re-reading it here would let one request hold two answers to "who owns
+      // this conversation".
+      ownershipState:       ownership.state,
+      // EMPTY, deliberately. No mutating tool is authorised in this commit:
+      // per the capability audit, odoo.read is a raw model/method primitive,
+      // wa.send lets the agent choose a recipient, and odoo.create_lead has no
+      // per-conversation idempotency key. Commit 3 introduces narrow,
+      // purpose-scoped, idempotent tools instead of exposing these.
+      allowedTools:         [],
+    };
+
     let needsHandoff = false;
 
     try {
@@ -658,6 +716,7 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
         odooBinding: odooBindingInput,
         conversationRef,
         escalationCorrelationId,
+        gatedLoop,
       });
       reply       = result.text;
       tokensUsed  = result.tokensUsed;
@@ -683,6 +742,44 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
     }
 
     if (!reply) return 200;
+
+    // ── Ownership freshness (AI-LOOP WIRING) ────────────────────────────────
+    //
+    // Generation is not instantaneous. While the brain was thinking, a human
+    // could have claimed this conversation, or a handback could have begun.
+    // The reply we are holding was computed for ONE ownership episode; posting
+    // it into a later one puts an AI turn into a conversation a person now
+    // owns — the precise failure Commit 2 exists to make impossible. So the
+    // last thing we do before speaking is re-read who owns it.
+    //
+    // Authoritative doors only. On a legacy door ownership is recorded but
+    // does not govern, and adding a discard there would change live behaviour
+    // in the same commit that must prove gate-OFF parity. The legacy race is
+    // pre-existing and closes when its door becomes authoritative.
+    //
+    // findFirst, not findUnique: this path's Prisma surface is deliberately
+    // the same one the first read used.
+    if (ownershipAuthoritative) {
+      const freshRow = await prisma.conversation.findFirst({
+        where:  { id: conversation.id },
+        select: { ownership_state: true, ownership_episode: true, human_handling: true },
+      });
+      const fresh = freshRow ? readOwnership(freshRow) : null;
+      const moved =
+        !fresh ||
+        fresh.diverged ||
+        fresh.state !== ownership.state ||
+        fresh.episode !== ownership.episode ||
+        suppressesAutomatedReply(fresh.state);
+      if (moved) {
+        console.warn(
+          `[agent-bot] discarding reply for conv cw#${cwConvId} — ownership moved during ` +
+            `generation: ${ownership.state}/${ownership.episode} -> ` +
+            `${fresh ? `${fresh.state}/${fresh.episode}` : 'unreadable'}`,
+        );
+        return 200;
+      }
+    }
 
     // ── Persist AI reply ────────────────────────────────────────────────────
     await prisma.message.create({
