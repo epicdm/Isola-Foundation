@@ -83,32 +83,86 @@ export function decideDispatchMode(params: {
 }
 
 export interface StaffTaskTemplateInput {
+  /**
+   * The Odoo record id this dispatch is about. Rendered as `#2589` into slot
+   * {{1}}, which the approved body repeats inside every reply command
+   * (`ACK {{1}}`, `START {{1}}`, `DONE {{1}} <result>`). It is therefore not a
+   * cosmetic label: it is the reference the staff member echoes back, and
+   * `parseStaffCommand` resolves from. It is injected by
+   * `buildStaffNotification` from the same `workRefId` that keys the WorkRef,
+   * so the reference a staff member is told to quote can never drift from the
+   * record the action will be applied to.
+   */
+  workRefId: number
   staffName: string
   workTitle: string
   projectName: string | null
   dueDate: string | null
+  /** Priority word for slot {{2}}. Defaults to NORMAL. */
+  priority?: string | null
+  /** Acknowledgement deadline for slot {{4}}. Defaults to ASAP. */
+  acknowledgeBy?: string | null
+}
+
+/**
+ * Positional body parameters required by the APPROVED `epic_internal_task_v1`
+ * template, read from the Meta Business Management API on 2026-07-30:
+ *
+ *   parameter_format: POSITIONAL
+ *   BODY: "EPIC Task {{1}} — {{2}} priority\n\nTitle: {{3}}\n
+ *          Acknowledge by: {{4}}\nDue by: {{5}}\n\nReply:\nACK {{1}}\n
+ *          START {{1}}\nBLOCKED {{1}} <reason>\nDONE {{1}} <result>\n
+ *          MY TASKS\nHELP"
+ *
+ * Five. Not four, not one. Sending any other count is Meta error #132000
+ * ("Number of parameters does not match the expected number of params") — a
+ * hard reject, so the staff member receives nothing at all.
+ */
+export const INTERNAL_TASK_TEMPLATE_PARAM_COUNT = 5
+
+/**
+ * Flatten a value into something Meta will accept as a body parameter.
+ *
+ * Meta rejects a template parameter containing a newline, a tab, or four or
+ * more consecutive spaces. An Odoo task name is free text typed by a human and
+ * routinely contains all three, so this is not defensive decoration: without
+ * it, one badly-formatted task title silently makes a staff member unreachable
+ * for that task. Empty and whitespace-only values collapse to the caller's
+ * readable fallback rather than a blank, which Meta also rejects.
+ */
+export function flattenForTemplate(value: string | null | undefined, fallback: string): string {
+  const flat = (value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/ {2,}/g, ' ').trim()
+  return flat.length > 0 ? flat : fallback
 }
 
 /**
  * Positional body params for `epic_internal_task_v1`, in template order.
  *
- * Every slot is filled with a non-empty string. Meta rejects a template send
- * whose parameter is empty or whitespace, and that rejection is a 400 that a
- * caller could mistake for "the staff member is unreachable" rather than "we
- * built a bad payload". Placeholders are explicit words a human can read in the
- * message, not blanks.
+ * Every slot is filled with a non-empty, flattened string. Meta rejects a
+ * template send whose parameter is empty or whitespace, and that rejection is a
+ * 400 that a caller could mistake for "the staff member is unreachable" rather
+ * than "we built a bad payload". Placeholders are explicit words a human can
+ * read in the message, not blanks.
+ *
+ * The returned length is asserted against the approved template's own
+ * parameter count. A future template edit that adds or removes a slot must
+ * change this function and its constant together, and will fail loudly here
+ * rather than quietly at Meta.
  */
 export function buildStaffTaskTemplateParams(input: StaffTaskTemplateInput): string[] {
-  const nonEmpty = (v: string | null | undefined, fallback: string): string => {
-    const t = (v ?? '').trim()
-    return t.length > 0 ? t : fallback
-  }
-  return [
-    nonEmpty(input.staffName, 'Team member'),
-    nonEmpty(input.workTitle, 'Assigned work'),
-    nonEmpty(input.projectName, 'General'),
-    nonEmpty(input.dueDate, 'No due date'),
+  const params = [
+    `#${input.workRefId}`,
+    flattenForTemplate(input.priority, 'NORMAL'),
+    flattenForTemplate(input.workTitle, 'Assigned work'),
+    flattenForTemplate(input.acknowledgeBy, 'ASAP'),
+    flattenForTemplate(input.dueDate, 'No due date'),
   ]
+  if (params.length !== INTERNAL_TASK_TEMPLATE_PARAM_COUNT) {
+    throw new Error(
+      `staff task template expects ${INTERNAL_TASK_TEMPLATE_PARAM_COUNT} params, built ${params.length}`,
+    )
+  }
+  return params
 }
 
 /**
@@ -187,10 +241,15 @@ export function buildStaffNotification(params: {
   workRefModel: WorkRefModel
   workRefId: number
   template: string
-  templateInput: StaffTaskTemplateInput
+  /** `workRefId` is NOT accepted here — it is injected below from the WorkRef
+   *  so slot {{1}} and the record the reply resolves to cannot disagree. */
+  templateInput: Omit<StaffTaskTemplateInput, 'workRefId'>
   purpose: 'task_dispatch' | 'manager_verification' | 'blocker_escalation' | 'onboarding'
 }): StaffNotificationEnvelope {
-  const templateParams = buildStaffTaskTemplateParams(params.templateInput)
+  const templateParams = buildStaffTaskTemplateParams({
+    ...params.templateInput,
+    workRefId: params.workRefId,
+  })
   return {
     tenantId: params.tenantId,
     contact: staffContactE164(params.toWaId),
@@ -206,7 +265,10 @@ export function buildStaffNotification(params: {
       workRefModel: params.workRefModel,
       workRefId: params.workRefId,
       templateParams,
-      summaryLine: `${templateParams[1]} — ${templateParams[2]} (due ${templateParams[3]})`,
+      // Title — project (due X). Built from the INPUT, not from positional
+      // indices, so a template slot reorder cannot silently rewrite the
+      // human-readable summary into nonsense.
+      summaryLine: `${templateParams[2]} — ${flattenForTemplate(params.templateInput.projectName, 'General')} (due ${templateParams[4]})`,
     },
   }
 }

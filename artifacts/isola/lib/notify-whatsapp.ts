@@ -32,6 +32,41 @@ export interface SendWhatsAppResult {
   error?: string;
 }
 
+/**
+ * Choose the positional body parameters for this send.
+ *
+ * An explicit `templateParams` array wins. It was built against a SPECIFIC
+ * template's approved body (see `buildStaffTaskTemplateParams`), so it is the
+ * only thing that knows how many slots that template actually has. Collapsing
+ * every template to a single `summaryLine` is what produced Meta error #132000
+ * on `epic_internal_task_v1`, which requires five: the staff dispatch was
+ * enqueued, drained, rejected and retried, and no staff member ever received a
+ * task. A rejected send is not a delivery problem to escalate to the recipient
+ * — it is a payload we built wrong.
+ *
+ * The `[summaryLine]` fallback is preserved verbatim for the single-parameter
+ * voicemail-catch template, which carries no `templateParams` and must keep
+ * behaving exactly as before.
+ *
+ * Exported so the selection rule is unit-testable without mocking Prisma or
+ * the Graph API.
+ */
+export function selectTemplateParams(payload: unknown): string[] {
+  const raw = (payload as { templateParams?: unknown } | null | undefined)?.templateParams;
+  if (
+    Array.isArray(raw) &&
+    raw.length > 0 &&
+    raw.every((p) => typeof p === 'string' && p.trim().length > 0)
+  ) {
+    return raw as string[];
+  }
+  const summaryLine =
+    typeof (payload as { summaryLine?: unknown } | null | undefined)?.summaryLine === 'string'
+      ? ((payload as { summaryLine: string }).summaryLine)
+      : '';
+  return summaryLine ? [summaryLine] : [];
+}
+
 export async function sendWhatsApp(input: SendWhatsAppInput): Promise<SendWhatsAppResult> {
   const { tenantId, contact, template, payload, pinnedPhoneNumberId } = input;
 
@@ -72,15 +107,13 @@ export async function sendWhatsApp(input: SendWhatsAppInput): Promise<SendWhatsA
     return { ok: false, status: 0, error: `WhatsAppNumber for tenant ${tenantId} has no resolvable token` };
   }
 
-  const summaryLine = typeof (payload as any)?.summaryLine === 'string' ? (payload as any).summaryLine : '';
-
   const result = await sendTemplate(getWhatsAppConfig(), {
     phoneId: waNumber.phone_number_id,
     token,
     to: contact.replace(/^\+/, ''),
     name: template,
     language: TEMPLATE_LANGUAGE,
-    params: summaryLine ? [summaryLine] : [],
+    params: selectTemplateParams(payload),
   });
 
   return { ok: result.ok, status: result.status, externalRef: result.messageId, error: result.error };

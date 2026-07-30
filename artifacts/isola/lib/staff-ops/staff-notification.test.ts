@@ -4,6 +4,7 @@ import {
   SERVICE_WINDOW_MS,
   buildStaffNotification,
   buildStaffTaskTemplateParams,
+  INTERNAL_TASK_TEMPLATE_PARAM_COUNT,
   decideDispatchMode,
   hasOpenServiceWindow,
   staffContactE164,
@@ -62,27 +63,71 @@ describe('decideDispatchMode — template-first, always, for anything proactive'
 describe('buildStaffTaskTemplateParams — Meta rejects empty parameters', () => {
   it('fills every slot with a readable placeholder rather than a blank', () => {
     const params = buildStaffTaskTemplateParams({
+      workRefId: 2589,
       staffName: '',
       workTitle: '   ',
       projectName: null,
       dueDate: null,
     })
-    expect(params).toEqual(['Team member', 'Assigned work', 'General', 'No due date'])
+    expect(params).toEqual(['#2589', 'NORMAL', 'Assigned work', 'ASAP', 'No due date'])
     for (const p of params) expect(p.trim().length).toBeGreaterThan(0)
+  })
+
+  it('builds exactly the five slots the approved template declares', () => {
+    const params = buildStaffTaskTemplateParams({
+      workRefId: 2590,
+      staffName: 'Hakeem Dalrymple',
+      workTitle: 'Controlled internal test',
+      projectName: 'BFF',
+      dueDate: null,
+    })
+    expect(params).toHaveLength(INTERNAL_TASK_TEMPLATE_PARAM_COUNT)
+    expect(INTERNAL_TASK_TEMPLATE_PARAM_COUNT).toBe(5)
+  })
+
+  it('puts the record reference in slot 1 so the reply commands resolve', () => {
+    expect(
+      buildStaffTaskTemplateParams({
+        workRefId: 2589,
+        staffName: 'Hakeem Dalrymple',
+        workTitle: 'anything',
+        projectName: null,
+        dueDate: null,
+      })[0],
+    ).toBe('#2589')
+  })
+
+  it('flattens newlines, tabs and space runs Meta would reject', () => {
+    const params = buildStaffTaskTemplateParams({
+      workRefId: 7,
+      staffName: 'Someone',
+      workTitle: 'Line one\nline two\tafter tab     five spaces',
+      projectName: null,
+      dueDate: null,
+    })
+    expect(params[2]).toBe('Line one line two after tab five spaces')
+    for (const p of params) {
+      expect(p).not.toMatch(/[\r\n\t]/)
+      expect(p).not.toMatch(/ {4,}/)
+    }
   })
 
   it('preserves real values in template order', () => {
     expect(
       buildStaffTaskTemplateParams({
+        workRefId: 2068,
         staffName: 'Phillip Alleyne',
         workTitle: 'INC/26-27/2068c - WhatsApp integration',
         projectName: 'Dragon Windows - Customer Status Portal',
         dueDate: '2026-08-01',
+        priority: 'HIGH',
+        acknowledgeBy: '10:45',
       }),
     ).toEqual([
-      'Phillip Alleyne',
+      '#2068',
+      'HIGH',
       'INC/26-27/2068c - WhatsApp integration',
-      'Dragon Windows - Customer Status Portal',
+      '10:45',
       '2026-08-01',
     ])
   })
