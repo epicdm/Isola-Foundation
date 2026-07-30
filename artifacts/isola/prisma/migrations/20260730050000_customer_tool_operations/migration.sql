@@ -26,7 +26,7 @@ CREATE TABLE "CustomerToolOperation" (
     "conversation_id" TEXT NOT NULL,
     "correlation_id" TEXT NOT NULL,
     "agent_session_id" TEXT,
-    "state" TEXT NOT NULL DEFAULT claimed,
+    "state" TEXT NOT NULL DEFAULT 'claimed',
     "result_model" TEXT,
     "result_id" INTEGER,
     "result" JSONB,
