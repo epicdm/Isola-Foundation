@@ -7,7 +7,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "start:prod": "prisma migrate resolve --applied 20260730050000_customer_tool_operations || true && prisma migrate deploy && next start",
+    "start:prod": "prisma migrate deploy && next start",
     "db:push": "tsx ../../scripts/src/guard-not-prod-db.ts && prisma db push",
     "migrate:dev": "tsx ../../scripts/src/guard-not-prod-db.ts && prisma migrate dev",
     "typecheck": "tsc --noEmit",
