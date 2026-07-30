@@ -361,9 +361,34 @@ function extractStaffTapId(msg: any): string {
  * defect class this packet exists to eliminate. The alternative considered and
  * rejected was duplicating these ~90 lines at the manager call site.
  *
- * Behaviour is unchanged from the inline version:
- *   - the service-window predicate is still consulted even though the inbound
- *     message has just refreshed it, which guards against clock skew;
+ * REACTIVE vs PROACTIVE (fixes a real defect: this function used to hardcode
+ * `lastInboundAt: now` for every caller, i.e. treat EVERY recipient's window
+ * as open — correct for a reactive reply, silently wrong for a proactive
+ * send to a THIRD PARTY who has not themselves just written in):
+ *   - `proactive` unset/false (the default; every reply-to-sender call site):
+ *     the inbound message that triggered this whole request just opened this
+ *     recipient's window, so `lastInboundAt: now` is not a hardcoded lie here
+ *     — it is the real, current fact. Goes out free-form/interactive exactly
+ *     as before.
+ *   - `proactive: true` (currently only `notifyAdminOfUnknownStaffSender`):
+ *     the recipient has not messaged us in this request, so there is no real
+ *     inbound time to check, and `decideDispatchMode` (see
+ *     staff-notification.ts) makes proactive sends ALWAYS a template — not
+ *     because the window happens to be closed, but because window state
+ *     inferred from our own possibly-stale records is never a safe basis for
+ *     guessing "proactive but free-form is fine". Requires a caller-supplied
+ *     `params.template` — there is deliberately NO default template. Reusing
+ *     `epic_internal_task_v1` (the one approved template this codebase already
+ *     sends proactively, via `dispatchWorkToStaff`) is NOT a safe generic
+ *     fallback: its approved body is hard-committed to "Reply: ACK {{1}} /
+ *     START {{1}} / DONE {{1}} <result> ...", which is correct for a real
+ *     task dispatch and actively misleading for anything else. A proactive
+ *     call with no matching template is refused and logged rather than
+ *     risking either a silent Meta 131047 (free-form outside the 24h window:
+ *     Graph still answers HTTP 200, the failure arrives later on the async
+ *     status webhook) or a confusing wrong-template send.
+ *
+ * Other behaviour is unchanged from the inline version:
  *   - a pinned STAFF_NOTIFICATION_PHONE_NUMBER_ID that does not belong to this
  *     tenant is still a hard stop with NO fallback, same rule as the drain;
  *   - a failed interactive send still falls back to plain text, because the
@@ -377,18 +402,38 @@ async function sendStaffChannelReply(params: {
   to: string;
   text: string;
   menu: MenuRendering;
+  proactive?: boolean;
+  /** Required when `proactive` is true — see decideDispatchMode above. */
+  template?: { name: string; params: string[] };
 }): Promise<void> {
-  const { tenantId, to, text, menu } = params;
+  const { tenantId, to, text, menu, proactive = false } = params;
 
-  // Reply with free-form text if the service window is open.
-  // The inbound message itself opens/refreshes the 24-hour window, so
-  // lastInboundAt = now gives age = 0 — hasOpenServiceWindow returns true.
-  // Respecting the predicate regardless guards against clock skew or any
-  // future change to the window rule.
-  const { hasOpenServiceWindow } = await import('@/lib/staff-ops/staff-notification');
+  const { decideDispatchMode } = await import('@/lib/staff-ops/staff-notification');
   const now = new Date();
-  if (!hasOpenServiceWindow({ lastInboundAt: now, now })) {
-    console.log(`[webhook/wa][staff] service window closed for sender=${to} — reply suppressed`);
+  // Reactive: the inbound that triggered this call is the real lastInboundAt.
+  // Proactive: there is no real signal, so `null` — decideDispatchMode does
+  // not use it for the proactive branch (always template), but passing the
+  // honest value keeps this call site truthful rather than reusing `now` for
+  // a recipient who has not written in.
+  const decision = decideDispatchMode({
+    proactive,
+    window: { lastInboundAt: proactive ? null : now, now },
+  });
+
+  if (decision.mode === 'template') {
+    if (!params.template) {
+      // Deliberately no default template. `epic_internal_task_v1`'s approved
+      // body is hard-committed to "Reply: ACK {{1}} / START {{1}} / DONE
+      // {{1}} ..." — correct for a real task dispatch (dispatchWorkToStaff),
+      // actively misleading for anything else. A caller-supplied template is
+      // the only way this branch sends; otherwise it refuses and logs rather
+      // than risking either a silent Meta 131047 or a confusing message.
+      console.error(
+        `[webhook/wa][staff] proactive send to=${to} tenant=${tenantId} why=${decision.why} has no template — refused`,
+      );
+      return;
+    }
+    await sendStaffTemplate({ tenantId, to, template: params.template.name, params: params.template.params });
     return;
   }
 
@@ -472,6 +517,74 @@ async function sendStaffChannelReply(params: {
   } else {
     console.log(
       `[webhook/wa][staff] reply sent phone_number_id=${fromNumber.phone_number_id} sender=${to} wamid=${replyResult.messageId}`,
+    );
+  }
+}
+
+/**
+ * The template-send half of the staff channel, split out from the free-form
+ * half above so `sendStaffChannelReply` reads as one decision (mode) plus two
+ * short sends, not one function that does both under one branch. Mirrors the
+ * FROM-number/token resolution exactly — same pinned-number rule, same
+ * failure logging shape — because a proactive send that can't resolve a FROM
+ * number is exactly as much a hard stop as a reactive one.
+ */
+async function sendStaffTemplate(params: {
+  tenantId: string;
+  to: string;
+  template: string;
+  params: string[];
+}): Promise<void> {
+  const { tenantId, to, template, params: templateParams } = params;
+
+  const pinnedId = process.env.STAFF_NOTIFICATION_PHONE_NUMBER_ID;
+  const fromNumber = await (pinnedId
+    ? prisma.whatsAppNumber.findFirst({
+        where: { phone_number_id: pinnedId, tenant_id: tenantId },
+        select: { phone_number_id: true, access_token: true, token_env: true },
+      })
+    : prisma.whatsAppNumber.findFirst({
+        where: { tenant_id: tenantId },
+        orderBy: { created_at: 'asc' },
+        select: { phone_number_id: true, access_token: true, token_env: true },
+      }));
+
+  if (!fromNumber) {
+    const why = pinnedId
+      ? `STAFF_NOTIFICATION_PHONE_NUMBER_ID=${pinnedId} not found for tenant ${tenantId} — refusing to fall back`
+      : `no WhatsAppNumber for tenant ${tenantId}`;
+    console.error(`[webhook/wa][staff] template send suppressed — ${why}`);
+    return;
+  }
+
+  const token = fromNumber.token_env
+    ? process.env[fromNumber.token_env]
+    : fromNumber.access_token;
+  if (!token) {
+    console.error(
+      `[webhook/wa][staff] template send suppressed — no token for phone_number_id=${fromNumber.phone_number_id} tenant=${tenantId}`,
+    );
+    return;
+  }
+
+  const { sendTemplate } = await import('@/engines/whatsapp');
+  const { getWhatsAppConfig } = await import('@/lib/engines');
+  const result = await sendTemplate(getWhatsAppConfig(), {
+    phoneId: fromNumber.phone_number_id,
+    token,
+    to: to.replace(/^\+/, ''),
+    name: template,
+    language: 'en_US',
+    params: templateParams,
+  });
+
+  if (!result.ok) {
+    console.error(
+      `[webhook/wa][staff] template send failed phone_number_id=${fromNumber.phone_number_id} to=${to} template=${template} status=${result.status} error=${result.error}`,
+    );
+  } else {
+    console.log(
+      `[webhook/wa][staff] template sent phone_number_id=${fromNumber.phone_number_id} to=${to} template=${template} wamid=${result.messageId}`,
     );
   }
 }
@@ -602,88 +715,23 @@ async function handleManagerVerdictTap(params: {
 }
 
 /**
- * Tell the manager that work is waiting on their verdict.
- *
- * Before this, a staff DONE created a `mail.activity` in Odoo and stopped
- * there — the manager found out only by opening Odoo, which in practice means
- * not at all. Creating the record and leaving the person unaware is the
- * completion half of the same defect class this packet exists to eliminate.
- *
- * DUPLICATE SUPPRESSION IS STRUCTURAL, NOT A FLAG. This reads
- * `applied.odooResult.verification`, which only exists on a FRESHLY applied
- * action. A duplicate webhook delivery is stopped by the wamid dedup claim; a
- * re-sent DONE hits `applyStaffAction`'s idempotency key and returns
- * `{deduped: true}` with no `odooResult` at all. Both therefore reach here with
- * nothing to send, without needing a separate "already notified" table.
- *
- * Sends through the shared helper so a manager notice cannot become a second
- * send path.
- */
-async function notifyManagerOfVerification(params: {
-  tenantId: string;
-  staffName: string;
-  managerOdooResUserId: number | null;
-  odooResult: Record<string, unknown> | null | undefined;
-  taskLabel: string;
-}): Promise<void> {
-  const verification = (params.odooResult?.verification ?? null) as
-    | { requested?: boolean; activityId?: number; why?: string; deduped?: boolean }
-    | null;
-
-  if (!verification?.requested || !verification.activityId) {
-    // No verification was raised — most often `staff_member_has_no_manager`.
-    // There is nobody to tell, and inventing a recipient would be worse.
-    return;
-  }
-
-  if (verification.deduped) {
-    // The activity already existed for THIS verification episode, so the
-    // manager has already been asked. Telling them a second time is exactly the
-    // duplicate the Foundation operation claim exists to prevent.
-    return;
-  }
-
-  const managerUserId = params.managerOdooResUserId;
-  if (!managerUserId) return;
-
-  const { findBindingByOdooUser } = await import('@/lib/staff-ops/service');
-  const manager = await findBindingByOdooUser(params.tenantId, managerUserId);
-  if (!manager?.waId) {
-    // Loud, because the Odoo activity DOES exist and now nobody knows.
-    console.error(
-      `[webhook/wa][manager] verification ${verification.activityId} raised for odoo user ${managerUserId} tenant=${params.tenantId} but that manager has no reachable WhatsApp binding — nobody was notified`,
-    );
-    return;
-  }
-
-  const { buildManagerVerdictMenu } = await import('@/lib/staff-ops/manager-verdict');
-  console.log(
-    `[webhook/wa][manager] notifying manager=${manager.waId} activity=${verification.activityId} tenant=${params.tenantId}`,
-  );
-  await sendStaffChannelReply({
-    tenantId: params.tenantId,
-    to: manager.waId,
-    text: `${params.staffName} reported this finished:\n\n${params.taskLabel}\n\nApprove it, or send it back for rework.`,
-    menu: buildManagerVerdictMenu(verification.activityId),
-  });
-}
-
-/**
  * Alert the tenant owner that an unenrolled number messaged the internal
  * staff line, at most once per sender per UTC day.
  *
- * Lives here, not in lib/staff-ops/staff-notification.ts, for the same
- * reason `notifyManagerOfVerification` does: it needs `sendStaffChannelReply`
- * and `prisma`, both already in scope in this route file, and a lib module
- * cannot import from a Next.js route handler. staff-notification.ts keeps
- * `unknownSenderAlertDedupeKey` as the pure part of this contract.
+ * Lives here, not in lib/staff-ops/staff-notification.ts: it needs
+ * `sendStaffChannelReply` and `prisma`, both already in scope in this route
+ * file, and a lib module cannot import from a Next.js route handler.
+ * staff-notification.ts keeps `unknownSenderAlertDedupeKey` as the pure part
+ * of this contract.
  *
- * Sends free text via the existing `sendStaffChannelReply` path rather than
- * the NotificationOutbox/template pipeline — there is no approved template
- * for "a stranger messaged the staff line" and inventing one would misuse an
- * approved template's frozen copy for unrelated content, a real Meta content-
- * policy risk for a low-value internal alert. Same tradeoff notifyManagerOfVerification
- * already accepts for its own free-text sends.
+ * Proactive (see sendStaffChannelReply's doc comment): the owner has not
+ * messaged us in this request, so `decideDispatchMode` always requires a
+ * template — and deliberately none is supplied. There is no approved
+ * template for "a stranger messaged the staff line", and `epic_internal_task_v1`
+ * is not a safe generic substitute (its body tells the reader to text staff
+ * commands). No template means this refuses and logs instead of sending
+ * something wrong; the reactive reply to the unknown sender themselves is
+ * unaffected and always goes out.
  */
 async function notifyAdminOfUnknownStaffSender(params: {
   tenantId: string;
@@ -705,7 +753,7 @@ async function notifyAdminOfUnknownStaffSender(params: {
 
   const owner = await prisma.staffBinding.findFirst({
     where: { tenant_id: tenantId, role: 'owner', active: true, wa_id: { not: null } },
-    select: { wa_id: true },
+    select: { wa_id: true, display_name: true },
   });
   if (!owner?.wa_id) {
     console.error(
@@ -717,11 +765,13 @@ async function notifyAdminOfUnknownStaffSender(params: {
   console.log(
     `[webhook/wa][staff] notifying owner=${owner.wa_id} of unknown sender waId=${waId} tenant=${tenantId} why=${why}`,
   );
+  // proactive: true, no template — see the doc comment above.
   await sendStaffChannelReply({
     tenantId,
     to: owner.wa_id,
     text: `An unrecognized number messaged the internal EPIC line (9043): +${waId} (${why}). If this is a new hire, add their WhatsApp binding.`,
     menu: { kind: 'none' },
+    proactive: true,
   });
 }
 
@@ -950,19 +1000,16 @@ async function handleStaffInboundMessage(params: {
       // the menu that comes back is the NEW stage's menu, not the old one's.
       replyMenu = await buildStaffReplyMenu({ binding: r.binding, target: r.target });
 
-      // A DONE that raised a verification must actually reach the manager.
-      // Creating the Odoo activity and stopping there is how finished work sits
-      // unseen. Deliberately AFTER the apply and its readback, so nothing is
-      // announced that Odoo did not accept.
-      if (r.action === 'done') {
-        await notifyManagerOfVerification({
-          tenantId,
-          staffName: r.binding.displayName,
-          managerOdooResUserId: r.binding.managerOdooResUserId,
-          odooResult: 'odooResult' in applied ? applied.odooResult : null,
-          taskLabel: r.target.label ?? `#${r.target.odooId}`,
-        });
-      }
+      // A DONE that raises a verification is already told to the manager —
+      // `applyStaffAction` (lib/staff-ops/service.ts) calls
+      // `applyDoneVerification`, which calls `enqueueManagerVerificationNotification`
+      // as part of the same write, before this function ever sees the result.
+      // That path sends the real approved `epic_manager_verification_v1`
+      // template with genuine Approve/Return buttons through the durable
+      // outbox. A second, synchronous, free-text notice used to be sent from
+      // here too — retired 2026-07-30 as a duplicate send path (it also had
+      // its own unrelated window-check bug). Do not re-add a manager notice
+      // in this branch; the outbox is the sole notifier.
     }
   }
 

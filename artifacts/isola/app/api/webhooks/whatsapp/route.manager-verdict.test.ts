@@ -1,17 +1,27 @@
 /**
  * route.manager-verdict.test.ts — the manager loop at the webhook boundary.
  *
- * Two properties are load-bearing here and neither is visible in a unit test of
- * the resolver:
+ * One property is load-bearing here and is not visible in a unit test of the
+ * resolver:
  *
- *   1. A manager verdict is NOT a second webhook processor. It is reached after
- *      the same wamid dedup claim, after the same tenant resolution, and it
- *      replies through the same send helper. If it ever branches ahead of the
- *      gate, cutover defect 4 reproduces on the number where it was already
- *      solved once.
- *   2. A staff DONE must actually reach the manager. Creating the Odoo activity
- *      and stopping there is how finished work sits unseen — and a duplicate
- *      delivery must not produce a second notice.
+ *   A manager verdict is NOT a second webhook processor. It is reached after
+ *   the same wamid dedup claim, after the same tenant resolution, and it
+ *   replies through the same send helper. If it ever branches ahead of the
+ *   gate, cutover defect 4 reproduces on the number where it was already
+ *   solved once.
+ *
+ * "A staff DONE must actually reach the manager" used to be tested here too,
+ * against a route.ts function (`notifyManagerOfVerification`) that sent an
+ * immediate, synchronous, interactive-buttons notice via `sendStaffChannelReply`.
+ * That function was retired 2026-07-30: it was a second, redundant send path
+ * for the exact same event `applyDoneVerification` (lib/staff-ops/service.ts)
+ * already notifies through `enqueueManagerVerificationNotification`
+ * (lib/staff-ops/manager-notification.ts) — the durable outbox, the real
+ * approved `epic_manager_verification_v1` template, genuine Approve/Return
+ * buttons baked into the template itself. `applyStaffAction` is mocked in
+ * this file (`h.applyResult`), so that notification path never actually runs
+ * here — it is covered directly in manager-notification.test.ts and
+ * service.orchestration.test.ts instead, where it belongs.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -228,77 +238,6 @@ describe('manager verdict at the webhook boundary', () => {
     await POST(req([buttonTap('10000000000', encodeManagerVerdictId('approve', ACTIVITY), 'w.11')]));
     expect(replies()).toBe(0);
     expect(h.calls).not.toContain('apply.verdict');
-  });
-});
-
-describe('staff DONE notifies the manager', () => {
-  const donePayload = encodeMenuId('done', CORR);
-
-  it('sends exactly one manager notice carrying Approve and Return', async () => {
-    await POST(req([buttonTap(WA_HAKEEM, donePayload, 'w.d1')]));
-    expect(h.calls).toContain('lookup.manager');
-    // one reply to Hakeem + one notice to Phillip
-    expect(h.sentButtons).toHaveLength(1);
-    const notice = h.sentButtons[0];
-    expect(notice.to).toBe(WA_PHILLIP);
-    expect(notice.buttons.map((b: any) => b.id)).toEqual([
-      encodeManagerVerdictId('approve', ACTIVITY),
-      encodeManagerVerdictId('return', ACTIVITY),
-    ]);
-    expect(notice.body).toContain('Hakeem Dalrymple');
-  });
-
-  it('a DUPLICATE staff DONE sends no second notice — structurally, via the dedup gate', async () => {
-    await POST(req([buttonTap(WA_HAKEEM, donePayload, 'w.d2')]));
-    await POST(req([buttonTap(WA_HAKEEM, donePayload, 'w.d2')]));
-    expect(h.calls.filter((c) => c === 'apply.staff')).toHaveLength(1);
-    expect(h.sentButtons.filter((b) => b.to === WA_PHILLIP)).toHaveLength(1);
-  });
-
-  it('a re-sent DONE that dedupes inside applyStaffAction sends no notice either', async () => {
-    // `deduped: true` carries no odooResult, so there is no verification to
-    // announce — suppression needs no separate "already notified" record.
-    h.applyResult = { ok: true, deduped: true, actionId: 'a1' };
-    await POST(req([buttonTap(WA_HAKEEM, donePayload, 'w.d3')]));
-    expect(h.sentButtons.filter((b) => b.to === WA_PHILLIP)).toHaveLength(0);
-  });
-
-  it('a verification already created for THIS episode sends no second notice', async () => {
-    // The Foundation operation claim found the episode already complete, so the
-    // activity is real and the manager was told the first time round. A second
-    // notice would be the duplicate the claim exists to prevent.
-    h.applyResult = {
-      ok: true,
-      deduped: false,
-      actionId: 'a1',
-      odooResult: {
-        chatter: {},
-        verification: { requested: true, deduped: true, activityId: ACTIVITY },
-      },
-    };
-    await POST(req([buttonTap(WA_HAKEEM, donePayload, 'w.d7')]));
-    expect(h.calls).not.toContain('lookup.manager');
-    expect(h.sentButtons.filter((b: any) => b.to === WA_PHILLIP)).toHaveLength(0);
-  });
-
-  it('no verification raised (no manager) means no notice and no invented recipient', async () => {
-    h.applyResult = { ok: true, deduped: false, actionId: 'a1', odooResult: { chatter: {}, verification: { requested: false, why: 'staff_member_has_no_manager' } } };
-    await POST(req([buttonTap(WA_HAKEEM, donePayload, 'w.d4')]));
-    expect(h.calls).not.toContain('lookup.manager');
-    expect(h.sentButtons.filter((b) => b.to === WA_PHILLIP)).toHaveLength(0);
-  });
-
-  it('a manager with no reachable binding is loud, not silent', async () => {
-    h.managerBinding = null;
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    await POST(req([buttonTap(WA_HAKEEM, donePayload, 'w.d5')]));
-    expect(spy.mock.calls.flat().join(' ')).toMatch(/nobody was notified/);
-    spy.mockRestore();
-  });
-
-  it('a non-DONE staff action raises no manager notice', async () => {
-    await POST(req([buttonTap(WA_HAKEEM, encodeMenuId('ack', CORR), 'w.d6')]));
-    expect(h.calls).not.toContain('lookup.manager');
   });
 });
 
