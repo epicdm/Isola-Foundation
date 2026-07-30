@@ -14,6 +14,7 @@
 import { prisma } from './prisma';
 import { audit } from './audit';
 import { sendWhatsApp } from './notify-whatsapp';
+import { isStaffNotification, resolveStaffChannel } from "@/lib/staff-ops/staff-channel";
 
 const BATCH_SIZE = 25;
 
@@ -68,14 +69,26 @@ export async function drainNotificationOutbox(): Promise<DrainNotificationOutbox
       // pin the send to that specific number. For every other notification the
       // field is absent and pinnedPhoneNumberId stays undefined, preserving
       // today's earliest-created-number behaviour exactly.
-      const staffPhoneNumberId = process.env.STAFF_NOTIFICATION_PHONE_NUMBER_ID;
+      // An internal staff notification goes out on the EXPLICITLY configured
+      // staff channel or it does not go out. The previous rule pinned the
+      // configured number when one was set and otherwise fell through to
+      // sendWhatsApps default - the tenant earliest-created number, which on
+      // the EPIC tenant is the CUSTOMER 6737 line. That is not a graceful
+      // degradation, it is messaging an employee from the customer-facing
+      // number, and a single unset environment variable was all it took.
+      // Now an unresolved staff channel fails this row with a truthful reason
+      // an operator can act on.
+      const staffChannel = isStaffNotification(row) ? resolveStaffChannel() : null;
+      if (staffChannel && !staffChannel.ok) {
+        throw new Error(staffChannel.reason);
+      }
       const send = await sendWhatsApp({
         tenantId: row.tenant_id,
         contact: row.contact,
         template: row.template,
         payload: row.payload,
-        pinnedPhoneNumberId:
-          staffPhoneNumberId && row.work_ref_model ? staffPhoneNumberId : undefined,
+        pinnedPhoneNumberId: staffChannel?.ok ? staffChannel.phoneNumberId : undefined,
+        forbidDefaultNumber: Boolean(staffChannel),
       });
 
       if (!send.ok) {

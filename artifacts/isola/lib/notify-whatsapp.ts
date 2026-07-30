@@ -23,6 +23,17 @@ export interface SendWhatsAppInput {
    *  with no fallback. Set by the drain for internal staff notifications when
    *  STAFF_NOTIFICATION_PHONE_NUMBER_ID is configured. */
   pinnedPhoneNumberId?: string;
+  /**
+   * When true, there is NO default number. If `pinnedPhoneNumberId` is absent
+   * the send is refused outright rather than falling back to the tenant
+   * earliest-created number.
+   *
+   * Set for every internal staff notification. On the EPIC tenant the
+   * earliest-created number is the CUSTOMER 6737 line, so the old fallback did
+   * not degrade gracefully - it messaged an employee from the number customers
+   * talk to, and it was one unset environment variable away from doing so.
+   */
+  forbidDefaultNumber?: boolean;
 }
 
 export interface SendWhatsAppResult {
@@ -69,6 +80,15 @@ export function selectTemplateParams(payload: unknown): string[] {
 
 export async function sendWhatsApp(input: SendWhatsAppInput): Promise<SendWhatsAppResult> {
   const { tenantId, contact, template, payload, pinnedPhoneNumberId } = input;
+
+  if (input.forbidDefaultNumber && !pinnedPhoneNumberId) {
+    return {
+      ok: false,
+      status: 0,
+      error:
+        "no explicit sending number for a notification that forbids the default - refusing to fall back to the tenant earliest-created number",
+    };
+  }
 
   // Resolve the tenant's own WhatsApp number to send FROM.
   //
