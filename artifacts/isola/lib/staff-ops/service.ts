@@ -64,6 +64,11 @@ import {
   verificationSummary,
   type VerificationRefusal,
 } from './manager-verification'
+import {
+  enqueueManagerVerificationNotification,
+  managerVerificationTemplateSpec,
+} from './manager-notification'
+import { resolveStaffChannel } from './staff-channel'
 
 /**
  * Optional overrides for manager-verification activity-type resolution.
@@ -887,7 +892,10 @@ async function applyDoneVerification(
     })
     if (!activityType) return refuse('activity_type_not_resolvable')
 
-    // 5. Create.
+    // 5. Create. The deadline is computed ONCE: the manager's notice quotes
+    //    the same review-by date the activity carries, and a midnight
+    //    rollover between two calls must not make them disagree.
+    const verificationDueBy = verificationDeadline(new Date(), verificationDeadlineDays())
     const created = await createManagerVerificationActivity(config, {
       resModel: 'project.task',
       resModelId,
@@ -902,7 +910,7 @@ async function applyDoneVerification(
         correlationId: input.correlationId,
         operationId,
       }),
-      dateDeadline: verificationDeadline(new Date(), verificationDeadlineDays()),
+      dateDeadline: verificationDueBy,
     })
     if (!created.ok) {
       const why: VerificationRefusal =
@@ -967,6 +975,63 @@ async function applyDoneVerification(
       meta: { operationId, episodeId, taskId: record.odooId, correlationId: input.correlationId, activity },
     })
 
+    // THE MISSING STEP. Everything above proves the activity exists in Odoo
+    // and matches what was asked for; only now may the manager be told. This is
+    // the last thing in the function deliberately - a notification is the one
+    // side effect that reaches a human, so it goes after every refusal.
+    //
+    // Its result is REPORTED, never thrown: the verification itself succeeded
+    // and that fact must not be rewritten by a notification problem. An
+    // unapproved template or an unconfigured staff channel therefore shows up
+    // as `notified: false` with a reason, and the activity still stands.
+    const notification = await enqueueManagerVerificationNotification(
+      {
+        tenantId: input.binding.tenantId,
+        activityId: activity.activityId,
+        operationId,
+        episodeId,
+        correlationId: input.correlationId,
+        workRefModel: 'project.task',
+        workRefId: task.taskId,
+        workTitle: task.name || record.name,
+        projectName: record.projectName,
+        staffDisplayName: input.binding.displayName,
+        reportedResult: input.note ?? null,
+        dueByWording: verificationDueBy,
+        manager: {
+          id: managerBinding.id,
+          waId: managerBinding.waId,
+          odooResUserId: managerOdooResUserId,
+          active: managerBinding.active,
+          displayName: managerBinding.displayName,
+        },
+      },
+      {
+        resolveStaffChannel,
+        enqueue: enqueueNotification,
+        findByDedupeKey: async (tenantId, dedupeKey) => {
+          const row = await prisma.notificationOutbox.findUnique({
+            where: { tenant_id_dedupe_key: { tenant_id: tenantId, dedupe_key: dedupeKey } },
+            select: { id: true, payload: true },
+          })
+          return row ? { id: row.id, payload: row.payload } : null
+        },
+        templateSpec: managerVerificationTemplateSpec(),
+        env: process.env,
+      },
+    )
+
+    await audit({
+      tenantId: input.binding.tenantId,
+      actorId: `staff:${input.binding.id}`,
+      action: notification.notified
+        ? 'staff_verification.manager_notified'
+        : 'staff_verification.manager_not_notified',
+      entity: 'mail.activity',
+      entityId: String(activity.activityId),
+      meta: { operationId, episodeId, notification },
+    })
+
     return {
       requested: true,
       activityId: activity.activityId,
@@ -977,6 +1042,7 @@ async function applyDoneVerification(
       managerOdooResUserId,
       activityTypeId: activity.activityTypeId,
       activityTypeVia: activityType.via,
+      notification,
     }
   } catch (err) {
     // Nothing proven, so nothing claimed. The DONE's chatter note still stands —
@@ -1199,6 +1265,17 @@ export async function dispatchWorkToStaff(input: DispatchWorkInput) {
     purpose: 'task_dispatch',
   })
 
+  // The WorkRef correlation goes in the SAME insert as the row.
+  //
+  // It used to be stamped by a second update immediately after the enqueue.
+  // `work_ref_model` is what `isStaffNotification()` keys on, and therefore what
+  // arms the staff-channel rule in the drain - and `enqueueNotification` sets
+  // `next_attempt_at` to `new Date()`, so the drain can claim the row BETWEEN the
+  // two writes. In that window the row is not recognised as staff,
+  // `forbidDefaultNumber` is false, and the send falls back to the tenant's
+  // earliest-created number, which on the EPIC tenant is the CUSTOMER 6737 line.
+  // A crash between the writes made that permanent. One insert closes the window
+  // instead of narrowing it.
   const result = await enqueueNotification({
     tenantId: envelope.tenantId,
     contact: envelope.contact,
@@ -1207,20 +1284,10 @@ export async function dispatchWorkToStaff(input: DispatchWorkInput) {
     template: envelope.template,
     payload: envelope.payload,
     dedupeKey: envelope.dedupeKey,
+    workRefModel: input.work.odooModel,
+    workRefId: input.work.odooId,
+    correlationId: input.work.correlationId,
   })
-
-  // Stamp the WorkRef correlation onto the outbox row so a wa-status callback
-  // can be traced back to the work episode it belongs to.
-  if (result.enqueued) {
-    await prisma.notificationOutbox.update({
-      where: { id: result.id },
-      data: {
-        work_ref_model: input.work.odooModel,
-        work_ref_id: input.work.odooId,
-        correlation_id: input.work.correlationId,
-      },
-    })
-  }
 
   return { ...result, dispatchMode: decision.mode, template }
 }
