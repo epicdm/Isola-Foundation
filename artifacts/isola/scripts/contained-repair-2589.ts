@@ -25,8 +25,8 @@ import { drainNotificationOutbox } from "../lib/notify-drain"
 const TENANT = "43b006e4-33e0-42a8-bec7-4422ba290d79"
 const ROW_2588 = "cms54h9cz0001s62muhnoqai2"
 const ROW_2589 = "cms6ywv24000ss62q6bgqn07s"
-const CUSTOMER_6737_PHONE_ID = "278390858690809"
-const EXPECTED_STAFF_PHONE_ID = "1029700810228517"
+const CUSTOMER_6737_PHONE_ID: string = "278390858690809"
+const EXPECTED_STAFF_PHONE_ID: string = "1029700810228517"
 
 const DEAD_LETTER_REASON =
   "Historical controlled-pilot dispatch frozen with malformed one-parameter payload before template fix 974d6c5; intentionally not redelivered."
