@@ -668,6 +668,63 @@ async function notifyManagerOfVerification(params: {
   });
 }
 
+/**
+ * Alert the tenant owner that an unenrolled number messaged the internal
+ * staff line, at most once per sender per UTC day.
+ *
+ * Lives here, not in lib/staff-ops/staff-notification.ts, for the same
+ * reason `notifyManagerOfVerification` does: it needs `sendStaffChannelReply`
+ * and `prisma`, both already in scope in this route file, and a lib module
+ * cannot import from a Next.js route handler. staff-notification.ts keeps
+ * `unknownSenderAlertDedupeKey` as the pure part of this contract.
+ *
+ * Sends free text via the existing `sendStaffChannelReply` path rather than
+ * the NotificationOutbox/template pipeline — there is no approved template
+ * for "a stranger messaged the staff line" and inventing one would misuse an
+ * approved template's frozen copy for unrelated content, a real Meta content-
+ * policy risk for a low-value internal alert. Same tradeoff notifyManagerOfVerification
+ * already accepts for its own free-text sends.
+ */
+async function notifyAdminOfUnknownStaffSender(params: {
+  tenantId: string;
+  waId: string;
+  why: string;
+}): Promise<void> {
+  const { tenantId, waId, why } = params;
+
+  const { unknownSenderAlertDedupeKey } = await import('@/lib/staff-ops/staff-notification');
+  const utcDate = new Date().toISOString().slice(0, 10);
+  const dedupeKey = unknownSenderAlertDedupeKey(waId, utcDate);
+
+  // Reuses the wamid idempotency table as a generic claim store — any string
+  // is a valid key, not just a Meta message id (see lib/inbound-dedup.ts).
+  if (await claimInboundMessageId(dedupeKey)) {
+    console.log(`[webhook/wa][staff] unknown-sender alert already sent today for waId=${waId} tenant=${tenantId}`);
+    return;
+  }
+
+  const owner = await prisma.staffBinding.findFirst({
+    where: { tenant_id: tenantId, role: 'owner', active: true, wa_id: { not: null } },
+    select: { wa_id: true },
+  });
+  if (!owner?.wa_id) {
+    console.error(
+      `[webhook/wa][staff] unknown-sender waId=${waId} tenant=${tenantId} why=${why} — no reachable owner binding, alert not delivered`,
+    );
+    return;
+  }
+
+  console.log(
+    `[webhook/wa][staff] notifying owner=${owner.wa_id} of unknown sender waId=${waId} tenant=${tenantId} why=${why}`,
+  );
+  await sendStaffChannelReply({
+    tenantId,
+    to: owner.wa_id,
+    text: `An unrecognized number messaged the internal EPIC line (9043): +${waId} (${why}). If this is a new hire, add their WhatsApp binding.`,
+    menu: { kind: 'none' },
+  });
+}
+
 async function handleStaffInboundMessage(params: {
   phoneNumberId: string;
   from: string;
@@ -755,11 +812,36 @@ async function handleStaffInboundMessage(params: {
 
   const r = resolved.route;
 
-  // ── Identity failures: silence is correct, nothing to reply to. ─────────────
+  // ── Identity failures ──────────────────────────────────────────────────────
+  //
+  // Fail closed on DATA: no EPIC work, no names, no record ids, no routing to
+  // the customer inbox. But not silence — an unenrolled number messaging the
+  // internal line and hearing nothing back looks identical to a broken
+  // system, and that is how staff stop trying.
+  //
+  // The reply is deliberately contentless: it confirms the number is not
+  // enrolled and says an administrator has been told. It leaks nothing about
+  // whether EPIC exists, who works here or what is in Odoo. Applies uniformly
+  // to all four exception reasons (unknown_sender, inactive_binding,
+  // ambiguous_binding, cross_tenant) — none of them earns a data-bearing
+  // reply, and ambiguous/cross_tenant are exactly the cases an operator most
+  // needs the admin alert for.
   if (r.route === 'exception') {
     console.error(
-      `[webhook/wa][staff] unresolved phone_number_id=${phoneNumberId} sender=${from} route=exception why=${r.why} — dropped, no reply`,
+      `[webhook/wa][staff] unresolved phone_number_id=${phoneNumberId} sender=${from} route=exception why=${r.why} — no data returned`,
     );
+
+    await notifyAdminOfUnknownStaffSender({ tenantId, waId: from, why: r.why });
+
+    await sendStaffChannelReply({
+      tenantId,
+      to: from,
+      text:
+        'This is an internal EPIC line. This number is not enrolled, so I ' +
+        'cannot share anything here. An administrator has been notified. If ' +
+        'you are EPIC staff, ask for your WhatsApp number to be added.',
+      menu: { kind: 'none' },
+    });
     return;
   }
 
@@ -776,15 +858,54 @@ async function handleStaffInboundMessage(params: {
     console.log(
       `[webhook/wa][staff] help route phone_number_id=${phoneNumberId} sender=${from} why=${r.why} openWork=${resolved.openWork.length}`,
     );
-    // unknown_reference: they typed a valid command but with a task id we don't
-    // have on their list. Show a targeted message echoing the bad ref plus their
-    // actual open tasks — not the generic command list, which would be noise here.
-    replyText =
-      r.why === 'task_list'
-        ? buildStaffTaskListReply(resolved.openWork)
-        : r.why === 'unknown_reference'
-          ? buildStaffUnknownRefReply(body, resolved.openWork)
-          : buildStaffHelpReply(resolved.openWork);
+
+    if (r.why === 'task_list') {
+      // A direct request for the list. Answer it directly; do not spend a
+      // Hermes turn rendering something Foundation already knows exactly.
+      replyText = buildStaffTaskListReply(resolved.openWork);
+
+    } else if (r.why === 'unknown_reference') {
+      // They typed a valid command but with a task id we don't have on their
+      // list. Show a targeted message echoing the bad ref plus their actual
+      // open tasks — not the generic command list, which would be noise here.
+      replyText = buildStaffUnknownRefReply(body, resolved.openWork);
+
+    } else if (r.why === 'explicit_help') {
+      // A direct request for the command list. Direct answer, same reasoning
+      // as task_list above.
+      replyText = buildStaffHelpReply(resolved.openWork);
+
+    } else {
+      // ── FREE-FORM. This is the Hermes door. ────────────────────────────
+      //
+      // `non_command` and `no_open_work` mean the grammar found nothing to
+      // apply. That is not a failure — it is the ordinary case of a person
+      // talking. Identity is already resolved and authenticated above; the
+      // binding, not the text, decides who this is and what they may see.
+      const { runStaffHermesTurn, identityFromBinding } = await import(
+        '@/lib/staff-ops/hermes-bridge'
+      );
+      const turn = await runStaffHermesTurn({
+        identity: identityFromBinding(r.binding),
+        text: body,
+        openWork: resolved.openWork,
+      });
+
+      if (turn.ok) {
+        console.log(
+          `[webhook/wa][staff] hermes turn ok sender=${from} session=${turn.sessionKey} chars=${turn.text.length}`,
+        );
+        replyText = turn.text;
+      } else {
+        // Hermes unreachable. Fall back to the command list rather than
+        // silence — the staff member still has a working structured path,
+        // and saying so is more useful than not replying.
+        console.error(
+          `[webhook/wa][staff] hermes turn failed sender=${from} reason=${turn.reason} detail=${turn.detail ?? ''}`,
+        );
+        replyText = buildStaffHelpReply(resolved.openWork);
+      }
+    }
 
   } else if (r.route === 'staff_disambiguation') {
     console.log(

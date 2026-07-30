@@ -180,6 +180,18 @@ export function staffNotificationDedupeKey(params: {
   return `staff:${params.purpose}:${params.correlationId}`
 }
 
+/**
+ * Dedupe key for the unknown-staff-sender admin alert.
+ *
+ * Keyed on the sender's wa_id and the UTC calendar date (not the correlation
+ * id — there is no work episode here, just a stranger messaging the internal
+ * line). One stranger produces at most one alert per day, no matter how many
+ * messages they send or how many times the webhook redelivers.
+ */
+export function unknownSenderAlertDedupeKey(waId: string, utcDate: string): string {
+  return `staff:unknown-sender:${waId}:${utcDate}`
+}
+
 export interface StaffNotificationEnvelope {
   tenantId: string
   contact: string
