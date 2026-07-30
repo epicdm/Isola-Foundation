@@ -7,109 +7,90 @@
 -- It is not itself an AI employee, and two of them on one door is not "two
 -- agents" — it is an ambiguous front door.
 --
--- Defect: account_id='5' / inbox_id='3' / mode='a2' currently carries TWO
--- ChatwootBinding rows. Verified against production Neon (neondb,
--- ep-fancy-cake-aiczmqqq) on 2026-07-25:
+-- ┌──────────────────────────────────────────────────────────────────────────┐
+-- │ THIS MIGRATION WAS EDITED AFTER IT HAD ALREADY BEEN APPLIED TO           │
+-- │ PRODUCTION. That is normally forbidden. It was done ONCE, under a        │
+-- │ single narrowly-scoped owner exception, and is not a precedent.          │
+-- │                                                                          │
+-- │   applied to production : 2026-07-25 22:21:50.144659+00 → .399674+00     │
+-- │   production ledger checksum (unchanged, permanent):                     │
+-- │     a67295d73829ac254daa326e71d2cfb3eaf4660e387115df50cd8d59b64f8882     │
+-- │                                                                          │
+-- │ Prisma 6.19.3 does NOT re-verify checksums of already-applied migrations │
+-- │ in `migrate status` or `migrate deploy`, so production is undisturbed;   │
+-- │ `migrate dev` WILL report this migration as modified. That warning is    │
+-- │ expected, and is legitimate ONLY for the exact checksum pair recorded in │
+-- │ scripts/src/guard-cw00-checksum-exception.ts. Any other applied-migration│
+-- │ checksum mismatch is a real defect and that guard fails closed on it.    │
+-- └──────────────────────────────────────────────────────────────────────────┘
 --
---   KEEP    id  cmrj1d06c000ds617dx9f59od
---           tenant   43b006e4-33e0-42a8-bec7-4422ba290d79 (active)
---           agent_id cmrhp53b30007s61711vk4dbt (EMA, is_active, brain_provider clawith)
---           created  2026-07-13   updated 2026-07-17
+-- WHY THE EDIT WAS NECESSARY
+-- The original migration opened with hard preconditions naming the exact
+-- production rows. That made it safe to run unattended via `start:prod`, and it
+-- worked: production is deduped and the unique index is live. But the same
+-- guards made it UNREPLAYABLE. Measured on a disposable database, the real
+-- 25-migration history applied to an empty database fails here with
+--   'expected 1 or 2 ChatwootBinding rows on account 5 / inbox 3 / a2, found 0'
+-- 24 migrations apply, the index is never created. Development (heliumdb) is in
+-- exactly that position: one migration behind, index absent, zero duplicates.
+-- So migration-only disaster recovery was broken, and development could never
+-- converge. This edit makes the migration strict where production identity is
+-- present and replayable where it is not.
 --
---   REMOVE  id  cmrsbmzvm0001s62skjms8nfc
---           tenant   ema_sales_tenant (retired)
---           agent_id NULL  ← points at no Clawith agent at all
---           created  2026-07-19   updated 2026-07-25T19:21:26Z
+-- THE BRANCHES, IN ORDER
+--   0. GLOBAL DUPLICATE GUARD  — any duplicate (account_id, inbox_id, mode)
+--      group other than the one reviewed pair aborts before any DML or DDL.
+--   1. PRODUCTION FIRST RUN    — the reviewed pair is present in its exact
+--      reviewed shape: assert full identity, write redacted evidence, delete
+--      exactly the reviewed orphan, then enforce uniqueness.
+--   2. PRODUCTION RE-RUN       — already deduped: assert the survivor is the
+--      reviewed one, delete nothing, then enforce uniqueness.
+--   3. ENVIRONMENT-NEUTRAL     — NONE of the reviewed identities exist:
+--      delete nothing, require zero duplicates, then enforce uniqueness.
+--   4. FOREIGN OR SEEDED       — neither reviewed REGISTRATION exists and the
+--      reviewed door holds at most one row: there is nothing this migration is
+--      authorised to delete, so it deletes nothing and enforces uniqueness
+--      only. This is the shape of a development database whose bindings are
+--      minted by the application's own instrumentation seeder.
+--   *  ANY OTHER SHAPE aborts — including either reviewed registration
+--      appearing on its own, and any unrecognised door carrying more than one
+--      row. The rule this draws: refuse to DELETE on a shape this migration
+--      does not recognise; permit STRUCTURAL enforcement only once no
+--      duplicate can exist.
 --
--- app/api/chatwoot/agent-bot/route.ts resolves the owning tenant with
--- findMany({ where: { inbox_id, mode: 'a2' } }), so a second row on the same
--- door makes tenant/agent/token resolution ambiguous — the same failure class
--- as the 2026-07-01 account-5 incident (295-6737 vs EMA) that motivated the
--- inbox-scoped lookup in the first place. lib/chatwoot-binding-resolution.ts
--- (resolveActiveBinding) is the RUNTIME containment already shipped for this:
--- it prefers the active tenant over the retired duplicate. That containment is
--- a filter, not a structure. This migration removes the ambiguity itself and
--- then makes it unrepresentable.
+-- Being replayable does NOT relax production identity checks. Branches 1 and 2
+-- carry exactly the assertions the original had.
 --
--- ── Ordering (this order is mandatory) ───────────────────────────────────────
--- A unique index CANNOT be created while the duplicate still exists — Postgres
--- would reject the CREATE and abort the whole migration. So, inside this one
--- transaction: verify preconditions → snapshot evidence → delete the single
--- orphan row → create the unique index → verify the survivor. An earlier
--- proposal that created the constraint first was simply invalid.
+-- Constraint shape: a full (non-partial) unique index named exactly as Prisma
+-- names @@unique([account_id, inbox_id, mode]). inbox_id is nullable and
+-- Postgres unique indexes are NULLS DISTINCT, so rows with no inbox never
+-- collide; a partial index would be semantically identical for enforcement,
+-- inexpressible in Prisma, and permanent drift. `mode` is part of the key
+-- rather than a WHERE filter so the key is a strictly safer superset.
 --
--- ── Why a full UNIQUE INDEX and not a partial one ────────────────────────────
--- The key is (account_id, inbox_id, mode), created as a plain (non-partial)
--- unique index named exactly as Prisma names @@unique([account_id, inbox_id,
--- mode]). Reasoning:
---
---   * inbox_id is NULLABLE, and Postgres unique indexes are NULLS DISTINCT by
---     default. Rows with inbox_id IS NULL therefore never collide with anything
---     — a full index is already semantically identical, for enforcement
---     purposes, to a partial `WHERE inbox_id IS NOT NULL`. The partial variant
---     buys nothing and costs plenty (see next point). No existing row with a
---     NULL inbox_id can be broken by this.
---   * Prisma cannot express a partial index. A partial index would be permanent
---     drift: `prisma migrate diff` would forever want to drop it and add the
---     full one, and the declarative schema would never agree with the database.
---     CLAUDE.md requires schema.prisma and the database to agree, and the
---     EscalationRef incident (20260722203000) is this repo's standing lesson on
---     what silent schema drift costs. schema.prisma is updated in the same
---     commit with the matching @@unique.
---   * `mode` is deliberately part of the key rather than a `WHERE mode = 'a2'`
---     filter. mode has other values ('mirror' is the default) and this repo
---     cannot, from here, prove what the accounts 131/144 rows look like.
---     Including mode makes the key a strictly safer superset: it cannot reject
---     a legitimate mode-differentiated pair, while still eliminating the exact
---     ambiguity class the defect exhibits (two rows, same account, same inbox,
---     same mode).
---
--- Residual gaps this constraint deliberately does NOT close, stated plainly so
--- nobody mistakes it for total coverage:
+-- Residual gaps this constraint deliberately does NOT close, stated plainly:
 --   (a) one 'a2' row and one 'mirror' row on the same inbox remain permitted;
---   (b) the same inbox_id under two different account_ids remains permitted
---       (the agent-bot lookup keys on inbox_id + mode and ignores account_id);
+--   (b) the same inbox_id under two different account_ids remains permitted;
 --   (c) two rows with inbox_id IS NULL on the same account+mode remain
---       permitted (no inbox = no door; NULLS NOT DISTINCT is not Prisma-
---       expressible and could fail on data this migration cannot inspect).
--- resolveActiveBinding() remains the second line of defence for all three.
--- Tightening further requires production data confirmation and is out of scope.
+--       permitted (NULLS NOT DISTINCT is not Prisma-expressible).
+-- lib/chatwoot-binding-resolution.ts (resolveActiveBinding) remains the runtime
+-- second line of defence for all three.
 --
--- ── Safety properties ────────────────────────────────────────────────────────
---   * Idempotent. A second run finds one row on the door (the KEEP row),
---     deletes nothing, and still succeeds; CREATE UNIQUE INDEX IF NOT EXISTS is
---     a no-op the second time.
---   * Fail-closed. Every precondition mismatch RAISEs before any DML/DDL. A
---     migration runs in a transaction, so an abort leaves the database byte-for-
---     byte unchanged — no partial delete, no half-created index.
---   * Narrow. The DELETE is pinned to the exact id AND the full predicate
---     (tenant_id / account_id / inbox_id / mode / agent_id IS NULL) and asserts
---     ROW_COUNT = 1, so it cannot reach any other registration even if the id
---     were wrong.
---   * Non-cascading. Conversation.chatwoot_binding_id is ON DELETE SET NULL
---     (20260721010000), verified in that migration's DDL — deleting a binding
---     does not destroy conversations. EscalationRef.chatwoot_binding_id is a
---     bare TEXT snapshot column with no FK at all, so those rows are untouched;
---     any that snapshotted the removed binding will simply fail closed on
---     resolve, which is the correct behaviour for a short-TTL capability.
---     Both counts are recorded in the evidence row before the delete.
+-- Safety properties:
+--   * Atomic. Prisma 6.19.3 applies each PostgreSQL migration in a transaction
+--     with or without explicit BEGIN/COMMIT — verified by experiment, including
+--     for this exact delete → create-index → failing-post-check shape. Any
+--     abort below leaves the database byte-for-byte unchanged.
+--   * Fail-closed. Every unrecognised shape RAISEs before any DML or DDL.
+--   * Narrow. The delete is pinned to the exact id AND the full predicate and
+--     asserts ROW_COUNT = 1.
+--   * Non-cascading. Conversation.chatwoot_binding_id is ON DELETE SET NULL;
+--     EscalationRef.chatwoot_binding_id is a bare TEXT snapshot with no FK.
 --
--- ── Evidence ─────────────────────────────────────────────────────────────────
--- The pre-delete state is written to "AuditLog" (the repo's existing governance
--- table — no out-of-band table is created, because an out-of-band table is
--- exactly what `prisma db push` silently drops). The snapshot is REDACTED: it
--- records ids, tenants, account/inbox/mode, agent, and timestamps, and never
--- `token` or `base_url`. The row id is deterministic, so a re-run cannot
--- double-write it.
---
--- ── Preflight ────────────────────────────────────────────────────────────────
--- Run prisma/preflight/20260725210000_cw00_binding_uniqueness_preflight.sql
--- (read-only) against the target database FIRST. If a guard below fires during
--- `prisma migrate deploy`, Prisma records this migration as failed (P3009) and
--- the documented recovery, `migrate resolve`, is FORBIDDEN by CLAUDE.md §2.4 —
--- recovering from that needs an owner decision. The preflight exists so that
--- never happens: it reports every condition this migration checks, without
--- writing anything.
+-- PREFLIGHT: run prisma/preflight/20260725210000_cw00_binding_uniqueness_preflight.sql
+-- (read-only) against the target FIRST. Because this migration will never re-run
+-- in production, that preflight is the ONLY thing that re-proves production
+-- identity — it is mandatory, not optional.
 
 DO $$
 DECLARE
@@ -122,9 +103,12 @@ DECLARE
   k_inbox     CONSTANT text := '3';
   k_mode      CONSTANT text := 'a2';
 
-  n_key           integer;
   n_other_dupes   integer;
   other_dupe_desc text;
+  n_key           integer;
+  n_keep_row      integer;
+  n_drop_row      integer;
+  n_ident_present integer;
   n_conv          integer;
   n_escref        integer;
   n_deleted       integer;
@@ -132,10 +116,12 @@ DECLARE
   drop_ok         boolean;
 BEGIN
   ---------------------------------------------------------------------------
-  -- 1a. Any OTHER duplicate door would make the CREATE UNIQUE INDEX below fail
-  --     with an opaque Postgres error. Detect it here and abort with a message
-  --     that names the offending group(s). Groups with inbox_id IS NULL are
-  --     excluded because NULLS DISTINCT means they cannot violate the index.
+  -- 0. GLOBAL DUPLICATE GUARD.
+  --    Any duplicate door BEYOND the one reviewed pair would make the
+  --    CREATE UNIQUE INDEX below fail with an opaque Postgres error. Detect it
+  --    here, before anything is written, and name the offending group(s).
+  --    Groups with inbox_id IS NULL are excluded: NULLS DISTINCT means they
+  --    cannot violate the index.
   ---------------------------------------------------------------------------
   SELECT count(*),
          coalesce(string_agg(format('(account_id=%s, inbox_id=%s, mode=%s) x%s',
@@ -151,54 +137,30 @@ BEGIN
    WHERE NOT (d.account_id = k_account AND d.inbox_id = k_inbox AND d.mode = k_mode);
 
   IF n_other_dupes > 0 THEN
-    RAISE EXCEPTION 'CW00 binding uniqueness: found % duplicate (account_id, inbox_id, mode) group(s) BEYOND the one reviewed pair on account 5 / inbox 3 / a2: %. This migration is authorised to remove exactly one specific orphan registration and nothing else; it will not guess which row of an unreviewed duplicate pair is the authoritative one. Stopping before any change (nothing has been deleted, no index created). Investigate each group, get the removal reviewed, then re-run.',
+    RAISE EXCEPTION 'CW00 binding uniqueness: found % duplicate (account_id, inbox_id, mode) group(s) BEYOND the one reviewed pair on account 5 / inbox 3 / a2: %. This migration is authorised to remove exactly one specific orphan registration and nothing else; it will not guess which row of an unreviewed duplicate pair is authoritative. Stopping before any change (nothing deleted, no index created). Investigate each group, get the removal reviewed, then re-run.',
       n_other_dupes, other_dupe_desc;
   END IF;
 
   ---------------------------------------------------------------------------
-  -- 1b. How many registrations sit on the target door right now?
+  -- 1. Classify the environment by REVIEWED IDENTITY PRESENCE.
   ---------------------------------------------------------------------------
   SELECT count(*) INTO n_key
     FROM "ChatwootBinding"
    WHERE account_id = k_account AND inbox_id = k_inbox AND mode = k_mode;
 
-  IF n_key = 1 THEN
-    ------------------------------------------------------------------------
-    -- Idempotent path: already deduped by an earlier run of this migration.
-    -- The single survivor must be the active EPIC registration — if it is
-    -- anything else, the wrong row survived and we must not proceed.
-    ------------------------------------------------------------------------
-    SELECT EXISTS (
-      SELECT 1
-        FROM "ChatwootBinding" b
-        JOIN "Tenant" t ON t.id = b.tenant_id
-        JOIN "Agent"  a ON a.id = b.agent_id
-       WHERE b.id = keep_id
-         AND b.tenant_id = keep_tenant
-         AND b.account_id = k_account AND b.inbox_id = k_inbox AND b.mode = k_mode
-         AND t.status = 'active'
-         AND a.id = keep_agent AND a.tenant_id = keep_tenant AND a.is_active
-    ) INTO keep_ok;
+  SELECT count(*) INTO n_keep_row FROM "ChatwootBinding" WHERE id = keep_id;
+  SELECT count(*) INTO n_drop_row FROM "ChatwootBinding" WHERE id = drop_id;
 
-    IF NOT keep_ok THEN
-      RAISE EXCEPTION 'CW00 binding uniqueness: account 5 / inbox 3 / a2 holds exactly one registration, but it is not the expected active EPIC one (id %, tenant %, agent % on an active tenant with an active agent). Something other than this migration changed the door. Stopping before any change.',
-        keep_id, keep_tenant, keep_agent;
-    END IF;
+  -- Every reviewed production-specific identity, across all three tables.
+  SELECT (SELECT count(*) FROM "ChatwootBinding" WHERE id IN (keep_id, drop_id))
+       + (SELECT count(*) FROM "Tenant"          WHERE id IN (keep_tenant, drop_tenant))
+       + (SELECT count(*) FROM "Agent"           WHERE id = keep_agent)
+    INTO n_ident_present;
 
-    RAISE NOTICE 'CW00 binding uniqueness: nothing to delete — account 5 / inbox 3 / a2 already holds exactly the active EPIC registration %. Proceeding to uniqueness enforcement.', keep_id;
-
-  ELSIF n_key = 2 THEN
+  IF n_key = 2 AND n_keep_row = 1 AND n_drop_row = 1 THEN
     ------------------------------------------------------------------------
-    -- Expected first-run state. Both rows must match the reviewed evidence
-    -- exactly. n_key = 2 plus both ids confirmed present proves the pair is
-    -- exactly {keep_id, drop_id} — there is no unexpected third registration.
-    --
-    -- Hard identity checks: row ids, tenant ids, account/inbox/mode, the
-    -- KEEP row's owning agent (exists, owned by the same tenant, is_active),
-    -- the KEEP tenant is active, the DROP tenant is retired, and the DROP row
-    -- points at no agent. brain_provider is recorded as evidence but is NOT a
-    -- hard gate: it is a routing preference that may legitimately change,
-    -- whereas ownership and active-ness are identity.
+    -- BRANCH 1 — PRODUCTION FIRST RUN. Both reviewed rows present.
+    -- Identity assertions are exactly those of the original migration.
     ------------------------------------------------------------------------
     SELECT EXISTS (
       SELECT 1
@@ -234,8 +196,8 @@ BEGIN
     END IF;
 
     ------------------------------------------------------------------------
-    -- 3. Redacted evidence snapshot, written BEFORE the delete.
-    --    ON CONFLICT DO NOTHING keeps a re-run from double-writing.
+    -- Redacted evidence snapshot, written BEFORE the delete. Deterministic id
+    -- so a re-run cannot double-write it. Never token, never base_url.
     ------------------------------------------------------------------------
     SELECT count(*) INTO n_conv   FROM "Conversation"  WHERE chatwoot_binding_id = drop_id;
     SELECT count(*) INTO n_escref FROM "EscalationRef" WHERE chatwoot_binding_id = drop_id;
@@ -246,8 +208,8 @@ BEGIN
     )
     SELECT
       'cw00-dedupe-' || drop_id,
-      keep_tenant,                       -- attributed to the surviving authority that owns this door
-      NULL,                              -- AuditLog XOR: exactly one of tenant_id / consumer_account_id
+      keep_tenant,
+      NULL,
       'system',
       'chatwoot_binding.duplicate_removed',
       'ChatwootBinding',
@@ -286,10 +248,6 @@ BEGIN
                      ),
         'referencing_rows', jsonb_build_object(
                        'conversations_set_null_by_fk', n_conv,
-                       -- Recorded as ids, not just a count, so the ON DELETE
-                       -- SET NULL side-effect is reversible: re-pointing these
-                       -- conversations is the only part of this migration that
-                       -- cannot be reconstructed from the surviving rows.
                        'conversation_ids_set_null', (
                          SELECT coalesce(jsonb_agg(c.id ORDER BY c.id), '[]'::jsonb)
                            FROM "Conversation" c
@@ -310,7 +268,7 @@ BEGIN
     ON CONFLICT ("id") DO NOTHING;
 
     ------------------------------------------------------------------------
-    -- 4. Delete ONLY that one orphan row. Pinned by id AND full predicate.
+    -- Delete ONLY that one orphan row. Pinned by id AND full predicate.
     ------------------------------------------------------------------------
     DELETE FROM "ChatwootBinding"
      WHERE id         = drop_id
@@ -325,11 +283,82 @@ BEGIN
       RAISE EXCEPTION 'CW00 binding uniqueness: expected to delete exactly 1 registration, deleted %. Rolling back.', n_deleted;
     END IF;
 
-    RAISE NOTICE 'CW00 binding uniqueness: removed orphan registration % (retired tenant %, agent_id NULL). % conversation(s) had their chatwoot_binding_id set to NULL by the ON DELETE SET NULL FK; % EscalationRef snapshot(s) now fail closed on resolve. Evidence written to AuditLog id cw00-dedupe-%.',
+    RAISE NOTICE 'CW00 binding uniqueness [production first run]: removed orphan registration % (retired tenant %, agent_id NULL). % conversation(s) had chatwoot_binding_id set to NULL by the ON DELETE SET NULL FK; % EscalationRef snapshot(s) now fail closed on resolve. Evidence written to AuditLog id cw00-dedupe-%.',
       drop_id, drop_tenant, n_conv, n_escref, drop_id;
 
+  ELSIF n_key = 1 AND n_keep_row = 1 AND n_drop_row = 0 THEN
+    ------------------------------------------------------------------------
+    -- BRANCH 2 — PRODUCTION RE-RUN. Already deduped by an earlier run.
+    -- The single survivor must be the active EPIC registration.
+    ------------------------------------------------------------------------
+    SELECT EXISTS (
+      SELECT 1
+        FROM "ChatwootBinding" b
+        JOIN "Tenant" t ON t.id = b.tenant_id
+        JOIN "Agent"  a ON a.id = b.agent_id
+       WHERE b.id = keep_id
+         AND b.tenant_id = keep_tenant
+         AND b.account_id = k_account AND b.inbox_id = k_inbox AND b.mode = k_mode
+         AND t.status = 'active'
+         AND a.id = keep_agent AND a.tenant_id = keep_tenant AND a.is_active
+    ) INTO keep_ok;
+
+    IF NOT keep_ok THEN
+      RAISE EXCEPTION 'CW00 binding uniqueness: account 5 / inbox 3 / a2 holds exactly one registration, but it is not the expected active EPIC one (id %, tenant %, agent % on an active tenant with an active agent). Something other than this migration changed the door. Stopping before any change.',
+        keep_id, keep_tenant, keep_agent;
+    END IF;
+
+    RAISE NOTICE 'CW00 binding uniqueness [production re-run]: nothing to delete — account 5 / inbox 3 / a2 already holds exactly the active EPIC registration %. Proceeding to uniqueness enforcement.', keep_id;
+
+  ELSIF n_ident_present = 0 AND n_key = 0 THEN
+    ------------------------------------------------------------------------
+    -- BRANCH 3 — ENVIRONMENT-NEUTRAL. None of the reviewed production
+    -- identities exist anywhere: no reviewed bindings, no reviewed tenants,
+    -- no reviewed agent, and nothing on the reviewed door. This is a fresh
+    -- database or a development database that never carried production data.
+    -- Delete nothing; enforce structure only.
+    --
+    -- The global guard at step 0 already proved there is no duplicate group
+    -- outside the reviewed door, and n_key = 0 proves there is none on it, so
+    -- CREATE UNIQUE INDEX below cannot fail on data.
+    ------------------------------------------------------------------------
+    RAISE NOTICE 'CW00 binding uniqueness [environment-neutral]: none of the reviewed production identities are present and the reviewed door is empty. No registration will be deleted. Enforcing uniqueness only.';
+
+  ELSIF n_keep_row = 0 AND n_drop_row = 0 AND n_key <= 1 THEN
+    ------------------------------------------------------------------------
+    -- BRANCH 4 — FOREIGN OR SEEDED ENVIRONMENT. Neither reviewed production
+    -- REGISTRATION is present, so there is nothing this migration is
+    -- authorised to delete: its only sanctioned deletion is the specific
+    -- reviewed orphan `drop_id`. Whatever occupies the reviewed door is not
+    -- production's reviewed pair. In development that row is minted by the
+    -- application's own instrumentation seeder on every boot, together with
+    -- the `ema_sales_tenant` slug that production also uses — which is why
+    -- such a database can never reach BRANCH 3 no matter how often it is
+    -- cleaned, and why keying this branch on reviewed BINDING ids rather than
+    -- on `n_ident_present` is what makes the migration genuinely replayable.
+    --
+    -- Why `n_key <= 1` is load-bearing: the global guard at step 0
+    -- deliberately EXCLUDES the reviewed door from its duplicate scan, so a
+    -- duplicate sitting ON that door while neither reviewed id is present
+    -- would pass step 0 unseen and make the CREATE UNIQUE INDEX below fail
+    -- with an opaque Postgres error instead of a named one. Capping the door
+    -- at a single row closes that gap; step 0 covers every other door.
+    --
+    -- This branch CANNOT fire in production: production holds `keep_id`, so it
+    -- always matches BRANCH 1 or BRANCH 2, both of which are evaluated first.
+    -- No production identity assertion is weakened by its existence.
+    ------------------------------------------------------------------------
+    RAISE NOTICE 'CW00 binding uniqueness [foreign-or-seeded]: neither reviewed production registration is present and the reviewed door holds % row(s), none of them reviewed. No registration will be deleted. Enforcing uniqueness only.', n_key;
+
   ELSE
-    RAISE EXCEPTION 'CW00 binding uniqueness: expected 1 or 2 ChatwootBinding rows on account 5 / inbox 3 / a2, found %. The reviewed evidence (2026-07-25) recorded exactly 2. Stopping before any change — this migration will not delete a row on a door whose shape it does not recognise.', n_key;
+    ------------------------------------------------------------------------
+    -- ANY OTHER SHAPE — including PARTIAL presence of the reviewed identity
+    -- set. Partial presence is suspicious, never "close enough to neutral":
+    -- it means something restored, seeded or mutated part of production's
+    -- identity into this database, and this migration must not guess.
+    ------------------------------------------------------------------------
+    RAISE EXCEPTION 'CW00 binding uniqueness: unrecognised environment shape — rows on the reviewed door (account 5 / inbox 3 / a2) = %, reviewed KEEP binding present = %, reviewed DROP binding present = %, reviewed production identities present across ChatwootBinding/Tenant/Agent = %. Recognised shapes are: (a) production first run — 2 rows on the door with both reviewed bindings; (b) production re-run — 1 row, the reviewed KEEP binding, no DROP binding; (c) environment-neutral — zero reviewed identities anywhere and an empty door; (d) foreign-or-seeded — neither reviewed registration present and at most one row on the door, which deletes nothing and only enforces structure. Anything else — either reviewed registration appearing alone, or an unrecognised door carrying more than one row — is treated as suspicious and refused. Stopping before any change — nothing deleted, no index created.',
+      n_key, n_keep_row, n_drop_row, n_ident_present;
   END IF;
 END $$;
 
@@ -344,40 +373,105 @@ CREATE UNIQUE INDEX IF NOT EXISTS "ChatwootBinding_account_id_inbox_id_mode_key"
 -- including the delete above.
 DO $$
 DECLARE
-  keep_id   CONSTANT text := 'cmrj1d06c000ds617dx9f59od';
-  keep_agent CONSTANT text := 'cmrhp53b30007s61711vk4dbt';
-  survivor_ok boolean;
-  n_key       integer;
+  keep_id     CONSTANT text := 'cmrj1d06c000ds617dx9f59od';
+  keep_agent  CONSTANT text := 'cmrhp53b30007s61711vk4dbt';
+  idx_name    CONSTANT text := 'ChatwootBinding_account_id_inbox_id_mode_key';
+
+  survivor_ok  boolean;
+  n_key        integer;
+  n_keep_row   integer;
+  n_dupes      integer;
+  idx_ok       boolean;
+  idx_actual   text;
 BEGIN
+  ---------------------------------------------------------------------------
+  -- P1. Production identity — asserted ONLY where the reviewed registration is
+  --     present. In an environment-neutral database there is no production
+  --     identity to assert, and demanding one is exactly what made the
+  --     original migration unreplayable. Production identity is independently
+  --     re-proved by the read-only preflight, which is mandatory for that
+  --     reason.
+  ---------------------------------------------------------------------------
+  SELECT count(*) INTO n_keep_row FROM "ChatwootBinding" WHERE id = keep_id;
+
+  IF n_keep_row > 0 THEN
+    SELECT EXISTS (
+      SELECT 1
+        FROM "ChatwootBinding" b
+        JOIN "Agent" a ON a.id = b.agent_id
+       WHERE b.id = keep_id
+         AND b.tenant_id = '43b006e4-33e0-42a8-bec7-4422ba290d79'
+         AND b.account_id = '5' AND b.inbox_id = '3' AND b.mode = 'a2'
+         AND a.id = keep_agent
+    ) INTO survivor_ok;
+
+    IF NOT survivor_ok THEN
+      RAISE EXCEPTION 'CW00 binding uniqueness POST-CHECK FAILED: the active EPIC/EMA registration % (agent %) is not present on account 5 / inbox 3 / a2 after dedupe. Rolling back everything.', keep_id, keep_agent;
+    END IF;
+
+    SELECT count(*) INTO n_key
+      FROM "ChatwootBinding"
+     WHERE account_id = '5' AND inbox_id = '3' AND mode = 'a2';
+
+    IF n_key <> 1 THEN
+      RAISE EXCEPTION 'CW00 binding uniqueness POST-CHECK FAILED: expected exactly 1 registration on account 5 / inbox 3 / a2, found %. Rolling back everything.', n_key;
+    END IF;
+  END IF;
+
+  ---------------------------------------------------------------------------
+  -- P2. Universal: no duplicate door survives anywhere. True in every
+  --     environment, including empty ones.
+  ---------------------------------------------------------------------------
+  SELECT count(*) INTO n_dupes FROM (
+    SELECT 1 FROM "ChatwootBinding"
+     WHERE inbox_id IS NOT NULL
+     GROUP BY account_id, inbox_id, mode
+    HAVING count(*) > 1
+  ) d;
+
+  IF n_dupes > 0 THEN
+    RAISE EXCEPTION 'CW00 binding uniqueness POST-CHECK FAILED: % duplicate (account_id, inbox_id, mode) group(s) survive. Rolling back everything.', n_dupes;
+  END IF;
+
+  ---------------------------------------------------------------------------
+  -- P3. Universal: the index exists in EXACTLY the required SHAPE.
+  --     Name alone is not sufficient. `CREATE UNIQUE INDEX IF NOT EXISTS`
+  --     keys on the relation name, so a pre-existing same-named index that is
+  --     non-unique, partial, invalid or on the wrong columns would be silently
+  --     accepted and the containment would not actually be enforced — the same
+  --     failure class as the 2026-07-22 "marked applied, DDL never ran"
+  --     incident. Assert the structure, inside the transaction.
+  ---------------------------------------------------------------------------
   SELECT EXISTS (
     SELECT 1
-      FROM "ChatwootBinding" b
-      JOIN "Agent" a ON a.id = b.agent_id
-     WHERE b.id = keep_id
-       AND b.tenant_id = '43b006e4-33e0-42a8-bec7-4422ba290d79'
-       AND b.account_id = '5' AND b.inbox_id = '3' AND b.mode = 'a2'
-       AND a.id = keep_agent
-  ) INTO survivor_ok;
+      FROM pg_index ix
+      JOIN pg_class     i ON i.oid = ix.indexrelid
+      JOIN pg_class     t ON t.oid = ix.indrelid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+     WHERE i.relname   = idx_name
+       AND n.nspname   = current_schema()
+       AND t.relname   = 'ChatwootBinding'
+       AND ix.indisunique
+       AND ix.indisvalid
+       AND ix.indisready
+       AND ix.indpred IS NULL
+       AND pg_get_indexdef(i.oid) = format(
+             'CREATE UNIQUE INDEX %I ON %I.%I USING btree (account_id, inbox_id, mode)',
+             idx_name, n.nspname, 'ChatwootBinding')
+  ) INTO idx_ok;
 
-  IF NOT survivor_ok THEN
-    RAISE EXCEPTION 'CW00 binding uniqueness POST-CHECK FAILED: the active EPIC/EMA registration % (agent %) is not present on account 5 / inbox 3 / a2 after dedupe. Rolling back everything.', keep_id, keep_agent;
+  IF NOT idx_ok THEN
+    SELECT coalesce(
+             (SELECT pg_get_indexdef(i.oid)
+                FROM pg_class i
+                JOIN pg_namespace n2 ON n2.oid = i.relnamespace
+               WHERE i.relname = idx_name AND n2.nspname = current_schema()),
+             '(no index of that name in this schema)')
+      INTO idx_actual;
+
+    RAISE EXCEPTION 'CW00 binding uniqueness POST-CHECK FAILED: % is not a valid, ready, non-partial UNIQUE btree index on exactly (account_id, inbox_id, mode) of "ChatwootBinding". Actual definition: %. An index of the right name but the wrong shape does NOT enforce the containment. Rolling back everything.',
+      idx_name, idx_actual;
   END IF;
 
-  SELECT count(*) INTO n_key
-    FROM "ChatwootBinding"
-   WHERE account_id = '5' AND inbox_id = '3' AND mode = 'a2';
-
-  IF n_key <> 1 THEN
-    RAISE EXCEPTION 'CW00 binding uniqueness POST-CHECK FAILED: expected exactly 1 registration on account 5 / inbox 3 / a2, found %. Rolling back everything.', n_key;
-  END IF;
-
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_indexes
-     WHERE schemaname = current_schema()
-       AND indexname  = 'ChatwootBinding_account_id_inbox_id_mode_key'
-  ) THEN
-    RAISE EXCEPTION 'CW00 binding uniqueness POST-CHECK FAILED: unique index ChatwootBinding_account_id_inbox_id_mode_key is missing. Rolling back everything.';
-  END IF;
-
-  RAISE NOTICE 'CW00 binding uniqueness: post-checks passed — one door, one registration, uniqueness enforced.';
+  RAISE NOTICE 'CW00 binding uniqueness: post-checks passed — no duplicate door survives and uniqueness is structurally enforced.';
 END $$;
