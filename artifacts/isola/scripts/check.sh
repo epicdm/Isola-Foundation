@@ -9,8 +9,18 @@
 #
 #   scripts/check.sh              full suite
 #   scripts/check.sh lib/foo      one path
+#   scripts/check.sh --publish-gate --expected-sha <FULL_SHA> [--require-ancestor <FULL_SHA>]...
+#   scripts/check.sh --publish-gate --manifest release-manifest.json
 set -uo pipefail
 cd /home/runner/workspace/artifacts/isola || exit 1
+
+# --publish-gate delegates to the release gate and does NOT fall through to the
+# ordinary check output. The gate reruns tsc and vitest itself, because a test
+# result only means something bound to the exact HEAD being published.
+if [ "${1:-}" = "--publish-gate" ]; then
+  shift
+  exec npx tsx scripts/publish-gate.ts "$@"
+fi
 T0=$(date +%s)
 ./node_modules/.bin/tsc --noEmit -p tsconfig.json > /tmp/isola-tsc.log 2>&1
 TSC=$?
