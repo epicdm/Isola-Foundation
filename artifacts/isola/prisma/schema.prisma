@@ -90,6 +90,7 @@ model Tenant {
   staff_work_actions  StaffWorkAction[]
 
   conversation_ownership_transitions ConversationOwnershipTransition[]
+  customer_tool_operations           CustomerToolOperation[]
 }
 
 // ── Per-tenant voicemail catches (AI missed-call catcher) ────────────────────
@@ -1052,5 +1053,75 @@ model ConversationOwnershipTransition {
   @@unique([tenant_id, conversation_id, operation_id], map: "ConversationOwnershipTransition_tenant_conv_op_key")
   @@index([conversation_id, episode])
   @@index([tenant_id, created_at])
+  @@index([correlation_id])
+}
+
+// ── Governed customer-tool operations — the exactly-once ledger ──────────────
+//
+// One row per AUTHORISED tool execution. Every governed customer tool (lead
+// create, lead update, follow-up, business note) claims here BEFORE it touches
+// Odoo, and records its verified readback here after.
+//
+// WHY IT IS FOUNDATION-SIDE AND NOT AN ODOO LOOKUP
+//   The obvious cheaper design is "before creating, search Odoo for one that
+//   looks the same". That is a heuristic, and it breaks in exactly the case
+//   that matters: two near-simultaneous retries of the same turn both search,
+//   both find nothing, and both create. It also cannot survive the record
+//   being completed, archived or unlinked afterwards — an Odoo activity that
+//   has been marked done is gone from the searchable set, so a retry would
+//   cheerfully create a second one. This ledger is durable and independent of
+//   the Odoo records later lifecycle, which is the whole point.
+//
+// WHY THE REQUEST HASH IS NOT DECORATION
+//   `operation_id` alone cannot be trusted for reuse: Clawith supplies an
+//   idempotency HINT, and a model that reuses a hint for genuinely different
+//   arguments must be REFUSED, not silently served the earlier result. Storing
+//   the hash of the authorised arguments is what makes that refusal possible.
+//   Foundation derives the final operation_id itself; the hint is an input to
+//   that derivation, never the identity.
+model CustomerToolOperation {
+  id        String @id @default(cuid())
+  tenant_id String
+
+  /// Foundation-derived, stable across retries of the same authorised turn.
+  /// NEVER the raw hint Clawith supplied.
+  operation_id String
+
+  /// Governed tool name, e.g. `crm.lead.create`.
+  tool_name String
+
+  /// Hash of the AUTHORISED arguments. A second claim on the same
+  /// operation_id with a different hash is a conflict, not a retry.
+  request_hash String
+
+  conversation_id  String
+  correlation_id   String
+  agent_session_id String?
+
+  /// claimed | succeeded | failed
+  state String @default("claimed")
+
+  /// The authoritative Odoo record this operation produced or affected.
+  /// Recorded ONLY after a successful readback — never from a create response
+  /// alone, because an id echoed back is not proof of what was stored.
+  result_model String?
+  result_id    Int?
+
+  /// The verified readback, returned verbatim on a retry so a repeat never
+  /// re-executes and never invents a fresh answer.
+  result Json?
+
+  failure_code   String?
+  failure_detail String?
+
+  claimed_at   DateTime  @default(now())
+  completed_at DateTime?
+  updated_at   DateTime  @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+
+  @@unique([tenant_id, operation_id])
+  @@index([tenant_id, tool_name])
+  @@index([conversation_id])
   @@index([correlation_id])
 }
