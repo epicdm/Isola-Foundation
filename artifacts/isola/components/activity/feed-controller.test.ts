@@ -116,7 +116,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-// ── POPULATED ───────────────────────────────────────────────────
+// ── POPULATED ──
 
 describe("POPULATED: five sources answer and rows arrive", () => {
   it("shows the rows, all five source reports and both timestamps", async () => {
@@ -146,7 +146,7 @@ describe("POPULATED: five sources answer and rows arrive", () => {
   })
 })
 
-// ── EMPTY ───────────────────────────────────────────────────────
+// ── EMPTY ──
 
 describe("EMPTY: everything answered and there was nothing", () => {
   it("is a ready screen with no rows and no complaint", async () => {
@@ -162,7 +162,7 @@ describe("EMPTY: everything answered and there was nothing", () => {
   })
 })
 
-// ── PARTIAL ─────────────────────────────────────────────────────
+// ── PARTIAL ──
 
 describe("PARTIAL: some sources answered and some did not", () => {
   it("keeps every row that did arrive and never becomes a failure", async () => {
@@ -187,7 +187,7 @@ describe("PARTIAL: some sources answered and some did not", () => {
   })
 })
 
-// ── FORBIDDEN SOURCE ────────────────────────────────────────────
+// ── FORBIDDEN SOURCE ──
 
 describe("FORBIDDEN_SOURCE: the audit trail is not this accounts to read", () => {
   it("is a 200 feed, and the forbidden source shows no count and no timestamp", async () => {
@@ -216,7 +216,7 @@ describe("FORBIDDEN_SOURCE: the audit trail is not this accounts to read", () =>
   })
 })
 
-// ── ALL SOURCES UNAVAILABLE ──────────────────────────────────────
+// ── ALL SOURCES UNAVAILABLE ──
 
 describe("ALL_SOURCES_UNAVAILABLE: a 503", () => {
   it("is an unavailable screen with a retry, and never an empty list", async () => {
@@ -253,7 +253,7 @@ describe("ALL_SOURCES_UNAVAILABLE: a 503", () => {
   })
 })
 
-// ── AUTHENTICATION EXPIRED ───────────────────────────────────────
+// ── AUTHENTICATION EXPIRED ──
 
 describe("AUTHENTICATION_EXPIRED: a 401", () => {
   it("stops paginating and does not retry", async () => {
@@ -280,7 +280,7 @@ describe("AUTHENTICATION_EXPIRED: a 401", () => {
   })
 })
 
-// ── INVALID FILTER ───────────────────────────────────────────────
+// ── INVALID FILTER ──
 
 describe("INVALID_FILTER: a sanitized 400", () => {
   it("names the parameter and shows the detail the API wrote", async () => {
@@ -314,7 +314,7 @@ describe("INVALID_FILTER: a sanitized 400", () => {
   })
 })
 
-// ── INVALID CURSOR ───────────────────────────────────────────────
+// ── INVALID CURSOR ──
 
 describe("INVALID_CURSOR: the server refuses the position we held", () => {
   it("restarts at page one instead of dead-ending, exactly once", async () => {
@@ -365,7 +365,7 @@ describe("INVALID_CURSOR: the server refuses the position we held", () => {
   })
 })
 
-// ── PAGINATION ──────────────────────────────────────────────────
+// ── PAGINATION ──
 
 describe("pagination uses the server cursor verbatim", () => {
   it("first page then second page, with zero duplicates", async () => {
@@ -420,7 +420,7 @@ describe("pagination uses the server cursor verbatim", () => {
   })
 })
 
-// ── FILTERS ─────────────────────────────────────────────────────
+// ── FILTERS ──
 
 describe("filters", () => {
   const filters: ActivityFilters = {
@@ -504,7 +504,7 @@ describe("filters", () => {
   })
 })
 
-// ── the boundary itself ───────────────────────────────────────────
+// ── the boundary itself ──
 
 describe("nothing from an exception reaches the caller", () => {
   it("a thrown fetch becomes a kind, not a hostname", async () => {
@@ -541,7 +541,7 @@ describe("nothing from an exception reaches the caller", () => {
   })
 })
 
-// ── presentation rules ────────────────────────────────────────────
+// ── presentation rules ──
 
 describe("presentation rules that a reader depends on", () => {
   it("a failed readback never reads as a success", () => {
