@@ -24,12 +24,15 @@ const QUERY: ResolvedQuery = {
   permittedCompanies: [TENANT],
 }
 
+/** The argument is declared so the test can read what the delegate was asked. */
+const delegateSpy = () => vi.fn(async (_args: unknown) => [] as unknown[])
+
 function spies() {
   return {
-    auditLog: { findMany: vi.fn(async () => [] as unknown[]) },
-    approvalRequest: { findMany: vi.fn(async () => [] as unknown[]) },
-    staffWorkAction: { findMany: vi.fn(async () => [] as unknown[]) },
-    conversationOwnership: { findMany: vi.fn(async () => [] as unknown[]) },
+    auditLog: { findMany: delegateSpy() },
+    approvalRequest: { findMany: delegateSpy() },
+    staffWorkAction: { findMany: delegateSpy() },
+    conversationOwnership: { findMany: delegateSpy() },
   }
 }
 
@@ -128,9 +131,8 @@ describe('every read is scoped to the session tenant', () => {
 
   it('never widens the scope from the query it was handed', async () => {
     const deps = spies()
-    // The resolved query names tenant-1; the registry was configured for
-    // tenant-1 too. The delegate must be scoped by the CONFIG, which comes from
-    // the session — never by anything a caller could put in a query string.
+    // The registry is scoped by its CONFIG, which comes from the session —
+    // never by anything a caller could put in a query string.
     await readAll({ tenantId: TENANT }, deps)
     const args = deps.auditLog.findMany.mock.calls[0][0] as { where: { tenant_id: string } }
     expect(args.where.tenant_id).toBe(TENANT)
