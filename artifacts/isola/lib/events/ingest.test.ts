@@ -10,6 +10,7 @@ import {
   projectChannelHealth,
   projectOwnership,
   type IngestPorts,
+  type IngestResult,
   type Lane2Event,
   type ProjectedActivity,
 } from './ingest'
@@ -60,6 +61,13 @@ describe('event ingestion — accepts what Lane 2 reports', () => {
     })
     expect(project).not.toHaveBeenCalled()
   })
+
+  it('carries the dedupe key into the projection so the store can persist it', async () => {
+    const projected: ProjectedActivity[] = []
+    await ingestLane2Event(EVENT, ports({ project: async (a) => void projected.push(a) }))
+    // `projected_activity.dedupe_key` is NOT NULL and half of a unique key.
+    expect(projected[0]?.dedupeKey).toBe('wamid-1')
+  })
 })
 
 describe('event ingestion — rejections', () => {
@@ -96,6 +104,54 @@ describe('event ingestion — rejections', () => {
       // The refusal must not echo the matched value back.
       expect(r.detail).not.toMatch(/EAAG/)
     }
+  })
+})
+
+describe('the receipt is never issued ahead of the projection', () => {
+  it('produces NO accepted receipt when the projection fails', async () => {
+    // `ports.project` is awaited before the receipt is built. If the store
+    // cannot write, the caller must not walk away holding a receipt that says
+    // the event was projected.
+    let receipt: IngestResult | null = null
+    let thrown: unknown = null
+    try {
+      receipt = await ingestLane2Event(
+        EVENT,
+        ports({
+          project: async () => {
+            throw new Error('connect ECONNREFUSED 10.0.0.1:5432')
+          },
+        }),
+      )
+    } catch (err) {
+      thrown = err
+    }
+
+    expect(receipt).toBeNull()
+    expect(thrown).toBeInstanceOf(Error)
+  })
+
+  it('refuses a credential-shaped payload BEFORE anything is projected', async () => {
+    const project = vi.fn(async () => {})
+    const r = await ingestLane2Event(
+      { ...EVENT, payload: { authorization: `Bearer ${'x'.repeat(30)}` } },
+      ports({ project }),
+    )
+    expect(r.accepted).toBe(false)
+    if (!r.accepted) expect(r.rejection).toBe('payload_contains_credential')
+    // Not "stored and then scrubbed" — never written at all.
+    expect(project).not.toHaveBeenCalled()
+  })
+
+  it('an unsupported event type never reaches the projection', async () => {
+    const project = vi.fn(async () => {})
+    const r = await ingestLane2Event(
+      { ...EVENT, eventType: 'message.telepathy' },
+      ports({ project }),
+    )
+    expect(r.accepted).toBe(false)
+    if (!r.accepted) expect(r.rejection).toBe('unknown_event_type')
+    expect(project).not.toHaveBeenCalled()
   })
 })
 
