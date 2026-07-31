@@ -143,9 +143,14 @@ export type SourceResult =
   | { status: 'unavailable'; reason: string }
   | { status: 'forbidden' }
 
+/**
+ * An activity source. The method is called `read` and not `fetch` on purpose:
+ * this layer reads, and a method named after the network primitive makes the
+ * boundary check below unable to tell a port call from an outbound request.
+ */
 export interface ActivitySource {
   name: string
-  fetch(query: ResolvedQuery): Promise<SourceResult>
+  read(query: ResolvedQuery): Promise<SourceResult>
 }
 
 export interface SourceReport {
@@ -241,10 +246,15 @@ export function compareItems(a: ActivityItem, b: ActivityItem): number {
   return a.activityId < b.activityId ? -1 : a.activityId > b.activityId ? 1 : 0
 }
 
-/** True when `item` sits strictly after `cursor` in the ordering above. */
-function isAfterCursor(item: ActivityItem, cursor: Cursor): boolean {
-  const d = ms(cursor.occurredAt) - ms(item.occurredAt)
-  if (d !== 0) return d < 0
+/**
+ * True when `item` sits strictly after `cursor` in the ordering above.
+ *
+ * The list runs NEWEST FIRST, so "after" means OLDER. Getting this backwards
+ * hands the caller page one for ever, and every page looks correct in isolation.
+ */
+export function isAfterCursor(item: ActivityItem, cursor: Cursor): boolean {
+  const cursorMinusItem = ms(cursor.occurredAt) - ms(item.occurredAt)
+  if (cursorMinusItem !== 0) return cursorMinusItem > 0
   return item.activityId > cursor.activityId
 }
 
@@ -406,9 +416,12 @@ export async function getActivityFeed(
   const settled = await Promise.all(
     ports.sources.map(async (source): Promise<{ report: SourceReport; items: ActivityItem[] }> => {
       try {
-        const result = await source.fetch(resolved)
+        const result = await source.read(resolved)
         if (result.status === 'unavailable') {
-          return { report: { source: source.name, state: 'unavailable', detail: result.reason }, items: [] }
+          return {
+            report: { source: source.name, state: 'unavailable', detail: result.reason },
+            items: [],
+          }
         }
         if (result.status === 'forbidden') {
           return { report: { source: source.name, state: 'forbidden' }, items: [] }
@@ -441,27 +454,37 @@ export async function getActivityFeed(
   )
 
   const reports = settled.map((s) => s.report)
-  const staleSources = new Set(reports.filter((r) => r.state === 'stale').map((r) => r.source))
 
-  const collected = dedupe(settled.flatMap((s) => s.items)).filter((item) =>
-    matchesQuery(item, resolved),
-  )
+  // Staleness belongs to the ADAPTER that produced the row, tracked by the row
+  // itself. Matching on a name field instead would silently mark stale rows
+  // fresh whenever the adapter and the source label differ.
+  const staleItems = new WeakMap<ActivityItem, boolean>()
+  const gathered: ActivityItem[] = []
+  for (const s of settled) {
+    const isStale = s.report.state === 'stale'
+    for (const row of s.items) {
+      staleItems.set(row, isStale)
+      gathered.push(row)
+    }
+  }
+
+  const collected = dedupe(gathered).filter((row) => matchesQuery(row, resolved))
 
   // Permission filtering happens BEFORE ordering, paging and counting. Filtering
   // after the page is cut would let the number of rows on a page reveal how many
   // forbidden records sit behind it.
   const visible: ActivityItem[] = []
-  for (const item of collected) {
-    if (!permittedCompanies.includes(item.companyId)) continue
-    if (item.customerId && !(await ports.permissions.mayViewCustomer(item.customerId))) continue
+  for (const row of collected) {
+    if (!permittedCompanies.includes(row.companyId)) continue
+    if (row.customerId && !(await ports.permissions.mayViewCustomer(row.customerId))) continue
     if (
-      item.relatedObjectType &&
-      item.relatedObjectId &&
-      !(await ports.permissions.mayViewObject(item.relatedObjectType, item.relatedObjectId))
+      row.relatedObjectType &&
+      row.relatedObjectId &&
+      !(await ports.permissions.mayViewObject(row.relatedObjectType, row.relatedObjectId))
     ) {
       continue
     }
-    visible.push(item)
+    visible.push(row)
   }
 
   visible.sort(compareItems)
@@ -473,14 +496,14 @@ export async function getActivityFeed(
       ? encodeCursor({ occurredAt: last.occurredAt, activityId: last.activityId })
       : null
 
-  const items: ActivityFeedItem[] = page.map((item) => {
-    const ageSeconds = Math.max(0, Math.round((now.getTime() - ms(item.occurredAt)) / 1000))
-    return {
-      ...item,
-      availableActions: actionsFor(item),
-      freshness: { ageSeconds, stale: staleSources.has(item.sourceSystem) },
-    }
-  })
+  const items: ActivityFeedItem[] = page.map((row) => ({
+    ...row,
+    availableActions: actionsFor(row),
+    freshness: {
+      ageSeconds: Math.max(0, Math.round((now.getTime() - ms(row.occurredAt)) / 1000)),
+      stale: staleItems.get(row) ?? false,
+    },
+  }))
 
   return {
     ok: true,

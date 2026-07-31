@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import {
+  ACTIONS_BY_EVENT,
   ACTIVITY_FEED_VERSION,
   EVENT_TYPES,
   MAX_PAGE_SIZE,
@@ -51,9 +52,12 @@ function item(over: Partial<ActivityItem> = {}): ActivityItem {
   }
 }
 
-const source = (name: string, result: SourceResult | (() => Promise<SourceResult>)): ActivitySource => ({
+const source = (
+  name: string,
+  result: SourceResult | (() => Promise<SourceResult>),
+): ActivitySource => ({
   name,
-  fetch: typeof result === 'function' ? result : async () => result,
+  read: typeof result === 'function' ? result : async () => result,
 })
 
 const ok = (items: ActivityItem[], mode?: 'production' | 'fixture'): SourceResult => ({
@@ -155,7 +159,10 @@ describe('filters', () => {
     const r = await run(
       { from: '2026-07-31T17:00:00Z', to: '2026-07-31T17:55:00Z' },
       ports([
-        source('s', ok([item({ activityId: 'old', occurredAt: '2026-07-30T10:00:00Z' }), item({ activityId: 'new' })])),
+        source(
+          's',
+          ok([item({ activityId: 'old', occurredAt: '2026-07-30T10:00:00Z' }), item({ activityId: 'new' })]),
+        ),
       ]),
     )
     expect(r.ok && r.items.map((i) => i.activityId)).toEqual(['new'])
@@ -194,9 +201,20 @@ describe('ordering — by when it happened, not when we heard', () => {
 })
 
 describe('duplicate events', () => {
+  const reported = item({
+    activityId: 'x',
+    sourceSystem: 'lane2',
+    provenance: { source: 'lane2', fetchedAt: NOW.toISOString(), trust: 'reported' },
+    title: 'reported',
+  })
+  const authoritative = item({
+    activityId: 'x',
+    sourceSystem: 'odoo',
+    provenance: { source: 'odoo', fetchedAt: NOW.toISOString(), trust: 'authoritative' },
+    title: 'authoritative',
+  })
+
   it('keeps the source with the better claim to know', () => {
-    const reported = item({ activityId: 'x', sourceSystem: 'lane2', provenance: { source: 'lane2', fetchedAt: NOW.toISOString(), trust: 'reported' }, title: 'reported' })
-    const authoritative = item({ activityId: 'x', sourceSystem: 'odoo', provenance: { source: 'odoo', fetchedAt: NOW.toISOString(), trust: 'authoritative' }, title: 'authoritative' })
     expect(dedupe([reported, authoritative])).toHaveLength(1)
     expect(dedupe([reported, authoritative])[0].title).toBe('authoritative')
     expect(dedupe([authoritative, reported])[0].title).toBe('authoritative')
@@ -213,7 +231,10 @@ describe('source states are never flattened', () => {
   it('one failed source and one good source is PARTIAL, not a full feed', async () => {
     const r = await run(
       {},
-      ports([source('good', ok([item()])), source('bad', { status: 'unavailable', reason: 'odoo timed out' })]),
+      ports([
+        source('good', ok([item()])),
+        source('bad', { status: 'unavailable', reason: 'odoo timed out' }),
+      ]),
     )
     expect(r.ok).toBe(true)
     if (!r.ok) return
@@ -249,7 +270,7 @@ describe('source states are never flattened', () => {
     expect(r.ok && r.dataState).toBe('forbidden')
   })
 
-  it('stale data is labelled stale rather than presented as current', async () => {
+  it('stale data is labelled stale on the feed AND on every row it produced', async () => {
     const r = await run(
       {},
       ports([
@@ -264,7 +285,30 @@ describe('source states are never flattened', () => {
     expect(r.ok).toBe(true)
     if (!r.ok) return
     expect(r.dataState).toBe('stale')
+    // The adapter is called `cache` while the row says `foundation`. Marking the
+    // row by name would quietly present stale data as current.
+    expect(r.items[0].sourceSystem).toBe('foundation')
     expect(r.items[0].freshness.stale).toBe(true)
+  })
+
+  it('rows from a healthy source are not marked stale by a different failing source', async () => {
+    const r = await run(
+      {},
+      ports([
+        source('fresh', ok([item({ activityId: 'fresh-row' })])),
+        source('cache', {
+          status: 'stale',
+          items: [item({ activityId: 'stale-row' })],
+          fetchedAt: NOW.toISOString(),
+          reason: 'last good read',
+        }),
+      ]),
+    )
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    const byId = Object.fromEntries(r.items.map((i) => [i.activityId, i.freshness.stale]))
+    expect(byId['fresh-row']).toBe(false)
+    expect(byId['stale-row']).toBe(true)
   })
 
   it('an old read is stale even when the source did not say so', async () => {
@@ -273,6 +317,7 @@ describe('source states are never flattened', () => {
       ports([source('slow', { status: 'ok', items: [item()], fetchedAt: '2026-07-31T17:00:00Z' })]),
     )
     expect(r.ok && r.dataState).toBe('stale')
+    expect(r.ok && r.items[0].freshness.stale).toBe(true)
   })
 
   it('fixture data is never presented as production data', async () => {
@@ -286,7 +331,10 @@ describe('source states are never flattened', () => {
   it('fixture is still flagged when the overall state is partial', async () => {
     const r = await run(
       {},
-      ports([source('seed', ok([item()], 'fixture')), source('bad', { status: 'unavailable', reason: 'x' })]),
+      ports([
+        source('seed', ok([item()], 'fixture')),
+        source('bad', { status: 'unavailable', reason: 'x' }),
+      ]),
     )
     expect(r.ok && r.dataState).toBe('partial')
     expect(r.ok && r.containsFixture).toBe(true)
@@ -322,7 +370,10 @@ describe('permission filtering', () => {
   })
 
   it('refuses an inactive staff user', async () => {
-    const r = await run({}, ports([source('s', ok([item()]))], permissions({ actorIsActive: async () => false })))
+    const r = await run(
+      {},
+      ports([source('s', ok([item()]))], permissions({ actorIsActive: async () => false })),
+    )
     expect(r.ok).toBe(false)
     if (r.ok) return
     expect(r.refusal).toBe('unknown_or_inactive_actor')
@@ -331,7 +382,9 @@ describe('permission filtering', () => {
   it('drops another company’s activity even when a source hands it over', async () => {
     const r = await run(
       {},
-      ports([source('leaky', ok([item({ activityId: 'mine' }), item({ activityId: 'theirs', companyId: OTHER })]))]),
+      ports([
+        source('leaky', ok([item({ activityId: 'mine' }), item({ activityId: 'theirs', companyId: OTHER })])),
+      ]),
     )
     expect(r.ok && r.items.map((i) => i.activityId)).toEqual(['mine'])
   })
@@ -340,7 +393,12 @@ describe('permission filtering', () => {
     const r = await run(
       {},
       ports(
-        [source('s', ok([item({ activityId: 'ok1' }), item({ activityId: 'secret', relatedObjectId: 'task-99' })]))],
+        [
+          source(
+            's',
+            ok([item({ activityId: 'ok1' }), item({ activityId: 'secret', relatedObjectId: 'task-99' })]),
+          ),
+        ],
         permissions({ mayViewObject: async (_t, id) => id !== 'task-99' }),
       ),
     )
@@ -356,7 +414,12 @@ describe('permission filtering', () => {
     const r = await run(
       {},
       ports(
-        [source('s', ok([item({ activityId: 'a', customerId: 'cust-1' }), item({ activityId: 'b', customerId: 'cust-9' })]))],
+        [
+          source(
+            's',
+            ok([item({ activityId: 'a', customerId: 'cust-1' }), item({ activityId: 'b', customerId: 'cust-9' })]),
+          ),
+        ],
         permissions({ mayViewCustomer: async (id) => id !== 'cust-9' }),
       ),
     )
@@ -468,7 +531,14 @@ describe('governed action and approval lifecycle rows', () => {
       ports([
         source(
           'foundation',
-          ok([item({ activityId: 'done', eventType: 'governed.action.completed', status: 'EXECUTED', summary: 'note read back as written' })]),
+          ok([
+            item({
+              activityId: 'done',
+              eventType: 'governed.action.completed',
+              status: 'EXECUTED',
+              summary: 'note read back as written',
+            }),
+          ]),
         ),
       ]),
     )
@@ -478,7 +548,12 @@ describe('governed action and approval lifecycle rows', () => {
   it('a failed action is not dressed up as a success', async () => {
     const r = await run(
       {},
-      ports([source('foundation', ok([item({ activityId: 'bad', eventType: 'governed.action.failed', status: 'READBACK_FAILED' })]))]),
+      ports([
+        source(
+          'foundation',
+          ok([item({ activityId: 'bad', eventType: 'governed.action.failed', status: 'READBACK_FAILED' })]),
+        ),
+      ]),
     )
     expect(r.ok).toBe(true)
     if (!r.ok) return
@@ -527,12 +602,13 @@ describe('the feed reads and does nothing else', () => {
 
   it('sends nothing, writes nothing and reaches no network', () => {
     expect(code).not.toMatch(/\bfetch\s*\(/)
-    expect(code).not.toMatch(/\b(sendMessage|sendReply|deliver|assign|takeOver|forceHandback|resumeAi)\s*\(/)
+    expect(code).not.toMatch(
+      /\b(sendMessage|sendReply|deliver|assign|takeOver|forceHandback|resumeAi)\s*\(/,
+    )
     expect(code).not.toMatch(/\bprisma\./)
   })
 
   it('offers no action that would message a customer', () => {
-    const { ACTIONS_BY_EVENT } = require('./feed') as typeof import('./feed')
     for (const actions of Object.values(ACTIONS_BY_EVENT)) {
       for (const a of actions) {
         expect(a).not.toMatch(/message|reply|send|whatsapp|handover|takeover/i)
