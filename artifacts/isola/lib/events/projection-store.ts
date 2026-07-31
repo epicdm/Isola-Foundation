@@ -37,7 +37,6 @@ import { createHash } from 'node:crypto'
 import type { ResolvedQuery } from '@/lib/activity/feed'
 import { LANE2_SOURCE, type Lane2ProjectionStore } from '@/lib/activity/sources/lane2-events'
 import type { ActorClass, EventType, ProjectedActivity } from '@/lib/events/ingest'
-import { prisma } from '@/lib/prisma'
 
 /**
  * RETENTION AND DELETION — what is decided, and what deliberately is not.
@@ -79,7 +78,9 @@ export class ProjectionConflict extends Error {
   constructor(tenantId: string, eventId: string, detail: string) {
     // The message carries hashes and identifiers only. Echoing the differing
     // payload back would put customer content into a log line.
-    super(`projected activity ${eventId} already exists for this tenant with different content (${detail})`)
+    super(
+      `projected activity ${eventId} already exists for this tenant with different content (${detail})`,
+    )
     this.name = 'ProjectionConflict'
     this.tenantId = tenantId
     this.eventId = eventId
@@ -269,17 +270,22 @@ const identityWhere = (tenantId: string, eventId: string) => ({
   tenant_id_event_id: { tenant_id: tenantId, event_id: eventId },
 })
 
+/**
+ * Imported on FIRST USE, not at module load. A caller that injects its own
+ * delegate must never cause a PrismaClient to be constructed — that is what
+ * makes these paths testable without a database.
+ */
+async function realDelegate(): Promise<ProjectionDelegate> {
+  const { prisma } = await import('@/lib/prisma')
+  return (prisma as unknown as { projectedActivity: ProjectionDelegate }).projectedActivity
+}
+
 /* ── the store ──────────────────────────────────────────────────────── */
 
 export function createPrismaProjectionStore(
   deps: ProjectionStoreDeps = {},
 ): PrismaProjectionStore {
-  // Resolved per call, not at construction: a caller that injects its own
-  // delegate never touches the real client, and the model may not exist on the
-  // generated client until `prisma generate` has run against the new schema.
-  const delegate = (): ProjectionDelegate =>
-    deps.delegate ??
-    (prisma as unknown as { projectedActivity: ProjectionDelegate }).projectedActivity
+  const delegate = async (): Promise<ProjectionDelegate> => deps.delegate ?? realDelegate()
 
   function assertSameContent(
     stored: ProjectedActivityRow,
@@ -298,7 +304,7 @@ export function createPrismaProjectionStore(
 
   return {
     async project(activity: ProjectedActivity): Promise<void> {
-      const d = delegate()
+      const d = await delegate()
       const tenantId = activity.companyId
       const eventId = activity.eventId
       const dedupeKey = dedupeKeyOf(activity)
@@ -323,7 +329,7 @@ export function createPrismaProjectionStore(
           throw new ProjectionConflict(
             tenantId,
             eventId,
-            `dedupe key is already held by a different event in this tenant`,
+            'dedupe key is already held by a different event in this tenant',
           )
         }
         assertSameContent(raced, incomingHash, tenantId, eventId)
@@ -349,10 +355,12 @@ export function createPrismaProjectionStore(
       if (from && !Number.isNaN(from.getTime())) occurredAt.gte = from
       if (to && !Number.isNaN(to.getTime())) occurredAt.lte = to
 
+      const d = await delegate()
+
       // A throw from here is NOT caught. `buildSource` turns it into
       // `unavailable`; swallowing it into `[]` would report "nothing happened"
       // when the truth is "we could not find out".
-      const rows = await delegate().findMany({
+      const rows = await d.findMany({
         where: {
           tenant_id: query.companyId,
           ...(occurredAt.gte || occurredAt.lte ? { occurred_at: occurredAt } : {}),
