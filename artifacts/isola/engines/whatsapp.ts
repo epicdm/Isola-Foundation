@@ -306,6 +306,90 @@ export interface WhatsAppSendListInput {
  * deliberate: a list hides the options behind one tap, so buttons stay the
  * default for the common two-or-three-action case.
  */
+/**
+ * A published WhatsApp Flow, addressed for one send.
+ *
+ * `flowToken` is opaque to Meta and echoed back verbatim inside the completion
+ * payload. It is the ONLY business-controlled state carrier for an endpointless
+ * Flow, which is precisely why the caller puts the action and the record id in
+ * it — the message then carries its own context and the server holds none.
+ */
+export interface WhatsAppSendFlowInput {
+  phoneId: string
+  token: string
+  to: string
+  body: string
+  flowId: string
+  flowToken: string
+  /** Button label that opens the form. Meta advises <= 30 chars, no emoji. */
+  cta: string
+  /** Entry screen id in the published Flow JSON. */
+  screen: string
+  /** Values bound to `${data.*}` on the entry screen. */
+  data?: Record<string, string>
+  header?: string
+  footer?: string
+}
+
+/**
+ * sendInteractiveFlow — open a published Flow inside the 24-hour window.
+ *
+ * `flow_action: "navigate"` is the endpointless pair to the Flow JSON's
+ * `complete` action: WhatsApp renders the screen on-device from the published
+ * JSON and posts the result back as one `nfm_reply`. There is deliberately no
+ * `data_exchange` here — that mode would require a live endpoint on the reply
+ * path, and the reply path is the one place a staff member is waiting.
+ *
+ * Validates before sending for the same reason as the button sender: an
+ * over-long CTA or an empty body is a 400 from Meta that would otherwise be
+ * recorded as a delivery failure on a staff member's handset.
+ */
+export async function sendInteractiveFlow(
+  config: WhatsAppConfig,
+  input: WhatsAppSendFlowInput,
+): Promise<WhatsAppSendResult> {
+  if (!input.body?.trim()) {
+    return { ok: false, status: 0, error: 'empty flow body — nothing sent' }
+  }
+  if (!input.flowId?.trim()) {
+    return { ok: false, status: 0, error: 'no flow id — nothing sent' }
+  }
+  if (!input.flowToken?.trim()) {
+    return { ok: false, status: 0, error: 'no flow token — refusing to send a flow that cannot be correlated' }
+  }
+  if (!input.cta?.trim() || input.cta.length > 30) {
+    return { ok: false, status: 0, error: `flow cta must be 1..30 chars: "${input.cta}"` }
+  }
+
+  return postToGraph(config, input.phoneId, input.token, {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: input.to,
+    type: 'interactive',
+    interactive: {
+      type: 'flow',
+      ...(input.header ? { header: { type: 'text', text: input.header } } : {}),
+      body: { text: input.body },
+      ...(input.footer ? { footer: { text: input.footer } } : {}),
+      action: {
+        name: 'flow',
+        parameters: {
+          flow_message_version: '3',
+          flow_token: input.flowToken,
+          flow_id: input.flowId,
+          flow_cta: input.cta,
+          flow_action: 'navigate',
+          mode: 'published',
+          flow_action_payload: {
+            screen: input.screen,
+            ...(input.data ? { data: input.data } : {}),
+          },
+        },
+      },
+    },
+  })
+}
+
 export async function sendInteractiveList(
   config: WhatsAppConfig,
   input: WhatsAppSendListInput,

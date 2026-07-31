@@ -20,6 +20,11 @@ import { handleInboundWhatsApp } from '@/lib/agent';
 import { prisma } from '@/lib/prisma';
 import { claimInboundMessageId } from '@/lib/inbound-dedup';
 import type { MenuRendering } from '@/lib/staff-ops/staff-menu';
+import {
+  buildStaffNoteFlow,
+  isTextBearingAction,
+  type StaffFlowPrompt,
+} from '@/lib/staff-ops/staff-flow';
 
 // ── Signature helpers ─────────────────────────────────────────────────────────
 
@@ -304,6 +309,27 @@ function buildStaffUnknownRefReply(
   return `"${ref}" is not on your open task list.\n\nYour open tasks:\n${taskLines.join('\n')}`;
 }
 
+/**
+ * The sentence above the form.
+ *
+ * Says what is being asked and NOTHING about what has been recorded, because
+ * at this point nothing has been: the action applies when the form comes back,
+ * not when the button was tapped. A message here reading "Blocked" would be the
+ * same defect class as reporting a stage move that did not happen.
+ */
+function buildStaffFlowPromptReply(action: string): string {
+  switch (action) {
+    case 'blocked':
+      return 'Tap below and tell me what the blocker is — the task is not flagged until you send it.';
+    case 'done':
+      return 'Tap below and tell me what the result was — it goes to your manager for verification.';
+    case 'update':
+      return 'Tap below and write your update.';
+    default:
+      return 'Tap below to add the detail.';
+  }
+}
+
 /** Reply when the action was recognised but could not be written to the record. */
 function buildStaffApplyFailedReply(): string {
   return "⚠️ Couldn't record that — please try again.";
@@ -344,12 +370,52 @@ function buildStaffInvalidStartReply(validNextActions: string[]): string {
  */
 function extractStaffTapId(msg: any): string {
   if (msg?.type === 'interactive') {
+    // A COMPLETED FLOW is a fourth envelope for the same fact. Its
+    // `flow_token` is the very id `buildStaffNoteFlow` minted — the same
+    // `encodeMenuId` string a button tap would have carried — so normalising
+    // it here means a Flow completion resolves through `decodeMenuId`,
+    // `resolveInboundStaffTap` and the authority check with no new branch
+    // anywhere downstream. The only thing a Flow adds is the note, extracted
+    // separately by `extractStaffFlowNote`.
+    if (msg.interactive?.type === 'nfm_reply') {
+      const parsed = parseFlowResponseJson(msg);
+      return typeof parsed?.flow_token === 'string' ? parsed.flow_token : '';
+    }
     return String(msg.interactive?.button_reply?.id ?? msg.interactive?.list_reply?.id ?? '');
   }
   if (msg?.type === 'button') {
     return String(msg.button?.payload ?? '');
   }
   return '';
+}
+
+/**
+ * `nfm_reply.response_json` is a STRINGIFIED JSON blob, not an object.
+ * Parsing it is not optional, and it is user-influenced data arriving over a
+ * webhook, so every malformed shape resolves to null rather than throwing
+ * inside the message loop.
+ */
+function parseFlowResponseJson(msg: any): Record<string, unknown> | null {
+  const raw = msg?.interactive?.nfm_reply?.response_json;
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The words the tap could not carry.
+ *
+ * Whitespace-only is treated as absent: a form submitted with three spaces in
+ * it is not a blocker reason, and recording it as one would put an empty line
+ * in front of a manager who has to decide something.
+ */
+function extractStaffFlowNote(msg: any): string | null {
+  const note = parseFlowResponseJson(msg)?.note;
+  return typeof note === 'string' && note.trim() ? note.trim() : null;
 }
 
 /**
@@ -405,6 +471,17 @@ async function sendStaffChannelReply(params: {
   proactive?: boolean;
   /** Required when `proactive` is true — see decideDispatchMode above. */
   template?: { name: string; params: string[] };
+  /**
+   * When present this reply OPENS A FORM instead of offering a menu. Routed
+   * through this function rather than a second sender for the reason stated
+   * above: two send paths is how "exactly one reply" quietly becomes two.
+   *
+   * Only meaningful on the reactive path. A free-form `interactive` message
+   * needs an open 24-hour window, and the template branch below returns before
+   * this is ever read — a proactive caller passing a flow gets the template, not
+   * a silent 131047.
+   */
+  flow?: StaffFlowPrompt | null;
 }): Promise<void> {
   const { tenantId, to, text, menu, proactive = false } = params;
 
@@ -471,7 +548,8 @@ async function sendStaffChannelReply(params: {
     return;
   }
 
-  const { sendText, sendInteractiveButtons, sendInteractiveList } = await import('@/engines/whatsapp');
+  const { sendText, sendInteractiveButtons, sendInteractiveList, sendInteractiveFlow } =
+    await import('@/engines/whatsapp');
   const { getWhatsAppConfig } = await import('@/lib/engines');
   const waConfig = getWhatsAppConfig();
   const sendCtx = {
@@ -480,9 +558,19 @@ async function sendStaffChannelReply(params: {
     to: to.replace(/^\+/, ''), // Meta expects E.164 digits without '+'
   };
 
-  // Interactive when there is a menu, plain text otherwise.
-  let replyResult =
-    menu.kind === 'buttons'
+  // A form when one is asked for, interactive when there is a menu, plain text
+  // otherwise.
+  let replyResult = params.flow
+    ? await sendInteractiveFlow(waConfig, {
+        ...sendCtx,
+        body: text,
+        flowId: params.flow.flowId,
+        flowToken: params.flow.flowToken,
+        cta: params.flow.cta,
+        screen: params.flow.screen,
+        data: params.flow.data,
+      })
+    : menu.kind === 'buttons'
       ? await sendInteractiveButtons(waConfig, {
           ...sendCtx,
           body: text,
@@ -503,9 +591,9 @@ async function sendStaffChannelReply(params: {
 
   // A menu problem must never cost the staff member their confirmation — the
   // text is the part that carries the fact, so it is the floor, not the extra.
-  if (!replyResult.ok && menu.kind !== 'none') {
+  if (!replyResult.ok && (params.flow || menu.kind !== 'none')) {
     console.error(
-      `[webhook/wa][staff] interactive reply failed kind=${menu.kind} sender=${to} status=${replyResult.status} error=${replyResult.error} — falling back to text`,
+      `[webhook/wa][staff] interactive reply failed kind=${params.flow ? 'flow' : menu.kind} sender=${to} status=${replyResult.status} error=${replyResult.error} — falling back to text`,
     );
     replyResult = await sendText(waConfig, { ...sendCtx, body: text });
   }
@@ -782,8 +870,11 @@ async function handleStaffInboundMessage(params: {
   waMessageId: string;
   /** Developer id echoed back by a menu tap, or null for a typed message. */
   tapId?: string | null;
+  /** Free text typed into a WhatsApp Flow form, or null for anything else. */
+  flowNote?: string | null;
 }) {
   const { phoneNumberId, from, body, waMessageId, tapId } = params;
+  const flowNote = params.flowNote ?? null;
 
   // Cross-path inbound idempotency gate — must be the first operation.
   // Two Meta apps are subscribed to the same WABA, so every inbound message
@@ -964,14 +1055,49 @@ async function handleStaffInboundMessage(params: {
     replyText = buildStaffDisambiguationReply(r.action, r.candidates);
 
   } else {
-    // staff_action — apply then decide text based on outcome.
+    // staff_action.
+    //
+    // ── A TAP CANNOT CARRY TEXT. ───────────────────────────────────────────
+    //
+    // UPDATE, BLOCKED and DONE are meaningless without words: a blocker with no
+    // reason cannot be acted on by a manager, and a DONE with no result sends a
+    // verification whose "Reported result" line is empty. Applying those on a
+    // bare tap wrote exactly that, honestly labelled and still useless.
+    //
+    // So a text-bearing action that arrives with NO words does not apply — it
+    // replies with a Flow that asks for them, and applies when the form comes
+    // back. The action and the record ride in the Flow's `flow_token`, so
+    // nothing is remembered server-side between the two messages and an
+    // abandoned form leaves no stale state to swallow the next message.
+    //
+    // A TYPED command is untouched: `BLOCKED 2410 <reason>` arrives with
+    // `r.note` already set and applies immediately, as it always has.
+    const note = r.note ?? flowNote;
+    if (isTextBearingAction(r.action) && !note?.trim()) {
+      console.log(
+        `[webhook/wa][staff] action=${r.action} needs words sender=${from} task=${r.target.odooId} — opening flow, not applying`,
+      );
+      await sendStaffChannelReply({
+        tenantId,
+        to: from,
+        text: buildStaffFlowPromptReply(r.action),
+        menu: { kind: 'none' },
+        flow: buildStaffNoteFlow({
+          action: r.action,
+          correlationId: r.target.correlationId,
+          taskLabel: r.target.label ?? `#${r.target.odooId}`,
+        }),
+      });
+      return;
+    }
+
     const applied = await applyStaffAction({
       binding:           r.binding,
       action:            r.action,
       workRefModel:      r.target.odooModel,
       workRefId:         r.target.odooId,
       correlationId:     r.target.correlationId,
-      note:              r.note,
+      note,
       providerMessageId: waMessageId,
       source:            'whatsapp',
     });
@@ -1127,6 +1253,9 @@ async function processWebhook(body: Record<string, unknown>) {
             body: String(msg.text?.body ?? ''),
             waMessageId: String(msg.id ?? ''),
             tapId: tapId || null,
+            // Present only on a completed Flow. Everything else passes null and
+            // behaves exactly as before.
+            flowNote: extractStaffFlowNote(msg),
           });
         }
         continue; // hard barrier — never fall through to customer-agent path
