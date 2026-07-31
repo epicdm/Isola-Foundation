@@ -616,3 +616,172 @@ describe('the feed reads and does nothing else', () => {
     }
   })
 })
+
+// ───────────────────────────────────────────────────────────────
+// Ownership filtering. `ownershipStates` narrows the CANDIDATE SET — it runs
+// with every other semantic filter, before permission filtering, ordering, page
+// slicing and cursor generation. A filter applied to an already-cut page gives
+// short pages, a cursor that skips rows, and a count that disagrees with what is
+// on screen. These tests exist to make that regression impossible to land.
+// ───────────────────────────────────────────────────────────────
+
+const minutesAgo = (n: number) => new Date(NOW.getTime() - n * 60_000).toISOString()
+
+describe('ownership state narrows the candidate set before the page is cut', () => {
+  // Deliberately interleaved. Newest first the real order is
+  // human, ai, human, ai, human, ai — so if the ownership filter ran AFTER the
+  // slice, page one would hold ONE human row and the empty slot would be the
+  // silhouette of an ai row the caller asked not to see.
+  const interleaved: ActivityItem[] = [
+    item({ activityId: 'h0', ownershipState: 'human', occurredAt: minutesAgo(0) }),
+    item({ activityId: 'x0', ownershipState: 'ai', occurredAt: minutesAgo(1) }),
+    item({ activityId: 'h1', ownershipState: 'human', occurredAt: minutesAgo(2) }),
+    item({ activityId: 'x1', ownershipState: 'ai', occurredAt: minutesAgo(3) }),
+    item({ activityId: 'h2', ownershipState: 'human', occurredAt: minutesAgo(4) }),
+    item({ activityId: 'x2', ownershipState: 'ai', occurredAt: minutesAgo(5) }),
+  ]
+  const p = () => ports([source('s', ok(interleaved))])
+
+  it('page one is a FULL page of the two newest matching rows', async () => {
+    const r = await run({ ownershipStates: ['human'], pageSize: 2 }, p())
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.items).toHaveLength(2)
+    expect(r.items.map((i) => i.activityId)).toEqual(['h0', 'h1'])
+  })
+
+  it('the next cursor sits on the SECOND human row, not on the row after it', async () => {
+    const r = await run({ ownershipStates: ['human'], pageSize: 2 }, p())
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.nextCursor).not.toBeNull()
+    // Positioned on h1 — the last row actually shown. Anchoring it on the next
+    // candidate (x1) would hand page two a row the caller filtered out.
+    expect(decodeCursor(r.nextCursor as string)).toEqual({
+      occurredAt: minutesAgo(2),
+      activityId: 'h1',
+    })
+  })
+
+  it('page two is the third human row and the walk ends there', async () => {
+    const first = await run({ ownershipStates: ['human'], pageSize: 2 }, p())
+    if (!first.ok || !first.nextCursor) throw new Error('expected a second page')
+    const second = await run(
+      { ownershipStates: ['human'], pageSize: 2, cursor: first.nextCursor },
+      p(),
+    )
+    expect(second.ok).toBe(true)
+    if (!second.ok) return
+    expect(second.items.map((i) => i.activityId)).toEqual(['h2'])
+    expect(second.nextCursor).toBeNull()
+  })
+
+  it('no ai row appears on any page, and no page slot is spent on one', async () => {
+    const shared = p()
+    const seen: string[] = []
+    const pageSizes: number[] = []
+    let cursor: string | null = null
+    for (let guard = 0; guard < 10; guard++) {
+      const r: Awaited<ReturnType<typeof getActivityFeed>> = await run(
+        { ownershipStates: ['human'], pageSize: 2, cursor },
+        shared,
+      )
+      expect(r.ok).toBe(true)
+      if (!r.ok) break
+      pageSizes.push(r.items.length)
+      // Every page but the last is FULL. An ineligible row that consumed a slot
+      // shows up here as a short page in the middle of the walk.
+      if (r.nextCursor) expect(r.items).toHaveLength(2)
+      seen.push(...r.items.map((i) => i.activityId))
+      cursor = r.nextCursor
+      if (!cursor) break
+    }
+    expect(seen).toEqual(['h0', 'h1', 'h2'])
+    expect(pageSizes).toEqual([2, 1])
+    expect(seen.some((id) => id.startsWith('x'))).toBe(false)
+  })
+
+  it('counts only matching rows — the feed is not empty and not padded', async () => {
+    const r = await run({ ownershipStates: ['human'], pageSize: 100 }, p())
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.items).toHaveLength(3)
+    expect(r.dataState).toBe('available_with_records')
+    expect(r.nextCursor).toBeNull()
+  })
+
+  it('a row with no ownership concept is UNKNOWN, not a match for everything', async () => {
+    const rows = [item({ activityId: 'plain', ownershipState: null })]
+
+    const unknown = await run({ ownershipStates: ['unknown'] }, ports([source('s', ok(rows))]))
+    expect(unknown.ok).toBe(true)
+    if (!unknown.ok) return
+    expect(unknown.items.map((i) => i.activityId)).toEqual(['plain'])
+
+    const ai = await run({ ownershipStates: ['ai'] }, ports([source('s', ok(rows))]))
+    expect(ai.ok).toBe(true)
+    if (!ai.ok) return
+    expect(ai.items).toHaveLength(0)
+    // Absent because it does not match — not absent because a source broke.
+    expect(ai.dataState).toBe('available_empty')
+  })
+
+  it('permission filtering still runs before the slice when ownership is filtered too', async () => {
+    const rows = Array.from({ length: 6 }, (_, n) =>
+      item({
+        activityId: `p${n}`,
+        ownershipState: 'human',
+        relatedObjectId: n % 2 === 0 ? 'allowed' : 'blocked',
+        occurredAt: minutesAgo(n),
+      }),
+    )
+    const r = await run(
+      { ownershipStates: ['human'], pageSize: 2 },
+      ports(
+        [source('s', ok(rows))],
+        permissions({ mayViewObject: async (_t, id) => id === 'allowed' }),
+      ),
+    )
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    // Three visible rows, page size two: a FULL page and exactly one more. A
+    // short page here would let the caller count the rows they may not see.
+    expect(r.items.map((i) => i.activityId)).toEqual(['p0', 'p2'])
+    expect(r.nextCursor).not.toBeNull()
+    expect(JSON.stringify(r.items)).not.toContain('blocked')
+  })
+
+  it('breaks ties on the same instant by activityId ASC, ownership filter or not', async () => {
+    const sameInstant = [
+      item({ activityId: 'h-z', ownershipState: 'human', occurredAt: minutesAgo(1) }),
+      item({ activityId: 'h-a', ownershipState: 'human', occurredAt: minutesAgo(1) }),
+      item({ activityId: 'h-m', ownershipState: 'human', occurredAt: minutesAgo(1) }),
+    ]
+    const r = await run(
+      { ownershipStates: ['human'], pageSize: 10 },
+      ports([source('s', ok(sameInstant))]),
+    )
+    expect(r.ok && r.items.map((i) => i.activityId)).toEqual(['h-a', 'h-m', 'h-z'])
+  })
+
+  it('a tie split across a page boundary does not repeat or drop a row', async () => {
+    const sameInstant = [
+      item({ activityId: 'h-z', ownershipState: 'human', occurredAt: minutesAgo(1) }),
+      item({ activityId: 'h-a', ownershipState: 'human', occurredAt: minutesAgo(1) }),
+      item({ activityId: 'h-m', ownershipState: 'human', occurredAt: minutesAgo(1) }),
+      item({ activityId: 'x-a', ownershipState: 'ai', occurredAt: minutesAgo(1) }),
+    ]
+    const shared = ports([source('s', ok(sameInstant))])
+    const first = await run({ ownershipStates: ['human'], pageSize: 2 }, shared)
+    if (!first.ok || !first.nextCursor) throw new Error('expected a second page')
+    const second = await run(
+      { ownershipStates: ['human'], pageSize: 2, cursor: first.nextCursor },
+      shared,
+    )
+    expect(second.ok).toBe(true)
+    if (!second.ok) return
+    expect(first.items.map((i) => i.activityId)).toEqual(['h-a', 'h-m'])
+    expect(second.items.map((i) => i.activityId)).toEqual(['h-z'])
+    expect(second.nextCursor).toBeNull()
+  })
+})
