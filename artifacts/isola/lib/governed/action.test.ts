@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  DependencyUnavailable,
   runGovernedAction,
   type ActionExecutor,
   type ActionPorts,
@@ -58,6 +59,23 @@ describe('governed action — the happy path proves itself by readback', () => {
     expect(r.outcome).toBe('READBACK_FAILED')
     expect(r.readback).toBeNull()
   })
+
+  it('never claims success when readback THROWS, and names the id written', async () => {
+    const r = await runGovernedAction(
+      PROPOSAL,
+      ports({
+        executors: [
+          executor({
+            readback: async () => {
+              throw new Error('odoo read timeout')
+            },
+          }),
+        ],
+      }),
+    )
+    expect(r.outcome).toBe('READBACK_FAILED')
+    expect(r.detail).toContain('note-9')
+  })
 })
 
 describe('governed action — an unimplemented executor says so', () => {
@@ -70,8 +88,6 @@ describe('governed action — an unimplemented executor says so', () => {
   })
 
   it('still writes an audit entry when nothing was performed', async () => {
-    // Captured rather than spied: the point of the assertion is WHAT was audited,
-    // and a plain closure types the entry without fighting the mock generics.
     const audited: string[] = []
     await runGovernedAction(
       PROPOSAL,
@@ -87,13 +103,67 @@ describe('governed action — an unimplemented executor says so', () => {
   })
 })
 
+describe('governed action — a dependency being down is its own outcome', () => {
+  it('DEPENDENCY_UNAVAILABLE when the system of record is unreachable', async () => {
+    const r = await runGovernedAction(
+      PROPOSAL,
+      ports({
+        executors: [
+          executor({
+            execute: async () => {
+              throw new DependencyUnavailable('odoo', 'ECONNREFUSED')
+            },
+          }),
+        ],
+      }),
+    )
+    expect(r.outcome).toBe('DEPENDENCY_UNAVAILABLE')
+    expect(r.detail).toContain('odoo')
+  })
+
+  it('EXECUTION_FAILED when the write was refused, NOT the same as down', async () => {
+    const r = await runGovernedAction(
+      PROPOSAL,
+      ports({
+        executors: [
+          executor({
+            execute: async () => {
+              throw new Error('field customer_id is required')
+            },
+          }),
+        ],
+      }),
+    )
+    expect(r.outcome).toBe('EXECUTION_FAILED')
+  })
+
+  it('neither failure returns an empty success', async () => {
+    for (const thrown of [new DependencyUnavailable('odoo', 'down'), new Error('refused')]) {
+      const r = await runGovernedAction(
+        PROPOSAL,
+        ports({
+          executors: [
+            executor({
+              execute: async () => {
+                throw thrown
+              },
+            }),
+          ],
+        }),
+      )
+      expect(r.outcome).not.toBe('EXECUTED')
+      expect(r.readback).toBeNull()
+    }
+  })
+})
+
 describe('governed action — authorization, validation, approval', () => {
   it('refuses a role that may not propose the action', async () => {
     const r = await runGovernedAction(
       { ...PROPOSAL, actorRole: 'staff' },
       ports({ executors: [executor({ allowedRoles: ['owner'] })] }),
     )
-    expect(r.outcome).toBe('UNAUTHORIZED')
+    expect(r.outcome).toBe('PERMISSION_DENIED')
   })
 
   it('refuses an invalid payload before touching the executor', async () => {
@@ -101,10 +171,12 @@ describe('governed action — authorization, validation, approval', () => {
     const r = await runGovernedAction(
       PROPOSAL,
       ports({
-        executors: [executor({ validate: () => ({ ok: false, detail: 'body required' }), execute })],
+        executors: [
+          executor({ validate: () => ({ ok: false, detail: 'body required' }), execute }),
+        ],
       }),
     )
-    expect(r.outcome).toBe('INVALID')
+    expect(r.outcome).toBe('VALIDATION_FAILED')
     expect(execute).not.toHaveBeenCalled()
   })
 
@@ -114,14 +186,45 @@ describe('governed action — authorization, validation, approval', () => {
       PROPOSAL,
       ports({ approvalRequired: () => true, executors: [executor({ execute })] }),
     )
-    expect(r.outcome).toBe('AWAITING_APPROVAL')
+    expect(r.outcome).toBe('APPROVAL_REQUIRED')
     expect(r.approvalId).toBe('appr-1')
     expect(execute).not.toHaveBeenCalled()
   })
 
-  it('treats an undeclared action type as INVALID, at high risk', async () => {
+  it('a GRANTED approval falls through and executes', async () => {
+    const r = await runGovernedAction(
+      PROPOSAL,
+      ports({
+        approvalRequired: () => true,
+        approvalVerdict: async () => ({ state: 'granted', approvalId: 'appr-7' }),
+      }),
+    )
+    expect(r.outcome).toBe('EXECUTED')
+  })
+
+  it('a REJECTED approval is its own outcome and executes nothing', async () => {
+    const execute = vi.fn(async () => ({ externalId: 'x' }))
+    const r = await runGovernedAction(
+      PROPOSAL,
+      ports({
+        approvalRequired: () => true,
+        approvalVerdict: async () => ({
+          state: 'rejected',
+          approvalId: 'appr-9',
+          reason: 'not this customer',
+        }),
+        executors: [executor({ execute })],
+      }),
+    )
+    expect(r.outcome).toBe('APPROVAL_REJECTED')
+    expect(r.approvalId).toBe('appr-9')
+    expect(r.detail).toContain('not this customer')
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('treats an undeclared action type as VALIDATION_FAILED, at high risk', async () => {
     const r = await runGovernedAction({ ...PROPOSAL, actionType: 'wire.transfer' }, ports())
-    expect(r.outcome).toBe('INVALID')
+    expect(r.outcome).toBe('VALIDATION_FAILED')
     expect(r.riskLevel).toBe('high')
   })
 })
@@ -134,7 +237,7 @@ describe('governed action — idempotency', () => {
       PROPOSAL,
       ports({ executors: [executor({ execute })], findPriorResult: async () => first }),
     )
-    expect(second.outcome).toBe('DUPLICATE_IGNORED')
+    expect(second.outcome).toBe('IDEMPOTENT_REPLAY')
     expect(second.readback).toEqual(first.readback)
     expect(execute).toHaveBeenCalledOnce()
   })
@@ -145,11 +248,11 @@ describe('governed action — idempotency', () => {
       { ...PROPOSAL, actorRole: 'nobody' },
       ports({ findPriorResult: async () => first }),
     )
-    expect(r.outcome).toBe('DUPLICATE_IGNORED')
+    expect(r.outcome).toBe('IDEMPOTENT_REPLAY')
   })
 
   it('requires an idempotency key', async () => {
     const r = await runGovernedAction({ ...PROPOSAL, idempotencyKey: '' }, ports())
-    expect(r.outcome).toBe('INVALID')
+    expect(r.outcome).toBe('VALIDATION_FAILED')
   })
 })

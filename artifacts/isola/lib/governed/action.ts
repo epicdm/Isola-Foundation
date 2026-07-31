@@ -18,15 +18,22 @@ export const GOVERNED_ACTION_VERSION = 'governed-action@1' as const
 export const RISK_LEVELS = ['low', 'medium', 'high'] as const
 export type RiskLevel = (typeof RISK_LEVELS)[number]
 
+/**
+ * Every distinct way an action can end. Deliberately granular: collapsing "the
+ * dependency was down" into "it failed" loses the one bit an operator needs in
+ * order to know whether retrying is sensible.
+ */
 export type ActionOutcome =
   | 'EXECUTED'
-  | 'AWAITING_APPROVAL'
-  | 'REJECTED'
+  | 'VALIDATION_FAILED'
+  | 'PERMISSION_DENIED'
+  | 'APPROVAL_REQUIRED'
+  | 'APPROVAL_REJECTED'
   | 'EXECUTOR_UNAVAILABLE'
-  | 'UNAUTHORIZED'
-  | 'INVALID'
+  | 'EXECUTION_FAILED'
   | 'READBACK_FAILED'
-  | 'DUPLICATE_IGNORED'
+  | 'IDEMPOTENT_REPLAY'
+  | 'DEPENDENCY_UNAVAILABLE'
 
 export interface ActionProposal {
   actionType: string
@@ -72,10 +79,35 @@ export interface ActionExecutor {
   readback?(externalId: string, input: ActionProposal): Promise<Record<string, unknown> | null>
 }
 
+/**
+ * Raised by an executor when the SYSTEM OF RECORD is unreachable, as opposed to
+ * the write being rejected. Retrying is sensible for one and not the other, so
+ * the caller must be able to tell them apart.
+ */
+export class DependencyUnavailable extends Error {
+  constructor(
+    public readonly dependency: string,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'DependencyUnavailable'
+  }
+}
+
+export type ApprovalVerdict =
+  | { state: 'pending'; approvalId: string }
+  | { state: 'granted'; approvalId: string }
+  | { state: 'rejected'; approvalId: string; reason: string }
+
 export interface ActionPorts {
   executors: readonly ActionExecutor[]
   /** True when this action type at this risk level needs a human. */
   approvalRequired(actionType: string, risk: RiskLevel, role: string): boolean
+  /**
+   * The standing verdict for this proposal, if a human has already ruled. An
+   * absent implementation means "no verdict yet" and the action holds.
+   */
+  approvalVerdict?(p: ActionProposal): Promise<ApprovalVerdict>
   /** Returns a prior result for this idempotency key, if one exists. */
   findPriorResult(idempotencyKey: string): Promise<ActionResult | null>
   recordApprovalRequest(p: ActionProposal, risk: RiskLevel): Promise<string>
@@ -121,74 +153,85 @@ export async function runGovernedAction(
   if (!proposal.idempotencyKey?.trim()) {
     const auditId = await ports.writeAudit({
       proposal,
-      outcome: 'INVALID',
+      outcome: 'VALIDATION_FAILED',
       riskLevel: risk,
       detail: 'idempotencyKey is required',
       readback: null,
     })
-    return result(proposal, 'INVALID', risk, 'idempotencyKey is required', auditId)
+    return result(proposal, 'VALIDATION_FAILED', risk, 'idempotencyKey is required', auditId)
   }
 
-  // Idempotency BEFORE anything else: a retry must never execute twice.
+  // Idempotency BEFORE anything else: a retry must never execute twice, and must
+  // not be re-judged against permissions that may have changed since.
   const prior = await ports.findPriorResult(proposal.idempotencyKey)
   if (prior) {
-    return { ...prior, outcome: 'DUPLICATE_IGNORED', detail: 'replayed prior result' }
+    return { ...prior, outcome: 'IDEMPOTENT_REPLAY', detail: 'replayed prior result' }
   }
 
   if (!executor) {
     const detail = `no executor declared for ${proposal.actionType}`
     const auditId = await ports.writeAudit({
       proposal,
-      outcome: 'INVALID',
+      outcome: 'VALIDATION_FAILED',
       riskLevel: risk,
       detail,
       readback: null,
     })
-    return result(proposal, 'INVALID', risk, detail, auditId)
+    return result(proposal, 'VALIDATION_FAILED', risk, detail, auditId)
   }
 
   if (!executor.allowedRoles.includes(proposal.actorRole)) {
     const detail = `role ${proposal.actorRole} may not propose ${proposal.actionType}`
     const auditId = await ports.writeAudit({
       proposal,
-      outcome: 'UNAUTHORIZED',
+      outcome: 'PERMISSION_DENIED',
       riskLevel: risk,
       detail,
       readback: null,
     })
-    return result(proposal, 'UNAUTHORIZED', risk, detail, auditId)
+    return result(proposal, 'PERMISSION_DENIED', risk, detail, auditId)
   }
 
   const valid = executor.validate(proposal.payload)
   if (!valid.ok) {
     const auditId = await ports.writeAudit({
       proposal,
-      outcome: 'INVALID',
+      outcome: 'VALIDATION_FAILED',
       riskLevel: risk,
       detail: valid.detail,
       readback: null,
     })
-    return result(proposal, 'INVALID', risk, valid.detail, auditId)
+    return result(proposal, 'VALIDATION_FAILED', risk, valid.detail, auditId)
   }
 
   if (ports.approvalRequired(proposal.actionType, risk, proposal.actorRole)) {
-    const approvalId = await ports.recordApprovalRequest(proposal, risk)
-    const auditId = await ports.writeAudit({
-      proposal,
-      outcome: 'AWAITING_APPROVAL',
-      riskLevel: risk,
-      detail: `approval ${approvalId} required`,
-      readback: null,
-    })
-    return result(
-      proposal,
-      'AWAITING_APPROVAL',
-      risk,
-      `approval ${approvalId} required`,
-      auditId,
-      null,
-      approvalId,
-    )
+    const verdict = await ports.approvalVerdict?.(proposal)
+
+    if (verdict?.state === 'rejected') {
+      const detail = `approval ${verdict.approvalId} rejected: ${verdict.reason}`
+      const auditId = await ports.writeAudit({
+        proposal,
+        outcome: 'APPROVAL_REJECTED',
+        riskLevel: risk,
+        detail,
+        readback: null,
+      })
+      return result(proposal, 'APPROVAL_REJECTED', risk, detail, auditId, null, verdict.approvalId)
+    }
+
+    if (verdict?.state !== 'granted') {
+      const approvalId = verdict?.approvalId || (await ports.recordApprovalRequest(proposal, risk))
+      const detail = `approval ${approvalId} required`
+      const auditId = await ports.writeAudit({
+        proposal,
+        outcome: 'APPROVAL_REQUIRED',
+        riskLevel: risk,
+        detail,
+        readback: null,
+      })
+      return result(proposal, 'APPROVAL_REQUIRED', risk, detail, auditId, null, approvalId)
+    }
+    // granted — fall through and execute
   }
 
   // ── The honest branch. A declared action with no implementation says so. ────
@@ -204,11 +247,45 @@ export async function runGovernedAction(
     return result(proposal, 'EXECUTOR_UNAVAILABLE', risk, detail, auditId)
   }
 
-  const { externalId } = await executor.execute(proposal)
-  const readback = await executor.readback(externalId, proposal)
+  let externalId: string
+  try {
+    ;({ externalId } = await executor.execute(proposal))
+  } catch (err) {
+    // A dependency being DOWN is not the same as a write being REFUSED.
+    const down = err instanceof DependencyUnavailable
+    const outcome: ActionOutcome = down ? 'DEPENDENCY_UNAVAILABLE' : 'EXECUTION_FAILED'
+    const detail = down
+      ? `dependency ${(err as DependencyUnavailable).dependency} unavailable: ${err.message}`
+      : `execution failed: ${err instanceof Error ? err.message : String(err)}`
+    const auditId = await ports.writeAudit({
+      proposal,
+      outcome,
+      riskLevel: risk,
+      detail,
+      readback: null,
+    })
+    return result(proposal, outcome, risk, detail, auditId)
+  }
+
+  let readback: Record<string, unknown> | null
+  try {
+    readback = await executor.readback(externalId, proposal)
+  } catch (err) {
+    // We wrote something and cannot prove what. That is NOT success, and it is
+    // not a clean failure either — say so, and name the id so a human can look.
+    const detail = `wrote ${externalId} but readback threw: ${err instanceof Error ? err.message : String(err)}`
+    const auditId = await ports.writeAudit({
+      proposal,
+      outcome: 'READBACK_FAILED',
+      riskLevel: risk,
+      detail,
+      readback: null,
+    })
+    return result(proposal, 'READBACK_FAILED', risk, detail, auditId)
+  }
 
   if (!readback) {
-    const detail = `executed ${externalId} but readback returned nothing; success is NOT claimed`
+    const detail = `executed ${externalId} but readback returned nothing or did not match; success is NOT claimed`
     const auditId = await ports.writeAudit({
       proposal,
       outcome: 'READBACK_FAILED',
@@ -226,5 +303,12 @@ export async function runGovernedAction(
     detail: `executed and read back ${externalId}`,
     readback,
   })
-  return result(proposal, 'EXECUTED', risk, `executed and read back ${externalId}`, auditId, readback)
+  return result(
+    proposal,
+    'EXECUTED',
+    risk,
+    `executed and read back ${externalId}`,
+    auditId,
+    readback,
+  )
 }
