@@ -2,42 +2,50 @@
  * The customer-tool exactly-once ledger — now a thin wrapper.
  *
  * Every export and every signature in this file is unchanged. What changed is
- * underneath: the claim lifecycle is `lib/operations/ledger.ts`, shared with
+ * underneath: the CLAIM lifecycle is `lib/operations/ledger.ts`, shared with
  * Foundation staff actions. One table, one set of race semantics, one place to
  * reason about "has this already happened".
  *
  * WHAT DELIBERATELY DID NOT CHANGE
  * --------------------------------
- * 1. The operation ID. `deriveOperationId` below is byte-for-byte the scheme
- *    that produced every row already in the table. Re-deriving under the neutral
- *    scheme would have made every historical operation invisible — and an
- *    invisible completed operation is one that runs a second time.
+ * 1. The operation ID. `deriveOperationId` below is the scheme that produced
+ *    every row already in the table. Re-deriving under the neutral scheme would
+ *    have made every historical operation invisible — and an invisible completed
+ *    operation is one that runs a second time.
  * 2. The inputs. Customer tools still require the tenant, the transport-verified
  *    customer identity, the conversation, the session, the correlation, the
  *    hint, and the policy-approved assignee where one applies. The shared ledger
  *    unifies STORAGE. It does not unify authorization.
+ * 3. What completion stores. The result column keeps holding the tool's own
+ *    result, byte for byte, so every historical row and every new row read the
+ *    same way.
+ *
+ * WHY COMPLETION DOES NOT WRITE AN ENVELOPE
+ * -----------------------------------------
+ * A record id is all `completeOperation` receives, and company, action, object
+ * and actor cannot be recovered from it. Writing an envelope with those fields
+ * blank would look like evidence while being none. This lane's audit fields are
+ * already in real columns — tenant_id, tool_name, conversation_id,
+ * correlation_id, agent_session_id, request_hash, result_model, result_id — and
+ * the caller class is recoverable from the id scheme via `callerClassOf`.
  *
  * The two id shapes cannot collide: this file mints `op-` + 32 hex; the neutral
  * scheme mints `op_` + 64 hex. Different separator, different length. A test
  * asserts it rather than trusting it.
  */
 
+import { createHash } from 'node:crypto'
+
 import {
   canonicalJson as neutralCanonicalJson,
   claimOperation as ledgerClaim,
-  completeOperation as ledgerComplete,
-  failOperation as ledgerFail,
   hashArguments as neutralHashArguments,
-  prismaLedgerStore,
   rowToLedgerRecord,
   unwrapResult,
   type LedgerRecord,
   type LedgerStore,
-  type OperationEnvelope,
 } from '@/lib/operations/ledger'
 import { prisma } from '@/lib/prisma'
-
-import { createHash } from 'node:crypto'
 
 export const OPERATION_STATES = ['claimed', 'succeeded', 'failed'] as const
 export type OperationState = (typeof OPERATION_STATES)[number]
@@ -202,7 +210,7 @@ export const prismaOperationStore: OperationStore = {
 }
 
 /**
- * Presents a customer-tool `OperationStore` to the neutral ledger. Injected
+ * Presents a customer-tool `OperationStore` to the neutral ledger. The injected
  * fakes in the existing tests keep working untouched, which is the point: if
  * those tests still pass, the behaviour genuinely did not change.
  */
@@ -242,22 +250,6 @@ export function ledgerStoreFrom(store: OperationStore): LedgerStore {
         })
         .then(toLedger),
     isUniqueViolation,
-  }
-}
-
-/** The envelope shape a customer-tool operation records for the auditor. */
-function envelopeFor(input: ClaimOperationInput): OperationEnvelope {
-  return {
-    version: 'operations.ledger@1',
-    callerClass: 'customer_agent',
-    companyId: input.tenantId,
-    actionType: input.toolName,
-    objectType: 'customer_tool',
-    objectId: input.conversationId,
-    actorRef: input.agentSessionId ?? '',
-    auditRef: null,
-    readback: null,
-    result: null,
   }
 }
 
@@ -338,7 +330,7 @@ export async function claimOperation(
         previousFailureCode: outcome.previousFailureClass,
       }
     default:
-      // `previously_failed` cannot occur: retryFailed defaults to true.
+      // `previously_failed` cannot occur here: retryFailed defaults to true.
       throw new Error(`unexpected ledger outcome ${(outcome as { status: string }).status}`)
   }
 }
@@ -350,39 +342,20 @@ export async function claimOperation(
  * must have read them BACK from Odoo. An id echoed by a create response is not
  * proof of what was stored, and this ledger is not the place to start
  * pretending otherwise.
+ *
+ * Stores the result verbatim. See the file header for why no envelope is
+ * written here.
  */
 export async function completeOperation(
   recordId: string,
   outcome: { resultModel: string | null; resultId: number | null; result: unknown },
   store: OperationStore = prismaOperationStore,
 ): Promise<OperationRecord> {
-  const ledgerStore = ledgerStoreFrom(store)
-  const existing = await ledgerStore.find('', '').catch(() => null)
-  void existing
-
-  const record = await ledgerComplete(
-    recordId,
-    {
-      envelope: {
-        version: 'operations.ledger@1',
-        callerClass: 'customer_agent',
-        companyId: '',
-        actionType: '',
-        objectType: 'customer_tool',
-        objectId: '',
-        actorRef: '',
-        auditRef: null,
-        readback: null,
-        result: null,
-      },
-      readback: null,
-      result: outcome.result,
-      resultModel: outcome.resultModel,
-      resultId: outcome.resultId,
-    },
-    ledgerStore,
-  )
-  return ledgerRecordToOperationRecord(record, outcome.result)
+  return store.markSucceeded(recordId, {
+    result_model: outcome.resultModel,
+    result_id: outcome.resultId,
+    result: outcome.result,
+  })
 }
 
 /**
@@ -394,26 +367,8 @@ export async function failOperation(
   failure: { code: string; detail?: string | null },
   store: OperationStore = prismaOperationStore,
 ): Promise<OperationRecord> {
-  const record = await ledgerFail(
-    recordId,
-    { failureClass: failure.code, detail: failure.detail ?? null },
-    ledgerStoreFrom(store),
-  )
-  return ledgerRecordToOperationRecord(record)
-}
-
-function ledgerRecordToOperationRecord(r: LedgerRecord, result?: unknown): OperationRecord {
-  return {
-    id: r.recordId,
-    tenant_id: r.tenantId,
-    operation_id: r.operationId,
-    tool_name: r.toolName ?? '',
-    request_hash: r.requestHash,
-    state: r.state === 'completed' ? 'succeeded' : r.state,
-    result_model: r.resultModel,
-    result_id: r.resultId,
-    result: result !== undefined ? result : unwrapResult(r.rawResult),
-    failure_code: r.failureClass,
-    claimed_at: r.claimedAt,
-  }
+  return store.markFailed(recordId, {
+    failure_code: failure.code,
+    failure_detail: failure.detail ?? null,
+  })
 }
