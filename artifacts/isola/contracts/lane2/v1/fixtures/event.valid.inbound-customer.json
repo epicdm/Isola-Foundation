@@ -1,0 +1,16 @@
+{
+  "eventId": "evt-001",
+  "version": "lane2.events.ingest@1",
+  "sourceSystem": "lane2",
+  "eventType": "message.inbound.customer",
+  "occurredAt": "2026-07-31T11:59:00Z",
+  "companyId": "co-1",
+  "channelBindingId": "cb-1",
+  "conversationRef": "conv-1",
+  "actorClass": "customer",
+  "payload": {
+    "preview": "my line is down"
+  },
+  "correlationId": "corr-1",
+  "dedupeKey": "wamid-1"
+}

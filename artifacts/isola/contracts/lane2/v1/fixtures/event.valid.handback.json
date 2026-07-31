@@ -1,0 +1,13 @@
+{
+  "eventId": "evt-002",
+  "version": "lane2.events.ingest@1",
+  "sourceSystem": "lane2",
+  "eventType": "ownership.handback",
+  "occurredAt": "2026-07-31T12:05:00Z",
+  "companyId": "co-1",
+  "channelBindingId": "cb-1",
+  "conversationRef": "conv-1",
+  "actorClass": "staff",
+  "payload": {},
+  "dedupeKey": "handback-1"
+}

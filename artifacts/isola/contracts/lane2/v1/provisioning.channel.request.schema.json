@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://isola.epic.dm/contracts/lane2/v1/provisioning.channel.request.schema.json",
+  "title": "lane2.provisioning.channel.connect@1 (request)",
+  "description": "Foundation asks Lane 2 to configure Meta, Chatwoot and Clawith. Foundation has already validated the user, recorded the business request, and decided the classification. Lane 2 configures; it does not classify.",
+  "type": "object",
+  "required": [
+    "channelBindingId",
+    "companyId",
+    "purpose",
+    "requestedType",
+    "classification",
+    "correlationId",
+    "idempotencyKey"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "channelBindingId": {
+      "type": "string"
+    },
+    "companyId": {
+      "type": "string"
+    },
+    "purpose": {
+      "type": "string"
+    },
+    "requestedType": {
+      "enum": [
+        "whatsapp",
+        "telegram",
+        "voice",
+        "email"
+      ]
+    },
+    "classification": {
+      "enum": [
+        "customer_facing",
+        "internal_private"
+      ],
+      "description": "Foundation's decision. Echo it back unchanged or omit it. A different value is refused."
+    },
+    "clawithAgentRef": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "chatwootTeamRef": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "operatingPolicy": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Opaque JSON text."
+    },
+    "approvalRequired": {
+      "type": "boolean"
+    },
+    "correlationId": {
+      "type": "string"
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "description": "Replaying this key must not provision twice."
+    }
+  }
+}

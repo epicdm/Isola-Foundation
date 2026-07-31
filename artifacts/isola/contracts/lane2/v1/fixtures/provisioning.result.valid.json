@@ -1,0 +1,14 @@
+{
+  "channelBindingId": "cb-1",
+  "status": "ready",
+  "contractVersion": "lane2.provisioning.channel.connect@1",
+  "providerRef": "pn_01H8",
+  "inboxRef": "inbox_46",
+  "agentRef": "agent_ref_1",
+  "readiness": "ready",
+  "health": "healthy",
+  "chatwootDeepLink": "https://inbox.epic.dm/app/accounts/1/conversations/9",
+  "echoedClassification": "internal_private",
+  "verifiedAt": "2026-07-31T12:00:00Z",
+  "correlationId": "corr-1"
+}
