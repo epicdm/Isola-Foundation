@@ -186,3 +186,63 @@ describe('the fingerprint', () => {
     expect(filterFingerprint(r.query)).toBe(r.fingerprint)
   })
 })
+
+// The ownership filter narrows WHICH ROWS EXIST, so it belongs in the cursor's
+// identity. Replaying a human-only cursor against an ai-only query would answer
+// a question nobody asked, from a page boundary that means nothing there.
+describe('the ownership filter is part of the question the cursor belongs to', () => {
+  it('refuses a cursor issued before the ownership filter changed', () => {
+    const a = parse('ownershipState=human')
+    if (!a.ok) throw new Error('expected a parse')
+    const wrapped = encodeActivityCursor(feedCursor, a.fingerprint)
+
+    const b = parse(`ownershipState=ai&cursor=${wrapped}`)
+    expect(b.ok).toBe(false)
+    if (b.ok) return
+    expect(b.rejection).toBe('malformed_cursor')
+    expect(b.parameter).toBe('cursor')
+    expect(b.detail).toContain('different set of filters')
+  })
+
+  it('refuses a cursor when the ownership filter is dropped entirely', () => {
+    const a = parse('ownershipState=human')
+    if (!a.ok) throw new Error('expected a parse')
+    const wrapped = encodeActivityCursor(feedCursor, a.fingerprint)
+
+    const b = parse(`cursor=${wrapped}`)
+    expect(b.ok).toBe(false)
+    if (b.ok) return
+    expect(b.rejection).toBe('malformed_cursor')
+    expect(b.detail).toContain('different set of filters')
+  })
+
+  it('refuses a cursor when the ownership filter is widened', () => {
+    const a = parse('ownershipState=human')
+    if (!a.ok) throw new Error('expected a parse')
+    const wrapped = encodeActivityCursor(feedCursor, a.fingerprint)
+
+    const b = parse(`ownershipState=human&ownershipState=ai&cursor=${wrapped}`)
+    expect(b.ok).toBe(false)
+    if (b.ok) return
+    expect(b.detail).toContain('different set of filters')
+  })
+
+  it('keeps the cursor valid when ONLY the page size changed', () => {
+    const a = parse('ownershipState=human&pageSize=10')
+    if (!a.ok) throw new Error('expected a parse')
+    const wrapped = encodeActivityCursor(feedCursor, a.fingerprint)
+
+    const b = parse(`ownershipState=human&pageSize=50&cursor=${wrapped}`)
+    expect(b.ok).toBe(true)
+    if (!b.ok) return
+    expect(b.query.cursor).toBe(feedCursor)
+    expect(b.query.pageSize).toBe(50)
+    expect(b.fingerprint).toBe(a.fingerprint)
+  })
+
+  it('ignores the order the ownership states were given in', () => {
+    const a = parse('ownershipState=human&ownershipState=ai')
+    const b = parse('ownershipState=ai&ownershipState=human')
+    expect(a.ok && b.ok && a.fingerprint === b.fingerprint).toBe(true)
+  })
+})
