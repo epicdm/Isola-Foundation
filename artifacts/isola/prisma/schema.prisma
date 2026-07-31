@@ -92,6 +92,11 @@ model Tenant {
   conversation_ownership_transitions ConversationOwnershipTransition[]
   customer_tool_operations           CustomerToolOperation[]
   channelBindings ChannelBinding[]
+
+  /// Lane-2 events Foundation has accepted and projected into the activity
+  /// feed. Cascades on delete: activity must never outlive the tenant it
+  /// describes, and an orphan row would point at an id that no longer resolves.
+  projected_activity ProjectedActivity[]
 }
 
 // ── Per-tenant voicemail catches (AI missed-call catcher) ────────────────────
@@ -1187,4 +1192,52 @@ model CustomerToolOperation {
   @@index([tenant_id, tool_name])
   @@index([conversation_id])
   @@index([correlation_id])
+}
+
+// ── Lane-2 projected activity (Foundation's read model) ────────────────────────
+//
+// What `IngestPorts.project` writes and `Lane2ProjectionStore.read` reads; see
+// lib/events/projection-store.ts for the conflict and retention rules.
+//
+// Foundation LEARNS from these rows. It never acts on them: there is no reply,
+// retry or ownership command anywhere on this path. Lane 2 owns transport
+// dedup; the keys below are for THIS read model only.
+model ProjectedActivity {
+  id        String @id @default(cuid())
+  tenant_id String
+
+  /// Lane 2's own identity for the event, and its transport dedup key.
+  /// The tenant is part of BOTH unique keys: an id unique only globally would
+  /// let one tenant's event collide with another tenant's.
+  event_id   String
+  dedupe_key String
+
+  event_type    String
+  source_system String
+  actor_class   String
+
+  /// When it HAPPENED vs when it ARRIVED. Both are kept because a late
+  /// delivery must land in its historical place, not at the top of the feed.
+  occurred_at DateTime
+  received_at DateTime
+
+  channel_binding_id String?
+  agent_ref          String?
+  conversation_ref   String?
+  correlation_id     String?
+
+  related_objects Json @default("{}")
+  payload         Json @default("{}")
+
+  created_at DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+
+  @@unique([tenant_id, event_id])
+  @@unique([tenant_id, dedupe_key])
+  @@index([tenant_id, occurred_at])
+  @@index([tenant_id, event_type])
+  @@index([tenant_id, source_system])
+  @@index([tenant_id, conversation_ref])
+  @@map("projected_activity")
 }
