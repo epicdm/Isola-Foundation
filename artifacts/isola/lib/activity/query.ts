@@ -74,8 +74,10 @@ const reject = (
 ): ParseResult => ({ ok: false, rejection, parameter, detail })
 
 /**
- * A hash of everything that changes WHICH rows exist. Page size is excluded on
- * purpose: changing how many rows you ask for does not change where you are.
+ * A hash of everything that changes WHICH rows exist — ownership filter
+ * included, because it narrows the candidate set like any other filter. Page
+ * size is excluded on purpose: changing how many rows you ask for does not
+ * change where you are.
  */
 export function filterFingerprint(query: ActivityQuery): string {
   const material = JSON.stringify([
@@ -92,6 +94,7 @@ export function filterFingerprint(query: ActivityQuery): string {
     [...(query.sourceSystems ?? [])].sort(),
     [...(query.eventTypes ?? [])].sort(),
     [...(query.statuses ?? [])].sort(),
+    [...(query.ownershipStates ?? [])].sort(),
     query.from ?? null,
     query.to ?? null,
   ])
@@ -163,7 +166,6 @@ function isFailure(v: unknown): v is ParseResult {
  *               narrow to it but never widen past it; the feed refuses anything
  *               outside the permitted set anyway, and it refuses identically for
  *               a company that does not exist.
- * @param knownSources the source names actually registered on this deployment
  */
 export function parseActivityQuery(
   params: URLSearchParams,
@@ -264,6 +266,10 @@ export function parseActivityQuery(
     eventTypes: families.length ? families : null,
     sourceSystems: sources.length ? sources : null,
     statuses: statuses.length ? statuses : null,
+    // Narrows the candidate set inside the feed, BEFORE ordering and slicing.
+    // Filtering a page after it is cut gives short pages, counts that disagree
+    // with what is shown, and rows that turn up again later.
+    ownershipStates: ownership.length ? ownership : null,
     from: dates.occurredFrom,
     to: dates.occurredTo,
     cursor: null,
@@ -290,13 +296,5 @@ export function parseActivityQuery(
     query.cursor = check.feedCursor
   }
 
-  // `ownershipState` narrows rows, not the row SET, so it is applied after the
-  // feed returns rather than folded into the fingerprint.
   return { ok: true, query, fingerprint }
-}
-
-/** The ownership filter, applied to what the feed returned. */
-export function ownershipFilterFrom(params: URLSearchParams): readonly string[] | null {
-  const values = params.getAll('ownershipState').map((s) => s.trim()).filter(Boolean)
-  return values.length ? values : null
 }
