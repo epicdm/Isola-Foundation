@@ -108,6 +108,13 @@ export interface ProjectedActivity {
   relatedObjects: Record<string, string>
   correlationId: string | null
   payload: Record<string, unknown>
+  /**
+   * Lane 2's transport dedup key, carried through so the store can persist it
+   * under `@@unique([tenant_id, dedupe_key])`. Optional because the read model
+   * itself is keyed on `(tenant_id, event_id)` — a projection built by hand for
+   * a fold or a test does not need one.
+   */
+  dedupeKey?: string
 }
 
 export interface IngestPorts {
@@ -179,6 +186,9 @@ export async function ingestLane2Event(
     return { accepted: true, eventId: event.eventId, projected: false, reason: 'duplicate' }
   }
 
+  // AWAITED BEFORE THE RECEIPT, deliberately. A receipt that says `projected:
+  // true` before the projection has landed is a receipt for something that may
+  // never have happened; if this rejects, no accepted receipt is produced at all.
   await ports.project({
     eventId: event.eventId,
     companyId: event.companyId,
@@ -193,6 +203,7 @@ export async function ingestLane2Event(
     relatedObjects: event.relatedObjects ?? {},
     correlationId: event.correlationId ?? null,
     payload: event.payload ?? {},
+    dedupeKey: event.dedupeKey,
   })
 
   return { accepted: true, eventId: event.eventId, projected: true }
