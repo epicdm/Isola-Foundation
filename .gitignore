@@ -62,3 +62,13 @@ WAVEB-SOULS.json
 
 artifacts/isola/.next/
 artifacts/isola/.next-preview/
+
+# --- repository contamination (added 2026-07-31 after the Replit Agent incident) ---
+# A git bundle is a whole repository inside this one; it does not belong in the
+# tree. evidence/stage1/isola-stage1.bundle is already TRACKED, so this rule
+# does not affect it — gitignore only governs untracked files.
+*.bundle
+# A timestamped copy of the Prisma schema forks the schema next to the
+# canonical file, where a later edit can land on the wrong one. The canonical
+# schema.prisma and everything under prisma/migrations/ are unaffected.
+schema.prisma.backup.*
