@@ -409,20 +409,25 @@ describe('end to end through the governed pipeline', () => {
 describe('the boundary', () => {
   it('never opens a socket in this suite — the transport is always injected', () => {
     const src = readFileSync(join(__dirname, 'odoo-record-system.test.ts'), 'utf8')
-    // json2Call is the only real transport, and it must not be referenced here.
-    expect(src).not.toMatch(/json2Call/)
+    // Only the IMPORT BLOCK is checked. Scanning the whole file would match the
+    // assertion's own search text, so the test would pass or fail for a reason
+    // that has nothing to do with the code under test.
+    const imports = src.slice(0, src.indexOf('describe('))
+    expect(imports).not.toMatch(/\bjson2Call\b/)
   })
 
   it('sends no message and touches no messaging provider', () => {
     const src = readFileSync(join(__dirname, 'odoo-record-system.ts'), 'utf8')
-    const code = src
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/\/\/.*$/gm, '')
-      .replace(/'[^']*'/g, "''")
-      .replace(/"[^"]*"/g, '""')
+    // Comments are stripped FIRST. This file's own docstring explains why the
+    // Chatwoot-bound customer tools are deliberately not reused, and prose about
+    // a thing is not a call to it. Matching the comment would confuse what the
+    // code says with what the code does.
+    const noComments = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+    const code = noComments.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""')
+
     expect(code).not.toMatch(/\bfetch\s*\(/)
-    expect(src).not.toMatch(/graph\.facebook\.com|api\.twilio|chatwoot|agents\.epic\.dm/i)
-    expect(src).not.toMatch(/process\.env/)
+    expect(noComments).not.toMatch(/graph\.facebook\.com|api\.twilio|chatwoot|agents\.epic\.dm/i)
+    expect(noComments).not.toMatch(/process\.env/)
   })
 
   it('never puts the api key into an error message', async () => {
