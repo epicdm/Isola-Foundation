@@ -91,7 +91,7 @@ function render(feedState: FeedState, filters: ActivityFilters = EMPTY_FILTERS):
 
 const count = (html: string, pattern: RegExp) => (html.match(pattern) ?? []).length
 
-// ── the eleven states ─────────────────────────────────────────────
+// ── the eleven states ──
 
 describe("LOADING", () => {
   it("says it is busy and does not pretend the list is empty", () => {
@@ -263,7 +263,7 @@ describe("INVALID_CURSOR", () => {
   })
 })
 
-// ── row honesty ───────────────────────────────────────────────────
+// ── row honesty ──
 
 describe("a row never invents anything", () => {
   it("renders no link at all when the API supplied none", () => {
@@ -358,7 +358,7 @@ describe("a row never invents anything", () => {
   })
 })
 
-// ── pagination ──────────────────────────────────────────────────
+// ── pagination ──
 
 describe("pagination is a real, focusable control", () => {
   it("renders a Load more button when the server gave a cursor", () => {
@@ -375,7 +375,7 @@ describe("pagination is a real, focusable control", () => {
   })
 })
 
-// ── accessibility structure ────────────────────────────────────────
+// ── accessibility structure ──
 
 describe("accessibility structure", () => {
   const html = render(state({ nextCursor: "C1" }))
@@ -444,7 +444,7 @@ describe("accessibility structure", () => {
   })
 })
 
-// ── mobile ────────────────────────────────────────────────────────
+// ── mobile ──
 
 describe("mobile layout", () => {
   const html = render(
