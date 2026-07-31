@@ -45,7 +45,7 @@ import {
 } from "./filters"
 import { ACTIVITY_SOURCE_ORDER, type ActivitySourceReport } from "./types"
 
-// ── source panel ─────────────────────────────────────────────────
+// ── source panel ──
 
 const TONE_ICON: Record<SourceTone, typeof Info> = {
   available: CheckCircle2,
@@ -126,7 +126,7 @@ export function SourcePanel({ sources, counts, loaded }: SourcePanelProps) {
   )
 }
 
-// ── problem notices ───────────────────────────────────────────────
+// ── problem notices ──
 
 export interface ProblemNoticeProps {
   problem: FeedProblem
@@ -275,7 +275,7 @@ export function ProblemNotice({
   }
 }
 
-// ── filter bar ───────────────────────────────────────────────────
+// ── filter bar ──
 
 const CONTROL_CLASS =
   "min-h-11 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
