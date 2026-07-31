@@ -44,6 +44,7 @@ const h = vi.hoisted(() => ({
   verdictResult: { ok: true, detail: { stage: { moved: true, stageName: 'Done', stageNameAfter: 'Done', readbackOk: true } } } as any,
   managerBinding: null as any,
   sentButtons: [] as any[],
+  sentFlows: [] as any[],
   sentTexts: [] as any[],
   verdictArgs: [] as any[],
 }));
@@ -119,6 +120,9 @@ vi.mock('@/engines/whatsapp', () => ({
   sendText: async (_c: any, input: any) => { h.calls.push('send.text'); h.sentTexts.push(input); return { ok: true, status: 200, messageId: 'wamid.t' }; },
   sendInteractiveButtons: async (_c: any, input: any) => { h.calls.push('send.buttons'); h.sentButtons.push(input); return { ok: true, status: 200, messageId: 'wamid.b' }; },
   sendInteractiveList: async (_c: any, input: any) => { h.calls.push('send.list'); h.sentButtons.push(input); return { ok: true, status: 200, messageId: 'wamid.l' }; },
+  // The module's real surface — an exhaustive vi.mock replaces the whole
+  // namespace, so a name it omits throws where the route destructures it.
+  sendInteractiveFlow: async (_c: any, input: any) => { h.calls.push('send.flow'); h.sentFlows.push(input); return { ok: true, status: 200, messageId: 'wamid.f' }; },
 }));
 
 import { POST } from './route';
@@ -148,6 +152,7 @@ const replies = () => h.sentButtons.length + h.sentTexts.length;
 beforeEach(() => {
   vi.clearAllMocks();
   h.calls = []; h.claimed = new Set(); h.sentButtons = []; h.sentTexts = []; h.verdictArgs = [];
+  h.sentFlows = [];
   h.menu = { kind: 'none' };
   h.applyResult = { ok: true, deduped: false, actionId: 'a1', odooResult: { chatter: { messagePost: [1] }, verification: { requested: true, activityId: ACTIVITY } } };
   h.managerResolution = null;

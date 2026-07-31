@@ -25,6 +25,8 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+process.env.STAFF_MANAGER_VERIFICATION_TEMPLATE_APPROVED = 'true'
+
 const TENANT = '43b006e4-33e0-42a8-bec7-4422ba290d79'
 const TASK = 2588
 const MODEL_ID = 727
@@ -54,6 +56,7 @@ const h = vi.hoisted(() => ({
 
 vi.mock('../prisma', () => ({
   prisma: {
+    consent: { findUnique: async () => ({ status: 'opted_in' }) },
     staffWorkAction: {
       findUnique: async ({ where }: any) => {
         const k = where.tenant_id_idempotency_key
@@ -93,7 +96,7 @@ vi.mock('../prisma', () => ({
       findMany: async ({ where }: any) => h.bindingRows.filter((b) => b.wa_id === where.wa_id),
       findUnique: async () => h.managerBindingRow,
     },
-    notificationOutbox: { findMany: async () => [], update: async () => ({}), count: async () => 0 },
+    notificationOutbox: { findUnique: async () => null, create: async () => ({ id: 'ob-test' }), findMany: async () => [], update: async () => ({}), count: async () => 0 },
   },
 }))
 
@@ -167,6 +170,8 @@ vi.mock('./odoo-work', async (importOriginal) => {
 
 import { applyStaffAction, resolveInboundManagerTap } from './service'
 import type { StaffBindingRow } from './inbound-routing'
+
+
 
 const HAKEEM: StaffBindingRow = {
   id: 'sb-hakeem',

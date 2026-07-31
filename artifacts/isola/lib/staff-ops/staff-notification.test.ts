@@ -105,7 +105,9 @@ describe('buildStaffTaskTemplateParams — Meta rejects empty parameters', () =>
       projectName: null,
       dueDate: null,
     })
-    expect(params[2]).toBe('Line one line two after tab five spaces')
+    // Slot 2 of THREE: [#id, title, board]. The title moved from index 2 to 1
+    // when the template changed from five slots to three.
+    expect(params[1]).toBe('Line one line two after tab five spaces')
     for (const p of params) {
       expect(p).not.toMatch(/[\r\n\t]/)
       expect(p).not.toMatch(/ {4,}/)
@@ -125,10 +127,8 @@ describe('buildStaffTaskTemplateParams — Meta rejects empty parameters', () =>
       }),
     ).toEqual([
       '#2068',
-      'HIGH',
       'INC/26-27/2068c - WhatsApp integration',
-      '10:45',
-      '2026-08-01',
+      'Dragon Windows - Customer Status Portal',
     ])
   })
 })

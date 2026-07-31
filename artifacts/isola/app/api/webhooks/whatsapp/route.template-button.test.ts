@@ -38,6 +38,7 @@ const h = vi.hoisted(() => ({
   tapArgs: [] as any[],
   textArgs: [] as any[],
   sentButtons: [] as any[],
+  sentFlows: [] as any[],
   sentTexts: [] as any[],
   /** Per-test override of what the tap resolver returns. */
   tapResolution: null as any,
@@ -136,6 +137,13 @@ vi.mock('@/engines/whatsapp', () => ({
     h.sentButtons.push(input);
     return h.interactiveResult;
   },
+  // The module's real surface. An exhaustive vi.mock replaces the whole
+  // namespace, so a name it omits throws where the route destructures it.
+  sendInteractiveFlow: async (_cfg: any, input: any) => {
+    h.calls.push('send.flow');
+    h.sentFlows.push(input);
+    return h.interactiveResult;
+  },
 }));
 
 import { POST } from './route';
@@ -230,6 +238,7 @@ beforeEach(() => {
   h.tapArgs = [];
   h.textArgs = [];
   h.sentButtons = [];
+  h.sentFlows = [];
   h.sentTexts = [];
   h.tapResolution = null;
   handleInboundWhatsAppMock.mockResolvedValue(undefined);
@@ -430,11 +439,37 @@ describe('staff webhook — template quick-reply taps', () => {
   });
 
   // 13. no regression — interactive.list_reply
+  //
+  // The ENVELOPE is what this test guards: a `list_reply` must still reach the
+  // resolver with its decoded action and correlation id. The OUTCOME changed on
+  // 2026-07-31 and this assertion changed with it.
+  //
+  // `done` is TEXT-BEARING (lib/staff-ops/staff-flow.ts). A tap carries no
+  // words, and a DONE with no result sends the manager a verification whose
+  // "Reported result" line is empty — so a text-bearing tap now opens the note
+  // Flow and applies only when the form comes back. Asserting `apply` here
+  // would be asserting the retired contract, not guarding the envelope.
   it('NO REGRESSION: an interactive list_reply is still acted on', async () => {
     await POST(webhookRequest([interactiveChange(encodeMenuId('done', CORR), 'wamid.reg-list', 'list')]));
     expect(h.tapArgs).toHaveLength(1);
     expect(h.tapArgs[0]).toMatchObject({ action: 'done', correlationId: CORR });
+    // Acted on — but nothing is written to Odoo until the words arrive.
+    expect(h.calls).not.toContain('apply');
+    expect(h.sentFlows).toHaveLength(1);
+    // The action and the record ride in the flow token, so the completion
+    // resolves through the same codec a button tap uses.
+    expect(h.sentFlows[0].flowToken).toBe(encodeMenuId('done', CORR));
+  });
+
+  // 13b. the same envelope, a TEXTLESS action — still applies on the tap.
+  // Together with 13 this pins both halves of the rule: the Flow gate is keyed
+  // on the ACTION, not on the envelope it arrived in.
+  it('NO REGRESSION: a textless action on a list_reply still applies immediately', async () => {
+    await POST(webhookRequest([interactiveChange(encodeMenuId('start', CORR), 'wamid.reg-list-2', 'list')]));
+    expect(h.tapArgs).toHaveLength(1);
+    expect(h.tapArgs[0]).toMatchObject({ action: 'start', correlationId: CORR });
     expect(h.calls).toContain('apply');
+    expect(h.sentFlows).toHaveLength(0);
   });
 
   it('NO REGRESSION: a non-actionable message type is still ignored entirely', async () => {

@@ -257,19 +257,21 @@ export async function generateReply(params: {
     }
   }
 
+  // ── HERMES IS RETIRED. ────────────────────────────────────────────────────
+  //
+  // `dec-one-clawith-runtime-two-isolated-domains-2026-07-30` makes Clawith the
+  // only agent runtime. A tenant row may still carry `brain_provider='hermes'`
+  // — that is stored data, not a live capability — so the value is honoured by
+  // being REFUSED here rather than by silently reaching a frozen platform.
+  //
+  // Deliberately not deleted-and-forgotten: leaving the branch in place with a
+  // loud log is how an operator learns that a row still names a runtime that no
+  // longer exists. Deleting it would make those tenants silently native with no
+  // signal that anything needed repointing.
   if (!result && agent.brain_provider === 'hermes') {
-    if (!HERMES_ALLOWED_PHONE_NUMBER_IDS.has(phoneNumberId)) {
-      console.warn(
-        `[brain-provider] brain_provider=hermes but phone_number_id ${phoneNumberId} is not on the hermes allowlist — falling back to native`,
-      );
-    } else {
-      const hermesResult = await tryHermes({ messages, sessionId, phoneNumberId, senderPhone });
-      if (hermesResult) {
-        result = { ...hermesResult, model: 'hermes' };
-      } else {
-        console.warn('[brain-provider] Hermes failed — falling back to native for this reply');
-      }
-    }
+    console.warn(
+      `[brain-provider] brain_provider=hermes is RETIRED (one-runtime decision) — phone_number_id ${phoneNumberId} answered natively; repoint this tenant to clawith`,
+    );
   }
 
   // ── GATED AI-LOOP PATH (default OFF) ──────────────────────────────────────
@@ -587,69 +589,36 @@ async function tryFlowise(params: {
  * `actions` is accepted but currently ignored — Hermes is a pure text brain
  * for this socket; Foundation remains the sole WhatsApp I/O surface.
  */
-async function tryHermes(params: {
+async function tryHermes(_params: {
   messages: { role: 'user' | 'assistant'; content: string }[];
   sessionId: string;
   phoneNumberId: string;
   senderPhone: string;
 }): Promise<{ text: string; tokensUsed: number; provider: 'hermes'; needsHandoff?: boolean; actions?: unknown } | null> {
-  const baseUrl = process.env.HERMES_AGENT_URL || DEFAULT_HERMES_AGENT_URL;
-  const internalSecret = process.env.BFF_INTERNAL_SECRET;
-  if (!internalSecret) {
-    console.warn('[brain-provider] BFF_INTERNAL_SECRET not configured — cannot use hermes provider');
-    return null;
-  }
-
-  const lastUserMessage = [...params.messages].reverse().find((m) => m.role === 'user');
-  const message = lastUserMessage?.content ?? '';
-  if (!message) return null;
-
-  try {
-    const res = await fetch(baseUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-internal-secret': internalSecret,
-      },
-      body: JSON.stringify({
-        sender_phone: params.senderPhone,
-        message,
-        session_id: params.sessionId,
-        phone_number_id: params.phoneNumberId,
-      }),
-      signal: AbortSignal.timeout(HERMES_TIMEOUT_MS),
-    });
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      console.error(`[brain-provider] Hermes call failed (${res.status}): ${errText}`);
-      return null;
-    }
-
-    const data: any = await res.json().catch(() => null);
-    const text: string = typeof data?.reply_text === 'string' ? data.reply_text.trim() : '';
-    if (!text) {
-      console.error('[brain-provider] Hermes response had no usable reply_text field');
-      return null;
-    }
-
-    // Hermes doesn't report token usage — cost is $0 to our meter for this reply.
-    // needs_handoff/actions are read opportunistically — Hermes's documented
-    // contract above doesn't list needs_handoff today, but this plumbing was
-    // previously dead even for the already-live `actions` field; capturing
-    // both here means nothing needs to change in this function again if/when
-    // Hermes starts sending either.
-    return {
-      text,
-      tokensUsed: 0,
-      provider: 'hermes',
-      needsHandoff: data?.needs_handoff === true,
-      actions: data?.actions,
-    };
-  } catch (err: any) {
-    console.error('[brain-provider] Hermes request error:', err?.message ?? err);
-    return null;
-  }
+  // ── RETIRED. NO REQUEST LEAVES THIS FUNCTION. ─────────────────────────────
+  //
+  // `dec-one-clawith-runtime-two-isolated-domains-2026-07-30` makes Clawith the
+  // only agent runtime and freezes Hermes. The single call site in
+  // `generateReply` was removed; this body was emptied so the removal is
+  // provable rather than believed — there is no longer any code here that
+  // could reach a Hermes endpoint even if a future edit re-introduced a caller.
+  //
+  // THE RETIRED CONTRACT, for the record:
+  //   POST {HERMES_AGENT_URL || DEFAULT_HERMES_AGENT_URL}
+  //   headers: { 'Content-Type': 'application/json',
+  //              'x-internal-secret': BFF_INTERNAL_SECRET }
+  //   body:    { phone_number_id, sender_phone, session_id, message }
+  //   expects: { reply_text: string, actions?: unknown }
+  //   timeout: HERMES_TIMEOUT_MS
+  //
+  // Kept as prose, not as unreachable code: TypeScript does not narrow types in
+  // unreachable code, so the retained implementation stopped type-checking
+  // (TS2769) the moment it became dead. A block the compiler can no longer
+  // reason about is not documentation, it is rot.
+  console.error(
+    `[brain-provider] tryHermes is retired — no request sent to ${DEFAULT_HERMES_AGENT_URL} (was ${HERMES_TIMEOUT_MS}ms)`,
+  );
+  return null;
 }
 
 // ── Clawith implementation ────────────────────────────────────────────────────

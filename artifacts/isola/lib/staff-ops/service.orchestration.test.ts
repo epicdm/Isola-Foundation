@@ -16,6 +16,8 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
+process.env.STAFF_MANAGER_VERIFICATION_TEMPLATE_APPROVED = 'true'
+
 // ── Fakes ─────────────────────────────────────────────────────────────────
 
 const h = vi.hoisted(() => {
@@ -35,6 +37,7 @@ const { calls, rows: staffWorkActionRows, odoo: odooState } = h
 
 vi.mock('../prisma', () => ({
   prisma: {
+    consent: { findUnique: async () => ({ status: 'opted_in' }) },
     staffWorkAction: {
       findUnique: async ({ where }: any) => {
         h.calls.push('sa.findUnique')
@@ -55,7 +58,7 @@ vi.mock('../prisma', () => ({
       },
       count: async () => 0,
     },
-    notificationOutbox: { findMany: async () => [], update: async () => ({}), count: async () => 0 },
+    notificationOutbox: { findUnique: async () => null, create: async () => ({ id: 'ob-test' }), findMany: async () => [], update: async () => ({}), count: async () => 0 },
     staffBinding: {
       findMany: async () => [],
       // The verifier lookup manager verification performs. Returns the manager
@@ -135,6 +138,8 @@ vi.mock('./odoo-work', async (importOriginal) => {
 
 import { applyStaffAction } from './service'
 import type { StaffBindingRow } from './inbound-routing'
+
+
 
 const ERIC: StaffBindingRow = {
   id: 'sb-epic-dev-2',

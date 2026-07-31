@@ -34,6 +34,7 @@ const h = vi.hoisted(() => ({
   tapArgs: [] as any[],
   textArgs: [] as any[],
   sentButtons: [] as any[],
+  sentFlows: [] as any[],
   sentTexts: [] as any[],
 }));
 
@@ -125,6 +126,13 @@ vi.mock('@/engines/whatsapp', () => ({
     h.sentButtons.push(input);
     return h.interactiveResult;
   },
+  // The module's real surface. An exhaustive vi.mock replaces the whole
+  // namespace, so a name it omits throws where the route destructures it.
+  sendInteractiveFlow: async (_cfg: any, input: any) => {
+    h.calls.push('send.flow');
+    h.sentFlows.push(input);
+    return h.interactiveResult;
+  },
 }));
 
 import { POST } from './route';
@@ -195,6 +203,7 @@ beforeEach(() => {
   h.tapArgs = [];
   h.textArgs = [];
   h.sentButtons = [];
+  h.sentFlows = [];
   h.sentTexts = [];
   handleInboundWhatsAppMock.mockResolvedValue(undefined);
   vi.stubEnv('META_WA_APP_SECRET', '');

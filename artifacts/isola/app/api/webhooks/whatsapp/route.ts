@@ -1017,34 +1017,60 @@ async function handleStaffInboundMessage(params: {
       replyText = buildStaffHelpReply(resolved.openWork);
 
     } else {
-      // ── FREE-FORM. This is the Hermes door. ────────────────────────────
+      // ── FREE-FORM. This is the INTERNAL CLAWITH DOMAIN door. ───────────
       //
       // `non_command` and `no_open_work` mean the grammar found nothing to
       // apply. That is not a failure — it is the ordinary case of a person
       // talking. Identity is already resolved and authenticated above; the
       // binding, not the text, decides who this is and what they may see.
-      const { runStaffHermesTurn, identityFromBinding } = await import(
-        '@/lib/staff-ops/hermes-bridge'
-      );
-      const turn = await runStaffHermesTurn({
-        identity: identityFromBinding(r.binding),
-        text: body,
-        openWork: resolved.openWork,
+      //
+      // Structured messages NEVER reach here. ACK / START / DONE, menu taps,
+      // Flow completions and manager Approve / Return are all resolved and
+      // returned before this branch, and they stay Foundation-authoritative.
+      // Only authenticated free-form reaches the runtime.
+      //
+      // The binding is resolved with NO DEFAULTS: tenant, domain, workspace,
+      // agent, number, role and permitted tools must every one be present or
+      // this refuses. A refusal is not a degraded answer — the staff member
+      // gets the structured path, which still works, rather than a turn from
+      // an agent nobody bound.
+      const { resolveInternalDomainBinding } = await import('@/lib/staff-ops/internal-domain');
+      const { runStaffRuntimeTurn } = await import('@/lib/staff-ops/staff-runtime-bridge');
+
+      const domain = resolveInternalDomainBinding({
+        tenantId,
+        binding: r.binding,
+        phoneNumberId,
       });
 
-      if (turn.ok) {
-        console.log(
-          `[webhook/wa][staff] hermes turn ok sender=${from} session=${turn.sessionKey} chars=${turn.text.length}`,
-        );
-        replyText = turn.text;
-      } else {
-        // Hermes unreachable. Fall back to the command list rather than
-        // silence — the staff member still has a working structured path,
-        // and saying so is more useful than not replying.
+      if (!domain.ok) {
         console.error(
-          `[webhook/wa][staff] hermes turn failed sender=${from} reason=${turn.reason} detail=${turn.detail ?? ''}`,
+          `[webhook/wa][staff] internal domain unresolved sender=${from} refusal=${domain.refusal} detail=${domain.detail} — structured path only`,
         );
         replyText = buildStaffHelpReply(resolved.openWork);
+      } else {
+        const turn = await runStaffRuntimeTurn({
+          binding: domain.binding,
+          text: body,
+          openWork: resolved.openWork,
+          correlationId: waMessageId,
+        });
+
+        if (turn.ok) {
+          console.log(
+            `[webhook/wa][staff] clawith turn ok sender=${from} domain=internal workspace=${domain.binding.clawithWorkspaceId} agent=${domain.binding.clawithAgentId} session=${turn.sessionKey} chars=${turn.text.length}`,
+          );
+          replyText = turn.text;
+        } else {
+          // Runtime unreachable. Fall back to the command list rather than
+          // silence — the staff member still has a working structured path,
+          // and saying so is more useful than not replying. There is NO
+          // second runtime to try: Hermes is frozen and is not a fallback.
+          console.error(
+            `[webhook/wa][staff] clawith turn failed sender=${from} reason=${turn.reason} detail=${turn.detail ?? ''}`,
+          );
+          replyText = buildStaffHelpReply(resolved.openWork);
+        }
       }
     }
 
