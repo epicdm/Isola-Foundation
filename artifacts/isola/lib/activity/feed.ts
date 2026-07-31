@@ -12,6 +12,11 @@
  * 3. Order by when we heard about something. A Lane-2 event that arrives an hour
  *    late belongs where it HAPPENED, not at the top of the page.
  *
+ * Every semantic filter is applied to the CANDIDATE SET, before ordering, page
+ * slicing and cursor generation. Filtering a page after it has been cut gives
+ * underfilled pages, counts that disagree with what is shown, and rows that
+ * turn up again later.
+ *
  * This module is query and projection only. It reads. It never sends a message,
  * never changes ownership of a conversation and never writes to a source.
  */
@@ -126,6 +131,8 @@ export interface ActivityQuery {
   eventTypes?: readonly string[] | null
   sourceSystems?: readonly string[] | null
   statuses?: readonly string[] | null
+  /** Applied to the candidate set like every other filter — never after paging. */
+  ownershipStates?: readonly string[] | null
   from?: string | null
   to?: string | null
   cursor?: string | null
@@ -290,6 +297,14 @@ function matchesQuery(item: ActivityItem, q: ResolvedQuery): boolean {
   if (q.eventTypes?.length && !q.eventTypes.includes(item.eventType)) return false
   if (q.sourceSystems?.length && !q.sourceSystems.includes(item.sourceSystem)) return false
   if (q.statuses?.length && !q.statuses.includes(item.status)) return false
+
+  // A row with no ownership concept is "unknown", not a match for everything.
+  if (
+    q.ownershipStates?.length &&
+    !q.ownershipStates.includes(item.ownershipState ?? 'unknown')
+  ) {
+    return false
+  }
 
   const objectFilters: [string | null | undefined, string][] = [
     [q.contactId, 'contact'],
