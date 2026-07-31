@@ -108,6 +108,12 @@ export interface ActionPorts {
    * absent implementation means "no verdict yet" and the action holds.
    */
   approvalVerdict?(p: ActionProposal): Promise<ApprovalVerdict>
+  /**
+   * The company that owns the record this action targets, or null when there is
+   * no such record. An absent implementation means the caller has already scoped
+   * the object and no further check is made here.
+   */
+  objectCompanyId?(p: ActionProposal): Promise<string | null>
   /** Returns a prior result for this idempotency key, if one exists. */
   findPriorResult(idempotencyKey: string): Promise<ActionResult | null>
   recordApprovalRequest(p: ActionProposal, risk: RiskLevel): Promise<string>
@@ -190,6 +196,25 @@ export async function runGovernedAction(
       readback: null,
     })
     return result(proposal, 'PERMISSION_DENIED', risk, detail, auditId)
+  }
+
+  // ── Company scoping. Runs BEFORE validate and before any write. ─────────────
+  if (ports.objectCompanyId) {
+    const owner = await ports.objectCompanyId(proposal)
+    if (owner !== proposal.companyId) {
+      // "Does not exist" and "belongs to someone else" collapse into ONE refusal
+      // with ONE wording. Distinguishing them would hand the caller an oracle for
+      // enumerating another company's record ids.
+      const detail = `${proposal.objectType} ${proposal.objectId} is not available to this company`
+      const auditId = await ports.writeAudit({
+        proposal,
+        outcome: 'PERMISSION_DENIED',
+        riskLevel: risk,
+        detail,
+        readback: null,
+      })
+      return result(proposal, 'PERMISSION_DENIED', risk, detail, auditId)
+    }
   }
 
   const valid = executor.validate(proposal.payload)
