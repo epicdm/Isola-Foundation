@@ -209,6 +209,18 @@ export async function runStaffRuntimeTurn(params: {
       },
       body: JSON.stringify({
         schema_version: '1.0.0',
+        // LIVE BRIDGE CONTRACT - verified against the running FastAPI model
+        // BridgeMessageIn in clawith-v1110 app/api/isola_bridge.py. It REQUIRES
+        // agent_id + phone + text, and DERIVES tenant FROM the agent
+        // (tenant_id = agent.tenant_id). Omitting any of the three is a 422,
+        // which is what this file did before these four lines existed.
+        // The richer fields below are the FORWARD contract: the current runtime
+        // ignores unknown keys, so they cost nothing and document the envelope
+        // Foundation intends to be authoritative on.
+        agent_id: binding.clawithAgentId,
+        phone: binding.waId,
+        text,
+        external_conversation_id: sessionKey,
         correlation_id: params.correlationId,
         // ── Identity. Every field authoritative, none from the message. ────
         tenant_id: binding.tenantId,
