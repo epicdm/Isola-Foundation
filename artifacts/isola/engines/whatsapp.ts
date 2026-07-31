@@ -55,6 +55,17 @@ export interface WhatsAppSendTemplateInput {
   name:     string
   language: string     // e.g. 'en_US'
   params?:  string[]   // positional body-text params, in order
+  /**
+   * Developer-defined payloads for the template's QUICK_REPLY buttons, in
+   * button order. Meta freezes a template's button LABELS at approval time,
+   * but the payload is supplied per send — that is what lets a frozen button
+   * carry a per-episode correlation id.
+   *
+   * A tap on one of these arrives inbound as `msg.type === 'button'` with
+   * `msg.button.payload`, NOT as `interactive.button_reply`. Both shapes are
+   * normalised to the same tap id at the webhook boundary.
+   */
+  quickReplyPayloads?: string[]
 }
 
 export interface WhatsAppSendAuthTemplateInput {
@@ -129,9 +140,23 @@ export async function sendTemplate(
   input: WhatsAppSendTemplateInput,
 ): Promise<WhatsAppSendResult> {
   const params = input.params ?? []
-  const components = params.length
+  const components: Record<string, unknown>[] = params.length
     ? [{ type: 'body', parameters: params.map((t) => ({ type: 'text', text: t })) }]
     : []
+
+  // One component per quick-reply button. Meta indexes buttons positionally
+  // and rejects the ENTIRE send if an index has no matching button on the
+  // approved template, so payloads must be passed in button order.
+  const quickReplies = input.quickReplyPayloads ?? []
+  quickReplies.forEach((payload, index) => {
+    components.push({
+      type: 'button',
+      sub_type: 'quick_reply',
+      index: String(index),
+      parameters: [{ type: 'payload', payload }],
+    })
+  })
+
   return postToGraph(config, input.phoneId, input.token, {
     messaging_product: 'whatsapp',
     to: input.to,
@@ -176,3 +201,242 @@ export async function sendAuthTemplate(
   })
 }
 
+
+/**
+ * ── Interactive messages ────────────────────────────────────────────────────
+ *
+ * IN-WINDOW ONLY. Like `sendText`, these deliver only inside the 24-hour
+ * customer-service window; outside it Meta answers 200 and then fails the
+ * message asynchronously with 131047. The first proactive contact must still be
+ * a template — see lib/staff-ops/staff-notification.ts for that policy.
+ *
+ * A tap returns the developer-defined `id` verbatim on the inbound webhook, so
+ * the id is the contract: it carries the action AND the work reference, which
+ * is what removes typed references from the staff loop.
+ */
+
+export interface WhatsAppInteractiveButton {
+  /** Echoed back on tap. Max 256 chars. */
+  id: string
+  /** Visible label. Max 20 chars — Meta rejects longer, it does not truncate. */
+  title: string
+}
+
+export interface WhatsAppSendButtonsInput {
+  phoneId: string
+  token: string
+  to: string
+  body: string
+  buttons: WhatsAppInteractiveButton[]
+  header?: string
+  footer?: string
+}
+
+/**
+ * sendInteractiveButtons — up to THREE inline reply buttons.
+ *
+ * Validates before sending rather than after: a fourth button, an over-long
+ * title or an empty body is a 400 from Meta that would otherwise be recorded as
+ * a delivery failure against the staff member, which reads as "unreachable"
+ * instead of "we built a bad payload".
+ */
+export async function sendInteractiveButtons(
+  config: WhatsAppConfig,
+  input: WhatsAppSendButtonsInput,
+): Promise<WhatsAppSendResult> {
+  if (!input.body?.trim()) {
+    return { ok: false, status: 0, error: 'empty interactive body — nothing sent' }
+  }
+  if (input.buttons.length < 1 || input.buttons.length > 3) {
+    return { ok: false, status: 0, error: `interactive buttons must be 1..3, got ${input.buttons.length}` }
+  }
+  for (const b of input.buttons) {
+    if (!b.id || b.id.length > 256) {
+      return { ok: false, status: 0, error: `button id must be 1..256 chars: ${b.id?.length ?? 0}` }
+    }
+    if (!b.title?.trim() || b.title.length > 20) {
+      return { ok: false, status: 0, error: `button title must be 1..20 chars: "${b.title}"` }
+    }
+  }
+
+  return postToGraph(config, input.phoneId, input.token, {
+    messaging_product: 'whatsapp',
+    to: input.to,
+    type: 'interactive',
+    interactive: {
+      type: 'button',
+      ...(input.header ? { header: { type: 'text', text: input.header } } : {}),
+      body: { text: input.body },
+      ...(input.footer ? { footer: { text: input.footer } } : {}),
+      action: {
+        buttons: input.buttons.map((b) => ({
+          type: 'reply',
+          reply: { id: b.id, title: b.title },
+        })),
+      },
+    },
+  })
+}
+
+export interface WhatsAppListRow {
+  id: string
+  /** Max 24 chars. */
+  title: string
+  /** Max 72 chars. */
+  description?: string
+}
+
+export interface WhatsAppSendListInput {
+  phoneId: string
+  token: string
+  to: string
+  body: string
+  /** Label on the button that opens the list. Max 20 chars. */
+  buttonText: string
+  rows: WhatsAppListRow[]
+  sectionTitle?: string
+  header?: string
+  footer?: string
+}
+
+/**
+ * sendInteractiveList — up to TEN rows behind a single "open menu" button.
+ *
+ * Used when more actions are valid than will fit in three buttons. The trade is
+ * deliberate: a list hides the options behind one tap, so buttons stay the
+ * default for the common two-or-three-action case.
+ */
+/**
+ * A published WhatsApp Flow, addressed for one send.
+ *
+ * `flowToken` is opaque to Meta and echoed back verbatim inside the completion
+ * payload. It is the ONLY business-controlled state carrier for an endpointless
+ * Flow, which is precisely why the caller puts the action and the record id in
+ * it — the message then carries its own context and the server holds none.
+ */
+export interface WhatsAppSendFlowInput {
+  phoneId: string
+  token: string
+  to: string
+  body: string
+  flowId: string
+  flowToken: string
+  /** Button label that opens the form. Meta advises <= 30 chars, no emoji. */
+  cta: string
+  /** Entry screen id in the published Flow JSON. */
+  screen: string
+  /** Values bound to `${data.*}` on the entry screen. */
+  data?: Record<string, string>
+  header?: string
+  footer?: string
+}
+
+/**
+ * sendInteractiveFlow — open a published Flow inside the 24-hour window.
+ *
+ * `flow_action: "navigate"` is the endpointless pair to the Flow JSON's
+ * `complete` action: WhatsApp renders the screen on-device from the published
+ * JSON and posts the result back as one `nfm_reply`. There is deliberately no
+ * `data_exchange` here — that mode would require a live endpoint on the reply
+ * path, and the reply path is the one place a staff member is waiting.
+ *
+ * Validates before sending for the same reason as the button sender: an
+ * over-long CTA or an empty body is a 400 from Meta that would otherwise be
+ * recorded as a delivery failure on a staff member's handset.
+ */
+export async function sendInteractiveFlow(
+  config: WhatsAppConfig,
+  input: WhatsAppSendFlowInput,
+): Promise<WhatsAppSendResult> {
+  if (!input.body?.trim()) {
+    return { ok: false, status: 0, error: 'empty flow body — nothing sent' }
+  }
+  if (!input.flowId?.trim()) {
+    return { ok: false, status: 0, error: 'no flow id — nothing sent' }
+  }
+  if (!input.flowToken?.trim()) {
+    return { ok: false, status: 0, error: 'no flow token — refusing to send a flow that cannot be correlated' }
+  }
+  if (!input.cta?.trim() || input.cta.length > 30) {
+    return { ok: false, status: 0, error: `flow cta must be 1..30 chars: "${input.cta}"` }
+  }
+
+  return postToGraph(config, input.phoneId, input.token, {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: input.to,
+    type: 'interactive',
+    interactive: {
+      type: 'flow',
+      ...(input.header ? { header: { type: 'text', text: input.header } } : {}),
+      body: { text: input.body },
+      ...(input.footer ? { footer: { text: input.footer } } : {}),
+      action: {
+        name: 'flow',
+        parameters: {
+          flow_message_version: '3',
+          flow_token: input.flowToken,
+          flow_id: input.flowId,
+          flow_cta: input.cta,
+          flow_action: 'navigate',
+          mode: 'published',
+          flow_action_payload: {
+            screen: input.screen,
+            ...(input.data ? { data: input.data } : {}),
+          },
+        },
+      },
+    },
+  })
+}
+
+export async function sendInteractiveList(
+  config: WhatsAppConfig,
+  input: WhatsAppSendListInput,
+): Promise<WhatsAppSendResult> {
+  if (!input.body?.trim()) {
+    return { ok: false, status: 0, error: 'empty interactive body — nothing sent' }
+  }
+  if (!input.buttonText?.trim() || input.buttonText.length > 20) {
+    return { ok: false, status: 0, error: `list button text must be 1..20 chars: "${input.buttonText}"` }
+  }
+  if (input.rows.length < 1 || input.rows.length > 10) {
+    return { ok: false, status: 0, error: `list rows must be 1..10, got ${input.rows.length}` }
+  }
+  for (const r of input.rows) {
+    if (!r.id || r.id.length > 200) {
+      return { ok: false, status: 0, error: `row id must be 1..200 chars: ${r.id?.length ?? 0}` }
+    }
+    if (!r.title?.trim() || r.title.length > 24) {
+      return { ok: false, status: 0, error: `row title must be 1..24 chars: "${r.title}"` }
+    }
+    if (r.description && r.description.length > 72) {
+      return { ok: false, status: 0, error: `row description must be <=72 chars: ${r.description.length}` }
+    }
+  }
+
+  return postToGraph(config, input.phoneId, input.token, {
+    messaging_product: 'whatsapp',
+    to: input.to,
+    type: 'interactive',
+    interactive: {
+      type: 'list',
+      ...(input.header ? { header: { type: 'text', text: input.header } } : {}),
+      body: { text: input.body },
+      ...(input.footer ? { footer: { text: input.footer } } : {}),
+      action: {
+        button: input.buttonText,
+        sections: [
+          {
+            title: input.sectionTitle ?? 'Actions',
+            rows: input.rows.map((r) => ({
+              id: r.id,
+              title: r.title,
+              ...(r.description ? { description: r.description } : {}),
+            })),
+          },
+        ],
+      },
+    },
+  })
+}

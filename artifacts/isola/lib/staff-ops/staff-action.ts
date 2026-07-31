@@ -1,0 +1,384 @@
+/**
+ * staff-action.ts — the StaffAction contract and its pure decision core.
+ *
+ * A StaffAction is a thing a staff member asked Foundation to do to an
+ * authoritative Odoo record. It is NOT work state. Foundation stores that an
+ * action was requested and applied (for idempotency and audit); Odoo stores
+ * what the work now is. If those two ever disagree, Odoo is right.
+ *
+ * ── Why this parser is strict, and what it is refusing to repeat ────────────
+ *
+ * The legacy BFF parser required `ACK OPS-nnn` and returned UNKNOWN for a bare
+ * `ACK`. That mattered because a bare `ACK` is literally what a human sends —
+ * it is what Eric sent on 2026-07-28, and what any acceptance test sends. A fix
+ * that gated on the strict parser alone would have compiled, passed review, and
+ * left the defect in place (`ev-staff-inbound-ack-routing-2026-07-27` §2).
+ * So bare verbs ARE accepted here.
+ *
+ * The opposite error is just as real and is recorded as a near-miss on the same
+ * packet: a fuzzy matcher that treats any message containing the word "done" or
+ * "can't" as a staff action will hijack ordinary prose — including an owner's
+ * business question — and will report a PASS while acknowledging nothing. So a
+ * sentence is NEVER a command here. Only these shapes are:
+ *
+ *     ACK                      bare verb, resolved against the sender's open work
+ *     ACK #2292                verb + explicit Odoo record
+ *     ACK project.task#2292    verb + model-qualified record
+ *     UPDATE waiting on parts  verb + note, resolved against the sender's open work
+ *     BLOCKED no access to site
+ *     DONE
+ *     HELP
+ *     CORRECT ...
+ *
+ * A bare verb with zero or several open work refs does not guess. It returns
+ * `needs_disambiguation`, which is an operator-visible outcome, not a silent
+ * best-effort. Guessing is how a staff ACK lands on the wrong task.
+ */
+
+import { isWorkRefModel, type WorkRefModel } from './work-ref'
+
+export const STAFF_ACTIONS = ['ack', 'update', 'blocked', 'done', 'help', 'correct', 'start', 'tasks'] as const
+export type StaffActionKind = (typeof STAFF_ACTIONS)[number]
+
+/** Verb spellings a human actually types, mapped to the canonical action. */
+const VERB_ALIASES: Record<string, StaffActionKind> = {
+  ack: 'ack',
+   acknowledge: 'ack',
+  acknowledged: 'ack',
+  update: 'update',
+  progress: 'update',
+  blocked: 'blocked',
+  block: 'blocked',
+  stuck: 'blocked',
+  done: 'done',
+  complete: 'done',
+  completed: 'done',
+  finish: 'done',
+  finished: 'done',
+  help: 'help',
+  correct: 'correct',
+  correction: 'correct',
+  start: 'start',
+  starting: 'start',
+  began: 'start',
+  begin: 'start',
+  resume: 'start',
+  resuming: 'start',
+  // MY TASKS is advertised by epic_internal_task_v1. `my tasks` is collapsed to
+  // this single token in parseStaffCommand before the lookup.
+  mytasks: 'tasks',
+  tasks: 'tasks',
+  task: 'tasks',
+}
+
+/**
+ * Verbs that carry a free-text remainder as their note. `ack` does not:
+ * `DONE the printer was replaced` is still a DONE, and the remainder is kept as
+ * a note, but the ACTION never depends on the remainder.
+ */
+const NOTE_BEARING: ReadonlySet<StaffActionKind> = new Set(['update', 'blocked', 'correct', 'done', 'start'])
+
+export interface OpenWorkRefCandidate {
+  odooModel: WorkRefModel
+  odooId: number
+  correlationId: string
+  /** Short human label, only used to render a disambiguation prompt. */
+  label?: string
+}
+
+export interface ParseStaffCommandInput {
+  text: string
+  /**
+   * The sender's currently open, Foundation-dispatched work. Supplied by the
+   * caller (never read in here) so this stays a pure function.
+   */
+  openWork: OpenWorkRefCandidate[]
+}
+
+export type ParseStaffCommandResult =
+  | {
+      matched: true
+      action: StaffActionKind
+      /** Resolved target. Always present when matched. */
+      target: OpenWorkRefCandidate
+      note: string | null
+      /** How the target was resolved — recorded so evidence can distinguish them. */
+      resolution: 'explicit_ref' | 'sole_open_work'
+      /** How the verb was recognised. Both are first-class; neither is a fallback. */
+      grammar: 'strict' | 'bare'
+    }
+  | {
+      matched: false
+      reason:
+        | 'not_a_command'
+        | 'needs_disambiguation'
+        | 'no_open_work'
+        | 'unknown_reference'
+        /** A listing request (MY TASKS). Not a failure — there is simply no
+         *  record to target, because the sender asked to SEE their work. */
+        | 'list_request'
+    }
+      & { action?: StaffActionKind; candidates?: OpenWorkRefCandidate[] }
+
+/**
+ * Extract an explicit Odoo record reference from the token after the verb.
+ * Accepts `#2292`, `2292`, `project.task#2292`. Returns null when the token is
+ * not a reference (which is normal — it is usually the start of a note).
+ */
+function parseExplicitRef(token: string | undefined): { model?: WorkRefModel; id: number } | null {
+  if (!token) return null
+
+  const qualified = /^([a-z_.]+)#(\d+)$/i.exec(token)
+  if (qualified) {
+    const model = qualified[1].toLowerCase()
+    if (!isWorkRefModel(model)) return null
+    return { model, id: Number(qualified[2]) }
+  }
+
+  const hashed = /^#(\d+)$/.exec(token)
+  if (hashed) return { id: Number(hashed[1]) }
+
+  // A bare integer is only a reference if it is plausibly an Odoo id. A single
+  // digit is far more likely to be a disambiguation choice or the start of a
+  // note, so it is deliberately not treated as a record id here.
+  const bare = /^(\d{2,})$/.exec(token)
+  if (bare) return { id: Number(bare[1]) }
+
+  return null
+}
+
+/**
+ * Normalise a string for label comparison: lowercase, collapse whitespace,
+ * trim, strip surrounding non-alphanumeric characters.
+ */
+function normalizeLabel(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')
+}
+
+/**
+ * True when ch is a word-boundary character — the set of characters that are
+ * allowed to immediately follow a label prefix in a longer label string.
+ * End-of-string (undefined) is also a boundary.
+ */
+function isWordBoundary(ch: string | undefined): boolean {
+  return ch === undefined || ch === ' ' || ch === '-' || ch === ':' || ch === '/'
+}
+
+/**
+ * Test whether a normalised label string matches a normalised query string
+ * under the label-reference rules:
+ *   • exact equality, or
+ *   • the label begins with the query and the next character is a word boundary.
+ *
+ * This is what stops "DW 206" from matching "DW 2060 — …" — the character at
+ * position query.length in the label is "0", not a boundary.
+ */
+function labelTextMatches(normLabel: string, normQuery: string): boolean {
+  if (!normQuery) return false
+  if (normLabel === normQuery) return true
+  if (normLabel.startsWith(normQuery)) {
+    return isWordBoundary(normLabel[normQuery.length])
+  }
+  return false
+}
+
+interface LabelMatchHit {
+  matched: true
+  candidates: OpenWorkRefCandidate[]
+  /** How many tokens from the remainder were consumed as the label. */
+  consumedLen: number
+}
+
+/**
+ * Try to match a prefix of `remainder` tokens against the labels of
+ * `openWork`. Tries prefix lengths from longest to shortest so that a more
+ * specific (longer) label takes precedence over a shorter one.
+ *
+ * `noteAllowed` controls whether a match that leaves trailing tokens is
+ * accepted. For non-note-bearing verbs (ACK) the entire remainder must be
+ * consumed by the label; for note-bearing verbs (UPDATE, DONE, …) any
+ * trailing tokens become the note.
+ *
+ * Returns on the first prefix length that produces a USABLE hit. When some
+ * prefix produced hits but they were all rejected due to trailing tokens
+ * (`!noteAllowed`), `anyHit` is set to true so the caller can return
+ * `unknown_reference` rather than silently falling through to the bare-verb
+ * path — preventing "ACK DW 206" from resolving as if the user typed bare
+ * "ACK" with no reference at all.
+ *
+ * Matching only within the supplied list — never outside it — is what keeps
+ * closed, stale, unassigned and other-tenant work unreachable.
+ */
+function matchByLabel(
+  remainder: string[],
+  openWork: OpenWorkRefCandidate[],
+  noteAllowed: boolean,
+): LabelMatchHit | { matched: false; anyHit: boolean } {
+  let anyHit = false
+  for (let len = remainder.length; len >= 1; len--) {
+    const query = normalizeLabel(remainder.slice(0, len).join(' '))
+    if (!query) continue
+    const hits = openWork.filter((w) => labelTextMatches(normalizeLabel(w.label ?? ''), query))
+    if (hits.length === 0) continue
+
+    const hasTrailing = len < remainder.length
+    if (hasTrailing && !noteAllowed) {
+      // Prefix matched, but we cannot absorb the trailing tokens as a note
+      // for this verb. Record the hit so the caller can signal unknown_reference
+      // rather than fall through to sole-open-work.
+      anyHit = true
+      continue
+    }
+
+    return { matched: true, candidates: hits, consumedLen: len }
+  }
+  return { matched: false, anyHit }
+}
+
+/**
+ * The pure decision core. No I/O, no clock, no randomness.
+ */
+export function parseStaffCommand(input: ParseStaffCommandInput): ParseStaffCommandResult {
+  const raw = (input.text ?? '').trim()
+  if (!raw) return { matched: false, reason: 'not_a_command' }
+
+  // Strip trailing punctuation from the first token only — "ACK." and "ACK!"
+  // are the same intent as "ACK".
+  const tokens = raw.split(/\s+/)
+
+  // "MY TASKS" is two words carrying one intent, and it is the exact phrase the
+  // approved template tells staff to send. Collapse it before the verb lookup so
+  // it resolves like any other verb rather than failing as `not_a_command` —
+  // advertising a command the parser cannot recognise is the defect this whole
+  // packet exists to stop.
+  if (tokens.length >= 2 && /^my$/i.test(tokens[0]) && /^tasks?[.!,;:]*$/i.test(tokens[1])) {
+    tokens.splice(0, 2, 'mytasks')
+  }
+
+  const verbToken = tokens[0].toLowerCase().replace(/[.!,;:]+$/, '')
+  const action = VERB_ALIASES[verbToken]
+  if (!action) return { matched: false, reason: 'not_a_command' }
+
+  const explicit = parseExplicitRef(tokens[1])
+  const noteTokens = explicit ? tokens.slice(2) : tokens.slice(1)
+  const rawNote = noteTokens.join(' ').trim()
+  const note = NOTE_BEARING.has(action) && rawNote ? rawNote : null
+
+  // TASKS is a pure listing request: show me what I hold. It never targets a
+  // record and never applies anything, so it short-circuits before reference
+  // resolution — including the sole-open-work path that HELP uses. A listing
+  // request must never become an action on the one task someone happens to have.
+  if (action === 'tasks') {
+    return { matched: false, reason: 'list_request', action }
+  }
+
+  // HELP never targets a record — it is a request for the command contract.
+  // It is reported as matched with a synthetic target only when there is one;
+  // otherwise it still matches, because refusing HELP to someone with no open
+  // work would be perverse.
+  if (action === 'help') {
+    const sole = input.openWork.length === 1 ? input.openWork[0] : null
+    if (sole) {
+      return {
+        matched: true,
+        action,
+        target: sole,
+        note: null,
+        resolution: 'sole_open_work',
+        grammar: explicit ? 'strict' : 'bare',
+      }
+    }
+    return { matched: false, reason: 'no_open_work', action }
+  }
+
+  if (explicit) {
+    const target = input.openWork.find(
+      (w) => w.odooId === explicit.id && (!explicit.model || w.odooModel === explicit.model),
+    )
+    // An explicit reference the sender does not hold is NOT silently retargeted
+    // at their only other task. It fails closed.
+    if (!target) return { matched: false, reason: 'unknown_reference', action }
+    return { matched: true, action, target, note, resolution: 'explicit_ref', grammar: 'strict' }
+  }
+
+  // Label matching — when the text after the verb is not a numeric/model
+  // reference, try to match it against the labels of the sender's open work.
+  // Tries prefix lengths longest-first so that a longer label consumes as many
+  // tokens as possible, leaving the rest as the note.
+  // Matching only within openWork — never outside it — keeps closed, stale,
+  // unassigned and other-tenant work unreachable without any extra checks.
+  const noteAllowed = NOTE_BEARING.has(action)
+  const labelMatch = matchByLabel(tokens.slice(1), input.openWork, noteAllowed)
+  if (labelMatch.matched) {
+    const labelNoteTokens = tokens.slice(1 + labelMatch.consumedLen)
+    const labelRawNote = labelNoteTokens.join(' ').trim()
+    const labelNote = noteAllowed && labelRawNote ? labelRawNote : null
+    if (labelMatch.candidates.length === 1) {
+      return {
+        matched: true,
+        action,
+        target: labelMatch.candidates[0],
+        note: labelNote,
+        resolution: 'explicit_ref',
+        grammar: 'strict',
+      }
+    }
+    return { matched: false, reason: 'needs_disambiguation', action, candidates: labelMatch.candidates }
+  }
+
+  // Some prefix matched a label but was rejected because trailing tokens
+  // cannot be a note for this verb. Signal unknown_reference so the sender
+  // learns their reference was not recognised rather than getting a bare-verb
+  // response that ignores what they typed.
+  if (labelMatch.anyHit) return { matched: false, reason: 'unknown_reference', action }
+
+  // For non-note-bearing verbs (ACK), ANY non-empty remainder that reached
+  // this point without matching a label was an attempt to name a task that
+  // failed. Fail closed — same rule as for an unheld numeric reference.
+  // Note-bearing verbs (UPDATE, BLOCKED, DONE, CORRECT) are exempt: their
+  // remainder is ordinary prose that becomes the note, not a reference.
+  if (!noteAllowed && tokens.slice(1).length > 0) {
+    return { matched: false, reason: 'unknown_reference', action }
+  }
+
+  if (input.openWork.length === 0) return { matched: false, reason: 'no_open_work', action }
+  if (input.openWork.length > 1) {
+    return { matched: false, reason: 'needs_disambiguation', action, candidates: input.openWork }
+  }
+
+  return {
+    matched: true,
+    action,
+    target: input.openWork[0],
+    note,
+    resolution: 'sole_open_work',
+    grammar: 'bare',
+  }
+}
+
+/**
+ * Idempotency key for a StaffAction.
+ *
+ * Deliberately includes the note: a staff member sending `UPDATE on site now`
+ * and later `UPDATE parts fitted` is two distinct actions on the same task and
+ * both must land. But the SAME text re-delivered by Meta (a webhook retry) must
+ * collapse to one. `providerMessageId` is therefore the primary discriminator
+ * when present — Meta guarantees it is stable across retries of the same
+ * inbound — and the note only matters when it is absent.
+ */
+export function staffActionIdempotencyKey(params: {
+  tenantId: string
+  correlationId: string
+  action: StaffActionKind
+  providerMessageId?: string | null
+  note?: string | null
+}): string {
+  const discriminator =
+    params.providerMessageId?.trim() ||
+    `note:${(params.note ?? '').trim().toLowerCase().replace(/\s+/g, ' ')}`
+  return `sa:${params.tenantId}:${params.correlationId}:${params.action}:${discriminator}`
+}

@@ -25,6 +25,25 @@ export interface EnqueueNotificationParams {
   template: string;
   payload?: Record<string, unknown>;
   dedupeKey: string;
+  /**
+   * Odoo WorkRef correlation, set in THIS insert rather than stamped afterwards.
+   *
+   * WHY IT BELONGS HERE. `work_ref_model` is what `isStaffNotification()` keys
+   * on, and it is therefore what arms the staff-channel rule in the drain: an
+   * unmarked row gets `forbidDefaultNumber: false` and falls back to the
+   * tenant's earliest-created number, which on the EPIC tenant is the CUSTOMER
+   * 6737 line. `dispatchWorkToStaff` used to enqueue and then stamp the column
+   * in a second update — but `next_attempt_at` is `new Date()`, so the drain can
+   * claim the row between the two writes, and a crash between them makes the
+   * row permanently unmarked. Both windows are a staff message sent from the
+   * customer-facing number.
+   *
+   * Optional and defaulted to null, so every existing caller (voicemail, and
+   * anything customer-facing) behaves exactly as before.
+   */
+  workRefModel?: string | null;
+  workRefId?: number | null;
+  correlationId?: string | null;
 }
 
 export type EnqueueNotificationResult =
@@ -34,7 +53,18 @@ export type EnqueueNotificationResult =
 export async function enqueueNotification(
   params: EnqueueNotificationParams,
 ): Promise<EnqueueNotificationResult> {
-  const { tenantId, contact, channel, consentBasis, template, payload, dedupeKey } = params;
+  const {
+    tenantId,
+    contact,
+    channel,
+    consentBasis,
+    template,
+    payload,
+    dedupeKey,
+    workRefModel,
+    workRefId,
+    correlationId,
+  } = params;
 
   if (consentBasis !== 'owner_self_notification') {
     const consent = await prisma.consent.findUnique({
@@ -60,6 +90,9 @@ export async function enqueueNotification(
         dedupe_key: dedupeKey,
         state: 'pending',
         next_attempt_at: new Date(),
+        work_ref_model: workRefModel ?? null,
+        work_ref_id: workRefId ?? null,
+        correlation_id: correlationId ?? null,
       },
     });
 

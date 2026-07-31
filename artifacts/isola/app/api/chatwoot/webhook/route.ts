@@ -19,11 +19,14 @@
  *     BEFORE sending — retries on the same cwMessageId are idempotent (200)
  *   → sends to customer via WhatsApp sendText
  *   → on WA send failure: releases the anchor + returns 503 so Chatwoot retries
- *   → sets Conversation.human_handling = true (AI suspended for this conversation)
+ *   → records a HUMAN_OWNED ownership transition (AI suspended for this
+ *     conversation); Conversation.human_handling is written as its projection
  *
  * conversation_status_changed (status = resolved)
  *   → resolves tenant via account_id (hard-required; no tenantless fallback)
- *   → clears Conversation.human_handling = false so AI can resume
+ *   → records the resolution. On an authoritative door ownership does NOT
+ *     move and the AI does not resume; on a legacy door the historical
+ *     human_handling clear is preserved exactly
  *
  * Security notes
  * ──────────────
@@ -37,6 +40,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { getWhatsAppConfig } from '@/lib/engines';
 import { sendText } from '@/engines/whatsapp';
+import { ownershipIsAuthoritative } from '@/lib/ownership/authority';
+import { readOwnership } from '@/lib/ownership/state';
+import { recordHumanReply, recordResolution } from '@/lib/ownership/transitions';
 
 const TOKEN_ENV_ALLOWLIST = /^(META_|WHATSAPP_)/;
 
@@ -235,7 +241,10 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
     `[chatwoot/webhook] Human reply sent to ${customerPhone} via phone_id ${waNumber.phone_number_id}`,
   );
 
-  // Mark the conversation as human-handled — AI will not auto-reply while this is true.
+  // Mark the conversation as human-handled — AI will not auto-reply while this
+  // is true. Kept as the LEGACY-REGIME FAIL-SAFE: this path serves doors where
+  // the boolean is still the reply gate, so it must not become conditional on
+  // the ownership engine succeeding.
   await prisma.conversation
     .update({
       where: { id: localConv.id },
@@ -244,6 +253,29 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
     .catch((e: Error) =>
       console.warn('[chatwoot/webhook] human_handling update failed:', e.message),
     );
+
+  // Durable ownership record for the same fact: a human replied, so a human
+  // owns this conversation, in a numbered episode. Best-effort and separately
+  // caught — a ledger failure must never weaken the silence above.
+  try {
+    const owned = await prisma.conversation.findUnique({
+      where:  { id: localConv.id },
+      select: { id: true, tenant_id: true, ownership_state: true, ownership_episode: true, human_handling: true },
+    });
+    if (owned) {
+      const view = readOwnership(owned);
+      await recordHumanReply({
+        tenantId:       owned.tenant_id,
+        conversationId: owned.id,
+        operationId:    `human_reply:mirror:${cwMessageId}`,
+        currentState:   view.state,
+        currentEpisode: view.episode,
+        actorRef:       'chatwoot_user:mirrored_outgoing',
+      });
+    }
+  } catch (e) {
+    console.warn('[chatwoot/webhook] ownership transition failed:', (e as Error).message);
+  }
 
   return 200;
 }
@@ -302,10 +334,38 @@ async function handleConversationStatusChanged(
   if (customerPhone) {
     // Primary path: (chatwoot_conversation_id, customer_phone) uniquely identifies
     // the row across all tenants — no account_id required.
-    updated = await prisma.conversation.updateMany({
-      where: { chatwoot_conversation_id: cwConvId, customer_phone: customerPhone },
-      data:  { human_handling: false, status: 'resolved' },
+    //
+    // Resolution no longer decides ownership. Each matched row is recorded
+    // through the ownership engine, which applies the historical
+    // human_handling clear ONLY on a legacy door — and on an authoritative
+    // door leaves response authority exactly where it is, so closing a ticket
+    // cannot re-arm an automated brain.
+    const locals = await prisma.conversation.findMany({
+      where:  { chatwoot_conversation_id: cwConvId, customer_phone: customerPhone },
+      select: {
+        id: true, tenant_id: true, chatwoot_inbox_id: true,
+        chatwoot_binding_id: true, ownership_episode: true,
+      },
     });
+    for (const local of locals) {
+      let resolvedAccountId: string | null = null;
+      if (local.chatwoot_binding_id) {
+        const b = await prisma.chatwootBinding.findUnique({
+          where:  { id: local.chatwoot_binding_id },
+          select: { account_id: true },
+        });
+        resolvedAccountId = b?.account_id ?? null;
+      }
+      const authoritative =
+        resolvedAccountId !== null && ownershipIsAuthoritative(resolvedAccountId, local.chatwoot_inbox_id);
+      await recordResolution({
+        tenantId:       local.tenant_id,
+        conversationId: local.id,
+        operationId:    `resolution:${cwConvId}:${local.ownership_episode ?? 0}`,
+        authoritative,
+      });
+    }
+    updated = { count: locals.length };
   } else {
     // Phone absent: refuse to update rather than risk a cross-tenant mutation on
     // bare chatwoot_conversation_id (the field is only unique per tenant).
