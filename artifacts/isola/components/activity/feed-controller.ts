@@ -117,7 +117,7 @@ export function rowsPerSource(items: readonly ActivityFeedItem[]): Map<string, n
   return counts
 }
 
-// ── the HTTP boundary ─────────────────────────────────────────────
+// ── the HTTP boundary ──
 
 export type FetchOutcome =
   | { ok: true; body: ActivityFeedResponse }
@@ -201,7 +201,7 @@ export async function fetchActivityPage(input: FetchPageInput): Promise<FetchOut
   return { ok: true, body }
 }
 
-// ── transitions ──────────────────────────────────────────────────
+// ── transitions ──
 
 export function beginLoad(state: FeedState, mode: LoadMode): FeedState {
   return {
@@ -290,7 +290,7 @@ export function resetForFilters(state: FeedState): FeedState {
   return { ...initialFeedState(), lastLoadedAt: state.lastLoadedAt }
 }
 
-// ── the one entry point ───────────────────────────────────────────
+// ── the one entry point ──
 
 export interface LoadOptions {
   mode: LoadMode
