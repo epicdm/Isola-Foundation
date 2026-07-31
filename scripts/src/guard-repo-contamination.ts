@@ -66,9 +66,18 @@ export interface Finding {
   readonly reason: string
 }
 
-/** Normalise to forward slashes so the rules behave identically on any platform. */
+/**
+ * Normalise to forward slashes so the rules behave identically on any platform.
+ *
+ * Backslash is treated as a separator UNCONDITIONALLY, not via `path.sep`.
+ * `path.sep` is `/` on Linux, so a `path.sep`-only implementation silently does
+ * nothing to a Windows-style path on the platform this actually runs on — the
+ * guard would then miss `artifacts\prisma\schema.prisma.backup.1` entirely.
+ * For a guard, over-normalising risks a false positive; under-normalising risks
+ * missing contamination, which is the worse failure.
+ */
 export function normalise(file: string): string {
-  return file.split(path.sep).join('/')
+  return file.split('\\').join('/').split(path.sep).join('/')
 }
 
 export function isAllowedBundle(file: string): boolean {
