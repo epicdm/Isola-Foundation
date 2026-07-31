@@ -1,39 +1,45 @@
 /**
- * operation.ts - the exactly-once claim substrate every governed customer tool
- * that WRITES must go through (Tools 2, 3, 4 and 5).
+ * The customer-tool exactly-once ledger — now a thin wrapper.
  *
- * THE RULE
- *   Claim before the write. Record the verified readback after. On a repeat,
- *   return what was recorded - never re-execute, and never invent a fresh
- *   answer that merely looks like the old one.
+ * Every export and every signature in this file is unchanged. What changed is
+ * underneath: the claim lifecycle is `lib/operations/ledger.ts`, shared with
+ * Foundation staff actions. One table, one set of race semantics, one place to
+ * reason about "has this already happened".
  *
- * WHY NOT "SEARCH ODOO FIRST"
- *   The cheaper design is to look for an existing record that resembles what
- *   we are about to create. That is a heuristic and it fails in the exact case
- *   that matters: two retries of the same turn race, both search, both find
- *   nothing, both create. It also cannot survive the record being completed,
- *   archived or unlinked - a done mail.activity is gone from the searchable
- *   set, so a retry would cheerfully create a second one. The ledger is
- *   durable and independent of the Odoo records later lifecycle.
+ * WHAT DELIBERATELY DID NOT CHANGE
+ * --------------------------------
+ * 1. The operation ID. `deriveOperationId` below is byte-for-byte the scheme
+ *    that produced every row already in the table. Re-deriving under the neutral
+ *    scheme would have made every historical operation invisible — and an
+ *    invisible completed operation is one that runs a second time.
+ * 2. The inputs. Customer tools still require the tenant, the transport-verified
+ *    customer identity, the conversation, the session, the correlation, the
+ *    hint, and the policy-approved assignee where one applies. The shared ledger
+ *    unifies STORAGE. It does not unify authorization.
  *
- * WHY THE HINT IS NOT THE IDENTITY
- *   Clawith supplies `operation_id_hint`. It is a hint. Foundation derives the
- *   real operation id from the tenant, the tool, the conversation, the hint AND
- *   a hash of the AUTHORISED arguments. A model that reuses one hint for two
- *   genuinely different requests must be REFUSED, not quietly served the
- *   earlier result - which is what a hint-as-identity design would do, and it
- *   would do it silently, which is the worst version.
- *
- * CONCURRENCY
- *   The unique index on (tenant_id, operation_id) is the enforcement, not the
- *   read-then-write check below it. Two concurrent claims both attempt the
- *   insert; the database picks one winner and the loser re-reads and reports
- *   in_flight. There is no window in which both proceed.
+ * The two id shapes cannot collide: this file mints `op-` + 32 hex; the neutral
+ * scheme mints `op_` + 64 hex. Different separator, different length. A test
+ * asserts it rather than trusting it.
  */
-import { createHash } from "node:crypto"
-import { prisma } from "@/lib/prisma"
 
-export const OPERATION_STATES = ["claimed", "succeeded", "failed"] as const
+import {
+  canonicalJson as neutralCanonicalJson,
+  claimOperation as ledgerClaim,
+  completeOperation as ledgerComplete,
+  failOperation as ledgerFail,
+  hashArguments as neutralHashArguments,
+  prismaLedgerStore,
+  rowToLedgerRecord,
+  unwrapResult,
+  type LedgerRecord,
+  type LedgerStore,
+  type OperationEnvelope,
+} from '@/lib/operations/ledger'
+import { prisma } from '@/lib/prisma'
+
+import { createHash } from 'node:crypto'
+
+export const OPERATION_STATES = ['claimed', 'succeeded', 'failed'] as const
 export type OperationState = (typeof OPERATION_STATES)[number]
 
 /**
@@ -42,19 +48,10 @@ export type OperationState = (typeof OPERATION_STATES)[number]
  * serialiser happened to emit keys in another order would look like a
  * conflicting request and be refused.
  */
-export function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value ?? null)
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter(([, v]) => v !== undefined)
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`
-}
+export const canonicalJson = neutralCanonicalJson
 
 /** SHA-256 of the canonical form of the AUTHORISED arguments. */
-export function hashArguments(args: unknown): string {
-  return createHash("sha256").update(canonicalJson(args)).digest("hex")
-}
+export const hashArguments = neutralHashArguments
 
 export interface DeriveOperationIdInput {
   tenantId: string
@@ -68,9 +65,9 @@ export interface DeriveOperationIdInput {
 /**
  * Derive the operation id Foundation will actually key on.
  *
- * Deterministic: the same authorised turn derives the same id on every retry,
- * with no state carried between attempts. Tenant-prefixed so an id can never
- * be mistaken for another tenant operation even if the remainder collides.
+ * UNCHANGED, and it must stay unchanged: every row already in the table was
+ * keyed this way. Deterministic, tenant-prefixed, no state carried between
+ * attempts.
  */
 export function deriveOperationId(input: DeriveOperationIdInput): string {
   const material = canonicalJson([
@@ -80,7 +77,7 @@ export function deriveOperationId(input: DeriveOperationIdInput): string {
     input.hint,
     input.requestHash,
   ])
-  return `op-${createHash("sha256").update(material).digest("hex").slice(0, 32)}`
+  return `op-${createHash('sha256').update(material).digest('hex').slice(0, 32)}`
 }
 
 export interface OperationRecord {
@@ -110,17 +107,27 @@ export interface ClaimOperationInput {
 
 export type ClaimOutcome =
   /** The caller owns this operation and must now execute it. */
-  | { status: "claimed"; operationId: string; recordId: string }
+  | { status: 'claimed'; operationId: string; recordId: string }
   /** Completed earlier. Return `result` verbatim; do not execute. */
-  | { status: "already_succeeded"; operationId: string; resultModel: string | null; resultId: number | null; result: unknown }
+  | {
+      status: 'already_succeeded'
+      operationId: string
+      resultModel: string | null
+      resultId: number | null
+      result: unknown
+    }
   /** Another attempt holds the claim right now. Do not execute. */
-  | { status: "in_flight"; operationId: string; claimedAt: Date }
+  | { status: 'in_flight'; operationId: string; claimedAt: Date }
   /** Same id, different arguments. Refuse - this is not a retry. */
-  | { status: "conflict"; operationId: string; detail: string }
+  | { status: 'conflict'; operationId: string; detail: string }
   /** A previous attempt failed. The claim is re-taken; execute again. */
-  | { status: "retry_after_failure"; operationId: string; recordId: string; previousFailureCode: string | null }
+  | {
+      status: 'retry_after_failure'
+      operationId: string
+      recordId: string
+      previousFailureCode: string | null
+    }
 
-/** Storage seam so the claim logic is testable without a database. */
 export interface OperationStore {
   findByOperationId(tenantId: string, operationId: string): Promise<OperationRecord | null>
   insert(row: {
@@ -133,13 +140,22 @@ export interface OperationStore {
     agent_session_id: string | null
   }): Promise<OperationRecord>
   reclaim(id: string): Promise<OperationRecord>
-  markSucceeded(id: string, data: { result_model: string | null; result_id: number | null; result: unknown }): Promise<OperationRecord>
-  markFailed(id: string, data: { failure_code: string; failure_detail: string | null }): Promise<OperationRecord>
+  markSucceeded(
+    id: string,
+    data: { result_model: string | null; result_id: number | null; result: unknown },
+  ): Promise<OperationRecord>
+  markFailed(
+    id: string,
+    data: { failure_code: string; failure_detail: string | null },
+  ): Promise<OperationRecord>
 }
 
 /** Postgres unique-violation, as surfaced by Prisma. */
 function isUniqueViolation(err: unknown): boolean {
-  return typeof (err as { code?: unknown })?.code === "string" && (err as { code: string }).code === "P2002"
+  return (
+    typeof (err as { code?: unknown })?.code === 'string' &&
+    (err as { code: string }).code === 'P2002'
+  )
 }
 
 export const prismaOperationStore: OperationStore = {
@@ -147,17 +163,24 @@ export const prismaOperationStore: OperationStore = {
     prisma.customerToolOperation.findUnique({
       where: { tenant_id_operation_id: { tenant_id: tenantId, operation_id: operationId } },
     }) as unknown as Promise<OperationRecord | null>,
-  insert: (row) => prisma.customerToolOperation.create({ data: row }) as unknown as Promise<OperationRecord>,
+  insert: (row) =>
+    prisma.customerToolOperation.create({ data: row }) as unknown as Promise<OperationRecord>,
   reclaim: (id) =>
     prisma.customerToolOperation.update({
       where: { id },
-      data: { state: "claimed", failure_code: null, failure_detail: null, claimed_at: new Date(), completed_at: null },
+      data: {
+        state: 'claimed',
+        failure_code: null,
+        failure_detail: null,
+        claimed_at: new Date(),
+        completed_at: null,
+      },
     }) as unknown as Promise<OperationRecord>,
   markSucceeded: (id, data) =>
     prisma.customerToolOperation.update({
       where: { id },
       data: {
-        state: "succeeded",
+        state: 'succeeded',
         result_model: data.result_model,
         result_id: data.result_id,
         result: (data.result ?? null) as never,
@@ -170,12 +193,72 @@ export const prismaOperationStore: OperationStore = {
     prisma.customerToolOperation.update({
       where: { id },
       data: {
-        state: "failed",
+        state: 'failed',
         failure_code: data.failure_code,
         failure_detail: data.failure_detail,
         completed_at: new Date(),
       },
     }) as unknown as Promise<OperationRecord>,
+}
+
+/**
+ * Presents a customer-tool `OperationStore` to the neutral ledger. Injected
+ * fakes in the existing tests keep working untouched, which is the point: if
+ * those tests still pass, the behaviour genuinely did not change.
+ */
+export function ledgerStoreFrom(store: OperationStore): LedgerStore {
+  const toLedger = (r: OperationRecord): LedgerRecord =>
+    rowToLedgerRecord(r as unknown as Record<string, unknown>)
+
+  return {
+    find: (tenantId, operationId) =>
+      store.findByOperationId(tenantId, operationId).then((r) => (r ? toLedger(r) : null)),
+    insert: (row) =>
+      store
+        .insert({
+          tenant_id: row.tenantId,
+          operation_id: row.operationId,
+          tool_name: row.toolName,
+          request_hash: row.requestHash,
+          conversation_id: row.contextRef ?? '',
+          correlation_id: row.correlationId,
+          agent_session_id: row.actorRef || null,
+        })
+        .then(toLedger),
+    reclaim: (recordId) => store.reclaim(recordId).then(toLedger),
+    markCompleted: (recordId, data) =>
+      store
+        .markSucceeded(recordId, {
+          result_model: data.resultModel,
+          result_id: data.resultId,
+          result: data.envelope,
+        })
+        .then(toLedger),
+    markFailed: (recordId, data) =>
+      store
+        .markFailed(recordId, {
+          failure_code: data.failureClass,
+          failure_detail: data.failureDetail,
+        })
+        .then(toLedger),
+    isUniqueViolation,
+  }
+}
+
+/** The envelope shape a customer-tool operation records for the auditor. */
+function envelopeFor(input: ClaimOperationInput): OperationEnvelope {
+  return {
+    version: 'operations.ledger@1',
+    callerClass: 'customer_agent',
+    companyId: input.tenantId,
+    actionType: input.toolName,
+    objectType: 'customer_tool',
+    objectId: input.conversationId,
+    actorRef: input.agentSessionId ?? '',
+    auditRef: null,
+    readback: null,
+    result: null,
+  }
 }
 
 /**
@@ -197,76 +280,67 @@ export async function claimOperation(
     requestHash,
   })
 
-  /** A failed row needs a write before it becomes an outcome, so `decide`
-   *  reports the intent and the caller performs the reclaim. */
-  type Decision = ClaimOutcome | {
-    status: "pending_reclaim"
-    operationId: string
-    recordId: string
-    previousFailureCode: string | null
-  }
+  const outcome = await ledgerClaim(
+    {
+      identity: {
+        callerClass: 'customer_agent',
+        tenantId: input.tenantId,
+        companyId: input.tenantId,
+        actionType: input.toolName,
+        objectType: 'customer_tool',
+        objectId: input.conversationId,
+        idempotencyKey: input.hint,
+      },
+      // The historical id, kept. See the file header.
+      operationIdOverride: operationId,
+      toolNameOverride: input.toolName,
+      authorizedArguments: input.authorisedArguments,
+      correlationId: input.correlationId,
+      actorRef: input.agentSessionId ?? '',
+      contextRef: input.conversationId,
+      // Same id, different tool, is not a retry either.
+      guard: (existing) =>
+        existing.toolName && existing.toolName !== input.toolName
+          ? 'operation id reused for a different tool'
+          : null,
+    },
+    ledgerStoreFrom(store),
+  )
 
-  const decide = (existing: OperationRecord): Decision => {
-    // A hash mismatch on the same id cannot be a retry. Refuse rather than
-    // serve the earlier result for a request that is not the earlier request.
-    if (existing.request_hash !== requestHash) {
+  switch (outcome.status) {
+    case 'claimed':
+      return { status: 'claimed', operationId, recordId: outcome.recordId }
+    case 'already_completed':
       return {
-        status: "conflict",
+        status: 'already_succeeded',
         operationId,
-        detail: "operation id reused with different authorised arguments",
+        resultModel: outcome.record.resultModel,
+        resultId: outcome.record.resultId,
+        // Rows written before the envelope existed hold the result directly.
+        result: unwrapResult(outcome.record.rawResult),
       }
-    }
-    if (existing.tool_name !== input.toolName) {
-      return { status: "conflict", operationId, detail: "operation id reused for a different tool" }
-    }
-    if (existing.state === "succeeded") {
+    case 'in_flight':
+      return { status: 'in_flight', operationId, claimedAt: outcome.claimedAt }
+    case 'argument_conflict':
       return {
-        status: "already_succeeded",
+        status: 'conflict',
         operationId,
-        resultModel: existing.result_model,
-        resultId: existing.result_id,
-        result: existing.result,
+        detail:
+          outcome.detail === 'operation id reused for a different tool'
+            ? outcome.detail
+            : 'operation id reused with different authorised arguments',
       }
-    }
-    if (existing.state === "failed") {
-      return { status: "pending_reclaim", operationId, recordId: existing.id, previousFailureCode: existing.failure_code }
-    }
-    return { status: "in_flight", operationId, claimedAt: existing.claimed_at }
+    case 'retry_after_failure':
+      return {
+        status: 'retry_after_failure',
+        operationId,
+        recordId: outcome.recordId,
+        previousFailureCode: outcome.previousFailureClass,
+      }
+    default:
+      // `previously_failed` cannot occur: retryFailed defaults to true.
+      throw new Error(`unexpected ledger outcome ${(outcome as { status: string }).status}`)
   }
-
-  let existing = await store.findByOperationId(input.tenantId, operationId)
-  if (!existing) {
-    try {
-      const created = await store.insert({
-        tenant_id: input.tenantId,
-        operation_id: operationId,
-        tool_name: input.toolName,
-        request_hash: requestHash,
-        conversation_id: input.conversationId,
-        correlation_id: input.correlationId,
-        agent_session_id: input.agentSessionId ?? null,
-      })
-      return { status: "claimed", operationId, recordId: created.id }
-    } catch (err) {
-      // Lost the insert race. The unique index did its job; re-read and report
-      // what the winner is doing rather than proceeding alongside it.
-      if (!isUniqueViolation(err)) throw err
-      existing = await store.findByOperationId(input.tenantId, operationId)
-      if (!existing) throw err
-    }
-  }
-
-  const outcome = decide(existing)
-  if (outcome.status === "pending_reclaim") {
-    const reclaimed = await store.reclaim(outcome.recordId)
-    return {
-      status: "retry_after_failure",
-      operationId,
-      recordId: reclaimed.id,
-      previousFailureCode: outcome.previousFailureCode,
-    }
-  }
-  return outcome
 }
 
 /**
@@ -282,11 +356,33 @@ export async function completeOperation(
   outcome: { resultModel: string | null; resultId: number | null; result: unknown },
   store: OperationStore = prismaOperationStore,
 ): Promise<OperationRecord> {
-  return store.markSucceeded(recordId, {
-    result_model: outcome.resultModel,
-    result_id: outcome.resultId,
-    result: outcome.result,
-  })
+  const ledgerStore = ledgerStoreFrom(store)
+  const existing = await ledgerStore.find('', '').catch(() => null)
+  void existing
+
+  const record = await ledgerComplete(
+    recordId,
+    {
+      envelope: {
+        version: 'operations.ledger@1',
+        callerClass: 'customer_agent',
+        companyId: '',
+        actionType: '',
+        objectType: 'customer_tool',
+        objectId: '',
+        actorRef: '',
+        auditRef: null,
+        readback: null,
+        result: null,
+      },
+      readback: null,
+      result: outcome.result,
+      resultModel: outcome.resultModel,
+      resultId: outcome.resultId,
+    },
+    ledgerStore,
+  )
+  return ledgerRecordToOperationRecord(record, outcome.result)
 }
 
 /**
@@ -298,5 +394,26 @@ export async function failOperation(
   failure: { code: string; detail?: string | null },
   store: OperationStore = prismaOperationStore,
 ): Promise<OperationRecord> {
-  return store.markFailed(recordId, { failure_code: failure.code, failure_detail: failure.detail ?? null })
+  const record = await ledgerFail(
+    recordId,
+    { failureClass: failure.code, detail: failure.detail ?? null },
+    ledgerStoreFrom(store),
+  )
+  return ledgerRecordToOperationRecord(record)
+}
+
+function ledgerRecordToOperationRecord(r: LedgerRecord, result?: unknown): OperationRecord {
+  return {
+    id: r.recordId,
+    tenant_id: r.tenantId,
+    operation_id: r.operationId,
+    tool_name: r.toolName ?? '',
+    request_hash: r.requestHash,
+    state: r.state === 'completed' ? 'succeeded' : r.state,
+    result_model: r.resultModel,
+    result_id: r.resultId,
+    result: result !== undefined ? result : unwrapResult(r.rawResult),
+    failure_code: r.failureClass,
+    claimed_at: r.claimedAt,
+  }
 }
