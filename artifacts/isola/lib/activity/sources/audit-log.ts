@@ -6,19 +6,12 @@
  *
  * What it will NOT project: raw authorised arguments, failure stack traces,
  * secrets, or object identifiers the caller could not otherwise see. `meta` is
- * read through a WHITELIST — a column or key added next year is excluded by
- * default instead of leaking by default.
+ * read through a WHITELIST — a key added next year is excluded by default
+ * instead of leaking by default.
  */
 
 import type { ActivityItem, EventType, ResolvedQuery } from '../feed'
-import {
-  actorKindOf,
-  buildSource,
-  iso,
-  pickSafe,
-  summarise,
-  type SourceDeps,
-} from './shared'
+import { actorKindOf, buildSource, iso, pickSafe, summarise, type SourceDeps } from './shared'
 
 export const AUDIT_LOG_SOURCE = 'audit_log'
 
@@ -86,7 +79,7 @@ export function projectAuditLog(row: AuditLogRow): ActivityItem | null {
   const eventType: EventType = OUTCOME_EVENT[outcome] ?? 'audit.event'
   const actionType = meta.actionType || row.action
 
-  const title = OUTCOME_TITLE[outcome] ?? summarise(row.action, 80) || 'Recorded event'
+  const title = OUTCOME_TITLE[outcome] ?? (summarise(row.action, 80) || 'Recorded event')
   const summary = outcome
     ? summarise(`${actionType}${meta.dependency ? ` — ${meta.dependency} unavailable` : ''}`)
     : summarise(`${row.action}${row.entity ? ` on ${row.entity}` : ''}`)
