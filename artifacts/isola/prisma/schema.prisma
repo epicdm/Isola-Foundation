@@ -91,6 +91,7 @@ model Tenant {
 
   conversation_ownership_transitions ConversationOwnershipTransition[]
   customer_tool_operations           CustomerToolOperation[]
+  channelBindings ChannelBinding[]
 }
 
 // ── Per-tenant voicemail catches (AI missed-call catcher) ────────────────────
@@ -357,6 +358,68 @@ model BffBinding {
 // Per-agent override: set agent_id to pin a binding to a specific Agent (e.g.
 // EMA sales agent vs front-line agent on the same tenant). When null this is
 // the tenant-level fallback binding (current / legacy behaviour).
+// ── Channel binding (Foundation-owned business record) ────────────────────────
+//
+// Foundation records WHAT THE BUSINESS ASKED FOR and WHAT LANE 2 REPORTED BACK.
+// It does not configure Meta, Chatwoot or Clawith, and it never stores a
+// provider credential. Every identifier here is provider-SAFE: an opaque
+// reference Lane 2 chose to expose, never a token, key or secret.
+//
+// The row exists BEFORE provisioning (status 'requested') so the request itself
+// is auditable even if Lane 2 never runs or fails.
+model ChannelBinding {
+  id        String @id @default(cuid())
+  tenant_id String
+
+  /// Free text, written by the business: "customer front desk", "internal staff line".
+  purpose String
+  /// 'whatsapp' | 'telegram' | 'voice' | 'email'
+  requested_type String
+  /// 'customer_facing' | 'internal_private'. Required at request time: this is the
+  /// single fact that governs everything downstream, so it is never inferred.
+  classification String
+
+  /// Business selections a human makes in Foundation BEFORE Lane 2 runs.
+  clawith_agent_ref String?
+  chatwoot_team_ref String?
+  /// JSON text: operating hours, escalation windows. Opaque to this module.
+  operating_policy  String?
+  /// Fail-closed: a channel requires approval unless someone deliberately says otherwise.
+  approval_required Boolean @default(true)
+
+  /// Ownership classification as ACCEPTED (not as requested).
+  accepted_classification String?
+  accepted_at             DateTime?
+  accepted_by             String?
+
+  /// Everything Lane 2 hands back. Provider-safe references only.
+  provisioning_status    String  @default("requested") // requested|provisioning|ready|failed
+  provider_ref           String?
+  inbox_ref              String?
+  agent_ref              String?
+  lane2_contract_version String?
+  lane2_evidence_ref     String?
+
+  /// Status surface shown in the product.
+  readiness        String    @default("not_ready")
+  health           String    @default("unknown")
+  last_verified_at DateTime?
+
+  /// Native deep links supplied by Lane 2. Foundation renders, never constructs.
+  chatwoot_deep_link String?
+  clawith_deep_link  String?
+
+  requested_by String
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+
+  @@unique([tenant_id, purpose, requested_type])
+  @@index([tenant_id])
+  @@index([tenant_id, classification])
+}
+
 model ClawithBinding {
   id                   String  @id @default(cuid())
   tenant_id            String
