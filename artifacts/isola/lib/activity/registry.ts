@@ -21,6 +21,7 @@
  * SESSION, never from the query string.
  */
 
+import { createPrismaProjectionStore } from '@/lib/events/projection-store'
 import { prisma } from '@/lib/prisma'
 
 import type { ActivitySource } from './feed'
@@ -70,7 +71,12 @@ export interface ActivityRegistryDeps {
   approvalRequest: ActivityDelegate
   staffWorkAction: ActivityDelegate
   conversationOwnership: ActivityDelegate
-  /** Lane 2 has no store yet; the null store says so instead of saying nothing. */
+  /**
+   * Lane 2 now HAS a store — `projected_activity`, written by
+   * `IngestPorts.project`. Inject `nullLane2Store` to state deliberately that
+   * this deployment is not configured for it; leaving it undefined must not be
+   * the way a real deployment ends up reporting `unavailable` for ever.
+   */
   lane2Store?: Lane2ProjectionStore
 }
 
@@ -84,7 +90,9 @@ export function defaultActivityRegistryDeps(): ActivityRegistryDeps {
     approvalRequest: prisma.approvalRequest as unknown as ActivityDelegate,
     staffWorkAction: prisma.staffWorkAction as unknown as ActivityDelegate,
     conversationOwnership: prisma.conversationOwnershipTransition as unknown as ActivityDelegate,
-    lane2Store: nullLane2Store,
+    // The real table, not the null store. Production reporting `unavailable`
+    // when the rows are actually there is the failure this default prevents.
+    lane2Store: createPrismaProjectionStore(),
   }
 }
 
