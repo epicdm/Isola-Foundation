@@ -21,7 +21,7 @@
 
 import type { ActivitySourceReport, DataState, OwnershipState } from "./types"
 
-// ── generic ───────────────────────────────────────────────────────
+// ── generic ──────────────────────────────────────────────────
 
 /**
  * Turns an identifier into something a person can read.
@@ -36,7 +36,79 @@ export function humanise(key: string | null | undefined): string {
   return words.charAt(0).toUpperCase() + words.slice(1)
 }
 
-// ── sources ───────────────────────────────────────────────────────
+// ── identifiers ─────────────────────────────────────────────
+
+/**
+ * True when a string is a machine identifier rather than something a person
+ * wrote.
+ *
+ * The test is deliberately narrow: an unbroken run of at least sixteen
+ * alphanumerics containing BOTH a letter and a digit. That matches a cuid
+ * ("cmrewcr5e0001s617dpr2qm3e") and the tail of "agent:cmrew...", and it does
+ * not match a name, however long, because names carry no digits. Getting this
+ * wrong in the permissive direction would hide a real label behind an ellipsis,
+ * so the rule errs towards leaving text alone.
+ */
+export function isOpaqueIdentifier(value: string | null | undefined): boolean {
+  const raw = (value ?? "").trim()
+  if (!raw || /\s/.test(raw)) return false
+  const runs = raw.match(/[A-Za-z0-9]{16,}/g) ?? []
+  return runs.some((run) => /[0-9]/.test(run) && /[A-Za-z]/.test(run))
+}
+
+/**
+ * The last few characters of an identifier, marked as a fragment.
+ *
+ * Enough to tell two rows apart, short enough to read, and unmistakably partial
+ * so nobody copies it thinking it is the whole reference. The full value always
+ * travels alongside it in a title attribute -- it is shortened for display, not
+ * withheld.
+ */
+export function shortReference(value: string | null | undefined): string {
+  const raw = (value ?? "").trim()
+  if (!raw) return ""
+  return "…" + (raw.length <= 5 ? raw : raw.slice(-5))
+}
+
+/** What to print, and what to keep on hover. `title` is null when there is nothing extra to reveal. */
+export interface DisplayValue {
+  text: string
+  title: string | null
+}
+
+// ── parameter labels ─────────────────────────────────────────
+
+/**
+ * The API's parameter names, in the words this screen uses for them.
+ *
+ * ONE SOURCE, USED BY BOTH SIDES. The filter bar renders its control labels from
+ * this map and the error notice resolves the rejected parameter through it, so
+ * "The filter pageSize was refused" became "The filter Records per page was
+ * refused" and cannot drift back apart: a control renamed here is renamed in the
+ * error in the same edit (defect-activity-raw-parameter-name-in-error).
+ */
+const PARAMETER_LABELS: Readonly<Record<string, string>> = {
+  source: "System",
+  eventFamily: "Kind of record",
+  ownershipState: "Who was handling it",
+  status: "Status",
+  occurredFrom: "From",
+  occurredTo: "To",
+  customer: "Customer reference",
+  actor: "Person or assistant reference",
+  pageSize: "Records per page",
+  cursor: "Page position",
+  company: "Company",
+  filter: "Filter",
+}
+
+export function parameterLabel(parameter: string | null | undefined): string {
+  const key = (parameter ?? "").trim()
+  if (!key) return "Filter"
+  return PARAMETER_LABELS[key] ?? humanise(key)
+}
+
+// ── sources ─────────────────────────────────────────────────
 
 const SOURCE_LABELS: Readonly<Record<string, string>> = {
   audit_log: "Security and audit trail",
@@ -153,7 +225,7 @@ export function sourceStatus(
   }
 }
 
-// ── event families ────────────────────────────────────────────────
+// ── event families ────────────────────────────────────────────
 
 const FAMILY_LABELS: Readonly<Record<string, string>> = {
   "staff.note": "Note from your team",
@@ -189,7 +261,7 @@ export const EVENT_FAMILY_OPTIONS: readonly { value: string; label: string }[] =
   FAMILY_LABELS,
 ).map((value) => ({ value, label: FAMILY_LABELS[value] }))
 
-// ── ownership ─────────────────────────────────────────────────────
+// ── ownership ──────────────────────────────────────────────
 
 export const OWNERSHIP_OPTIONS: readonly { value: string; label: string }[] = [
   { value: "ai", label: "Handled by the assistant" },
@@ -209,7 +281,7 @@ export function ownershipLabel(state: OwnershipState | null | undefined): string
   return null
 }
 
-// ── status ────────────────────────────────────────────────────────
+// ── status ──────────────────────────────────────────────────
 
 export type StatusTone = "success" | "failure" | "pending" | "neutral"
 
@@ -284,7 +356,7 @@ export const STATUS_OPTIONS: readonly { value: string; label: string }[] = [
   "unknown",
 ].map((value) => ({ value, label: statusPresentation(value).label }))
 
-// ── actor ─────────────────────────────────────────────────────────
+// ── actor ──────────────────────────────────────────────────
 
 /**
  * Never derived from the reference. An actor ref is an internal identifier and
@@ -303,7 +375,77 @@ export function actorKindLabel(kind: string | null | undefined): string | null {
   return null
 }
 
-// ── time ──────────────────────────────────────────────────────────
+/**
+ * The actor, as a person should see it.
+ *
+ * THREE CASES, AND NOTHING IS INVENTED IN ANY OF THEM.
+ *
+ * 1. A real label: printed as it arrived, with the kind in brackets.
+ * 2. NO label: "Unknown", plus the kind if the API told us one. The internal
+ *    ref is NOT substituted -- "staff:99" is not the name of a person and
+ *    showing it in the name's place is a small lie with an official look.
+ * 3. A label that is itself an identifier: this is the one that was broken.
+ *    The API sometimes sends the ref as the label, so rows read
+ *    "agent:cmrewcr5e0001s617dpr2qm3e" (defect-activity-raw-cuid-on-screen).
+ *    We show the kind we genuinely know plus a short suffix -- "Assistant
+ *    · …2qm3e" -- and keep the whole identifier in the title. We do NOT look
+ *    up, guess or synthesise a name we were never given.
+ */
+export function actorDisplay(
+  actor: { label?: string | null; kind?: string | null } | null | undefined,
+): DisplayValue {
+  const kind = actorKindLabel(actor?.kind)
+  const label = actor?.label?.trim() ?? ""
+
+  if (!label) {
+    return { text: kind ? "Unknown (" + kind + ")" : "Unknown", title: null }
+  }
+
+  if (!isOpaqueIdentifier(label)) {
+    return { text: kind ? label + " (" + kind + ")" : label, title: null }
+  }
+
+  const noun = kind ? kind.charAt(0).toUpperCase() + kind.slice(1) : "Unknown"
+  return { text: noun + " · " + shortReference(label), title: label }
+}
+
+/**
+ * The related object, as a person should see it.
+ *
+ * "Conversation cmrewdo5b0005s61765xj85i4" becomes a short form with the full
+ * id on hover. A related id that is NOT opaque (a ticket number, say) is
+ * printed in full, because there is nothing to hide.
+ */
+export function relatedDisplay(
+  type: string | null | undefined,
+  id: string | null | undefined,
+): DisplayValue | null {
+  const kind = (type ?? "").trim()
+  const value = (id ?? "").trim()
+  if (!kind || !value) return null
+
+  const noun = humanise(kind)
+  if (!isOpaqueIdentifier(value)) return { text: noun + " " + value, title: null }
+  return { text: noun + " " + shortReference(value), title: noun + " " + value }
+}
+
+/**
+ * The row's own reference.
+ *
+ * Fifty rows stamped to the same MINUTE were visually identical -- seven of
+ * them, in one page, with nothing on the row to tell them apart
+ * (defect-activity-indistinguishable-rows). The ids were always distinct; the
+ * display threw the distinction away. This puts a short, stable handle back on
+ * every row, with the full activityId on hover, and absoluteTime below now
+ * carries seconds as well.
+ */
+export function recordReference(activityId: string | null | undefined): DisplayValue | null {
+  const raw = (activityId ?? "").trim()
+  if (!raw) return null
+  return { text: shortReference(raw), title: raw }
+}
+
+// ── time ───────────────────────────────────────────────────
 
 const MINUTE = 60
 const HOUR = 3600
@@ -316,6 +458,13 @@ const DAY = 86400
  * render, and between one reader and another, which makes it useless as the
  * exact value shown on hover and impossible to assert in a test. The suffix
  * says which zone it is in, so nobody has to guess.
+ *
+ * SECONDS ARE PART OF THE VALUE, NOT A DETAIL.
+ * Truncating to the minute made rows that happened seconds apart render as the
+ * same instant, and a feed whose whole ordering claim is "newest first" cannot
+ * then justify its own order to the reader
+ * (defect-activity-indistinguishable-rows). Automated work lands in bursts;
+ * minute precision is simply not enough resolution for this data.
  */
 export function absoluteTime(iso: string | null | undefined): string {
   if (!iso) return "Unknown time"
@@ -332,6 +481,8 @@ export function absoluteTime(iso: string | null | undefined): string {
     pad(date.getUTCHours()),
     ":",
     pad(date.getUTCMinutes()),
+    ":",
+    pad(date.getUTCSeconds()),
     " UTC",
   ].join("")
 }
@@ -366,7 +517,7 @@ export function freshnessLabel(
   return freshness.stale ? "From an older read" : "Current"
 }
 
-// ── data state ────────────────────────────────────────────────────
+// ── data state ──────────────────────────────────────────────
 
 export interface DataStateNotice {
   tone: "neutral" | "warning"
@@ -427,7 +578,84 @@ export function dataStateNotice(state: DataState | null | undefined): DataStateN
   }
 }
 
-// ── actions ───────────────────────────────────────────────────────
+/**
+ * The freshness line when the LAST REQUEST FAILED.
+ *
+ * dataStateNotice describes the data the API returned. When the API returned no
+ * data at all, asking it that question produced "Not loaded yet / This list has
+ * not been loaded yet" sitting directly above "That filter cannot be used" --
+ * two lines, one saying nothing has happened and the other saying something
+ * specific went wrong (defect-activity-contradictory-dual-state). A failed
+ * request is a different question and gets a different answer. Nothing here
+ * reads as a loading state and nothing here reads as success.
+ */
+export function problemStateNotice(problem: { kind: string }): DataStateNotice {
+  switch (problem.kind) {
+    case "auth_expired":
+      return {
+        tone: "warning",
+        label: "Signed out",
+        explanation: "This list stopped loading because the session is no longer signed in.",
+      }
+    case "not_permitted":
+      return {
+        tone: "warning",
+        label: "Not permitted",
+        explanation: "These records are not available to this account.",
+      }
+    case "unavailable":
+      return {
+        tone: "warning",
+        label: "Unavailable",
+        explanation: "None of the systems behind this list could be reached.",
+      }
+    case "invalid_filter":
+      return {
+        tone: "warning",
+        label: "Refused",
+        explanation:
+          "The last request was refused because a filter could not be used, so nothing was loaded for it.",
+      }
+    case "invalid_cursor":
+      return {
+        tone: "warning",
+        label: "Refused",
+        explanation: "The last request was refused because the page position was not valid.",
+      }
+    default:
+      return {
+        tone: "warning",
+        label: "Not loaded",
+        explanation: "The last request did not complete, so this list was not updated.",
+      }
+  }
+}
+
+export const CURSOR_RESET_TITLE = "Back to the first page"
+
+/**
+ * The freshness line after a REFUSED CURSOR was recovered from.
+ *
+ * This is the case the screen used to swallow whole. `?cursor=garbage` makes
+ * the API answer 400 malformed_cursor; the controller correctly throws the
+ * cursor away and fetches page one, and that page-one answer is a perfectly
+ * good 200 -- so the banner read "Complete / Every system answered" for a
+ * request the server had refused, and no notice was shown at all
+ * (defect-activity-400-rendered-as-complete). The recovery was right. Claiming
+ * it never happened was not. A request the server refused may not be reported
+ * as a complete answer, even when the retry after it succeeded.
+ */
+export function cursorResetNotice(): DataStateNotice {
+  return {
+    tone: "warning",
+    label: "Restarted at the first page",
+    explanation:
+      "The page position this list was given was not valid, so the server refused it and the " +
+      "first page was loaded instead. Nothing was skipped.",
+  }
+}
+
+// ── actions ─────────────────────────────────────────────────
 
 const ACTION_LABELS: Readonly<Record<string, string>> = {
   "note.create": "Add a note",
@@ -444,7 +672,7 @@ export function actionLabel(action: string): string {
   return ACTION_LABELS[action] ?? humanise(action)
 }
 
-// ── links ─────────────────────────────────────────────────────────
+// ── links ───────────────────────────────────────────────────
 
 /**
  * Only an absolute http(s) link survives.
