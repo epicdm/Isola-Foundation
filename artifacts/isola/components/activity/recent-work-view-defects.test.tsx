@@ -19,7 +19,7 @@ import { describe, expect, it } from "vitest"
 
 import { SidebarInset } from "@/components/ui/sidebar"
 
-import { RecentWorkLoading, RecentWorkView } from "./recent-work-view"
+import { RecentWorkLoading, RecentWorkShell, RecentWorkView } from "./recent-work-view"
 import { initialFeedState, type FeedProblem, type FeedState } from "./feed-controller"
 import { EMPTY_FILTERS, type ActivityFilters } from "./filters"
 import { ACTIVITY_SOURCE_ORDER, type ActivityFeedItem, type ActivitySourceReport } from "./types"
@@ -76,17 +76,25 @@ function state(overrides: Partial<FeedState> = {}): FeedState {
   }
 }
 
+/**
+ * The page as a reader receives it: the stable shell -- landmark, id and h1 --
+ * around whatever the feed is showing. RecentWorkShell is rendered by the route
+ * ABOVE the Suspense boundary, so the heading exists at every stage of the
+ * stream and exists exactly once.
+ */
 function render(feedState: FeedState, filters: ActivityFilters = EMPTY_FILTERS): string {
   return renderToStaticMarkup(
-    <RecentWorkView
-      state={feedState}
-      filters={filters}
-      now={NOW}
-      onRefresh={noop}
-      onLoadMore={noop}
-      onFiltersChange={noop}
-      onClearFilters={noop}
-    />,
+    <RecentWorkShell>
+      <RecentWorkView
+        state={feedState}
+        filters={filters}
+        now={NOW}
+        onRefresh={noop}
+        onLoadMore={noop}
+        onFiltersChange={noop}
+        onClearFilters={noop}
+      />
+    </RecentWorkShell>,
   )
 }
 
@@ -96,7 +104,11 @@ const count = (html: string, pattern: RegExp) => (html.match(pattern) ?? []).len
 
 describe("defect 2: the shell is never blank while loading", () => {
   it("the very first paint already has the whole page in outline", () => {
-    const html = renderToStaticMarkup(<RecentWorkLoading />)
+    const html = renderToStaticMarkup(
+      <RecentWorkShell>
+        <RecentWorkLoading />
+      </RecentWorkShell>,
+    )
     // Not three grey bars. The reader can see where the list will be.
     expect(html).toContain("aria-busy=\"true\"")
     expect(html).toContain("Recent Work</h1>")
@@ -188,9 +200,18 @@ describe("defect 4: exactly one h1 in the page tree", () => {
   })
 
   it("the loading page has one, and it is the same title", () => {
-    const html = renderToStaticMarkup(<RecentWorkLoading />)
+    // The heading belongs to the SHELL, above the Suspense boundary. The
+    // fallback must not carry a second copy of it, because React reveals a
+    // boundary by inserting the content beside the fallback before removing it
+    // -- so a heading in both means two h1s in the real document.
+    const html = renderToStaticMarkup(
+      <RecentWorkShell>
+        <RecentWorkLoading />
+      </RecentWorkShell>,
+    )
     expect(count(html, /<h1[\s>]/g)).toBe(1)
     expect(html).toContain("Recent Work</h1>")
+    expect(renderToStaticMarkup(<RecentWorkLoading />)).not.toMatch(/<h1[\s>]/)
   })
 
   it("every state renders exactly one, so no state can grow a second", () => {
@@ -267,7 +288,18 @@ describe("defect 5: the feed renders inside the page's one main", () => {
 
   it("offers a stable target for a skip link", () => {
     expect(render(state())).toContain("id=\"recent-work\"")
-    expect(renderToStaticMarkup(<RecentWorkLoading />)).toContain("id=\"recent-work\"")
+
+    // ONE target, not two. The id is the shell's; the fallback and the content
+    // that swap inside it must not reuse it, or a skip link and every
+    // getElementById on the page get an arbitrary one of the pair.
+    const loading = renderToStaticMarkup(
+      <RecentWorkShell>
+        <RecentWorkLoading />
+      </RecentWorkShell>,
+    )
+    expect(loading).toContain("id=\"recent-work\"")
+    expect((loading.match(/id="recent-work"/g) ?? []).length).toBe(1)
+    expect(renderToStaticMarkup(<RecentWorkLoading />)).not.toContain("id=\"recent-work\"")
   })
 })
 
