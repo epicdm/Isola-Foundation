@@ -268,6 +268,52 @@ describe('readback_failed never reads as done', () => {
   })
 })
 
+/* ── the defect live acceptance found ──────────────────────────────────────*/
+
+describe('retry advice belongs to the STATE, not to the flag', () => {
+  it('does not warn a rejected action that it might write a second time', () => {
+    // The live defect: "Rejected before sending" sat directly above
+    // "not safe — it may write a second time". Nothing was sent.
+    const text = textOf(render(<ActionResult outcome={outcome({ lifecycle: 'validation_failed' })} />))
+
+    expect(text).not.toContain('may write a second time')
+    expect(text).toContain('nothing was written')
+  })
+
+  it('warns ONLY readback_failed that a write could repeat', () => {
+    const warned = ACTION_LIFECYCLE_STATES.filter((state) =>
+      textOf(render(<ActionResult outcome={outcome({ lifecycle: state })} />)).includes(
+        'may write a second time',
+      ),
+    )
+
+    expect(warned).toEqual(['readback_failed'])
+  })
+
+  it('keeps the contract sentence when a more specific detail is also supplied', () => {
+    // The validator's wording is useful, but it must not displace the words
+    // that say whether anything was written.
+    const text = textOf(
+      render(
+        <ActionResult
+          outcome={outcome({ lifecycle: 'validation_failed', detail: 'body is required' })}
+        />,
+      ),
+    )
+
+    expect(text).toContain('body is required')
+    expect(text).toContain('Nothing was written')
+  })
+
+  it('does not repeat itself when the detail IS the contract sentence', () => {
+    const state: ActionLifecycleState = 'execution_failed'
+    const sentence = LIFECYCLE_PRESENTATION[state].sentence
+    const text = textOf(render(<ActionResult outcome={outcome({ lifecycle: state, detail: sentence })} />))
+
+    expect(text.split(sentence.slice(0, 30)).length - 1).toBe(1)
+  })
+})
+
 describe('unreachable and refused do not look the same', () => {
   const unreachable = render(<ActionResult outcome={outcome({ lifecycle: 'dependency_unavailable' })} />)
   const refused = render(<ActionResult outcome={outcome({ lifecycle: 'execution_failed' })} />)
