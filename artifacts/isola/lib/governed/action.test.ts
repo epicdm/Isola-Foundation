@@ -9,7 +9,7 @@ import {
 } from './action'
 
 const PROPOSAL: ActionProposal = {
-  actionType: 'note.add',
+  actionType: 'note.create',
   actorPrincipalId: 'p-1',
   actorRole: 'staff',
   companyId: 'co-1',
@@ -22,7 +22,7 @@ const PROPOSAL: ActionProposal = {
 
 function executor(over: Partial<ActionExecutor> = {}): ActionExecutor {
   return {
-    actionType: 'note.add',
+    actionType: 'note.create',
     riskLevel: 'low',
     allowedRoles: ['staff', 'manager', 'owner'],
     validate: () => ({ ok: true }),
