@@ -113,7 +113,9 @@ describe("defect 2: the shell is never blank while loading", () => {
     expect(html).toContain("data-activity-feed=\"loading\"")
     expect(html).not.toContain("display:none")
     expect(html).not.toContain("hidden=\"\"")
-    expect(html).not.toMatch(/class="[^"]*\bhidden\b/)
+    // A whole class token, not a substring: "overflow-hidden" is a legitimate
+    // clip and must not trip this.
+    expect(html).not.toMatch(/class="(?:[^"]*\s)?hidden(?:\s[^"]*)?"/)
   })
 
   it("the idle state shows skeletons rather than an empty list", () => {
