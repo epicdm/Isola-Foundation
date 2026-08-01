@@ -194,10 +194,15 @@ export const ACTION_LIFECYCLE_STATES = [
 export type ActionLifecycleState = (typeof ACTION_LIFECYCLE_STATES)[number]
 
 /**
- * States that belong to the FORM rather than to a recorded operation. Nothing
- * has been sent in either of them, and neither appears in any source contract.
+ * The state that belongs to the FORM rather than to a recorded operation.
+ *
+ * Only `draft` qualifies. The order pairs it with `executing`, but `executing`
+ * IS contract-backed -- it is where ClaimOutcome's `claimed`, `in_flight` and
+ * `retry_after_failure` and WorkOutcome's `in_progress` all land. Listing it
+ * here would have claimed the workspace invents a state that the ledger and the
+ * staff-work adapter both already record.
  */
-export const FORM_ONLY_STATES: readonly ActionLifecycleState[] = ['draft', 'executing']
+export const FORM_ONLY_STATES: readonly ActionLifecycleState[] = ['draft']
 
 export type RetryAdvice = 'safe' | 'unsafe' | 'not_applicable'
 export type LifecycleTone =
