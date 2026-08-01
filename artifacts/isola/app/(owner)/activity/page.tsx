@@ -24,7 +24,7 @@ import { getSession } from "@/lib/session"
 import { requireWorkspaceAccess } from "@/lib/workspace/authz"
 import { WorkspaceAccessDenied } from "@/components/workspace/access-denied"
 import { RecentWork } from "@/components/activity/recent-work"
-import { RecentWorkLoading } from "@/components/activity/recent-work-view"
+import { RecentWorkLoading, RecentWorkShell } from "@/components/activity/recent-work-view"
 
 export const revalidate = 0
 
@@ -45,14 +45,30 @@ export const revalidate = 0
  * content streams in behind it. The guard is not weakened by this: nothing the
  * guard protects renders until it resolves. It just stops being the reason the
  * screen is empty.
+ *
+ * THE HEADING AND THE LANDMARK ID LIVE OUT HERE, ABOVE THE BOUNDARY.
+ *
+ * They used to live in BOTH the fallback and the resolved content, so while the
+ * boundary was streaming the document held two elements with id="recent-work",
+ * two with id="recent-work-title" and two h1s. React reveals a boundary by
+ * inserting the resolved subtree next to the fallback and then removing the
+ * fallback, so those duplicates are in the real DOM -- an ambiguous landmark, a
+ * skip link with two targets, and two page headings for anything navigating by
+ * heading (defect-activity-duplicate-heading-and-id-while-streaming).
+ *
+ * A page heading is not a loading state: it is true before, during and after the
+ * fetch. Rendering it ONCE, outside the boundary, is what makes it stable --
+ * and it leaves the fallback free to be nothing but the skeleton.
  */
 export default function ActivityPage() {
   // useSearchParams needs a Suspense boundary above it, and the fallback is the
   // honest first paint: this list is not here yet, rather than an empty list.
   return (
-    <Suspense fallback={<RecentWorkLoading />}>
-      <GuardedRecentWork />
-    </Suspense>
+    <RecentWorkShell>
+      <Suspense fallback={<RecentWorkLoading />}>
+        <GuardedRecentWork />
+      </Suspense>
+    </RecentWorkShell>
   )
 }
 
