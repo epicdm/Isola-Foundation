@@ -17,9 +17,10 @@
  *   simply left out.
  */
 
-import { OdooApiError, OdooNoApiError, json2Call, type OdooConfig } from '@/engines/odoo'
+import { json2Call, type OdooConfig } from '@/engines/odoo'
 import { LEAD_FIELDS } from '@/lib/customer-tools/lookup'
 
+import { classifyOdooFailure } from './odoo-failure'
 import type { BundleAdapter, BundleSection, Provenance } from './context-bundle'
 
 export const CUSTOMER_SOURCES_VERSION = 'customer-sources@1' as const
@@ -48,27 +49,17 @@ export function odooCallerFor(config: OdooConfig): OdooCaller {
 /* ── failure wording ────────────────────────────────────────────────────────
  *
  * Odoo and its driver write for engineers: hostnames, database names, SQL. None
- * of that belongs on a workbench screen. These sentences say what an operator
- * needs in order to decide what to do next, and nothing else.
+ * of that belongs on a workbench screen. The sentences live in
+ * `./odoo-failure.ts`, which also decides WHICH sentence — a distinction that
+ * used to be made here and got it wrong: a transient 5xx was reported as "this
+ * Odoo plan does not expose the external API", a permanent condition, while
+ * three other reads of the same instance succeeded in the same request.
+ *
+ * The signature is unchanged so every existing caller keeps working.
  */
 
 export function sanitiseOdooFailure(err: unknown): string {
-  // Not "no data" — this Odoo plan has no external API at all. The one failure
-  // here an operator can actually act on, so it gets its own sentence.
-  if (err instanceof OdooNoApiError) {
-    return 'this Odoo plan does not expose the external API, so it cannot be read'
-  }
-  if (err instanceof OdooApiError) {
-    if (err.httpStatus === 401 || err.httpStatus === 403) return 'the source refused the read'
-    if (err.httpStatus === 404) return 'the source does not have this record type'
-    return 'the source answered with an error'
-  }
-  const raw = err instanceof Error ? err.message : String(err)
-  if (/timeout|timed out|abort/i.test(raw)) return 'the source did not answer in time'
-  if (/ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|socket|fetch failed/i.test(raw)) {
-    return 'the source could not be reached'
-  }
-  return 'the source failed to answer'
+  return classifyOdooFailure(err).message
 }
 
 /* ── row helpers ────────────────────────────────────────────────────────────*/
