@@ -26,6 +26,12 @@
  * 5. A WRITE IS DESCRIBED BEFORE IT HAPPENS. The workbench shows what will be
  *    written, to which system, under which permission, and what proof will be
  *    required, before anything is sent.
+ *
+ * 6. RETRY ADVICE IS PER STATE, NOT PER FLAG. `retryWrite: 'unsafe'` is true of
+ *    seven lifecycle states and only one of them — readback_failed — may have
+ *    written anything. Rendering the flag as a single sentence made a rejected
+ *    action warn that it might write a second time, directly under the words
+ *    "Rejected before sending". See ActionResult.
  */
 
 import type {
@@ -37,6 +43,7 @@ import type {
 import type { ActionField } from '@/lib/governed/executors/catalogue'
 import {
   LIFECYCLE_PRESENTATION,
+  mayHaveWritten,
   type ActionLifecycleState,
   type SectionState,
 } from '@/lib/customer-workspace/contract'
@@ -329,6 +336,24 @@ export function LifecycleBadge({ state }: { state: ActionLifecycleState }) {
   )
 }
 
+/**
+ * What to tell a reader about sending the same thing again.
+ *
+ * `retryWrite` alone is not enough. It is `unsafe` for validation_failed,
+ * permission_denied, approval_rejected, execution_failed, argument_conflict,
+ * executor_unavailable AND readback_failed — but only the last of those may
+ * have written anything. The others were refused before or by the system of
+ * record, with nothing written, and telling their reader "it may write a second
+ * time" contradicts the label they are reading it under.
+ */
+export function retryWriteSentence(outcome: ActionOutcomeView): string {
+  if (outcome.retryWrite === 'safe') return 'safe — nothing was written'
+  if (outcome.retryWrite !== 'unsafe') return 'not applicable'
+  return mayHaveWritten(outcome.lifecycle)
+    ? 'not safe — it may write a second time'
+    : 'not safe — but nothing was written; the same request would be refused again'
+}
+
 /* ── the workbench, before anything is sent ────────────────────────────────*/
 
 function FieldInput({
@@ -494,7 +519,17 @@ export function ActionResult({ outcome }: { outcome: ActionOutcomeView }) {
       aria-live={p.escalate ? 'assertive' : 'polite'}
     >
       <LifecycleBadge state={outcome.lifecycle} />
-      <p className="mt-1 text-sm">{outcome.detail}</p>
+
+      {/* THE CONTRACT'S SENTENCE ALWAYS. It is the one that says whether
+          anything was written, and it must not be displaced by a more specific
+          message that happens to be shorter. */}
+      <p className="mt-1 text-sm">{p.sentence}</p>
+
+      {/* The specific detail, when it adds something — a validator naming a
+          field, for instance. Beside the sentence, never instead of it. */}
+      {outcome.detail && outcome.detail !== p.sentence ? (
+        <p className="mt-1 text-sm text-muted-foreground">{outcome.detail}</p>
+      ) : null}
 
       <dl className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
         <div>
@@ -511,13 +546,7 @@ export function ActionResult({ outcome }: { outcome: ActionOutcomeView }) {
         </div>
         <div>
           <dt className="text-muted-foreground">Sending it again</dt>
-          <dd>
-            {outcome.retryWrite === 'safe'
-              ? 'safe — nothing was written'
-              : outcome.retryWrite === 'unsafe'
-                ? 'not safe — it may write a second time'
-                : 'not applicable'}
-          </dd>
+          <dd>{retryWriteSentence(outcome)}</dd>
         </div>
         {outcome.approvalRef ? (
           <div className="sm:col-span-2">
