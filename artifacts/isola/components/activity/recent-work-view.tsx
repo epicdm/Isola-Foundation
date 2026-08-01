@@ -58,8 +58,15 @@ import {
   ProblemNotice,
   SourcePanel,
 } from "./activity-panels"
-import { canLoadMore, isBusy, rowsPerSource, type FeedState } from "./feed-controller"
+import {
+  canLoadMore,
+  isBusy,
+  rowsPerSource,
+  type FeedProblem,
+  type FeedState,
+} from "./feed-controller"
 import { isFilterActive, type ActivityFilters } from "./filters"
+import { humaniseDetail } from "./parameter-detail"
 import {
   absoluteTime,
   cursorResetNotice,
@@ -175,6 +182,23 @@ export function RecentWorkLoading() {
       </Card>
     </div>
   )
+}
+
+/**
+ * The API's own sentence, in the words this screen uses.
+ *
+ * The endpoint writes its rejection details by naming the query parameter --
+ * "pageSize may not exceed 100" -- and `pageSize` is not written anywhere on
+ * this screen for a reader to go and change. The PARAMETER was already mapped
+ * through PARAMETER_LABELS and the DETAIL was not, so half the sentence was
+ * translated and half was not (defect-activity-raw-parameter-name-in-error,
+ * part 2). Both halves now go through the same table.
+ *
+ * Only the two problem kinds that carry text are touched, and a detail naming
+ * nothing this screen knows about is passed through exactly as written.
+ */
+function forDisplay(problem: FeedProblem): FeedProblem {
+  return "detail" in problem ? { ...problem, detail: humaniseDetail(problem.detail) } : problem
 }
 
 function RowSkeletons() {
@@ -316,7 +340,7 @@ export function RecentWorkView(props: RecentWorkViewProps) {
       <div aria-live="polite" className="flex flex-col gap-3">
         {state.problem ? (
           <ProblemNotice
-            problem={state.problem}
+            problem={forDisplay(state.problem)}
             hasRows={state.items.length > 0}
             onRetry={props.onRefresh}
             onClearFilters={props.onClearFilters}

@@ -18,7 +18,7 @@
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 
-import { RecentWorkLoading, RecentWorkView } from "./recent-work-view"
+import { RecentWorkLoading, RecentWorkShell, RecentWorkView } from "./recent-work-view"
 import { initialFeedState, type FeedProblem, type FeedState } from "./feed-controller"
 import { EMPTY_FILTERS, type ActivityFilters } from "./filters"
 import { ACTIVITY_SOURCE_ORDER, type ActivityFeedItem, type ActivitySourceReport } from "./types"
@@ -75,17 +75,25 @@ function state(overrides: Partial<FeedState> = {}): FeedState {
   }
 }
 
+/**
+ * The page as a reader receives it: the stable shell -- landmark, id and h1 --
+ * around whatever the feed is showing. RecentWorkShell is rendered by the route
+ * ABOVE the Suspense boundary, so the heading exists at every stage of the
+ * stream and exists exactly once.
+ */
 function render(feedState: FeedState, filters: ActivityFilters = EMPTY_FILTERS): string {
   return renderToStaticMarkup(
-    <RecentWorkView
-      state={feedState}
-      filters={filters}
-      now={NOW}
-      onRefresh={noop}
-      onLoadMore={noop}
-      onFiltersChange={noop}
-      onClearFilters={noop}
-    />,
+    <RecentWorkShell>
+      <RecentWorkView
+        state={feedState}
+        filters={filters}
+        now={NOW}
+        onRefresh={noop}
+        onLoadMore={noop}
+        onFiltersChange={noop}
+        onClearFilters={noop}
+      />
+    </RecentWorkShell>,
   )
 }
 
@@ -247,7 +255,9 @@ describe("INVALID_FILTER", () => {
     expect(html).toContain("That filter cannot be used")
     // The page's own label for it, not the API's parameter name (defect 11).
     expect(html).toContain("Records per page")
-    expect(html).toContain("pageSize may not exceed 100")
+    // ...and the API's own sentence goes through the SAME table, so the raw
+    // parameter name does not come back out on the end of it (defect 11, part 2).
+    expect(html).toContain("Records per page may not exceed 100")
     expect(html).toContain("Clear all filters")
   })
 })
