@@ -28,7 +28,35 @@ import { RecentWorkLoading } from "@/components/activity/recent-work-view"
 
 export const revalidate = 0
 
-export default async function ActivityPage() {
+/**
+ * THE PAGE COMPONENT IS SYNCHRONOUS, AND THAT IS THE POINT.
+ *
+ * It used to be `async` and to await getSession() and requireWorkspaceAccess()
+ * BEFORE returning any JSX. Under streaming SSR a segment emits nothing at all
+ * until its own component returns, so the Suspense boundary below could not
+ * help: its fallback is only reachable once the element tree containing it
+ * exists. Every navigation to /activity therefore showed the layout chrome
+ * above an empty content area for the whole duration of the guard -- a blank
+ * shell, indistinguishable from a broken page
+ * (defect-activity-blank-shell-while-loading).
+ *
+ * Moving the awaits into a child UNDER the boundary means the shell -- and with
+ * it the full-page skeleton -- is emitted on the first flush, and the guarded
+ * content streams in behind it. The guard is not weakened by this: nothing the
+ * guard protects renders until it resolves. It just stops being the reason the
+ * screen is empty.
+ */
+export default function ActivityPage() {
+  // useSearchParams needs a Suspense boundary above it, and the fallback is the
+  // honest first paint: this list is not here yet, rather than an empty list.
+  return (
+    <Suspense fallback={<RecentWorkLoading />}>
+      <GuardedRecentWork />
+    </Suspense>
+  )
+}
+
+async function GuardedRecentWork() {
   const session = await getSession()
   if (!session) redirect("/")
 
@@ -38,11 +66,5 @@ export default async function ActivityPage() {
   const guard = await requireWorkspaceAccess(session, "manager")
   if (!guard.ok) return <WorkspaceAccessDenied message={guard.error} />
 
-  // useSearchParams needs a Suspense boundary above it, and the fallback is the
-  // honest first paint: this list is not here yet, rather than an empty list.
-  return (
-    <Suspense fallback={<RecentWorkLoading />}>
-      <RecentWork />
-    </Suspense>
-  )
+  return <RecentWork />
 }
