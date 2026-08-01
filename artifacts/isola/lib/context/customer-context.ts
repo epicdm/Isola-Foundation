@@ -196,6 +196,12 @@ export interface AssembleInput {
    * second feed wearing the first one's clothes.
    */
   activity: SectionResult<readonly unknown[]> | undefined
+  /**
+   * The feed's sources that could not answer. Activity is the one section built
+   * from several upstreams, so it is the one section that can honestly be
+   * `partial`: real rows, incomplete picture.
+   */
+  activityMissing?: readonly string[]
   odooBaseUrl: string | null
   permittedActions: readonly string[]
   now: Date
@@ -220,7 +226,10 @@ export function assembleCustomerContext(input: AssembleInput): CustomerContextRe
       continue
     }
 
-    const view = viewSection(result)
+    const view = viewSection(
+      result,
+      name === 'activity' ? { missing: input.activityMissing ?? [] } : {},
+    )
     const data = result.status === 'ok' && Array.isArray(result.data) ? result.data : []
     const envelope = envelopeFrom(name, view, data, input.odooBaseUrl)
     sections[name] = envelope
