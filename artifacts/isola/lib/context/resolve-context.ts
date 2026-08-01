@@ -138,11 +138,33 @@ export interface ResolveContextPorts {
  * Action catalogue, strictly nested. A manager may do everything staff may do; an
  * owner everything a manager may. Nesting is asserted by a test, so a future edit
  * cannot quietly give staff an owner-only action.
+ *
+ * THESE NAMES MUST BE THE EXECUTORS' NAMES.
+ * ----------------------------------------
+ * This list says what a role is PERMITTED to do; `lib/governed/executors` says
+ * what can actually be DONE, and `runGovernedAction` looks an action up by the
+ * name registered there. A name in one list and not the other is not a harmless
+ * mismatch — it is either a button whose only possible outcome is a refusal
+ * (permitted here, no executor) or an implemented action nobody can reach
+ * (registered there, never permitted). Both happened:
+ *
+ *   `note.add` was permitted here and the executor is `note.create`, so every
+ *   proposal returned VALIDATION_FAILED, "no executor declared for note.add".
+ *
+ *   `activity.schedule` has had a working executor and appeared in no role's
+ *   list, so it was unreachable.
+ *
+ * `lib/governed/executors/catalogue.test.ts` now asserts the two agree, for
+ * every role, in both directions. `customer.lookup`, `task.reassign`,
+ * `business_field.update` and `approval.override` are deliberately here without
+ * executors: they are permissions this resolver grants, not writes the governed
+ * runtime performs, and the catalogue test scopes itself to the six that are.
  */
 const STAFF_ACTIONS = [
   'customer.lookup',
-  'note.add',
+  'note.create',
   'task.create',
+  'activity.schedule',
   'followup.schedule',
 ] as const
 const MANAGER_ACTIONS = [...STAFF_ACTIONS, 'lead.create', 'lead.update', 'task.reassign'] as const
