@@ -6,12 +6,29 @@
  * build a FeedState, render this with renderToStaticMarkup, and assert the HTML
  * a reader would actually be sent.
  *
+ * THREE COMPONENTS, ONE PAGE
+ * --------------------------
+ * RecentWorkShell is the part that is true whatever the feed is doing: the
+ * landmark, its id, and the page heading. It is rendered ONCE, ABOVE the
+ * Suspense boundary.
+ *
+ * RecentWorkLoading is the fallback and is now ONLY the skeleton. It carries no
+ * id="recent-work" and no h1, because the shell above it already does. When both
+ * of them carried the heading and the id, the streamed document held two of each
+ * at once -- React reveals a boundary by inserting the resolved subtree beside
+ * the fallback before removing it -- which is an ambiguous landmark, a skip link
+ * with two targets and two page headings
+ * (defect-activity-duplicate-heading-and-id-while-streaming).
+ *
+ * RecentWorkView is the resolved content and likewise renders neither.
+ *
  * LANDMARKS
  * ---------
- * The root is a SECTION, not a MAIN. components/ui/sidebar.tsx already renders
- * the pages one and only main landmark through SidebarInset, and a second main
- * makes the first meaningless to anything navigating by landmark. It carries a
- * stable id so a skip link can reach the records rather than the page top.
+ * The shell's root is a SECTION, not a MAIN. components/ui/sidebar.tsx already
+ * renders the pages one and only main landmark through SidebarInset, and a
+ * second main makes the first meaningless to anything navigating by landmark. It
+ * carries a stable id so a skip link can reach the records rather than the page
+ * top.
  *
  * WHAT IS ANNOUNCED
  * -----------------
@@ -67,6 +84,41 @@ export interface RecentWorkViewProps {
 }
 
 /**
+ * The stable page frame: the landmark, its id, and the one h1.
+ *
+ * A SECTION, and it must end up INSIDE the page's one <main>. SidebarInset
+ * (components/ui/sidebar.tsx) renders that <main>, and the (owner) layout puts
+ * this route's children inside it. Rendering a second <main> here would make
+ * "skip to main content" ambiguous, and rendering this as a sibling of it would
+ * make that link land on chrome with no feed under it. The id is a stable target
+ * for the landmark tests and for any skip link that wants to reach the records
+ * themselves rather than the top of the page.
+ *
+ * Nothing in here depends on the feed, which is exactly why it sits above the
+ * Suspense boundary: the title of the page is not a loading state.
+ */
+export function RecentWorkShell({ children }: { children: React.ReactNode }) {
+  return (
+    <section
+      id="recent-work"
+      aria-labelledby="recent-work-title"
+      className="flex w-full min-w-0 flex-col gap-6"
+    >
+      <header className="flex min-w-0 flex-col gap-1">
+        <h1 id="recent-work-title" className="text-2xl font-semibold tracking-tight">
+          Recent Work
+        </h1>
+        <p className="max-w-prose text-sm text-muted-foreground">
+          One list of what your team, your assistants and your connected systems have done, newest
+          first, with the system every record came from.
+        </p>
+      </header>
+      {children}
+    </section>
+  )
+}
+
+/**
  * The Suspense fallback, and the shape of the first paint.
  *
  * THIS IS THE WHOLE PAGE IN OUTLINE, NOT THREE GREY BARS.
@@ -76,31 +128,30 @@ export interface RecentWorkViewProps {
  * the entire wait. A stub that showed a heading-shaped bar and one block read
  * as a broken or empty page, which is exactly what a reader reported after
  * staring at it (defect-activity-blank-shell-while-loading). The skeleton now
- * has the same landmarks and the same sections as the loaded page: the reader
- * can see a list is coming, where it will be, and roughly how much of it.
+ * has the same sections as the loaded page: the reader can see a list is
+ * coming, where it will be, and roughly how much of it.
+ *
+ * WHAT IT DELIBERATELY DOES NOT RENDER: id="recent-work", and any h1. The shell
+ * above the boundary owns both, and duplicating them here is what put two
+ * landmarks and two page headings in the streamed document at once.
  *
  * aria-busy on the container, and no motion for a reader who asked for none.
  */
 export function RecentWorkLoading() {
   return (
-    <section
-      id="recent-work"
+    <div
       data-activity-feed="loading"
-      aria-labelledby="recent-work-title"
       aria-busy="true"
       className="flex w-full min-w-0 flex-col gap-6"
     >
-      <header className="flex flex-col gap-3">
-        <h1 id="recent-work-title" className="text-2xl font-semibold tracking-tight">
-          Recent Work
-        </h1>
+      <div className="flex flex-col gap-3">
         {/* Said in words as well as shape. A skeleton communicates nothing to a
             screen reader, and "loading" is the one thing this state means. */}
         <p role="status" aria-live="polite" className="text-sm text-muted-foreground">
           Loading your recent work. Nothing is missing yet.
         </p>
         <Skeleton className="h-4 w-full max-w-prose motion-reduce:animate-none" />
-      </header>
+      </div>
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {[0, 1, 2, 3].map((index) => (
@@ -122,7 +173,7 @@ export function RecentWorkLoading() {
           <RowSkeletons />
         </CardContent>
       </Card>
-    </section>
+    </div>
   )
 }
 
@@ -189,47 +240,14 @@ export function RecentWorkView(props: RecentWorkViewProps) {
 
   return (
     /**
-     * A SECTION, and it must end up INSIDE the page's one <main>.
+     * A DIV, not a second section with the page's id on it.
      *
-     * SidebarInset (components/ui/sidebar.tsx) renders that <main>, and the
-     * (owner) layout puts this route's children inside it. Rendering a second
-     * <main> here would make "skip to main content" ambiguous, and rendering
-     * this as a sibling of it would make that link land on chrome with no feed
-     * under it. The id is a stable target for the landmark tests and for any
-     * skip link that wants to reach the records themselves rather than the
-     * top of the page.
+     * RecentWorkShell owns the landmark, its id and the heading, and renders
+     * them above the Suspense boundary so exactly one of each exists at every
+     * stage of the stream. What is left here is the feed itself.
      */
-    <section
-      id="recent-work"
-      data-activity-feed="ready"
-      aria-labelledby="recent-work-title"
-      className="flex w-full min-w-0 flex-col gap-6"
-    >
-      <header className="flex flex-col gap-3">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h1 id="recent-work-title" className="text-2xl font-semibold tracking-tight">
-              Recent Work
-            </h1>
-            <p className="max-w-prose text-sm text-muted-foreground">
-              One list of what your team, your assistants and your connected systems have done,
-              newest first, with the system every record came from.
-            </p>
-          </div>
-          <Button
-            type="button"
-            onClick={props.onRefresh}
-            disabled={busy}
-            className="min-h-11 focus-visible:ring-2 motion-reduce:transition-none"
-          >
-            <RefreshCw
-              className={busy ? "size-4 animate-spin motion-reduce:animate-none" : "size-4"}
-              aria-hidden="true"
-            />
-            {busy ? "Refreshing" : "Refresh"}
-          </Button>
-        </div>
-
+    <div data-activity-feed="ready" className="flex w-full min-w-0 flex-col gap-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         {/* The honest header line: what state this list is in, when the API built
             it, and when WE last got a good answer. Those last two are different
             questions and a screen that shows only one of them cannot tell a
@@ -237,7 +255,7 @@ export function RecentWorkView(props: RecentWorkViewProps) {
         <div
           role="status"
           aria-live="polite"
-          className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground"
+          className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground"
         >
           <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
             {notice.tone === "warning" ? (
@@ -259,7 +277,20 @@ export function RecentWorkView(props: RecentWorkViewProps) {
               : "No successful refresh yet"}
           </span>
         </div>
-      </header>
+
+        <Button
+          type="button"
+          onClick={props.onRefresh}
+          disabled={busy}
+          className="min-h-11 focus-visible:ring-2 motion-reduce:transition-none"
+        >
+          <RefreshCw
+            className={busy ? "size-4 animate-spin motion-reduce:animate-none" : "size-4"}
+            aria-hidden="true"
+          />
+          {busy ? "Refreshing" : "Refresh"}
+        </Button>
+      </div>
 
       <section aria-labelledby="activity-filters-title" className="flex flex-col gap-3">
         <h2 id="activity-filters-title" className="text-sm font-semibold">
@@ -422,6 +453,6 @@ export function RecentWorkView(props: RecentWorkViewProps) {
           <p className="text-xs text-muted-foreground">That is the end of the list.</p>
         ) : null}
       </section>
-    </section>
+    </div>
   )
 }
