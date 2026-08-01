@@ -29,8 +29,10 @@ import {
   OWNERSHIP_OPTIONS,
   SOURCE_OPTIONS,
   STATUS_OPTIONS,
+  CURSOR_RESET_TITLE,
   absoluteTime,
   notLoadedSourceStatus,
+  parameterLabel,
   sourceDescription,
   sourceLabel,
   sourceStatus,
@@ -173,7 +175,7 @@ export function ProblemNotice({
       size="sm"
       onClick={onRetry}
       disabled={busy}
-      className="min-h-11 w-fit"
+      className="min-h-11 w-fit focus-visible:ring-2"
     >
       {busy ? "Trying again..." : "Try again"}
     </Button>
@@ -230,17 +232,20 @@ export function ProblemNotice({
         "That filter cannot be used",
         <>
           {/* Naming the parameter matters: a reader who filtered wrongly and is
-              shown a bare empty list will believe the empty list. */}
+              shown a bare empty list will believe the empty list. It is named in
+              the words the CONTROL uses, not the API's: "pageSize" is not on
+              this screen anywhere, so a reader told that "pageSize" was refused
+              has nothing to go and change. */}
           <p>
-            The filter <span className="font-medium">{problem.parameter}</span> was refused:{" "}
-            {problem.detail}
+            The filter <span className="font-medium">{parameterLabel(problem.parameter)}</span> was
+            refused: {problem.detail}
           </p>
           <Button
             type="button"
             variant="outline"
             size="sm"
             onClick={onClearFilters}
-            className="min-h-11 w-fit"
+            className="min-h-11 w-fit focus-visible:ring-2"
           >
             Clear all filters
           </Button>
@@ -251,7 +256,7 @@ export function ProblemNotice({
       return shell(
         "default",
         Info,
-        "Back to the first page",
+        CURSOR_RESET_TITLE,
         <p>
           The place this list had reached is no longer valid, so it has started again from the most
           recent records. Nothing was skipped.
@@ -275,10 +280,95 @@ export function ProblemNotice({
   }
 }
 
+// ── the refused-cursor notice ──
+
+/**
+ * Shown when a cursor was REFUSED and page one was fetched instead.
+ *
+ * This is not the same as ProblemNotice's invalid_cursor branch. That branch
+ * only renders while the problem is still current; the recovery SUCCEEDS, which
+ * clears the problem and left the screen with nothing to show for a request the
+ * server had rejected. State carries `cursorWasReset` precisely so the
+ * successful recovery can still be reported, and this is what reports it.
+ *
+ * The wording has three jobs, in this order: say the position was not valid,
+ * say we are back at the first page, and say nothing was skipped. A reader who
+ * is only told the last of those cannot tell whether anything happened at all.
+ */
+export function CursorResetNotice() {
+  return (
+    <Alert role="status" aria-live="polite">
+      <Info className="size-4" aria-hidden="true" />
+      <AlertTitle>{CURSOR_RESET_TITLE}</AlertTitle>
+      <AlertDescription className="flex flex-col gap-2">
+        <p>
+          The page position in the address was not valid, so the server refused it. This list has
+          started again from the most recent records. Nothing was skipped.
+        </p>
+      </AlertDescription>
+    </Alert>
+  )
+}
+
+// ── the ignored-parameters notice ──
+
+export interface IgnoredParamsNoticeProps {
+  params: readonly string[]
+  onClear(): void
+}
+
+/**
+ * Shown when the address bar carries parameters this page does not implement.
+ *
+ * The page builds its API query from a fixed list of keys, so an extra one is
+ * dropped on the way out and never reaches the server that would have refused
+ * it. That is a quiet disagreement between a link and the list it produces, and
+ * the reader is the only one who can resolve it -- so they are told which
+ * parameter was ignored and offered a one-press way to drop it from the address.
+ */
+export function IgnoredParamsNotice({ params, onClear }: IgnoredParamsNoticeProps) {
+  if (params.length === 0) return null
+  return (
+    <Alert role="status" aria-live="polite">
+      <Info className="size-4" aria-hidden="true" />
+      <AlertTitle>Part of this address was ignored</AlertTitle>
+      <AlertDescription className="flex flex-col gap-2">
+        <p>
+          {params.length === 1
+            ? "This list does not use the parameter "
+            : "This list does not use the parameters "}
+          <span className="break-words font-medium">{params.join(", ")}</span>
+          {params.length === 1
+            ? ", so it was ignored. Everything below answers the rest of the address."
+            : ", so they were ignored. Everything below answers the rest of the address."}
+        </p>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={onClear}
+          className="min-h-11 w-fit focus-visible:ring-2"
+        >
+          Remove it from the address
+        </Button>
+      </AlertDescription>
+    </Alert>
+  )
+}
+
 // ── filter bar ──
 
+/**
+ * focus-visible:ring-2, not ring-1.
+ *
+ * These controls set outline-none, so the ring IS the focus indicator, and at
+ * ring-1 it rendered as a 1px box-shadow -- under the 2px minimum thickness
+ * WCAG 2.4.11 asks of a focus appearance, and easy to lose against the border
+ * it sits on (defect-activity-1px-focus-ring). Removing the outline is only
+ * defensible when what replaces it is at least as visible.
+ */
 const CONTROL_CLASS =
-  "min-h-11 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
+  "min-h-11 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
 
 function SelectField(props: {
   id: string
@@ -288,6 +378,24 @@ function SelectField(props: {
   options: readonly { value: string; label: string }[]
   onChange(value: string): void
 }) {
+  // A SELECT CANNOT DISPLAY A VALUE IT HAS NO OPTION FOR.
+  //
+  // The URL is the source of truth for every filter, and the API accepts values
+  // this list does not offer: `?pageSize=5` returns five rows, but 5 is not one
+  // of 10/25/50/100, so the control fell back to its first option and read
+  // "25 (default)" beside a five-row list
+  // (defect-activity-pagesize-not-reflected). The reader is then told something
+  // false about the list they are looking at, and cannot see what to change.
+  //
+  // So the current value is added as an option when the list is missing it. The
+  // fix is here rather than in the page-size field alone because every select on
+  // this screen reads from the same URL and has the same hole.
+  const known = props.options.some((option) => option.value === props.value)
+  const options =
+    props.value && !known
+      ? [{ value: props.value, label: props.value + " (from the address)" }, ...props.options]
+      : props.options
+
   return (
     <div className="flex min-w-0 flex-col gap-1.5">
       <Label htmlFor={props.id} className="text-xs">
@@ -301,7 +409,7 @@ function SelectField(props: {
         onChange={(event) => props.onChange(event.target.value)}
       >
         <option value="">{props.placeholder}</option>
-        {props.options.map((option) => (
+        {options.map((option) => (
           <option key={option.value} value={option.value}>
             {option.label}
           </option>
@@ -329,7 +437,10 @@ function TextField(props: {
         id={props.id}
         name={props.id}
         type={props.type ?? "text"}
-        className="min-h-11"
+        // ring-2 overrides the Input primitive's ring-1 through tailwind-merge.
+        // Scoped to this screen rather than changed app-wide, which is a larger
+        // decision than this defect.
+        className="min-h-11 focus-visible:ring-2"
         value={props.value}
         aria-describedby={hintId}
         onChange={(event) => props.onChange(event.target.value)}
@@ -361,7 +472,7 @@ export function FilterBar({ filters, onChange, onClear, showClear }: FilterBarPr
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <SelectField
           id="activity-filter-source"
-          label="System"
+          label={parameterLabel("source")}
           placeholder="All systems"
           value={filters.source[0] ?? ""}
           options={SOURCE_OPTIONS}
@@ -369,7 +480,7 @@ export function FilterBar({ filters, onChange, onClear, showClear }: FilterBarPr
         />
         <SelectField
           id="activity-filter-family"
-          label="Kind of record"
+          label={parameterLabel("eventFamily")}
           placeholder="All kinds"
           value={filters.eventFamily[0] ?? ""}
           options={EVENT_FAMILY_OPTIONS}
@@ -377,7 +488,7 @@ export function FilterBar({ filters, onChange, onClear, showClear }: FilterBarPr
         />
         <SelectField
           id="activity-filter-ownership"
-          label="Who was handling it"
+          label={parameterLabel("ownershipState")}
           placeholder="Anyone"
           value={filters.ownershipState[0] ?? ""}
           options={OWNERSHIP_OPTIONS}
@@ -385,7 +496,7 @@ export function FilterBar({ filters, onChange, onClear, showClear }: FilterBarPr
         />
         <SelectField
           id="activity-filter-status"
-          label="Status"
+          label={parameterLabel("status")}
           placeholder="Any status"
           value={filters.status[0] ?? ""}
           options={STATUS_OPTIONS}
@@ -393,28 +504,28 @@ export function FilterBar({ filters, onChange, onClear, showClear }: FilterBarPr
         />
         <TextField
           id="activity-filter-from"
-          label="From"
+          label={parameterLabel("occurredFrom")}
           type="date"
           value={filters.occurredFrom}
           onChange={(value) => scalar("occurredFrom", value)}
         />
         <TextField
           id="activity-filter-to"
-          label="To"
+          label={parameterLabel("occurredTo")}
           type="date"
           value={filters.occurredTo}
           onChange={(value) => scalar("occurredTo", value)}
         />
         <TextField
           id="activity-filter-customer"
-          label="Customer reference"
+          label={parameterLabel("customer")}
           hint="The exact customer reference. This is not a name search."
           value={filters.customer}
           onChange={(value) => scalar("customer", value)}
         />
         <TextField
           id="activity-filter-actor"
-          label="Person or assistant reference"
+          label={parameterLabel("actor")}
           hint="The exact actor reference. This is not a name search."
           value={filters.actor}
           onChange={(value) => scalar("actor", value)}
@@ -425,7 +536,7 @@ export function FilterBar({ filters, onChange, onClear, showClear }: FilterBarPr
         <div className="w-full sm:w-48">
           <SelectField
             id="activity-filter-page-size"
-            label="Records per page"
+            label={parameterLabel("pageSize")}
             placeholder="25 (default)"
             value={filters.pageSize}
             options={[
@@ -438,7 +549,12 @@ export function FilterBar({ filters, onChange, onClear, showClear }: FilterBarPr
           />
         </div>
         {showClear ? (
-          <Button type="button" variant="outline" onClick={onClear} className="min-h-11">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={onClear}
+            className="min-h-11 focus-visible:ring-2"
+          >
             Clear all filters
           </Button>
         ) : null}
