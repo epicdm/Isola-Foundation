@@ -81,16 +81,59 @@ export function StatusChip({ status }: { status: StatusPresentation }) {
 }
 
 /**
+ * THE ONE DOOR INTO THE CUSTOMER 360 WORKSPACE.
+ *
+ * There is no customer index page and no navigation entry, deliberately: a
+ * second way in would make two routes authoritative for the same thing, which
+ * is the invariant the Recent Work routes already hold.
+ *
+ * The id is checked against the SAME shape the context route accepts before a
+ * link is offered. A link built from an id that route would refuse is a link
+ * that lands on our own "not found", which reads to the reader as a deleted
+ * customer rather than as a reference we never understood.
+ *
+ * This is an internal route, not a native deep link, so it is not subject to
+ * the constructed-href rule below — /customer/<id> enforces its own session,
+ * role and tenant guards, and a reader who may not see the customer gets the
+ * same refusal there whether or not this link existed.
+ */
+const CUSTOMER_REFERENCE = /^[1-9]\d{0,17}$/
+
+export function customerHref(customerId: string | null): string | null {
+  if (!customerId || !CUSTOMER_REFERENCE.test(customerId)) return null
+  return `/customer/${customerId}`
+}
+
+/**
  * One field. `title` carries the full value when the visible text is a
  * shortened form of it -- the identifier is abbreviated for reading, never
  * withheld, so a reader who needs the whole reference can still get it.
  */
-function Meta({ term, value, title }: { term: string; value: string; title?: string | null }) {
+function Meta({
+  term,
+  value,
+  title,
+  href,
+}: {
+  term: string
+  value: string
+  title?: string | null
+  href?: string | null
+}) {
   return (
     <div className="flex min-w-0 flex-wrap items-baseline gap-1">
       <dt className="font-medium text-foreground/70">{term}</dt>
       <dd className="min-w-0 break-words" title={title ?? undefined}>
-        {value}
+        {href ? (
+          <a
+            href={href}
+            className="underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          >
+            {value}
+          </a>
+        ) : (
+          value
+        )}
       </dd>
     </div>
   )
@@ -143,7 +186,9 @@ export function ActivityRow({ item, now }: ActivityRowProps) {
           <Meta term="From" value={sourceLabel(item.provenance?.source ?? item.sourceSystem)} />
           <Meta term="Kind" value={familyLabel(item.eventType)} />
           <Meta term="Who" value={actor.text} title={actor.title} />
-          {item.customerLabel ? <Meta term="Customer" value={item.customerLabel} /> : null}
+          {item.customerLabel ? (
+            <Meta term="Customer" value={item.customerLabel} href={customerHref(item.customerId)} />
+          ) : null}
           {related ? <Meta term="Related to" value={related.text} title={related.title} /> : null}
           {ownership ? <Meta term="Ownership" value={ownership} /> : null}
           <Meta term="Freshness" value={freshnessLabel(item.freshness)} />
