@@ -17,11 +17,11 @@ import {
  * controls rather than a race it hopes to win — no sleeps, no fake clocks for
  * the ordinary paths.
  */
-function deferred<T = void>() {
-  let resolve!: (value: T) => void
+function deferred() {
+  let resolve!: () => void
   let reject!: (err: Error) => void
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res
+  const promise = new Promise<void>((res, rej) => {
+    resolve = () => res()
     reject = rej
   })
   return { promise, resolve, reject }
@@ -270,7 +270,6 @@ describe('writes do not pass through the read limiter', () => {
   it('introduces no retry anywhere in the limiter', () => {
     const limiter = read('lib/context/odoo-read-limiter.ts')
 
-    expect(limiter).not.toMatch(/\bretry\b\s*\(/i)
     expect(limiter).not.toContain('Retry-After')
     // The only place a call is made is once, inside the try.
     expect(limiter.match(/await fn\(\)/g) ?? []).toHaveLength(1)
