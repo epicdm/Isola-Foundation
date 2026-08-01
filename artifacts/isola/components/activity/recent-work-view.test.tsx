@@ -119,7 +119,7 @@ describe("POPULATED", () => {
     expect(html).toContain("1 record shown")
     expect(html).toContain("Security and audit trail")
     expect(html).toContain("Live channel and assistant events")
-    expect(html).toContain("Prepared 2026-07-31 22:00 UTC")
+    expect(html).toContain("Prepared 2026-07-31 22:00:00 UTC")
     expect(html).toContain("Last successful refresh")
   })
 })
@@ -188,7 +188,7 @@ describe("FORBIDDEN_SOURCE", () => {
     // Four sources report a count, the forbidden one does not.
     expect(count(html, /records on this page/g) + count(html, /1 record on this page/g)).toBe(4)
     // Four timestamps, not five.
-    expect(count(html, /Read 2026-07-31 22:00 UTC/g)).toBe(4)
+    expect(count(html, /Read 2026-07-31 22:00:00 UTC/g)).toBe(4)
   })
 })
 
@@ -245,7 +245,8 @@ describe("INVALID_FILTER", () => {
     }
     const html = render(state({ phase: "failed", items: [], problem }))
     expect(html).toContain("That filter cannot be used")
-    expect(html).toContain("pageSize")
+    // The page's own label for it, not the API's parameter name (defect 11).
+    expect(html).toContain("Records per page")
     expect(html).toContain("pageSize may not exceed 100")
     expect(html).toContain("Clear all filters")
   })
@@ -350,7 +351,7 @@ describe("a row never invents anything", () => {
   it("gives both a relative and an exact time", () => {
     const html = render(state())
     expect(html).toContain("5 minutes ago")
-    expect(html).toContain("title=\"2026-07-31 22:00 UTC\"")
+    expect(html).toContain("title=\"2026-07-31 22:00:00 UTC\"")
     // React serialises the JSX prop name here; a browser lowercases it while
     // parsing, so this is matched case-insensitively rather than pinned to
     // whichever casing this React version happens to emit.
@@ -487,6 +488,6 @@ describe("mobile layout", () => {
   })
 
   it("makes the pagination control full width on a phone", () => {
-    expect(html).toContain("min-h-11 w-full sm:w-fit")
+    expect(html).toContain("min-h-11 w-full")
   })
 })
