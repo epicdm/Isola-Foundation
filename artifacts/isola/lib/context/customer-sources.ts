@@ -21,6 +21,7 @@ import { json2Call, type OdooConfig } from '@/engines/odoo'
 import { LEAD_FIELDS } from '@/lib/customer-tools/lookup'
 
 import { classifyOdooFailure } from './odoo-failure'
+import { limitOdooReads, normaliseInstanceKey } from './odoo-read-limiter'
 import type { BundleAdapter, BundleSection, Provenance } from './context-bundle'
 
 export const CUSTOMER_SOURCES_VERSION = 'customer-sources@1' as const
@@ -42,8 +43,28 @@ export type OdooCaller = (
   params: Record<string, unknown>,
 ) => Promise<unknown>
 
+/**
+ * The one door every bounded Customer 360 read goes through — which is why the
+ * per-instance concurrency limit belongs here and nowhere else.
+ *
+ * `buildContextBundle` fans its adapters out with `Promise.all`, so four Odoo
+ * reads used to leave together and production returned HTTP 429 for one of them
+ * while the other three succeeded. `limitOdooReads` keys on the instance URL,
+ * so reads to one Odoo queue behind each other and reads to a DIFFERENT Odoo —
+ * another tenant's — are entirely unaffected.
+ *
+ * WRITES DO NOT PASS THROUGH HERE. `lib/governed/executors/odoo-record-system.ts`
+ * builds its own caller straight onto `json2Call`. That is deliberate and is
+ * left alone: a governed write is a single deliberate act, not a fan-out, and
+ * putting it behind a read queue would make a staff member wait on a page
+ * refresh to record a note.
+ */
 export function odooCallerFor(config: OdooConfig): OdooCaller {
-  return (model, method, params) => json2Call(config, model, method, params, ODOO_READ_TIMEOUT_MS)
+  const instanceKey = normaliseInstanceKey(config.url)
+  return (model, method, params) =>
+    limitOdooReads(instanceKey, () =>
+      json2Call(config, model, method, params, ODOO_READ_TIMEOUT_MS),
+    )
 }
 
 /* ── failure wording ────────────────────────────────────────────────────────
