@@ -116,6 +116,7 @@ const SOURCE_LABELS: Readonly<Record<string, string>> = {
   staff_work_action: "Work your team recorded",
   conversation_ownership: "Conversation handovers",
   lane2: "Live channel and assistant events",
+  customer_tool_operation: "Governed customer actions",
 }
 
 const SOURCE_DESCRIPTIONS: Readonly<Record<string, string>> = {
@@ -125,6 +126,8 @@ const SOURCE_DESCRIPTIONS: Readonly<Record<string, string>> = {
   conversation_ownership:
     "When a person took a conversation over from the assistant, and when it went back.",
   lane2: "Messages, channel health and assistant activity as they arrive.",
+  customer_tool_operation:
+    "Actions taken against a specific customer through the governed workbench, with whatever the system could confirm about the result.",
 }
 
 export function sourceLabel(source: string): string {
