@@ -19,12 +19,32 @@
  *
  * Every read is tenant-scoped at the delegate. The tenant id comes from the
  * SESSION, never from the query string.
+ *
+ * HOW MANY ROWS EACH SOURCE IS ASKED FOR
+ * --------------------------------------
+ * `lib/activity/source-query.ts` holds the rules and the reasoning: ordering,
+ * cursor and date range go into the query, and a source is asked for
+ * `pageSize + 1` rows instead of a flat 500 — except when the query carries a
+ * filter that is only decidable after projection, where the read stays wide so
+ * a page cannot come back short.
+ *
+ * ORDERING BY `created_at` IS ONLY VALID WHERE `created_at` IS `occurredAt`.
+ * It is, for the audit trail, staff work and ownership transitions. It is NOT
+ * for approvals: `projectApprovalRequest` reports the DECISION time
+ * (`decided_at ?? consumed_at`) for anything already decided, so a request
+ * created last month and approved a minute ago belongs at the top of the feed
+ * and is nowhere near the top by `created_at`. Taking `pageSize + 1` newest-by-
+ * created_at rows would silently drop it, and Prisma cannot order by that
+ * coalesce without raw SQL. The approvals read is therefore deliberately left
+ * exactly as it was — the one source still reading a bounded 500 — and says so
+ * here rather than being quietly wrong.
  */
 
 import { createPrismaProjectionStore } from '@/lib/events/projection-store'
 import { prisma } from '@/lib/prisma'
 
-import type { ActivitySource } from './feed'
+import type { ActivitySource, ResolvedQuery } from './feed'
+import { pagedFindManyArgs, SOURCE_ROW_LIMIT, type SourceColumns } from './source-query'
 import { createApprovalRequestSource, type ApprovalRequestRow } from './sources/approval-request'
 import { createAuditLogSource, type AuditLogRow } from './sources/audit-log'
 import {
@@ -45,8 +65,21 @@ export const ACTIVITY_SOURCE_NAMES = [
 ] as const
 export type ActivitySourceName = (typeof ACTIVITY_SOURCE_NAMES)[number]
 
-/** How many rows one source may contribute to a single feed read. */
-export const SOURCE_ROW_LIMIT = 500
+/** Re-exported so callers keep one name for the bounded-read ceiling. */
+export { SOURCE_ROW_LIMIT }
+
+/**
+ * The `activityId` prefix each adapter stamps onto its primary key. The cursor
+ * is `{ occurredAt, activityId }`, so translating it into a WHERE clause means
+ * knowing which part of it belongs to this source.
+ */
+export const SOURCE_ID_PREFIX: Readonly<Record<string, string>> = {
+  audit_log: 'audit',
+  approval_request: 'approval',
+  staff_work_action: 'staffwork',
+  conversation_ownership: 'ownership',
+  lane2: 'lane2',
+}
 
 /**
  * The narrow slice of a Prisma model delegate this module uses. Narrow on
@@ -105,8 +138,47 @@ export function tenantScopedFindManyArgs(tenantId: string) {
   }
 }
 
-function reader<Row>(delegate: ActivityDelegate, tenantId: string): () => Promise<Row[]> {
-  return async () => (await delegate.findMany(tenantScopedFindManyArgs(tenantId))) as Row[]
+/** These three sources project `created_at` as `occurredAt` and `id` as the id. */
+function columnsFor(name: string): SourceColumns {
+  return { time: 'created_at', id: 'id', idPrefix: SOURCE_ID_PREFIX[name] ?? name }
+}
+
+/**
+ * A source excluded by `?source=` can contribute nothing, so it is not asked.
+ * Every adapter here stamps its own name as the row's `sourceSystem`, which is
+ * what `matchesQuery` compares against — this is the whole-source question,
+ * answered before a query is issued rather than after 500 rows come back.
+ */
+export function excludedBySourceFilter(query: ResolvedQuery, name: string): boolean {
+  return Boolean(query.sourceSystems?.length && !query.sourceSystems.includes(name))
+}
+
+function reader<Row>(
+  delegate: ActivityDelegate,
+  tenantId: string,
+  name: string,
+): (query: ResolvedQuery) => Promise<Row[]> {
+  const columns = columnsFor(name)
+  return async (query: ResolvedQuery) => {
+    if (excludedBySourceFilter(query, name)) return []
+    return (await delegate.findMany(pagedFindManyArgs(tenantId, query, columns))) as Row[]
+  }
+}
+
+/**
+ * The approvals read, which cannot be ordered or cut in SQL. See the note at
+ * the top of the file: `occurredAt` for an approval is the decision time, and
+ * `created_at` is not it.
+ */
+function wideReader<Row>(
+  delegate: ActivityDelegate,
+  tenantId: string,
+  name: string,
+): (query: ResolvedQuery) => Promise<Row[]> {
+  return async (query: ResolvedQuery) => {
+    if (excludedBySourceFilter(query, name)) return []
+    return (await delegate.findMany(tenantScopedFindManyArgs(tenantId))) as Row[]
+  }
 }
 
 export function buildActivitySources(
@@ -118,8 +190,8 @@ export function buildActivitySources(
 
   // Not a ternary over the RESULT of a read — a ternary over whether the read
   // happens at all. The delegate is unreachable when the gate is closed.
-  const auditList: () => Promise<AuditLogRow[]> = config.canViewAudit
-    ? reader<AuditLogRow>(deps.auditLog, tenantId)
+  const auditList: (query: ResolvedQuery) => Promise<AuditLogRow[]> = config.canViewAudit
+    ? reader<AuditLogRow>(deps.auditLog, tenantId, 'audit_log')
     : async () => {
         throw new SourceForbidden('audit records are not available to this session')
       }
@@ -127,16 +199,20 @@ export function buildActivitySources(
   return [
     createAuditLogSource({ list: auditList, now }),
     createApprovalRequestSource({
-      list: reader<ApprovalRequestRow>(deps.approvalRequest, tenantId),
+      list: wideReader<ApprovalRequestRow>(deps.approvalRequest, tenantId, 'approval_request'),
       now,
     }),
     createStaffWorkActionSource({
-      list: reader<StaffWorkActionRow>(deps.staffWorkAction, tenantId),
+      list: reader<StaffWorkActionRow>(deps.staffWorkAction, tenantId, 'staff_work_action'),
       now,
       odooBaseUrl: config.odooBaseUrl,
     }),
     createOwnershipSource({
-      list: reader<OwnershipTransitionRow>(deps.conversationOwnership, tenantId),
+      list: reader<OwnershipTransitionRow>(
+        deps.conversationOwnership,
+        tenantId,
+        'conversation_ownership',
+      ),
       now,
       chatwootBaseUrl: config.chatwootBaseUrl,
     }),
