@@ -10,7 +10,8 @@
  * ---------
  * The root is a SECTION, not a MAIN. components/ui/sidebar.tsx already renders
  * the pages one and only main landmark through SidebarInset, and a second main
- * makes the first meaningless to anything navigating by landmark.
+ * makes the first meaningless to anything navigating by landmark. It carries a
+ * stable id so a skip link can reach the records rather than the page top.
  *
  * WHAT IS ANNOUNCED
  * -----------------
@@ -33,10 +34,23 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 
 import { ActivityRow } from "./activity-row"
-import { FilterBar, ProblemNotice, SourcePanel } from "./activity-panels"
+import {
+  CursorResetNotice,
+  FilterBar,
+  IgnoredParamsNotice,
+  ProblemNotice,
+  SourcePanel,
+} from "./activity-panels"
 import { canLoadMore, isBusy, rowsPerSource, type FeedState } from "./feed-controller"
 import { isFilterActive, type ActivityFilters } from "./filters"
-import { absoluteTime, dataStateNotice, relativeTime, sourceLabel } from "./labels"
+import {
+  absoluteTime,
+  cursorResetNotice,
+  dataStateNotice,
+  problemStateNotice,
+  relativeTime,
+  sourceLabel,
+} from "./labels"
 
 export interface RecentWorkViewProps {
   state: FeedState
@@ -47,16 +61,68 @@ export interface RecentWorkViewProps {
   onLoadMore(): void
   onFiltersChange(next: ActivityFilters): void
   onClearFilters(): void
+  /** Parameters in the address bar this page does not implement. */
+  unknownParams?: readonly string[]
+  onClearUnknownParams?: () => void
 }
 
-/** The Suspense fallback, and the shape of the first paint. */
+/**
+ * The Suspense fallback, and the shape of the first paint.
+ *
+ * THIS IS THE WHOLE PAGE IN OUTLINE, NOT THREE GREY BARS.
+ *
+ * The route holds its own guard, and until that guard resolves the browser has
+ * nothing for this segment at all -- so whatever this renders IS the screen for
+ * the entire wait. A stub that showed a heading-shaped bar and one block read
+ * as a broken or empty page, which is exactly what a reader reported after
+ * staring at it (defect-activity-blank-shell-while-loading). The skeleton now
+ * has the same landmarks and the same sections as the loaded page: the reader
+ * can see a list is coming, where it will be, and roughly how much of it.
+ *
+ * aria-busy on the container, and no motion for a reader who asked for none.
+ */
 export function RecentWorkLoading() {
   return (
-    <div className="flex flex-col gap-6" aria-busy="true">
-      <Skeleton className="h-8 w-56 motion-reduce:animate-none" />
-      <Skeleton className="h-4 w-full max-w-prose motion-reduce:animate-none" />
-      <Skeleton className="h-40 w-full motion-reduce:animate-none" />
-    </div>
+    <section
+      id="recent-work"
+      data-activity-feed="loading"
+      aria-labelledby="recent-work-title"
+      aria-busy="true"
+      className="flex w-full min-w-0 flex-col gap-6"
+    >
+      <header className="flex flex-col gap-3">
+        <h1 id="recent-work-title" className="text-2xl font-semibold tracking-tight">
+          Recent Work
+        </h1>
+        {/* Said in words as well as shape. A skeleton communicates nothing to a
+            screen reader, and "loading" is the one thing this state means. */}
+        <p role="status" aria-live="polite" className="text-sm text-muted-foreground">
+          Loading your recent work. Nothing is missing yet.
+        </p>
+        <Skeleton className="h-4 w-full max-w-prose motion-reduce:animate-none" />
+      </header>
+
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {[0, 1, 2, 3].map((index) => (
+          <Skeleton key={index} className="h-11 w-full motion-reduce:animate-none" />
+        ))}
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+        {[0, 1, 2, 3, 4].map((index) => (
+          <Skeleton key={index} className="h-20 w-full motion-reduce:animate-none" />
+        ))}
+      </div>
+
+      <Card className="min-w-0 overflow-hidden">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm">Records</CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          <RowSkeletons />
+        </CardContent>
+      </Card>
+    </section>
   )
 }
 
@@ -77,9 +143,37 @@ function RowSkeletons() {
 export function RecentWorkView(props: RecentWorkViewProps) {
   const { state, filters, now } = props
   const busy = isBusy(state)
-  const notice = dataStateNotice(state.dataState)
   const counts = rowsPerSource(state.items)
   const loaded = state.sources.length > 0
+  const unknownParams = props.unknownParams ?? []
+
+  // A cursor the SERVER refused, which we recovered from by fetching page one.
+  // The recovery succeeds, so `problem` is already null by the time this is
+  // rendered -- this flag is the only remaining evidence that the request the
+  // reader actually made was rejected.
+  const cursorWasRefused = state.cursorWasReset
+
+  /**
+   * THE FRESHNESS LINE ANSWERS ONE QUESTION AT A TIME, IN PRIORITY ORDER.
+   *
+   * It used to answer only "what did the API return?", which is the wrong
+   * question whenever the API returned nothing, or returned a page one we did
+   * not ask for. That produced two separate lies:
+   *
+   *   - "Not loaded yet / This list has not been loaded yet" printed directly
+   *     above "That filter cannot be used" -- a request that failed described as
+   *     one that never happened.
+   *   - "Complete / Every system answered" for a request the server answered
+   *     with a 400.
+   *
+   * A live problem outranks everything; a refused cursor outranks the data
+   * state; only a clean request gets to describe its own data.
+   */
+  const notice = state.problem
+    ? problemStateNotice(state.problem)
+    : cursorWasRefused
+      ? cursorResetNotice()
+      : dataStateNotice(state.dataState)
 
   const firstLoad = state.items.length === 0 && (state.phase === "loading" || state.phase === "idle")
   // A blocking problem is one where there is nothing on screen behind it. With
@@ -94,7 +188,23 @@ export function RecentWorkView(props: RecentWorkViewProps) {
   const stale = state.sources.filter((report) => report.state === "stale")
 
   return (
-    <section aria-labelledby="recent-work-title" className="flex w-full min-w-0 flex-col gap-6">
+    /**
+     * A SECTION, and it must end up INSIDE the page's one <main>.
+     *
+     * SidebarInset (components/ui/sidebar.tsx) renders that <main>, and the
+     * (owner) layout puts this route's children inside it. Rendering a second
+     * <main> here would make "skip to main content" ambiguous, and rendering
+     * this as a sibling of it would make that link land on chrome with no feed
+     * under it. The id is a stable target for the landmark tests and for any
+     * skip link that wants to reach the records themselves rather than the
+     * top of the page.
+     */
+    <section
+      id="recent-work"
+      data-activity-feed="ready"
+      aria-labelledby="recent-work-title"
+      className="flex w-full min-w-0 flex-col gap-6"
+    >
       <header className="flex flex-col gap-3">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
@@ -110,7 +220,7 @@ export function RecentWorkView(props: RecentWorkViewProps) {
             type="button"
             onClick={props.onRefresh}
             disabled={busy}
-            className="min-h-11 motion-reduce:transition-none"
+            className="min-h-11 focus-visible:ring-2 motion-reduce:transition-none"
           >
             <RefreshCw
               className={busy ? "size-4 animate-spin motion-reduce:animate-none" : "size-4"}
@@ -181,6 +291,15 @@ export function RecentWorkView(props: RecentWorkViewProps) {
             onClearFilters={props.onClearFilters}
             busy={busy}
           />
+        ) : null}
+
+        {/* The refused cursor, reported after a SUCCESSFUL recovery. Suppressed
+            when the problem notice is already saying it, so the same event is
+            never announced twice. */}
+        {cursorWasRefused && state.problem?.kind !== "invalid_cursor" ? <CursorResetNotice /> : null}
+
+        {unknownParams.length > 0 && props.onClearUnknownParams ? (
+          <IgnoredParamsNotice params={unknownParams} onClear={props.onClearUnknownParams} />
         ) : null}
 
         {degraded.length > 0 ? (
@@ -271,7 +390,7 @@ export function RecentWorkView(props: RecentWorkViewProps) {
                     type="button"
                     variant="outline"
                     onClick={props.onClearFilters}
-                    className="min-h-11"
+                    className="min-h-11 focus-visible:ring-2"
                   >
                     Clear all filters
                   </Button>
@@ -291,7 +410,7 @@ export function RecentWorkView(props: RecentWorkViewProps) {
               variant="outline"
               onClick={props.onLoadMore}
               disabled={!canLoadMore(state)}
-              className="min-h-11 w-full sm:w-fit"
+              className="min-h-11 w-full focus-visible:ring-2 sm:w-fit"
             >
               {state.phase === "loading_more" ? "Loading more" : "Load more"}
             </Button>
