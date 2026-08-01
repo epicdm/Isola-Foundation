@@ -295,6 +295,15 @@ export function resetForFilters(state: FeedState): FeedState {
 export interface LoadOptions {
   mode: LoadMode
   filters: ActivityFilters
+  /**
+   * A cursor the ADDRESS BAR carried into the first load, and only the first
+   * load. A pasted or bookmarked link can hold a position that has since gone
+   * stale, and the honest thing is to send it and let the server rule on it:
+   * if it refuses, rule 3 below restarts at page one and the screen says so.
+   * Dropping it before the request instead would produce a page-one list that
+   * silently claims to be the position that was asked for.
+   */
+  initialCursor?: string | null
 }
 
 export interface LoadDeps {
@@ -314,8 +323,15 @@ export async function runLoad(
   let base = beginLoad(state, mode)
 
   // The cursor comes back from the server untouched and is only ever sent for
-  // "more". Refresh and a filter change both start from the beginning.
-  const cursor = mode === "more" ? state.nextCursor : null
+  // "more", or for the very first load of a link that arrived carrying one.
+  // Refresh always starts from the beginning: a reader who presses Refresh is
+  // asking for the newest records, not for the position they were parked at.
+  const cursor =
+    mode === "more"
+      ? state.nextCursor
+      : mode === "initial"
+        ? (options.initialCursor ?? null)
+        : null
 
   let outcome = await fetchActivityPage({
     filters: options.filters,
