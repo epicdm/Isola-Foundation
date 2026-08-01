@@ -26,6 +26,7 @@ export const BUNDLE_SECTIONS = [
   'issues',
   'tasks',
   'activities',
+  'opportunities',
   'orders',
   'invoices',
   'diagnostics',
