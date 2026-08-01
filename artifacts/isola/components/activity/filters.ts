@@ -63,6 +63,65 @@ export const EMPTY_FILTERS: ActivityFilters = {
 export interface ReadableParams {
   get(key: string): string | null
   getAll(key: string): string[]
+  /** Both URLSearchParams and the Next.js wrapper have these; typed optional so
+      a hand-written stub does not have to implement them to be a valid filter
+      source. unrecognisedParamKeys needs one of them and says so. */
+  keys?(): IterableIterator<string>
+  forEach?(callback: (value: string, key: string) => void): void
+}
+
+/**
+ * The cursor is not a FILTER, but it IS a parameter this page understands.
+ *
+ * It is deliberately absent from SUPPORTED_FILTER_KEYS -- filtersFromParams
+ * must not turn it into a filter, and filtersToParams must not re-emit it,
+ * because the cursor belongs to a page position rather than to a question. It
+ * is listed here so that a pasted link carrying one is not reported to the
+ * reader as nonsense: it is a parameter we recognise, send, and let the server
+ * accept or refuse.
+ */
+export const CURSOR_PARAM = "cursor"
+
+export const RECOGNISED_PARAM_KEYS = [...SUPPORTED_FILTER_KEYS, CURSOR_PARAM] as const
+
+/**
+ * Parameters in the address bar that this page does not implement, in the order
+ * they appear, without duplicates.
+ *
+ * WHY THIS EXISTS AT ALL
+ * ----------------------
+ * filtersToParams emits ONLY the keys above, so an invented parameter never
+ * reaches the API: `?nonsense=1` was silently dropped on the way out and the
+ * reader was shown a perfectly ordinary list, with no hint that part of the
+ * link they pasted had been thrown away
+ * (defect-activity-unknown-param-silently-dropped). The API is strict about
+ * this and answers 400; the page was quietly more permissive than the contract
+ * it speaks to. Since the page is what does the discarding, the page is what
+ * has to admit it.
+ */
+export function unrecognisedParamKeys(params: ReadableParams): string[] {
+  const recognised = new Set<string>(RECOGNISED_PARAM_KEYS)
+  const found: string[] = []
+
+  const add = (key: string) => {
+    if (recognised.has(key)) return
+    if (found.includes(key)) return
+    found.push(key)
+  }
+
+  if (typeof params.keys === "function") {
+    for (const key of params.keys()) add(key)
+  } else if (typeof params.forEach === "function") {
+    params.forEach((_value, key) => add(key))
+  }
+
+  return found
+}
+
+/** The cursor a pasted link carried, if it carried one. Never invented here. */
+export function cursorFromParams(params: ReadableParams): string | null {
+  const value = (params.get(CURSOR_PARAM) ?? "").trim()
+  return value ? value : null
 }
 
 export function filtersFromParams(params: ReadableParams): ActivityFilters {
