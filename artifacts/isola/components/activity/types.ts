@@ -29,7 +29,7 @@ export type {
 } from "@/lib/activity/handler"
 
 /**
- * The five sources, in the order the registry builds them.
+ * The six sources, in the order the registry builds them.
  *
  * Rendered in this order EVERY time, including the ones that answered with
  * nothing and the ones this account may not read. A source that disappears from
@@ -39,7 +39,7 @@ export type {
  *
  * A literal rather than an import of ACTIVITY_SOURCE_NAMES: that module reaches
  * for Prisma and the projection store at import time, which is not something a
- * client bundle should be pulled into for the sake of five strings. The route
+ * client bundle should be pulled into for the sake of six strings. The route
  * test asserts the server list; labels.test.ts asserts this one still matches.
  */
 export const ACTIVITY_SOURCE_ORDER = [
@@ -48,6 +48,7 @@ export const ACTIVITY_SOURCE_ORDER = [
   "staff_work_action",
   "conversation_ownership",
   "lane2",
+  "customer_tool_operation",
 ] as const
 
 export type ActivitySourceName = (typeof ACTIVITY_SOURCE_ORDER)[number]
