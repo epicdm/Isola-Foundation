@@ -14,6 +14,14 @@ import { recentActionsAdapter, type RecentActionsStore } from './recent-actions'
 const NOW = new Date('2026-08-01T12:00:00Z')
 const ODOO = 'https://tenant.odoo.com'
 
+/**
+ * `undefined` means "the test did not care"; `null` means "there is no instance
+ * URL". Collapsing them with `??` is what let the no-link test pass while
+ * running with a URL configured.
+ */
+const baseUrlOf = (opts: { baseUrl?: string | null }): string | null =>
+  opts.baseUrl === undefined ? ODOO : opts.baseUrl
+
 const PARTNER = { id: 42, name: 'Marigot Hardware', email: null, phone: null, city: null, street: null, is_company: true, parent_id: false, active: true }
 const CONTACT = { id: 77, name: 'A Contact', email: null, phone: null, function: 'Owner' }
 const LEAD = { id: 5, name: 'Second line', type: 'opportunity', stage_id: [1, 'New'], user_id: false, expected_revenue: 0, date_deadline: false, write_date: '2026-07-01 10:00:00' }
@@ -32,8 +40,9 @@ function caller(over: Partial<Record<string, unknown[] | 'fail'>> = {}): OdooCal
     if (answer === 'fail') throw new Error('connect ECONNREFUSED 10.1.2.3:443')
     // res.partner serves both the customer and its contacts; the domain says which.
     if (model === 'res.partner') {
+      if (answer === 'fail') throw new Error('connect ECONNREFUSED 10.1.2.3:443')
       const domain = JSON.stringify((params as { domain?: unknown }).domain ?? [])
-      if (domain.includes('parent_id')) return over['res.partner:contacts'] ?? [CONTACT]
+      if (domain.includes('parent_id')) return (over['res.partner:contacts'] as unknown[]) ?? [CONTACT]
       return answer ?? []
     }
     return answer ?? []
@@ -42,12 +51,17 @@ function caller(over: Partial<Record<string, unknown[] | 'fail'>> = {}): OdooCal
 
 const emptyStore: RecentActionsStore = { list: async () => [] }
 
-async function bundleWith(
-  call: OdooCaller,
-  opts: { role?: string; store?: RecentActionsStore; baseUrl?: string | null } = {},
-): Promise<ContextBundle> {
+interface Opts {
+  role?: string
+  store?: RecentActionsStore
+  baseUrl?: string | null
+  activity?: Parameters<typeof assembleCustomerContext>[0]['activity']
+  activityMissing?: readonly string[]
+}
+
+async function bundleWith(call: OdooCaller, opts: Opts = {}): Promise<ContextBundle> {
   const adapters: BundleAdapter[] = [
-    ...buildCustomerAdapters({ call, odooBaseUrl: opts.baseUrl ?? ODOO, now: () => NOW }),
+    ...buildCustomerAdapters({ call, odooBaseUrl: baseUrlOf(opts), now: () => NOW }),
     recentActionsAdapter({ store: opts.store ?? emptyStore, tenantId: 'tenant-1', now: () => NOW }),
   ]
   return buildContextBundle(
@@ -63,16 +77,7 @@ async function bundleWith(
   )
 }
 
-async function assemble(
-  call: OdooCaller,
-  opts: {
-    role?: string
-    store?: RecentActionsStore
-    baseUrl?: string | null
-    activity?: Parameters<typeof assembleCustomerContext>[0]['activity']
-    activityMissing?: readonly string[]
-  } = {},
-) {
+async function assemble(call: OdooCaller, opts: Opts = {}) {
   const role = opts.role ?? 'manager'
   return assembleCustomerContext({
     correlationId: 'corr-1',
@@ -86,7 +91,7 @@ async function assemble(
         provenance: { source: 'activity@1', fetchedAt: NOW, stale: false },
       },
     activityMissing: opts.activityMissing,
-    odooBaseUrl: opts.baseUrl ?? ODOO,
+    odooBaseUrl: baseUrlOf(opts),
     permittedActions: ACTIONS_BY_ROLE[role as 'manager'] ?? [],
     now: NOW,
   })
@@ -232,6 +237,8 @@ describe('a link is offered only when it can be built honestly', () => {
     const [customer] = response.sections.customer.records as { link?: string }[]
 
     expect(customer.link).toBeUndefined()
+    // And nothing anywhere in the response invented one.
+    expect(JSON.stringify(response)).not.toContain('/odoo/')
   })
 
   it('uses the right model per section rather than one guessed base', async () => {
