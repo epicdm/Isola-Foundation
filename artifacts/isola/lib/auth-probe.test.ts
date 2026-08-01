@@ -123,7 +123,7 @@ describe('auth probe — three answers, not two', () => {
   it('passes the caller’s cookies through to the service', async () => {
     const spy = respond(200, { user: USER })
     await probeAuthUser({ Cookie: 'sid=abc' }, { fetch: spy as unknown as typeof fetch })
-    const [, init] = spy.mock.calls[0] as [string, RequestInit]
+    const [, init] = spy.mock.calls[0] as unknown as [string, RequestInit]
     expect((init.headers as Record<string, string>).Cookie).toBe('sid=abc')
     expect(init.cache).toBe('no-store')
   })

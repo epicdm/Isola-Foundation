@@ -7,7 +7,8 @@
  */
 
 import { cookies } from 'next/headers';
-import { getAuthUser } from './auth';
+import { probeAuth } from './auth';
+import type { AuthProbe, AuthUnavailableReason } from './auth-probe';
 import { prisma } from './prisma';
 import { getOrCreateIdentityForUser } from './identity';
 import type { User, Tenant } from '@prisma/client';
@@ -39,12 +40,42 @@ export interface SessionCtx {
  * diverge between the two.
  */
 export async function getSession(): Promise<SessionCtx | null> {
+  const result = await getSessionResult();
+  return result.status === 'authenticated' ? result.session : null;
+}
+
+/**
+ * The same resolution, without throwing away WHY there is no session.
+ *
+ * `anonymous` is a verdict about the reader. `unavailable` is a fact about us --
+ * the service that knows who they are could not be reached, so nothing has been
+ * established and nothing about their session should be discarded. A guard that
+ * cannot tell these apart redirects the second case to sign-in, and because
+ * /auth/login sets prompt: 'login consent', that redirect costs the reader an
+ * OAuth consent screen for an outage that was over in seconds.
+ */
+export type SessionResult =
+  | { status: 'authenticated'; session: SessionCtx }
+  | { status: 'anonymous' }
+  | { status: 'unavailable'; reason: AuthUnavailableReason; detail: string };
+
+export async function getSessionResult(): Promise<SessionResult> {
   const cookieStore = await cookies();
   const cookieHeader = cookieStore
     .getAll()
     .map((c) => `${c.name}=${c.value}`)
     .join('; ');
-  return resolveSession(cookieHeader);
+
+  const probe: AuthProbe = await probeAuth({ Cookie: cookieHeader });
+  if (probe.status === 'unavailable') {
+    return { status: 'unavailable', reason: probe.reason, detail: probe.detail };
+  }
+  if (probe.status === 'anonymous') return { status: 'anonymous' };
+
+  const session = await resolveSession(probe.user);
+  // Authenticated upstream but no business_user row is a real verdict about
+  // this reader, not an outage: they have signed in and have no place here.
+  return session ? { status: 'authenticated', session } : { status: 'anonymous' };
 }
 
 /**
@@ -69,11 +100,8 @@ export async function getSessionFromCookie(
 }
 
 async function resolveSession(
-  cookieHeader: string,
+  authUser: { id: string },
 ): Promise<SessionCtx | null> {
-  const authUser = await getAuthUser({ Cookie: cookieHeader });
-  if (!authUser?.id) return null;
-
   const user = await prisma.user.findUnique({
     where: { replit_id: authUser.id },
     include: { tenant: true },

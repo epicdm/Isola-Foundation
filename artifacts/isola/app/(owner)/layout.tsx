@@ -1,6 +1,8 @@
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { getSession } from '@/lib/session';
+import { getSessionResult } from '@/lib/session';
+import { loginDestination, safePath } from '@/lib/auth-gate';
+import { AuthServiceUnavailable } from '@/components/auth/auth-service-unavailable';
 import { resolveWorkspaceAuthz, workspaceRoleLabel } from '@/lib/workspace/authz';
 import { AppSidebar } from '@/components/app-sidebar';
 import { Topbar } from '@/components/topbar';
@@ -9,17 +11,31 @@ import { getPreference } from '@/server/server-actions';
 import { cn } from '@/lib/utils';
 
 export default async function OwnerLayout({ children }: { children: React.ReactNode }) {
-  const session = await getSession();
-  if (!session) {
-    // Send them to the real OIDC login and bring them back to where they were
-    // asking for, instead of dropping them on the public homepage. Middleware
-    // catches the no-cookie case; this handles a cookie that is present but no
-    // longer resolves to a session. The path comes from our own middleware
-    // header, never from user input.
-    const requested = (await headers()).get('x-isola-pathname') ?? '/dashboard';
-    const safe = requested.startsWith('/') && !requested.startsWith('//') ? requested : '/dashboard';
-    redirect(`/auth/login?returnTo=${encodeURIComponent(safe)}`);
+  const result = await getSessionResult();
+  // The path comes from our own middleware header, never from user input, and
+  // is re-checked by safePath anyway so both ends of the redirect agree.
+  const requested = (await headers()).get('x-isola-pathname');
+
+  // We could not find out who this is. NOT the same as finding out that nobody
+  // is here -- so nothing is redirected, nothing is discarded, and the reader is
+  // told plainly that this is our problem and their session is intact. Sending
+  // them to /auth/login here would put them through an OAuth consent screen,
+  // because that route sets prompt: 'login consent'
+  // (defect-owner-layout-dependency-outage-rendered-as-logout).
+  if (result.status === 'unavailable') {
+    return <AuthServiceUnavailable detail={result.detail} retryTo={safePath(requested)} />;
   }
+
+  // Genuinely signed out, on the authority of the sign-in service. Send them to
+  // the real OIDC login and bring them back to where they were asking for,
+  // instead of dropping them on the public homepage. Middleware catches the
+  // no-cookie case; this handles a cookie that is present but no longer
+  // resolves to a session.
+  if (result.status === 'anonymous') {
+    redirect(loginDestination(requested));
+  }
+
+  const session = result.session;
 
   // A platform administrator is NOT automatically sent to the operator console.
   // These are tenant routes; asking for one is an explicit choice of the tenant
