@@ -12,6 +12,10 @@
  * not send it, or shown as the word "Unknown". There is no fallback that guesses
  * an actor from a reference, a customer from an id, or a time from a gap.
  *
+ * An identifier is SHORTENED for reading, never replaced by a guess and never
+ * withheld: actorDisplay and relatedDisplay hand back both the short form and
+ * the whole value, and the whole value goes in a title.
+ *
  * STATUS IS NEVER COLOUR ALONE
  * ----------------------------
  * Every status carries a word and an icon. A reader who cannot distinguish red
@@ -27,12 +31,12 @@ import { cn } from "@/lib/utils"
 import {
   absoluteTime,
   actionLabel,
-  actorKindLabel,
-  actorLabel,
+  actorDisplay,
   familyLabel,
   freshnessLabel,
-  humanise,
   ownershipLabel,
+  recordReference,
+  relatedDisplay,
   relativeTime,
   safeHref,
   sourceLabel,
@@ -76,11 +80,18 @@ export function StatusChip({ status }: { status: StatusPresentation }) {
   )
 }
 
-function Meta({ term, value }: { term: string; value: string }) {
+/**
+ * One field. `title` carries the full value when the visible text is a
+ * shortened form of it -- the identifier is abbreviated for reading, never
+ * withheld, so a reader who needs the whole reference can still get it.
+ */
+function Meta({ term, value, title }: { term: string; value: string; title?: string | null }) {
   return (
     <div className="flex min-w-0 flex-wrap items-baseline gap-1">
       <dt className="font-medium text-foreground/70">{term}</dt>
-      <dd className="min-w-0 break-words">{value}</dd>
+      <dd className="min-w-0 break-words" title={title ?? undefined}>
+        {value}
+      </dd>
     </div>
   )
 }
@@ -93,8 +104,11 @@ export interface ActivityRowProps {
 export function ActivityRow({ item, now }: ActivityRowProps) {
   const status = statusPresentation(item.status)
   const ownership = ownershipLabel(item.ownershipState)
-  const actorKind = actorKindLabel(item.actor?.kind)
+  const actor = actorDisplay(item.actor)
   const occurredExact = absoluteTime(item.occurredAt)
+  // A short, stable handle for this row. Two records in the same second are
+  // still two records, and the reader needs something to say that with.
+  const reference = recordReference(item.activityId)
 
   // A link is rendered ONLY when the API supplied one that survives the scheme
   // check. There is no constructed href anywhere on this row: a guessed deep
@@ -103,10 +117,7 @@ export function ActivityRow({ item, now }: ActivityRowProps) {
     .map((link) => ({ ...link, safe: safeHref(link.href) }))
     .filter((link) => link.safe !== null)
 
-  const related =
-    item.relatedObjectType && item.relatedObjectId
-      ? humanise(item.relatedObjectType) + " " + item.relatedObjectId
-      : null
+  const related = relatedDisplay(item.relatedObjectType, item.relatedObjectId)
 
   return (
     <li className="border-b last:border-b-0">
@@ -131,15 +142,13 @@ export function ActivityRow({ item, now }: ActivityRowProps) {
         <dl className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
           <Meta term="From" value={sourceLabel(item.provenance?.source ?? item.sourceSystem)} />
           <Meta term="Kind" value={familyLabel(item.eventType)} />
-          <Meta
-            term="Who"
-            value={actorLabel(item.actor) + (actorKind ? " (" + actorKind + ")" : "")}
-          />
+          <Meta term="Who" value={actor.text} title={actor.title} />
           {item.customerLabel ? <Meta term="Customer" value={item.customerLabel} /> : null}
-          {related ? <Meta term="Related to" value={related} /> : null}
+          {related ? <Meta term="Related to" value={related.text} title={related.title} /> : null}
           {ownership ? <Meta term="Ownership" value={ownership} /> : null}
           <Meta term="Freshness" value={freshnessLabel(item.freshness)} />
           <Meta term="Occurred" value={occurredExact} />
+          {reference ? <Meta term="Record" value={reference.text} title={reference.title} /> : null}
         </dl>
 
         <div className="flex flex-wrap items-center gap-2">
