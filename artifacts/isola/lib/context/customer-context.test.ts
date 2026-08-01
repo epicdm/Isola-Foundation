@@ -40,7 +40,6 @@ function caller(over: Partial<Record<string, unknown[] | 'fail'>> = {}): OdooCal
     if (answer === 'fail') throw new Error('connect ECONNREFUSED 10.1.2.3:443')
     // res.partner serves both the customer and its contacts; the domain says which.
     if (model === 'res.partner') {
-      if (answer === 'fail') throw new Error('connect ECONNREFUSED 10.1.2.3:443')
       const domain = JSON.stringify((params as { domain?: unknown }).domain ?? [])
       if (domain.includes('parent_id')) return (over['res.partner:contacts'] as unknown[]) ?? [CONTACT]
       return answer ?? []
