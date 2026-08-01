@@ -31,7 +31,15 @@ export interface ActivityFeedController {
   loadMore(): void
 }
 
-export function useActivityFeed(filters: ActivityFilters): ActivityFeedController {
+export function useActivityFeed(
+  filters: ActivityFilters,
+  /**
+   * A cursor the ADDRESS BAR arrived with, used for the first load of this
+   * filter set and nothing else. Refresh and Load more both ignore it: refresh
+   * means "the newest records", and Load more has the server's own cursor.
+   */
+  initialCursor: string | null = null,
+): ActivityFeedController {
   const [state, setState] = useState<FeedState>(initialFeedState)
 
   // Refs, not dependencies. A callback that changed identity whenever the state
@@ -41,6 +49,8 @@ export function useActivityFeed(filters: ActivityFilters): ActivityFeedControlle
   stateRef.current = state
   const filtersRef = useRef(filters)
   filtersRef.current = filters
+  const cursorRef = useRef(initialCursor)
+  cursorRef.current = initialCursor
   const inFlight = useRef(false)
 
   const load = useCallback(async (mode: LoadMode) => {
@@ -55,7 +65,13 @@ export function useActivityFeed(filters: ActivityFilters): ActivityFeedControlle
     // comes back, rather than after.
     setState(beginLoad(base, mode))
     try {
-      setState(await runLoad(base, { mode, filters: filtersRef.current }))
+      setState(
+        await runLoad(base, {
+          mode,
+          filters: filtersRef.current,
+          initialCursor: cursorRef.current,
+        }),
+      )
     } finally {
       inFlight.current = false
     }
