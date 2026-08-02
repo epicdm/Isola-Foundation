@@ -21,6 +21,7 @@ vi.mock('@/lib/prisma', () => {
       approvalRequest: { findMany },
       staffWorkAction: { findMany },
       conversationOwnershipTransition: { findMany },
+      customerToolOperation: { findMany },
     },
     default: {},
   }
@@ -36,6 +37,7 @@ const SOURCE_NAMES = [
   'staff_work_action',
   'conversation_ownership',
   'lane2',
+  'customer_tool_operation',
 ]
 
 const request = (qs = '') => new Request(`http://localhost/api/v1/activity${qs}`)
