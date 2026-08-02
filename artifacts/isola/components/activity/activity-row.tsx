@@ -32,6 +32,7 @@ import {
   absoluteTime,
   actionLabel,
   actorDisplay,
+  customerDisplay,
   familyLabel,
   freshnessLabel,
   ownershipLabel,
@@ -161,6 +162,12 @@ export function ActivityRow({ item, now }: ActivityRowProps) {
     .filter((link) => link.safe !== null)
 
   const related = relatedDisplay(item.relatedObjectType, item.relatedObjectId)
+  // Gated on the id, not the label: a source that proves a customerId but never
+  // sends a label (customer_tool_operation, by design) must still get a working
+  // link. Gating this on customerLabel meant the "Open customer" link existed in
+  // the code and had never once rendered, for any source.
+  const customer = customerDisplay(item.customerId, item.customerLabel)
+  const customerLink = customerHref(item.customerId)
 
   return (
     <li className="border-b last:border-b-0">
@@ -186,8 +193,8 @@ export function ActivityRow({ item, now }: ActivityRowProps) {
           <Meta term="From" value={sourceLabel(item.provenance?.source ?? item.sourceSystem)} />
           <Meta term="Kind" value={familyLabel(item.eventType)} />
           <Meta term="Who" value={actor.text} title={actor.title} />
-          {item.customerLabel ? (
-            <Meta term="Customer" value={item.customerLabel} href={customerHref(item.customerId)} />
+          {customer ? (
+            <Meta term="Customer" value={customer.text} title={customer.title} href={customerLink} />
           ) : null}
           {related ? <Meta term="Related to" value={related.text} title={related.title} /> : null}
           {ownership ? <Meta term="Ownership" value={ownership} /> : null}
