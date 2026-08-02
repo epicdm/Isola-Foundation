@@ -193,10 +193,10 @@ describe("FORBIDDEN_SOURCE", () => {
 
     expect(html).toContain("Not permitted")
     expect(html).toContain("These records are not available to this account.")
-    // Four sources report a count, the forbidden one does not.
-    expect(count(html, /records on this page/g) + count(html, /1 record on this page/g)).toBe(4)
-    // Four timestamps, not five.
-    expect(count(html, /Read 2026-07-31 22:00:00 UTC/g)).toBe(4)
+    // Five sources report a count, the forbidden one does not.
+    expect(count(html, /records on this page/g) + count(html, /1 record on this page/g)).toBe(5)
+    // Five timestamps, not six.
+    expect(count(html, /Read 2026-07-31 22:00:00 UTC/g)).toBe(5)
   })
 })
 
