@@ -56,17 +56,34 @@ function envelope(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function signedRequest(body: Record<string, unknown>, secret: string | undefined = SECRET) {
+function signedRequest(body: Record<string, unknown>, secret: string = SECRET) {
   const raw = JSON.stringify(body);
   const ts = String(Math.floor(Date.now() / 1000));
-  const headers: Record<string, string> = { 'content-type': 'application/json' };
-  if (secret) {
-    headers['x-lane2-broker-signature'] = computeLane2BrokerSignature(secret, ts, raw);
-    headers['x-lane2-broker-timestamp'] = ts;
-  }
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    'x-lane2-broker-signature': computeLane2BrokerSignature(secret, ts, raw),
+    'x-lane2-broker-timestamp': ts,
+  };
   return new NextRequest('https://foundation.test/api/lane2/broker/turn', {
     method: 'POST',
     headers,
+    body: raw,
+  });
+}
+
+/**
+ * Builds a request with NO signature/timestamp headers at all — the actual
+ * "unsigned request" case. Deliberately a separate function rather than a
+ * falsy-secret branch on signedRequest: a defaulted parameter substitutes
+ * its default for an explicit `undefined` argument, so that pattern can
+ * never reliably produce an unsigned request (dec-pr68-test-fixes-no-gate-
+ * waiver-2026-08-02).
+ */
+function unsignedRequest(body: Record<string, unknown>) {
+  const raw = JSON.stringify(body);
+  return new NextRequest('https://foundation.test/api/lane2/broker/turn', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
     body: raw,
   });
 }
@@ -103,7 +120,7 @@ beforeEach(() => {
 
 describe('auth', () => {
   it('rejects an unsigned request', async () => {
-    const res = await POST(signedRequest(envelope(), undefined));
+    const res = await POST(unsignedRequest(envelope()));
     expect(res.status).toBe(401);
     expect(H.invokeClawithGatedMock).not.toHaveBeenCalled();
   });
@@ -112,6 +129,12 @@ describe('auth', () => {
     const res = await POST(signedRequest(envelope(), 'wrong-secret'));
     expect(res.status).toBe(401);
     expect(H.invokeClawithGatedMock).not.toHaveBeenCalled();
+  });
+
+  it('accepts a correctly signed request', async () => {
+    const res = await POST(signedRequest(envelope()));
+    expect(res.status).toBe(200);
+    expect(H.invokeClawithGatedMock).toHaveBeenCalledTimes(1);
   });
 });
 
