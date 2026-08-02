@@ -35,6 +35,7 @@ function spies() {
     approvalRequest: { findMany: delegateSpy() },
     staffWorkAction: { findMany: delegateSpy() },
     conversationOwnership: { findMany: delegateSpy() },
+    customerToolOperation: { findMany: delegateSpy() },
   }
 }
 
@@ -72,17 +73,17 @@ const argsOf = (spy: { findMany: { mock: { calls: unknown[][] } } }): FindManyAr
 // ──────────────────────────────────────────────────────────
 
 describe('every source is registered, every time', () => {
-  it('registers all five in the declared order', () => {
+  it('registers all six in the declared order', () => {
     expect(build({}, spies()).map((s) => s.name)).toEqual([...ACTIVITY_SOURCE_NAMES])
   })
 
-  it('registers the same five whatever the audit permission is', () => {
+  it('registers the same six whatever the audit permission is', () => {
     const permitted = build({ canViewAudit: true }, spies()).map((s) => s.name)
     const denied = build({ canViewAudit: false }, spies()).map((s) => s.name)
     // A source the caller may not read is still LISTED. Dropping it would make
     // "you may not see this" and "this does not exist" the same on screen.
     expect(denied).toEqual(permitted)
-    expect(denied).toHaveLength(5)
+    expect(denied).toHaveLength(6)
   })
 
   it('registers lane2 and reports it UNAVAILABLE rather than empty', async () => {
@@ -92,6 +93,20 @@ describe('every source is registered, every time', () => {
     // "no customer said anything today", which is a different claim entirely.
     if (results.lane2.status !== 'unavailable') return
     expect(results.lane2.reason.length).toBeGreaterThan(0)
+  })
+
+  it('registers customer_tool_operation as the sixth source, distinct from staff_work_action', async () => {
+    const names = build({}, spies()).map((s) => s.name)
+    expect(names).toContain('customer_tool_operation')
+    expect(names).toContain('staff_work_action')
+    // The two governed-work sources must never collapse into one name or
+    // share a cursor namespace — see SOURCE_ID_PREFIX in registry.ts.
+    expect(names.indexOf('customer_tool_operation')).not.toBe(names.indexOf('staff_work_action'))
+    const results = await readAll({}, spies())
+    expect(results.customer_tool_operation.status).toBe('ok')
+    // staff_work_action is registered and read exactly as before — adding the
+    // sixth source must not perturb the existing five.
+    expect(results.staff_work_action.status).toBe('ok')
   })
 })
 
@@ -129,6 +144,7 @@ describe('every read is scoped to the session tenant', () => {
       deps.approvalRequest,
       deps.staffWorkAction,
       deps.conversationOwnership,
+      deps.customerToolOperation,
     ]) {
       expect(delegate.findMany).toHaveBeenCalledTimes(1)
       const args = argsOf(delegate)
@@ -144,6 +160,16 @@ describe('every read is scoped to the session tenant', () => {
     await readAll({ tenantId: TENANT }, deps)
     expect(argsOf(deps.auditLog).where.tenant_id).toBe(TENANT)
   })
+
+  it('scopes customer_tool_operation by tenant using its own time/id columns', async () => {
+    const deps = spies()
+    await readAll({ tenantId: 'tenant-other' }, deps)
+    const args = argsOf(deps.customerToolOperation)
+    expect(args.where).toMatchObject({ tenant_id: 'tenant-other' })
+    // This source has no created_at/id; it is timed by claimed_at and
+    // identified by operation_id — see SOURCE_COLUMN_OVERRIDES in registry.ts.
+    expect(args.orderBy).toEqual([{ claimed_at: 'desc' }, { operation_id: 'asc' }])
+  })
 })
 
 // ── how many rows a source is asked for ──
@@ -153,11 +179,12 @@ describe('a source is asked for a bounded number of rows', () => {
     const deps = spies()
     await readAll({}, deps, query({ pageSize: 25 }))
 
-    // Three of the four Prisma sources project created_at AS occurredAt, so the
-    // ordering and the cut can go into the query.
+    // Sources projecting their own occurredAt column can push the ordering and
+    // the cut into the query.
     expect(argsOf(deps.auditLog).take).toBe(26)
     expect(argsOf(deps.staffWorkAction).take).toBe(26)
     expect(argsOf(deps.conversationOwnership).take).toBe(26)
+    expect(argsOf(deps.customerToolOperation).take).toBe(26)
   })
 
   it('follows the page size rather than a constant', async () => {
@@ -253,6 +280,7 @@ describe('the date range and the cursor go into the query', () => {
     expect(deps.auditLog.findMany).toHaveBeenCalledTimes(0)
     expect(deps.approvalRequest.findMany).toHaveBeenCalledTimes(0)
     expect(deps.conversationOwnership.findMany).toHaveBeenCalledTimes(0)
+    expect(deps.customerToolOperation.findMany).toHaveBeenCalledTimes(0)
     // Excluded is not FAILED: those sources answered, with nothing.
     expect(results.audit_log.status).toBe('ok')
   })
@@ -279,5 +307,16 @@ describe('the date range and the cursor go into the query', () => {
 
     const where = argsOf(deps.auditLog).where as { AND?: Record<string, unknown>[] }
     expect(where.AND?.[0]).toEqual({ created_at: { lte: new Date(cursor.occurredAt) } })
+  })
+
+  it('issues no customer_tool_operation query for a cross-source cursor at a different instant', async () => {
+    // The cursor namespace is per-source. A cursor minted by staff_work_action
+    // must still correctly narrow customer_tool_operation's own claimed_at scan.
+    const deps = spies()
+    const cursor = { occurredAt: '2026-07-20T12:00:00.000Z', activityId: 'staffwork:9' }
+    await readAll({}, deps, query({ cursor }))
+
+    const where = argsOf(deps.customerToolOperation).where as { AND?: Record<string, unknown>[] }
+    expect(where.AND?.[0]).toBeDefined()
   })
 })
