@@ -118,8 +118,8 @@ afterEach(() => {
 
 // ── POPULATED ──
 
-describe("POPULATED: five sources answer and rows arrive", () => {
-  it("shows the rows, all five source reports and both timestamps", async () => {
+describe("POPULATED: six sources answer and rows arrive", () => {
+  it("shows the rows, all six source reports and both timestamps", async () => {
     const items = SOURCES.map((source, index) =>
       item({
         activityId: "a-" + index,
@@ -131,8 +131,8 @@ describe("POPULATED: five sources answer and rows arrive", () => {
     const state = await load(START, "initial")
 
     expect(state.phase).toBe("ready")
-    expect(state.items).toHaveLength(5)
-    expect(state.sources).toHaveLength(5)
+    expect(state.items).toHaveLength(6)
+    expect(state.sources).toHaveLength(6)
     expect(state.sources.map((s) => s.source)).toEqual(SOURCES)
     expect(state.dataState).toBe("available_with_records")
     expect(state.generatedAt).toBe(T0)
