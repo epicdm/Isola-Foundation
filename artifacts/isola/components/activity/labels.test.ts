@@ -14,6 +14,7 @@ import {
   absoluteTime,
   actorDisplay,
   cursorResetNotice,
+  customerDisplay,
   dataStateNotice,
   isOpaqueIdentifier,
   parameterLabel,
@@ -145,6 +146,36 @@ describe("a related object is never fabricated", () => {
   it("is omitted when either half is missing", () => {
     expect(relatedDisplay("conversation", null)).toBeNull()
     expect(relatedDisplay(null, "abc")).toBeNull()
+  })
+})
+
+describe("a customer with a proven id but no label still shows, and still links", () => {
+  it("REGRESSION: an id with no label is not withheld -- it falls through to the id", () => {
+    // This is the exact shape customer_tool_operation sends: a real,
+    // Odoo-verified customerId and a customerLabel of null, by design.
+    expect(customerDisplay("42", null)).toEqual({ text: "Customer #42", title: null })
+  })
+
+  it("prints a short partner id in full, because there is nothing to hide", () => {
+    expect(customerDisplay("7", null)).toEqual({ text: "Customer #7", title: null })
+  })
+
+  it("shortens a long opaque id and keeps the whole value in title", () => {
+    const display = customerDisplay("cmrewdo5b0005s61765xj85i4", null)
+    expect(display?.text).toBe("Customer · …j85i4")
+    expect(display?.title).toBe("cmrewdo5b0005s61765xj85i4")
+  })
+
+  it("prefers a real label when one arrives, and invents nothing beyond it", () => {
+    expect(customerDisplay("42", "Island Hardware Ltd")).toEqual({
+      text: "Island Hardware Ltd",
+      title: null,
+    })
+  })
+
+  it("is omitted, not printed as Unknown, when there is no id and no label", () => {
+    expect(customerDisplay(null, null)).toBeNull()
+    expect(customerDisplay("", "")).toBeNull()
   })
 })
 
