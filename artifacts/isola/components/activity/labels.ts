@@ -433,6 +433,39 @@ export function relatedDisplay(
 }
 
 /**
+ * The customer, as a person should see it.
+ *
+ * A real label is used exactly as it arrived. Today nothing sends one:
+ * `customer_tool_operation` -- the only source that ever proves a customerId --
+ * deliberately never sends a label either, because its id is verified against
+ * Odoo and this screen is not entitled to attach a name to it that nobody
+ * confirmed. So this almost always falls through to the id itself.
+ *
+ * That fall-through is the point. `activity-row.tsx` used to gate the entire
+ * Customer field -- link included -- on `customerLabel` being truthy. No source
+ * has ever sent one, so the "Open customer" link existed in the code and had
+ * never once rendered. An id with no label is not a reason to withhold the
+ * link; it is the ONLY thing this source was built to prove.
+ *
+ * A short partner id such as "42" is not an opaque identifier and is printed in
+ * full, the same as `relatedDisplay` prints a readable id in full. A longer,
+ * opaque id is shortened the same way `relatedDisplay` shortens one, with the
+ * whole value kept in `title`.
+ */
+export function customerDisplay(
+  customerId: string | null | undefined,
+  customerLabel: string | null | undefined,
+): DisplayValue | null {
+  const label = (customerLabel ?? "").trim()
+  if (label) return { text: label, title: null }
+
+  const id = (customerId ?? "").trim()
+  if (!id) return null
+  if (!isOpaqueIdentifier(id)) return { text: "Customer #" + id, title: null }
+  return { text: "Customer · " + shortReference(id), title: id }
+}
+
+/**
  * The row's own reference.
  *
  * Fifty rows stamped to the same MINUTE were visually identical -- seven of
