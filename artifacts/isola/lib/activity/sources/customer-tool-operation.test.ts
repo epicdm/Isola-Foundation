@@ -197,7 +197,11 @@ describe('lifecycle is preserved exactly -- LIFECYCLE_PRESENTATION decides the w
       'governed.action.failed',
       'nothing was performed',
     ],
-    ['READBACK_FAILED', 'readback_failed', 'governed.readback', 'not confirmed'],
+    // The TITLE for this one is "Written but not confirmed" -- asserted
+    // separately below via LIFECYCLE_PRESENTATION.readback_failed.label. The
+    // SENTENCE itself never says the words "not confirmed"; it says what
+    // actually happened.
+    ['READBACK_FAILED', 'readback_failed', 'governed.readback', 'could not read it back'],
   ] as const)(
     'a failed row with failure_code %s becomes lifecycle %s (%s), and the sentence says "%s"',
     (code, lifecycle, eventType, sentenceFragment) => {
