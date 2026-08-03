@@ -2,11 +2,13 @@ import { redirect, notFound } from 'next/navigation';
 import { getSession } from '@/lib/session';
 import { prisma } from '@/lib/prisma';
 import Link from 'next/link';
-import { ArrowLeft, Bot, User } from 'lucide-react';
+import { ArrowLeft, Bot, ExternalLink, User } from 'lucide-react';
 import { Card, CardContent, CardFooter } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { levelSatisfies, resolveWorkspaceAuthz } from '@/lib/workspace/authz';
+import { buildChatwootConversationLink } from '@/lib/chatwoot-conversation-link';
 
 export const revalidate = 0;
 
@@ -21,9 +23,16 @@ export default async function ConversationPage({
   const { id } = await params;
   const conversation = await prisma.conversation.findFirst({
     where: { id, tenant_id: session.effectiveTenantId },
-    include: { messages: { orderBy: { created_at: 'asc' } } },
+    include: { messages: { orderBy: { created_at: 'asc' } }, chatwoot_binding: true },
   });
   if (!conversation) notFound();
+
+  const authz = await resolveWorkspaceAuthz(session);
+  const chatwootUrl = buildChatwootConversationLink({
+    chatwootConversationId: conversation.chatwoot_conversation_id,
+    chatwootBinding: conversation.chatwoot_binding,
+    canView: levelSatisfies(authz.level, 'manager'),
+  });
 
   return (
     <div className="flex flex-col gap-5">
@@ -84,10 +93,12 @@ export default async function ConversationPage({
               {conversation.status === 'open' ? 'Resolve' : 'Reopen'}
             </Button>
           </form>
-          {conversation.chatwoot_conversation_id && (
-            <Badge variant="secondary" className="self-center">
-              Chatwoot #{conversation.chatwoot_conversation_id}
-            </Badge>
+          {chatwootUrl && (
+            <Button asChild size="sm" variant="outline">
+              <a href={chatwootUrl} target="_blank" rel="noopener noreferrer">
+                Chatwoot #{conversation.chatwoot_conversation_id} <ExternalLink className="size-3.5" />
+              </a>
+            </Button>
           )}
         </CardFooter>
       </Card>
