@@ -31,6 +31,7 @@ export default async function ConversationPage({
   const chatwootUrl = buildChatwootConversationLink({
     chatwootConversationId: conversation.chatwoot_conversation_id,
     chatwootBinding: conversation.chatwoot_binding,
+    conversationTenantId: conversation.tenant_id,
     canView: levelSatisfies(authz.level, 'manager'),
   });
 

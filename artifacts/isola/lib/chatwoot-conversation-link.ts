@@ -18,13 +18,29 @@ function isUsableBase(u: unknown): u is string {
 
 const normalizeBase = (u: string) => u.trim().replace(/\/+$/, '');
 
+/**
+ * Chatwoot account ids are opaque path segments, not free text. A binding row
+ * carrying anything else (a slash, `..`, a query/fragment character) must fail
+ * closed rather than let the stored value redirect the link outside
+ * `/app/accounts/{account}/conversations/{id}`.
+ */
+const isSafePathSegment = (v: string) => /^[A-Za-z0-9_-]+$/.test(v);
+
 export function buildChatwootConversationLink(input: {
   chatwootConversationId: number | null;
-  chatwootBinding: { base_url: string; account_id: string } | null;
+  chatwootBinding: { base_url: string; account_id: string; tenant_id: string } | null;
+  conversationTenantId: string;
   canView: boolean;
 }): string | null {
   if (!input.canView) return null;
   if (input.chatwootConversationId == null) return null;
-  if (!input.chatwootBinding || !isUsableBase(input.chatwootBinding.base_url)) return null;
+  if (!input.chatwootBinding) return null;
+  // The binding relation is resolved by chatwoot_binding_id alone (see
+  // prisma/schema.prisma Conversation.chatwoot_binding_id) — it is not scoped
+  // to the conversation's own tenant_id by the query itself. A row pointing at
+  // another tenant's binding must never build that tenant's Chatwoot URL.
+  if (input.chatwootBinding.tenant_id !== input.conversationTenantId) return null;
+  if (!isUsableBase(input.chatwootBinding.base_url)) return null;
+  if (!isSafePathSegment(input.chatwootBinding.account_id)) return null;
   return `${normalizeBase(input.chatwootBinding.base_url)}/app/accounts/${input.chatwootBinding.account_id}/conversations/${input.chatwootConversationId}`;
 }
