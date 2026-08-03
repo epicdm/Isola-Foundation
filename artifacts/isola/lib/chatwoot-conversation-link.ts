@@ -14,9 +14,16 @@
  */
 function isUsableBase(u: unknown): u is string {
   if (typeof u !== 'string' || u.trim() === '') return false;
+  const trimmed = u.trim();
+  // Checked on the raw string, not `.search`/`.hash`: a bare trailing `?` or
+  // `#` with nothing after it (e.g. "https://host?") parses to an EMPTY
+  // search/hash in the WHATWG URL model, so those getters would pass it
+  // through — but the delimiter is still in `.href`, and string-concatenating
+  // the conversation path onto it lands inside the query/fragment instead of
+  // the path.
+  if (trimmed.includes('?') || trimmed.includes('#')) return false;
   try {
-    const parsed = new URL(u.trim());
-    if (parsed.search !== '' || parsed.hash !== '') return false;
+    const parsed = new URL(trimmed);
     return parsed.protocol === 'http:' || parsed.protocol === 'https:';
   } catch {
     return false;

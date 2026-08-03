@@ -122,6 +122,19 @@ describe('buildChatwootConversationLink (pure)', () => {
       buildChatwootConversationLink({ ...base, chatwootBinding: { ...binding, base_url: 'https://inbox.epic.dm#frag' } })
     ).toBeNull();
   });
+
+  // Codex re-review finding [P2]: a BARE trailing "?" or "#" with nothing
+  // after it parses to an EMPTY .search/.hash in the WHATWG URL model, so a
+  // check against those getters alone would miss it — the delimiter still
+  // ends up in the concatenated href.
+  it('returns null when base_url ends with a bare query or fragment delimiter', () => {
+    expect(
+      buildChatwootConversationLink({ ...base, chatwootBinding: { ...binding, base_url: 'https://inbox.epic.dm?' } })
+    ).toBeNull();
+    expect(
+      buildChatwootConversationLink({ ...base, chatwootBinding: { ...binding, base_url: 'https://inbox.epic.dm#' } })
+    ).toBeNull();
+  });
 });
 
 describe('Inbox conversation detail — Chatwoot deep link', () => {
