@@ -5,11 +5,18 @@
  * `/inbox/${inbox_id}` instead, see app/admin/tenants/[id]/page.tsx).
  */
 
-/** Same base_url validity check as app/admin/tenants/[id]/page.tsx. */
+/**
+ * Same base_url validity check as app/admin/tenants/[id]/page.tsx, plus a
+ * rejection this callsite needs that the admin page's inbox-link builder does
+ * not: a query string or fragment on base_url would be silently absorbed into
+ * the appended `/app/accounts/.../conversations/...` suffix by plain string
+ * concatenation, producing a link that does not open the bound conversation.
+ */
 function isUsableBase(u: unknown): u is string {
   if (typeof u !== 'string' || u.trim() === '') return false;
   try {
     const parsed = new URL(u.trim());
+    if (parsed.search !== '' || parsed.hash !== '') return false;
     return parsed.protocol === 'http:' || parsed.protocol === 'https:';
   } catch {
     return false;

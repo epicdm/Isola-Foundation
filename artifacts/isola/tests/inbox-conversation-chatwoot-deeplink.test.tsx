@@ -109,6 +109,19 @@ describe('buildChatwootConversationLink (pure)', () => {
       ).toBeNull();
     }
   });
+
+  // Codex re-review finding [P2]: a query string or fragment on base_url would
+  // be silently absorbed into the appended suffix by string concatenation
+  // (e.g. "https://inbox.epic.dm?x=" + "/app/accounts/2/conversations/9"
+  // resolves to a query, not the intended conversation path).
+  it('returns null when base_url carries a query string or fragment', () => {
+    expect(
+      buildChatwootConversationLink({ ...base, chatwootBinding: { ...binding, base_url: 'https://inbox.epic.dm?x=1' } })
+    ).toBeNull();
+    expect(
+      buildChatwootConversationLink({ ...base, chatwootBinding: { ...binding, base_url: 'https://inbox.epic.dm#frag' } })
+    ).toBeNull();
+  });
 });
 
 describe('Inbox conversation detail — Chatwoot deep link', () => {
