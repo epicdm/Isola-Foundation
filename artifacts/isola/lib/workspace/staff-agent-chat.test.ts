@@ -1,14 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { prismaMock } = vi.hoisted(() => ({
+const { prismaMock, recordClawithFailureMock } = vi.hoisted(() => ({
   prismaMock: {
     agent: { findFirst: vi.fn() },
     clawithBinding: { findFirst: vi.fn() },
     chatwootBinding: { findMany: vi.fn() },
   },
+  recordClawithFailureMock: vi.fn(),
 }));
 
 vi.mock('@/lib/prisma', () => ({ prisma: prismaMock }));
+vi.mock('@/lib/clawith/alert', () => ({ recordClawithFailure: recordClawithFailureMock }));
 
 import {
   FOUNDATION_STAFF_CHAT_AGENT_IDS_ENV,
@@ -24,6 +26,7 @@ import {
 } from './staff-agent-chat';
 import { CLAWITH_STRUCTURED_URL as LEGACY_CLAWITH_STRUCTURED_URL, MAX_ATTEMPTS } from '@/lib/clawith/client';
 import { CLAWITH_SCHEMA_VERSION } from '@/lib/clawith/contract';
+import { resetAllCircuitBreakers } from '@/lib/clawith/circuit-breaker';
 import type { SessionCtx } from '@/lib/session';
 
 const TENANT = '43b006e4-33e0-42a8-bec7-4422ba290d79';
@@ -104,6 +107,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetAllCircuitBreakers();
 });
 
 describe('proof 1: allowlist parsing (revised rule 5)', () => {
@@ -702,6 +706,11 @@ describe('proof 11: failure classification maps onto the closed safe-state vocab
     ['agent_mismatch', 'degraded'],
     ['unsupported_tool', 'degraded'],
     ['contradictory_response', 'degraded'],
+    ['payment_required', 'unavailable'],
+    ['rate_limited', 'degraded'],
+    ['provider_unavailable', 'degraded'],
+    ['provider_error_leaked', 'unavailable'],
+    ['circuit_open', 'unavailable'],
   ];
 
   for (const [kind, expected] of cases) {
@@ -762,5 +771,113 @@ describe('proof 11: failure classification maps onto the closed safe-state vocab
     });
     expect(outcome.result.state).toBe('replied');
     expect(fetchImpl).toHaveBeenCalledTimes(MAX_ATTEMPTS);
+  });
+});
+
+describe('proof 13: a staff-chat 402 is sanitized end-to-end and alerts exactly once', () => {
+  it('produces state=unavailable, no raw detail, exactly one attempt and exactly one alert', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ error: 'Insufficient Balance' }, 402));
+    const outcome = await performStaffChatTurn({
+      session: session(),
+      agent: eligibleAgent(),
+      message: 'hello',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      env: env(),
+      clientOptions: { fetchImpl: fetchImpl as unknown as typeof fetch, sleep: async () => {} },
+    });
+
+    expect(outcome.result.state).toBe('unavailable');
+    expect(outcome.result.text).toBeNull();
+    expect(JSON.stringify(outcome.result)).not.toContain('402');
+    expect(JSON.stringify(outcome.result)).not.toContain('Insufficient Balance');
+    // 402 is not retryable on the same credential — one attempt, not MAX_ATTEMPTS.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    expect(recordClawithFailureMock).toHaveBeenCalledTimes(1);
+    const [failureArg, ctxArg] = recordClawithFailureMock.mock.calls[0] as unknown as [
+      { kind: string; status: number | null },
+      Record<string, unknown>,
+    ];
+    expect(failureArg).toMatchObject({ kind: 'payment_required', status: 402 });
+    expect(ctxArg).toMatchObject({ surface: 'staff_chat', correlationId: 'staffchat:thread-1:turn-1' });
+  });
+
+  it('a retried transient failure that exhausts MAX_ATTEMPTS still produces exactly one alert, not one per attempt', async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw Object.assign(new Error('timeout'), { name: 'TimeoutError' });
+    });
+    const outcome = await performStaffChatTurn({
+      session: session(),
+      agent: eligibleAgent(),
+      message: 'hello',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      env: env(),
+      clientOptions: { fetchImpl: fetchImpl as unknown as typeof fetch, sleep: async () => {} },
+    });
+    expect(outcome.result.state).toBe('timeout');
+    expect(fetchImpl).toHaveBeenCalledTimes(MAX_ATTEMPTS);
+    expect(recordClawithFailureMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('proof 14: automatic fallback to a different Clawith agent is disabled — same logical agent, one attempt, no masking', () => {
+  const FALLBACK_CLAWITH_AGENT_ID = '9a1c9e2e-6b1a-4b9a-8b1a-2f3c4d5e6f70';
+  // The shape the old CLAWITH_APPROVED_FALLBACK_AGENTS env var used to accept
+  // (see ev-shared-model-failure-pr72-review-report-2026-08-04) — must now be
+  // completely inert. fallback.ts no longer reads any such variable, and
+  // there is no export left to name it by, so the literal env var name is
+  // reproduced here directly.
+  const envWithLegacyFallbackVar = env({
+    CLAWITH_APPROVED_FALLBACK_AGENTS: `${CLAWITH_AGENT_ID}:${FALLBACK_CLAWITH_AGENT_ID}`,
+  });
+
+  it('a primary 402 is never covered by a second agent — one attempt, sanitized unavailable, no ClawithBinding lookup', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ error: 'Insufficient Balance' }, 402));
+
+    const outcome = await performStaffChatTurn({
+      session: session(),
+      agent: eligibleAgent(),
+      message: 'hello',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      env: envWithLegacyFallbackVar,
+      clientOptions: { fetchImpl: fetchImpl as unknown as typeof fetch, sleep: async () => {} },
+    });
+
+    expect(outcome.result.state).toBe('unavailable');
+    expect(outcome.result.text).toBeNull();
+    expect(JSON.stringify(outcome.result)).not.toContain('402');
+    expect(JSON.stringify(outcome.result)).not.toContain('Insufficient Balance');
+    // Never attempted a second call against any other agent.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    // The legacy pairing env var is never even read — no lookup for a
+    // fallback agent's ClawithBinding happens at all.
+    expect(prismaMock.clawithBinding.findFirst).not.toHaveBeenCalled();
+
+    expect(recordClawithFailureMock).toHaveBeenCalledTimes(1);
+    const [failureArg] = recordClawithFailureMock.mock.calls[0] as unknown as [{ kind: string }];
+    expect(failureArg).toMatchObject({ kind: 'payment_required' });
+  });
+
+  it('every attempt sends the same designated_agent_id the caller resolved — never the legacy fallback agent id', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(okBody()));
+
+    await performStaffChatTurn({
+      session: session(),
+      agent: eligibleAgent(),
+      message: 'hello',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      env: envWithLegacyFallbackVar,
+      clientOptions: { fetchImpl: fetchImpl as unknown as typeof fetch, sleep: async () => {} },
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    const sentAgentId = JSON.parse(init.body as string).designated_agent_id;
+    expect(sentAgentId).toBe(CLAWITH_AGENT_ID);
+    expect(sentAgentId).not.toBe(FALLBACK_CLAWITH_AGENT_ID);
   });
 });

@@ -31,12 +31,77 @@ export interface ExpectedResponseIdentity {
   tenantId: string;
   /** Tool names this request authorised. Anything else is rejected. */
   allowedToolNames: ReadonlySet<string>;
+  /** The locale THIS request asked Clawith to reply in. When it names a CJK
+   *  language, a CJK-script reply is the expected shape, not a leak — see
+   *  `looksLikeProviderErrorLeak`. Optional so callers (e.g. the reasoning-loop
+   *  orchestrator) that do not carry a request locale keep today's stricter
+   *  behaviour rather than silently opting out of the CJK check. */
+  locale?: string;
 }
 
 /** Tool names whose execution changes a business system of record. A reply
  *  that presumes one of these has already run is a fabrication until
  *  Foundation says otherwise. */
 const MUTATION_HINT = /\.(create|update|delete|schedule|send|log)$/;
+
+/** Signatures of a raw provider/runtime failure leaking through as if it
+ *  were ordinary reply text. This is deliberately separate from HTTP-status
+ *  classification: a provider can fail with a 200 whose body is otherwise
+ *  well-formed but whose `customer_reply` (or handoff message) IS the raw
+ *  failure — an HTTP code quoted as prose, a billing message, a bare run id,
+ *  or runtime text in a language the agent was never asked to answer in.
+ *  Never trust user-facing language alone when a structured code is
+ *  available; this exists for the case where there isn't one. */
+const UUID_ANYWHERE_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
+const CJK_RE = /[一-鿿]/;
+/** A request whose locale names one of these families expects a CJK-script
+ *  reply as ordinary output — the broad CJK_RE catch-all below would
+ *  otherwise flag every legitimate Chinese/Japanese/Korean customer reply as
+ *  a leak. It is suppressed ONLY for these locales, and ONLY as the generic
+ *  "any CJK character" heuristic — the explicit localized phrases in
+ *  LOCALIZED_LEAK_SIGNATURES below still fire regardless of locale, because
+ *  Clawith's own providers (DeepSeek, Moonshot, Qwen, Zhipu) are Chinese AI
+ *  vendors whose native failure text is exactly this shape. */
+const CJK_LOCALE_RE = /^(zh|ja|ko)\b/i;
+/** Chinese-language equivalents of the explicit English failure vocabulary
+ *  below. Literal phrase matches, not "any CJK text" — these are what let a
+ *  CJK-locale request still catch a real localized provider failure (this is
+ *  the exact shape of the original leak: DeepSeek/Moonshot/Qwen/Zhipu error
+ *  text arrives in Chinese, not English). Deliberately excludes a generic
+ *  "service unavailable" phrase: unlike these, it collides with ordinary
+ *  business copy (e.g. "fibre service is temporarily unavailable in this
+ *  area") that a CJK-locale customer reply can legitimately say. */
+const LOCALIZED_LEAK_SIGNATURES: RegExp[] = [
+  /模型调用失败/, // model_call_failed
+  /余额不足/, // insufficient balance
+  /请求(过于)?频繁|频率限制|限流/, // rate limited
+  /需要支付|信用(额度)?已用完|配额已(用完|超出)/, // payment required / credit exhausted / quota exceeded
+];
+const PROVIDER_LEAK_SIGNATURES: RegExp[] = [
+  /\bHTTP[ _-]?[45]\d{2}\b/i,
+  /\binsufficient[ _-]?balance\b/i,
+  /\bmodel_call_failed\b/i,
+  /\b(payment[ _-]?required|credit[ _-]?exhausted|quota[ _-]?exceeded)\b/i,
+  /\brate[ _-]?limit(ed)?\b/i,
+  /\brun[ _-]?id\b/i,
+  UUID_ANYWHERE_RE,
+  /"(error|error_code|error_type|status_code)"\s*:/i,
+  /\b(deepseek|openai|anthropic|moonshot|qwen|zhipu)\b/i,
+  ...LOCALIZED_LEAK_SIGNATURES,
+];
+
+/** True when `text` looks like a raw provider/runtime failure rather than an
+ *  ordinary reply. Exported so both this module and its tests can reason
+ *  about the exact signatures independent of where the check is wired in.
+ *  `locale` is the request's own reply locale — pass it whenever it is known
+ *  so a genuine CJK-language reply is not mistaken for raw runtime text. Only
+ *  the broad "any CJK character" catch-all is locale-gated; every explicit
+ *  failure phrase (English or localized) still fires no matter the locale. */
+export function looksLikeProviderErrorLeak(text: string, locale?: string): boolean {
+  if (PROVIDER_LEAK_SIGNATURES.some((re) => re.test(text))) return true;
+  if (locale !== undefined && CJK_LOCALE_RE.test(locale)) return false;
+  return CJK_RE.test(text);
+}
 
 function fail(kind: ClawithFailureKind, detail: string): never {
   throw new ClawithFailure(kind, detail);
@@ -188,6 +253,22 @@ export function parseClawithResponse(raw: unknown, expected: ExpectedResponseIde
   const escalation = parseEscalation(r.escalation);
   const toolRequests = parseToolRequests(r.tool_requests, expected.allowedToolNames);
   const customerReply = str(r.customer_reply);
+
+  // A "successful" response whose visible text IS the raw failure is the
+  // exact leak this taxonomy exists to catch — checked before any of the
+  // structural contradiction checks below, and on both fields Foundation
+  // ever actually renders to a user (customer_reply, escalation's
+  // customer-facing handoff message; escalation.explanation is
+  // operator-only and never shown to anyone, so it is not checked here).
+  if (customerReply !== null && looksLikeProviderErrorLeak(customerReply, expected.locale)) {
+    fail('provider_error_leaked', customerReply.slice(0, 500));
+  }
+  if (
+    escalation.customer_handoff_message !== null &&
+    looksLikeProviderErrorLeak(escalation.customer_handoff_message, expected.locale)
+  ) {
+    fail('provider_error_leaked', escalation.customer_handoff_message.slice(0, 500));
+  }
 
   // ── Contradiction checks ──────────────────────────────────────────────────
   // A response that says nothing, asks for nothing and escalates nothing is

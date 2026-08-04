@@ -24,10 +24,12 @@
  * There is no fourth branch, and in particular no native one.
  */
 
-import { callClawithStructured, type ClawithClientOptions } from './client';
+import type { ClawithClientOptions } from './client';
 import type { ClawithRequest, ClawithResponse } from './contract';
 import { ClawithFailure, isClawithFailure, isConfigurationFailure, type ClawithFailureKind } from './errors';
 import { buildClawithRequest, type BuildClawithRequestInput } from './request';
+import { callClawithWithFallback } from './fallback';
+import { recordClawithFailure } from './alert';
 
 /** The one approved thing Foundation says when its brain is unreachable.
  *  It claims nothing about the customer's request, promises no timeline, and
@@ -154,7 +156,31 @@ export async function invokeClawithGated(input: InvokeClawithInput): Promise<Cla
   }
 
   try {
-    const { response, attempts, latencyMs } = await callClawithStructured(request, input.clientOptions);
+    const { response, attempts, latencyMs, usedFallback, primaryFailure } = await callClawithWithFallback({
+      request,
+      tenantId: input.tenantId,
+      clientOptions: input.clientOptions,
+      env: input.clientOptions?.env,
+    });
+
+    // A fallback that succeeds still means the PRIMARY credential failed —
+    // silently absorbing that would defeat requirement 8 (one alert per
+    // failure event) and requirement 15 (credit monitoring/first-failure
+    // alarm): an operator would never learn the primary ran out of balance
+    // until the fallback also failed. `primaryFailure` is only ever set
+    // alongside `usedFallback`, and fallback.ts never attempts a fallback for
+    // a configuration failure, so this is always a real provider event.
+    if (usedFallback && primaryFailure) {
+      await recordClawithFailure(primaryFailure, {
+        tenantId: input.tenantId,
+        agentId: null,
+        clawithAgentId: request.designated_agent_id,
+        surface: 'customer_dispatch',
+        correlationId: request.correlation_id,
+        actorId: 'system:clawith',
+      });
+    }
+
     console.log(
       `[clawith] turn ok corr=${request.correlation_id} agent=${request.designated_agent_id} ` +
         `attempts=${attempts} latency=${latencyMs}ms tools=${response.tool_requests.length} ` +
@@ -169,6 +195,20 @@ export async function invokeClawithGated(input: InvokeClawithInput): Promise<Cla
       `[clawith] turn FAILED CLOSED corr=${request.correlation_id} kind=${failure.kind} ` +
         `status=${failure.status ?? '-'} — no native fallback on the gated path`,
     );
+
+    // See staff-agent-chat.ts's identical guard: configuration failures are
+    // suppressed already and would only add alert noise while they persist.
+    if (!isConfigurationFailure(failure.kind)) {
+      await recordClawithFailure(failure, {
+        tenantId: input.tenantId,
+        agentId: null,
+        clawithAgentId: request.designated_agent_id,
+        surface: 'customer_dispatch',
+        correlationId: request.correlation_id,
+        actorId: 'system:clawith',
+      });
+    }
+
     return outcomeForFailure(failure, ctx);
   }
 }

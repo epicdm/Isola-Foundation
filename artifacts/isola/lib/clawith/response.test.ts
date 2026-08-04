@@ -172,3 +172,88 @@ describe('contradiction rejection', () => {
     expect(kindOf(() => parseClawithResponse(raw, EXPECTED))).toBe('contradictory_response');
   });
 });
+
+describe('proof: a raw provider failure leaking through a structurally-valid 200 is caught', () => {
+  it.each([
+    ['an HTTP status quoted as prose', 'HTTP 402 — the provider rejected this request.'],
+    ['an insufficient-balance message', 'Request failed: Insufficient Balance on this account.'],
+    ['a bare provider error code', 'model_call_failed: please retry later.'],
+    ['a billing/credit phrase', 'This request was blocked: payment required to continue.'],
+    ['a rate-limit phrase', 'You are being rate limited by the upstream provider.'],
+    ['a bare run id label', 'See Run ID for details: 2ed67e22-1ffb-4b9d-b60d-304f10b1e8ac'],
+    ['a bare UUID with no label at all', 'Reference 2ed67e22-1ffb-4b9d-b60d-304f10b1e8ac for support.'],
+    ['raw Chinese runtime failure text', '模型调用失败，请稍后重试。'],
+    ['raw provider JSON shape', '{"error_code": "insufficient_quota", "message": "no credit"}'],
+    ['a provider name', 'DeepSeek returned an error for this request.'],
+  ])('classifies %s in customer_reply as provider_error_leaked, not a normal reply', (_label, leak) => {
+    expect(kindOf(() => parseClawithResponse(body({ customer_reply: leak }), EXPECTED))).toBe(
+      'provider_error_leaked',
+    );
+  });
+
+  it('does NOT flag a genuine reply in the request\'s own CJK reply locale — locale, not script, decides', () => {
+    const zhExpected: ExpectedResponseIdentity = { ...EXPECTED, locale: 'zh-CN' };
+    const raw = body({ customer_reply: '您好，我们在多米尼克提供光纤安装服务。' });
+    expect(kindOf(() => parseClawithResponse(raw, zhExpected))).toBe('no-error');
+  });
+
+  it('still flags a raw Chinese runtime failure even under a zh-CN request locale — locale relaxes the broad script check, not the explicit failure phrases', () => {
+    const zhExpected: ExpectedResponseIdentity = { ...EXPECTED, locale: 'zh-CN' };
+    const raw = body({ customer_reply: '模型调用失败，请稍后重试。' });
+    expect(kindOf(() => parseClawithResponse(raw, zhExpected))).toBe('provider_error_leaked');
+  });
+
+  it('does NOT flag a genuine CJK service-availability reply — "service unavailable" is ordinary business copy, not just a leak phrase', () => {
+    const zhExpected: ExpectedResponseIdentity = { ...EXPECTED, locale: 'zh-CN' };
+    const raw = body({ customer_reply: '很抱歉，该地区光纤服务暂时不可用，我们会在覆盖后通知您。' });
+    expect(kindOf(() => parseClawithResponse(raw, zhExpected))).toBe('no-error');
+  });
+
+  it('still flags the identical raw Chinese runtime text when the request locale is NOT CJK', () => {
+    const raw = body({ customer_reply: '模型调用失败，请稍后重试。' });
+    expect(kindOf(() => parseClawithResponse(raw, { ...EXPECTED, locale: 'en-DM' }))).toBe(
+      'provider_error_leaked',
+    );
+  });
+
+  it('classifies the same leak signatures in escalation.customer_handoff_message', () => {
+    const raw = body({
+      customer_reply: null,
+      escalation: {
+        requested: true,
+        reason_code: 'approval_required',
+        customer_handoff_message: 'HTTP 402 Insufficient Balance — model_call_failed',
+      },
+    });
+    expect(kindOf(() => parseClawithResponse(raw, EXPECTED))).toBe('provider_error_leaked');
+  });
+
+  it('does NOT flag escalation.explanation — it is operator-only and never shown to anyone', () => {
+    const raw = body({
+      customer_reply: null,
+      escalation: {
+        requested: true,
+        reason_code: 'approval_required',
+        explanation: 'HTTP 402 Insufficient Balance — model_call_failed',
+        customer_handoff_message: 'Let me get a colleague for you.',
+      },
+    });
+    expect(() => parseClawithResponse(raw, EXPECTED)).not.toThrow();
+  });
+
+  it('never lets the raw leak text back out — the failure detail is truncated, not the full body', () => {
+    const longLeak = `HTTP 402 Insufficient Balance ${'x'.repeat(1000)}`;
+    try {
+      parseClawithResponse(body({ customer_reply: longLeak }), EXPECTED);
+      throw new Error('expected parseClawithResponse to throw');
+    } catch (err) {
+      expect((err as ClawithFailure).detail?.length).toBeLessThanOrEqual(500);
+    }
+  });
+
+  it('leaves an ordinary reply untouched — no false positive on normal service copy', () => {
+    expect(() =>
+      parseClawithResponse(body({ customer_reply: 'Yes, we install fibre in Roseau — would you like a quote?' }), EXPECTED),
+    ).not.toThrow();
+  });
+});
