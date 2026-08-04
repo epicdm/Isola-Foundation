@@ -217,7 +217,7 @@ export async function handleInboundWhatsApp(params: {
   // (ClawithBinding.tenant_id WHERE agent_id IS NULL). Without this, a
   // direct-webhook tenant flipped to brain_provider='clawith' would call
   // generateReply() with no clawithBinding and silently fall back to native.
-  let clawithBindingRow: { clawith_agent_id: string; paperclip_agent_id: string; paperclip_company_id: string } | null = null;
+  let clawithBindingRow: { tenant_id: string; clawith_agent_id: string; paperclip_agent_id: string; paperclip_company_id: string } | null = null;
   if (agent.brain_provider === 'clawith') {
     clawithBindingRow = await prisma.clawithBinding.findUnique({
       where: { agent_id: agent.id },
@@ -244,6 +244,7 @@ export async function handleInboundWhatsApp(params: {
       tenantId: tenant.id,
       clawithBinding: clawithBindingRow
         ? {
+            tenant_id: clawithBindingRow.tenant_id,
             clawith_agent_id: clawithBindingRow.clawith_agent_id,
             paperclip_agent_id: clawithBindingRow.paperclip_agent_id,
             paperclip_company_id: clawithBindingRow.paperclip_company_id,

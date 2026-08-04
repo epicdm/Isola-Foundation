@@ -14,6 +14,7 @@ vi.mock('@/lib/workspace/authz', () => ({ requireWorkspaceAccess: requireWorkspa
 vi.mock('@/lib/workspace/staff-agent-chat', () => ({
   resolveStaffChatEligibility: resolveEligibilityMock,
   performStaffChatTurn: performTurnMock,
+  buildStaffChatCorrelationId: (threadId: string, turnId: string) => `staffchat:${threadId}:${turnId}`,
 }));
 vi.mock('@/lib/audit', () => ({ audit: auditMock }));
 
@@ -136,6 +137,25 @@ describe('eligibility failure (agent exists, but is not chat-eligible) renders t
     expect(data.allowedTools).toEqual([]);
     expect(performTurnMock).not.toHaveBeenCalled();
     expect(auditMock).not.toHaveBeenCalled();
+  });
+
+  it('B4: returns state=blocked with no upstream call, but DOES audit, for a not_internal_classified refusal', async () => {
+    resolveEligibilityMock.mockResolvedValue({ eligible: false, reason: 'not_internal_classified' });
+    const res = await post(VALID_BODY);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.state).toBe('blocked');
+    expect(data.reason).toBe('not_internal_classified');
+    expect(performTurnMock).not.toHaveBeenCalled();
+
+    expect(auditMock).toHaveBeenCalledTimes(1);
+    const auditCall = auditMock.mock.calls[0][0];
+    expect(auditCall.action).toBe('clawith.exposure.staff_denied');
+    expect(auditCall.tenantId).toBe(TENANT);
+    expect(auditCall.actorId).toBe('user-1');
+    expect(auditCall.entityId).toBe(AGENT_ID);
+    expect(auditCall.requestId).toBe('staffchat:thread-1:turn-1');
+    expect(auditCall.meta).toEqual({ reason: 'not_internal_classified' });
   });
 });
 

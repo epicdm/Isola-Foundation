@@ -45,6 +45,8 @@ import type { OwnershipState } from './ownership/state';
 import { invokeClawithGated } from './clawith/invoke';
 import type { ClawithFailureRecord } from './clawith/invoke';
 import type { ClawithToolDefinition } from './clawith/contract';
+import { authorizeCustomerDispatch } from './clawith/customer-exposure-gate';
+import type { CustomerDispatchAuthorization } from './clawith/customer-exposure-gate';
 
 const FLOWISE_TIMEOUT_MS = 20_000;
 // Hermes agent replies in ~10-45s; 50s gives headroom before falling back to
@@ -185,10 +187,17 @@ export interface BrainAgent {
   intelligence_tier: string;
   brain_provider: string;       // 'native' | 'flowise' | 'hermes' | 'clawith'
   flowise_flow_id: string | null;
+  /** Required for the B2 customer exposure gate (an inactive agent is never
+   *  an authorized dispatch target, regardless of classification). */
+  is_active: boolean;
 }
 
 /** Tenant's Clawith identity, resolved from the ClawithBinding table. */
 export interface ClawithBindingInput {
+  /** ClawithBinding.tenant_id — required so the B2 exposure gate can prove
+   *  this binding belongs to the SAME Foundation tenant as `tenantId` below,
+   *  not just that some binding was resolved. */
+  tenant_id: string;
   clawith_agent_id: string;
   paperclip_agent_id: string;
   paperclip_company_id: string;
@@ -244,6 +253,32 @@ export async function generateReply(params: {
    *  below is UNREACHABLE — that is the entire point of §6. */
   let gatedFailClosed = false;
 
+  // ── B2: Foundation-owned customer exposure gate ──────────────────────────
+  // Decided ONCE, before either Clawith call shape below runs — this makes
+  // generateReply() the single reusable choke point B2 requires for both
+  // live customer paths (the Chatwoot A2 webhook and the direct WhatsApp
+  // webhook), since both funnel every clawith turn through this function.
+  // A denial never throws and never picks a different agent — it only
+  // withholds the clawithBinding this turn would otherwise have used.
+  let clawithDispatch: CustomerDispatchAuthorization = { allowed: true, reason: null };
+  if (agent.brain_provider === 'clawith' && clawithBinding) {
+    clawithDispatch = await authorizeCustomerDispatch({
+      foundationTenantId: tenantId,
+      requestedFoundationAgentId: agent.id,
+      agentActive: agent.is_active,
+      clawithBinding: { tenant_id: clawithBinding.tenant_id, clawith_agent_id: clawithBinding.clawith_agent_id },
+      correlationId: escalationCorrelationId ?? `corr-${sessionId}`,
+      source: gatedLoop ? 'chatwoot_a2' : 'direct_whatsapp',
+      contactRef: gatedLoop?.contactRef ?? null,
+    });
+    if (!clawithDispatch.allowed) {
+      console.warn(
+        `[brain-provider] customer exposure gate DENIED clawith dispatch (reason=${clawithDispatch.reason}) ` +
+          `tenant=${tenantId} clawith_agent=${clawithBinding.clawith_agent_id}`,
+      );
+    }
+  }
+
   if (agent.brain_provider === 'flowise' && agent.flowise_flow_id) {
     const flowiseResult = await tryFlowise({
       flowId: agent.flowise_flow_id,
@@ -290,6 +325,29 @@ export async function generateReply(params: {
     isAiLoopGatedDoor(gatedLoop.chatwootAccountId, gatedLoop.inboxId)
   ) {
     gatedFailClosed = true;
+
+    if (!clawithDispatch.allowed) {
+      // Exposure denial on the gated path resolves exactly like every other
+      // gated-path failure: suppressed, never a native reply — §6's "no
+      // fourth branch, and in particular no native one" applies here too.
+      return {
+        text: '',
+        tokensUsed: 0,
+        model: 'clawith',
+        provider: 'clawith',
+        needsHandoff: false,
+        suppressCustomerReply: true,
+        clawithFailure: {
+          kind: 'agent_missing',
+          detail: `exposure denied: ${clawithDispatch.reason}`,
+          status: null,
+          correlationId: escalationCorrelationId ?? '',
+          conversationId: gatedLoop.conversationId,
+          inboundMessageId: gatedLoop.inboundMessageId,
+        },
+      };
+    }
+
     const outcome = await invokeClawithGated({
       tenantId,
       bindingTenantId: gatedLoop.bindingTenantId,
@@ -341,6 +399,10 @@ export async function generateReply(params: {
       console.warn(
         '[brain-provider] brain_provider=clawith but no ClawithBinding for this tenant — falling back to native',
       );
+    } else if (!clawithDispatch.allowed) {
+      // Already logged and audited above — falls through to native exactly
+      // like the !clawithBinding case: the customer still gets a safe reply,
+      // never the denied (e.g. INTERNAL) agent.
     } else if (
       process.env.ISOLA_LEGACY_CLAWITH_FALLBACK === '1' &&
       !ISOLA_BRIDGE_ALLOWED_PHONE_NUMBER_IDS.has(phoneNumberId)

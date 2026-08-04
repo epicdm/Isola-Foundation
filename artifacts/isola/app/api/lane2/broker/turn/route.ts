@@ -26,14 +26,16 @@
  * substituted — flagged so the next release knows exactly what is missing):
  *   1. Agent resolution requires an EXPLICIT ChatwootBinding.agent_id for
  *      mode='lane2'. No implicit tenant-default-agent fallback.
- *   2. The ratified PUBLIC/INTERNAL agent_exposure_policy design
- *      (claude/FOUNDATION-AGENT-EXPOSURE-CLASSIFICATION-SPEC-2026-07-31.md)
- *      has zero implementation anywhere in this repo. This route's floor is
- *      narrower but real: only the agent explicitly bound to this tenant via
- *      ChatwootBinding/ClawithBinding can ever be invoked — never a
- *      caller-supplied id. Building the full classification table is a
- *      separately-scoped, separately-authorized release (it needs its own
- *      migration).
+ *   2. UPDATED (xp-foundation-agent-exposure-enforcement-2026-08-04): the
+ *      ratified PUBLIC/INTERNAL agent_exposure_policy is now implemented as
+ *      a code-level policy source (lib/clawith/agent-exposure-policy.ts) —
+ *      not yet the DB-backed table a full admin-manageable release needs
+ *      (that migration remains separately authorized and unbuilt). This
+ *      route calls the same authorizeCustomerDispatch() gate every
+ *      customer/public dispatch path uses (lib/clawith/customer-exposure-
+ *      gate.ts) immediately before invokeClawithGated below, so even the
+ *      explicitly-bound agent this route already restricted itself to must
+ *      also be classified enabled PUBLIC for this tenant.
  *   3. Customer identity resolution is honestly `unavailable` — no Customer/
  *      CRM binding is wired for lane2 conversations yet. Never fabricated.
  *   4. No local Conversation/ownership-state tracking for lane2 turns in
@@ -53,6 +55,7 @@ import { resolveActiveBinding } from '@/lib/chatwoot-binding-resolution';
 import { claimInboundMessageId } from '@/lib/inbound-dedup';
 import { audit } from '@/lib/audit';
 import { invokeClawithGated } from '@/lib/clawith/invoke';
+import { authorizeCustomerDispatch } from '@/lib/clawith/customer-exposure-gate';
 import { isLane2BrokerDoor } from '@/lib/lane2/broker-allowlist';
 import {
   readLane2BrokerSignatureHeaders,
@@ -217,6 +220,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       meta: { outcome: 'clawith_binding_unresolved' },
     });
     return NextResponse.json({ ok: false, outcome: 'clawith_binding_unresolved', correlationId }, { status: 200 });
+  }
+
+  // ── B2: Foundation-owned customer exposure gate ─────────────────────────
+  // This route bypasses lib/brain-provider.ts's generateReply() (it invokes
+  // invokeClawithGated directly), so it is a second explicit call site for
+  // the same reusable exposure decision — not a duplicate policy, one
+  // resolver (lib/clawith/agent-exposure-policy.ts) consulted from every
+  // customer/public dispatch shape this codebase has.
+  const dispatchAuth = await authorizeCustomerDispatch({
+    foundationTenantId: tenant.id,
+    requestedFoundationAgentId: agent.id,
+    agentActive: agent.is_active,
+    clawithBinding: { tenant_id: clawithBinding.tenant_id, clawith_agent_id: clawithBinding.clawith_agent_id },
+    correlationId,
+    source: 'lane2_broker',
+    contactRef: String(envelope.contactId),
+  });
+  if (!dispatchAuth.allowed) {
+    return NextResponse.json(
+      { ok: false, outcome: 'exposure_denied', reason: dispatchAuth.reason, correlationId },
+      { status: 200 },
+    );
   }
 
   // ── Invoke the existing, accepted, fail-closed Clawith contract. ───────

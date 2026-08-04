@@ -31,8 +31,19 @@ import type { SessionCtx } from '@/lib/session';
 
 const TENANT = '43b006e4-33e0-42a8-bec7-4422ba290d79';
 const OTHER_TENANT = 'tenant-someone-else';
-const AGENT_ID = '95062f12-76c1-4074-84d3-572de1291df6';
-const CLAWITH_AGENT_ID = '81b38cd6-9fba-4cc8-8f87-1bce1a4aa162';
+const AGENT_ID = 'a955edf4-a4c7-4669-b7dc-8dd3526716cf'; // Atlas's Foundation Agent id
+// Atlas's real clawith_agent_id — classified INTERNAL in the B1 policy floor
+// (lib/clawith/agent-exposure-policy.ts). Used throughout this file as the
+// eligible/happy-path fixture, since B3 (xp-foundation-agent-exposure-
+// enforcement-2026-08-04) requires the staff-chat positive proof to be a
+// genuinely INTERNAL agent. See "proof 15" below for the negative case this
+// change exists to prove: EMA's real (PUBLIC) clawith_agent_id, which this
+// fixture used exclusively before B3 and would have silently passed.
+const CLAWITH_AGENT_ID = '9baf6f00-f9e0-4bd4-9672-10865f438e2c';
+// EMA — PUBLIC in the same policy floor. A staff-chat turn must never reach
+// this id even when otherwise eligible (allowlisted, active, bound).
+const PUBLIC_CLAWITH_AGENT_ID = '81b38cd6-9fba-4cc8-8f87-1bce1a4aa162';
+const LEDGER_UNKNOWN_CLAWITH_AGENT_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'; // unclassified
 const CLAWITH_TENANT_ID = '6572bd90-0371-4041-986b-065379934f5d';
 const COMPANY_ID = '4cfe04bb-38e5-4745-ac4d-db202c61085f';
 
@@ -286,6 +297,118 @@ describe('proof 2: five-rule eligibility, revised policy', () => {
     );
     const result = await resolveStaffChatEligibility(TENANT, AGENT_ID, ALLOWLIST_ENV);
     expect(result).toEqual({ eligible: false, reason: 'agent_not_found' });
+  });
+});
+
+describe('proof 15: B3 exposure classification enforcement (xp-foundation-agent-exposure-enforcement-2026-08-04)', () => {
+  const ALLOWLIST_ENV_FOR = (agentId: string) => env({ [FOUNDATION_STAFF_CHAT_AGENT_IDS_ENV]: agentId });
+
+  it('fails closed — not_internal_classified — when the bound clawith_agent_id is EMA (PUBLIC), even though every other rule passes', async () => {
+    prismaMock.agent.findFirst.mockResolvedValue({
+      id: AGENT_ID,
+      tenant_id: TENANT,
+      name: 'Isola',
+      is_active: true,
+      brain_provider: 'clawith',
+    });
+    prismaMock.clawithBinding.findFirst.mockResolvedValue({
+      clawith_agent_id: PUBLIC_CLAWITH_AGENT_ID,
+      paperclip_company_id: COMPANY_ID,
+      clawith_tenant_id: CLAWITH_TENANT_ID,
+    });
+    const result = await resolveStaffChatEligibility(TENANT, AGENT_ID, ALLOWLIST_ENV_FOR(AGENT_ID));
+    expect(result).toEqual({ eligible: false, reason: 'not_internal_classified' });
+  });
+
+  it('fails closed — not_internal_classified — when the bound clawith_agent_id is unclassified (Ledger), never guessed as INTERNAL', async () => {
+    prismaMock.agent.findFirst.mockResolvedValue({
+      id: AGENT_ID,
+      tenant_id: TENANT,
+      name: 'Isola',
+      is_active: true,
+      brain_provider: 'clawith',
+    });
+    prismaMock.clawithBinding.findFirst.mockResolvedValue({
+      clawith_agent_id: LEDGER_UNKNOWN_CLAWITH_AGENT_ID,
+      paperclip_company_id: COMPANY_ID,
+      clawith_tenant_id: CLAWITH_TENANT_ID,
+    });
+    const result = await resolveStaffChatEligibility(TENANT, AGENT_ID, ALLOWLIST_ENV_FOR(AGENT_ID));
+    expect(result).toEqual({ eligible: false, reason: 'not_internal_classified' });
+  });
+
+  it('succeeds — eligible: true — for Atlas, the real INTERNAL-classified agent', async () => {
+    prismaMock.agent.findFirst.mockResolvedValue({
+      id: AGENT_ID,
+      tenant_id: TENANT,
+      name: 'Atlas',
+      is_active: true,
+      brain_provider: 'clawith',
+    });
+    prismaMock.clawithBinding.findFirst.mockResolvedValue({
+      clawith_agent_id: CLAWITH_AGENT_ID, // Atlas, INTERNAL
+      paperclip_company_id: COMPANY_ID,
+      clawith_tenant_id: CLAWITH_TENANT_ID,
+    });
+    prismaMock.chatwootBinding.findMany.mockResolvedValue([]);
+    const result = await resolveStaffChatEligibility(TENANT, AGENT_ID, ALLOWLIST_ENV_FOR(AGENT_ID));
+    expect(result.eligible).toBe(true);
+  });
+
+  it('a PUBLIC agent cannot become the internal default via env override — the hardcoded floor cannot be flipped by configuration', async () => {
+    prismaMock.agent.findFirst.mockResolvedValue({
+      id: AGENT_ID,
+      tenant_id: TENANT,
+      name: 'Isola',
+      is_active: true,
+      brain_provider: 'clawith',
+    });
+    prismaMock.clawithBinding.findFirst.mockResolvedValue({
+      clawith_agent_id: PUBLIC_CLAWITH_AGENT_ID,
+      paperclip_company_id: COMPANY_ID,
+      clawith_tenant_id: CLAWITH_TENANT_ID,
+    });
+    const envWithAttemptedOverride = env({
+      [FOUNDATION_STAFF_CHAT_AGENT_IDS_ENV]: AGENT_ID,
+      AGENT_EXPOSURE_POLICY_EXTRA_JSON: JSON.stringify([
+        { foundationTenantId: TENANT, clawithAgentId: PUBLIC_CLAWITH_AGENT_ID, classification: 'INTERNAL', enabled: true },
+      ]),
+    });
+    const result = await resolveStaffChatEligibility(TENANT, AGENT_ID, envWithAttemptedOverride);
+    expect(result).toEqual({ eligible: false, reason: 'not_internal_classified' });
+  });
+
+  it('a disabled INTERNAL classification fails closed too', async () => {
+    prismaMock.agent.findFirst.mockResolvedValue({
+      id: AGENT_ID,
+      tenant_id: TENANT,
+      name: 'Isola',
+      is_active: true,
+      brain_provider: 'clawith',
+    });
+    prismaMock.clawithBinding.findFirst.mockResolvedValue({
+      clawith_agent_id: 'some-other-internal-agent',
+      paperclip_company_id: COMPANY_ID,
+      clawith_tenant_id: CLAWITH_TENANT_ID,
+    });
+    const envWithDisabled = env({
+      [FOUNDATION_STAFF_CHAT_AGENT_IDS_ENV]: AGENT_ID,
+      AGENT_EXPOSURE_POLICY_EXTRA_JSON: JSON.stringify([
+        { foundationTenantId: TENANT, clawithAgentId: 'some-other-internal-agent', classification: 'INTERNAL', enabled: false },
+      ]),
+    });
+    const result = await resolveStaffChatEligibility(TENANT, AGENT_ID, envWithDisabled);
+    expect(result).toEqual({ eligible: false, reason: 'not_internal_classified' });
+  });
+
+  it('a cross-tenant actor cannot borrow Atlas\'s classification — a different tenant requesting the same clawith_agent_id is unmatched', async () => {
+    // resolveStaffChatEligibility itself already fails closed at the
+    // tenant-scoped agent lookup (agent_not_found) before exposure is even
+    // consulted for a genuinely cross-tenant request — this proves the
+    // exposure resolver ALSO keys on tenant, as a second independent layer.
+    const { resolveAgentExposure } = await import('@/lib/clawith/agent-exposure-policy');
+    const resolution = resolveAgentExposure({ foundationTenantId: OTHER_TENANT, clawithAgentId: CLAWITH_AGENT_ID });
+    expect(resolution.matched).toBe(false);
   });
 });
 
