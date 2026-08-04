@@ -43,6 +43,18 @@ export interface ClawithClientOptions {
    *  caller (e.g. staff chat) target its own endpoint, independently
    *  configurable and killable, without repointing `ISOLA_BRIDGE_URL`. */
   url?: string;
+  /**
+   * The Foundation tenant id, used ONLY to scope the circuit breaker — never
+   * sent on the wire. `request.tenant_id` is not safe for this: callers
+   * disagree on what they put there (invoke.ts sends the Foundation tenant;
+   * staff-agent-chat.ts deliberately sends the Clawith-side tenant instead,
+   * see its `tenantId` field doc), so keying on the wire value would let the
+   * SAME Foundation tenant land on two different breakers depending on which
+   * surface it came through, and could in principle let two DIFFERENT
+   * Foundation tenants collide if they share a Clawith tenant id. Falls back
+   * to `request.tenant_id` when omitted, so direct callers of this module
+   * that have no separate Foundation tenant id (e.g. tests) are unaffected. */
+  tenantId?: string;
 }
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -73,7 +85,7 @@ export async function callClawithStructured(
     throw new ClawithFailure('secret_missing', 'CLAWITH_SHARED_SECRET is not configured');
   }
 
-  const circuitKey = circuitKeyFor(request.tenant_id, request.designated_agent_id);
+  const circuitKey = circuitKeyFor(options.tenantId ?? request.tenant_id, request.designated_agent_id);
   if (isCircuitOpen(circuitKey)) {
     // A known-failing credential was already caught (payment/leak) within
     // the cooldown window — refused before any network attempt, same as

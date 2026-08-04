@@ -27,7 +27,13 @@
  *
  * The key is namespaced by Foundation tenant id so breaker state can never
  * cross tenants — including in tests/fixtures, where the same agent-id
- * constant is deliberately reused across unrelated tenant fixtures.
+ * constant is deliberately reused across unrelated tenant fixtures. This
+ * MUST be the Foundation tenant id specifically, not `ClawithRequest.tenant_id`
+ * off the wire: callers disagree on what goes in that field (invoke.ts sends
+ * the Foundation tenant; staff-agent-chat.ts deliberately sends the
+ * Clawith-side tenant instead), so client.ts takes the Foundation tenant id
+ * as a separate `ClawithClientOptions.tenantId` and only falls back to
+ * `request.tenant_id` when a caller has no better value to give it.
  *
  * In-memory and module-scoped: short cooldown to stop pointless repeat
  * attempts within one process's uptime, not a durable state model. A restart

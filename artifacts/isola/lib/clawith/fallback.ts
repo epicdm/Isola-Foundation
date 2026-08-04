@@ -38,8 +38,12 @@ import { ClawithFailure, classifyThrown, isClawithFailure } from './errors';
 
 export interface CallClawithWithFallbackInput {
   request: ClawithRequest;
-  /** Unused while fallback is disabled — kept so call sites do not need to
-   *  change when a real same-agent mechanism lands. */
+  /** The Foundation tenant id — forwarded to the client purely to scope the
+   *  circuit breaker (see `ClawithClientOptions.tenantId`), never sent on the
+   *  wire. Both real callers already had this on hand before building
+   *  `request`, which is why it is a separate field here rather than reused
+   *  from `request.tenant_id` (a value whose meaning callers do not agree
+   *  on). */
   tenantId: string;
   clientOptions?: ClawithClientOptions;
   env?: NodeJS.ProcessEnv;
@@ -58,7 +62,10 @@ export async function callClawithWithFallback(
   input: CallClawithWithFallbackInput,
 ): Promise<CallClawithWithFallbackResult> {
   try {
-    const result = await callClawithStructured(input.request, input.clientOptions);
+    const result = await callClawithStructured(input.request, {
+      ...input.clientOptions,
+      tenantId: input.tenantId,
+    });
     return { ...result, usedFallback: false, primaryFailure: null };
   } catch (err) {
     throw isClawithFailure(err)

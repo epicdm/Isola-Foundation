@@ -96,6 +96,28 @@ describe('callClawithWithFallback — normal success is unchanged', () => {
   });
 });
 
+describe('callClawithWithFallback — forwards the Foundation tenantId to the client for circuit-key scoping', () => {
+  it('passes input.tenantId through as clientOptions.tenantId, distinct from request.tenant_id on the wire', async () => {
+    callClawithStructuredMock.mockResolvedValue(okResult());
+    const fetchImpl = vi.fn();
+    await callClawithWithFallback({
+      request: request(),
+      tenantId: TENANT,
+      clientOptions: { fetchImpl: fetchImpl as unknown as typeof fetch },
+    });
+
+    expect(callClawithStructuredMock).toHaveBeenCalledTimes(1);
+    const [calledReq, calledOptions] = callClawithStructuredMock.mock.calls[0] as unknown as [
+      ReturnType<typeof request>,
+      { tenantId?: string; fetchImpl?: unknown },
+    ];
+    expect(calledReq.tenant_id).toBe(TENANT);
+    expect(calledOptions.tenantId).toBe(TENANT);
+    // The caller's other clientOptions (e.g. fetchImpl) still reach the client.
+    expect(calledOptions.fetchImpl).toBe(fetchImpl);
+  });
+});
+
 describe('callClawithWithFallback — automatic fallback to a different Clawith agent is disabled', () => {
   it('rethrows a payment_required failure immediately — no second agent is ever attempted', async () => {
     const primaryFailure = new ClawithFailure('payment_required', 'Insufficient Balance', 402);

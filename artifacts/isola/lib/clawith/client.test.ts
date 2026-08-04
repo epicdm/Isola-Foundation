@@ -244,3 +244,98 @@ describe('other transport classifications', () => {
     ).rejects.toMatchObject({ kind: 'unsupported_tool' });
   });
 });
+
+describe('circuit breaker key — scoped by the Foundation tenant, not the wire tenant_id', () => {
+  it('a payment_required failure opens the circuit for a second call with the same request — circuit_open, zero network attempts', async () => {
+    const failing = vi.fn(async () => jsonResponse({ error: 'Insufficient Balance' }, 402));
+    await expect(
+      callClawithStructured(REQUEST, { fetchImpl: failing as unknown as typeof fetch, env: ENV, sleep: noSleep }),
+    ).rejects.toMatchObject({ kind: 'payment_required' });
+
+    const second = vi.fn(async () => jsonResponse(okBody()));
+    await expect(
+      callClawithStructured(REQUEST, { fetchImpl: second as unknown as typeof fetch, env: ENV, sleep: noSleep }),
+    ).rejects.toMatchObject({ kind: 'circuit_open' });
+    expect(second).not.toHaveBeenCalled();
+  });
+
+  it('options.tenantId overrides request.tenant_id for the circuit key — the fix for staff-agent-chat.ts sending the Clawith tenant on the wire', async () => {
+    // Two requests that carry DIFFERENT wire tenant_id values (as invoke.ts
+    // and staff-agent-chat.ts genuinely do for the same real Foundation
+    // tenant — see circuit-breaker.ts's doc comment) but share the same
+    // Foundation tenant via options.tenantId must open ONE shared circuit.
+    const otherWireRequest = buildClawithRequest({
+      tenantId: 'clawith-tenant-not-the-foundation-tenant',
+      bindingTenantId: 'clawith-tenant-not-the-foundation-tenant',
+      conversationTenantId: 'clawith-tenant-not-the-foundation-tenant',
+      businessId: 'epic-communications-inc',
+      chatwootAccountId: '5',
+      inboxId: '46',
+      conversationId: 'conv-2',
+      inboundMessageId: 'msg-2',
+      contactRef: 'contact:1',
+      customerMessage: 'hello',
+      history: [],
+      designatedAgentId: AGENT,
+      allowedTools: [TOOL],
+      ownershipState: 'AI_OWNED',
+      correlationId: 'corr-2',
+    });
+    expect(otherWireRequest.tenant_id).not.toBe(REQUEST.tenant_id);
+
+    const failing = vi.fn(async () => jsonResponse({ error: 'Insufficient Balance' }, 402));
+    await expect(
+      callClawithStructured(REQUEST, {
+        fetchImpl: failing as unknown as typeof fetch,
+        env: ENV,
+        sleep: noSleep,
+        tenantId: 'foundation-tenant-shared-by-both-surfaces',
+      }),
+    ).rejects.toMatchObject({ kind: 'payment_required' });
+
+    const second = vi.fn(async () => jsonResponse(okBody()));
+    await expect(
+      callClawithStructured(otherWireRequest, {
+        fetchImpl: second as unknown as typeof fetch,
+        env: ENV,
+        sleep: noSleep,
+        tenantId: 'foundation-tenant-shared-by-both-surfaces',
+      }),
+    ).rejects.toMatchObject({ kind: 'circuit_open' });
+    expect(second).not.toHaveBeenCalled();
+  });
+
+  it('without options.tenantId, two DIFFERENT wire tenant_id values never share a circuit — the pre-existing per-request-tenant behaviour is preserved', async () => {
+    const otherWireRequest = buildClawithRequest({
+      tenantId: 'a-completely-different-tenant',
+      bindingTenantId: 'a-completely-different-tenant',
+      conversationTenantId: 'a-completely-different-tenant',
+      businessId: 'epic-communications-inc',
+      chatwootAccountId: '5',
+      inboxId: '46',
+      conversationId: 'conv-3',
+      inboundMessageId: 'msg-3',
+      contactRef: 'contact:1',
+      customerMessage: 'hello',
+      history: [],
+      designatedAgentId: AGENT,
+      allowedTools: [TOOL],
+      ownershipState: 'AI_OWNED',
+      correlationId: 'corr-3',
+    });
+
+    const failing = vi.fn(async () => jsonResponse({ error: 'Insufficient Balance' }, 402));
+    await expect(
+      callClawithStructured(REQUEST, { fetchImpl: failing as unknown as typeof fetch, env: ENV, sleep: noSleep }),
+    ).rejects.toMatchObject({ kind: 'payment_required' });
+
+    const healthy = vi.fn(async () => jsonResponse(okBody({ correlation_id: 'corr-3' })));
+    const result = await callClawithStructured(otherWireRequest, {
+      fetchImpl: healthy as unknown as typeof fetch,
+      env: ENV,
+      sleep: noSleep,
+    });
+    expect(result.response.customer_reply).toBe('hi there');
+    expect(healthy).toHaveBeenCalledTimes(1);
+  });
+});
