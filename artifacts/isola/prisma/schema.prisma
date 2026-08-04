@@ -430,6 +430,11 @@ model ClawithBinding {
   tenant_id            String
   agent_id             String? @unique // optional: pin to a specific Agent; null → per-tenant fallback
   clawith_agent_id     String // Clawith's own agent id — the `agent_id` field in the dispatch request body
+  // Clawith-side tenant namespace that owns `clawith_agent_id`. Distinct from
+  // `tenant_id` above (Foundation's own tenant) — the structured bridge's
+  // `tenant_id` wire field is a strict equality gate against THIS value, not
+  // Foundation's. Nullable/additive; existing rows are backfilled explicitly.
+  clawith_tenant_id    String?
   paperclip_agent_id   String
   paperclip_company_id String
 

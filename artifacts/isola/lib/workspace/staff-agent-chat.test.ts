@@ -30,6 +30,7 @@ const TENANT = '43b006e4-33e0-42a8-bec7-4422ba290d79';
 const OTHER_TENANT = 'tenant-someone-else';
 const AGENT_ID = '95062f12-76c1-4074-84d3-572de1291df6';
 const CLAWITH_AGENT_ID = '81b38cd6-9fba-4cc8-8f87-1bce1a4aa162';
+const CLAWITH_TENANT_ID = '6572bd90-0371-4041-986b-065379934f5d';
 const COMPANY_ID = '4cfe04bb-38e5-4745-ac4d-db202c61085f';
 
 const VALID_STRUCTURED_URL = 'https://agents.epic.dm/api/isola/bridge/structured/message';
@@ -70,6 +71,7 @@ function eligibleAgent(overrides: Partial<StaffChatEligibleAgent> = {}): StaffCh
     tenantId: TENANT,
     name: 'Isola',
     clawithAgentId: CLAWITH_AGENT_ID,
+    clawithTenantId: CLAWITH_TENANT_ID,
     paperclipCompanyId: COMPANY_ID,
     chatwootBindingModes: ['lane2', 'a2'],
     ...overrides,
@@ -200,6 +202,31 @@ describe('proof 2: five-rule eligibility, revised policy', () => {
     expect(result).toEqual({ eligible: false, reason: 'no_clawith_binding' });
   });
 
+  it('fails closed — no_clawith_tenant — when the binding resolves but carries no clawith_tenant_id (NULL), and makes zero upstream calls', async () => {
+    const fetchSpy = vi.fn();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    try {
+      prismaMock.agent.findFirst.mockResolvedValue({
+        id: AGENT_ID,
+        tenant_id: TENANT,
+        name: 'Isola',
+        is_active: true,
+        brain_provider: 'clawith',
+      });
+      prismaMock.clawithBinding.findFirst.mockResolvedValue({
+        clawith_agent_id: CLAWITH_AGENT_ID,
+        paperclip_company_id: COMPANY_ID,
+        clawith_tenant_id: null,
+      });
+      const result = await resolveStaffChatEligibility(TENANT, AGENT_ID, ALLOWLIST_ENV);
+      expect(result).toEqual({ eligible: false, reason: 'no_clawith_tenant' });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('fails closed — not_allowlisted — when tenant/active/provider/binding all pass but the agent is unlisted', async () => {
     prismaMock.agent.findFirst.mockResolvedValue({
       id: AGENT_ID,
@@ -211,6 +238,7 @@ describe('proof 2: five-rule eligibility, revised policy', () => {
     prismaMock.clawithBinding.findFirst.mockResolvedValue({
       clawith_agent_id: CLAWITH_AGENT_ID,
       paperclip_company_id: COMPANY_ID,
+      clawith_tenant_id: CLAWITH_TENANT_ID,
     });
     const result = await resolveStaffChatEligibility(TENANT, AGENT_ID, env()); // no allowlist var at all
     expect(result).toEqual({ eligible: false, reason: 'not_allowlisted' });
@@ -227,6 +255,7 @@ describe('proof 2: five-rule eligibility, revised policy', () => {
     prismaMock.clawithBinding.findFirst.mockResolvedValue({
       clawith_agent_id: CLAWITH_AGENT_ID,
       paperclip_company_id: COMPANY_ID,
+      clawith_tenant_id: CLAWITH_TENANT_ID,
     });
     prismaMock.chatwootBinding.findMany.mockResolvedValue([{ mode: 'lane2' }, { mode: 'a2' }]);
 
@@ -234,6 +263,7 @@ describe('proof 2: five-rule eligibility, revised policy', () => {
     expect(result.eligible).toBe(true);
     if (result.eligible) {
       expect(result.agent.clawithAgentId).toBe(CLAWITH_AGENT_ID);
+      expect(result.agent.clawithTenantId).toBe(CLAWITH_TENANT_ID);
       expect(result.agent.paperclipCompanyId).toBe(COMPANY_ID);
       // Read for audit/context only — see proof 7 for the "never triggers a
       // Chatwoot call" half of this guarantee.
@@ -271,6 +301,7 @@ describe('proof 7: ChatwootBinding presence never triggers a Chatwoot call or de
       prismaMock.clawithBinding.findFirst.mockResolvedValue({
         clawith_agent_id: CLAWITH_AGENT_ID,
         paperclip_company_id: COMPANY_ID,
+        clawith_tenant_id: CLAWITH_TENANT_ID,
       });
       prismaMock.chatwootBinding.findMany.mockResolvedValue([{ mode: 'lane2' }, { mode: 'a2' }]);
 
@@ -599,6 +630,60 @@ describe('proof 10: escalation is represented truthfully but performs no handoff
     });
     expect(outcome.result.state).toBe('escalated');
     expect(outcome.result.text).toBe('Flagging this for a teammate.');
+  });
+});
+
+describe('proof 12: the wire tenant_id is the CLAWITH tenant, never Foundation\'s own tenant id', () => {
+  it('sends clawithTenantId as tenant_id on the wire — not agent.tenantId (Foundation), which differs in this fixture', async () => {
+    expect(CLAWITH_TENANT_ID).not.toBe(TENANT); // the fixture must actually exercise a mismatch
+    const fetchImpl = vi.fn(async () => jsonResponse(okBody()));
+    const outcome = await performStaffChatTurn({
+      session: session(),
+      agent: eligibleAgent(),
+      message: 'hello',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      env: env(),
+      clientOptions: { fetchImpl: fetchImpl as unknown as typeof fetch, sleep: async () => {} },
+    });
+    expect(outcome.sentRequest.tenant_id).toBe(CLAWITH_TENANT_ID);
+    expect(outcome.sentRequest.tenant_id).not.toBe(TENANT);
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(init.body as string).tenant_id).toBe(CLAWITH_TENANT_ID);
+  });
+
+  it('still sends allowed_tools: [] once the tenant field is corrected', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(okBody()));
+    const outcome = await performStaffChatTurn({
+      session: session(),
+      agent: eligibleAgent(),
+      message: 'hello',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      env: env(),
+      clientOptions: { fetchImpl: fetchImpl as unknown as typeof fetch, sleep: async () => {} },
+    });
+    expect(outcome.sentRequest.allowed_tools).toEqual([]);
+  });
+
+  it('a mismatched clawithTenantId across the three tenant inputs would be rejected by buildClawithRequest — proven by using the SAME value consistently succeeding without a request_invalid failure', async () => {
+    // performStaffChatTurn passes agent.clawithTenantId for tenantId,
+    // bindingTenantId AND conversationTenantId. If it ever regressed to
+    // passing three different values, buildClawithRequest's cross-tenant
+    // check would reject the request before any fetch, and this turn would
+    // never reach 'replied'.
+    const fetchImpl = vi.fn(async () => jsonResponse(okBody()));
+    const outcome = await performStaffChatTurn({
+      session: session(),
+      agent: eligibleAgent(),
+      message: 'hello',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      env: env(),
+      clientOptions: { fetchImpl: fetchImpl as unknown as typeof fetch, sleep: async () => {} },
+    });
+    expect(outcome.result.state).toBe('replied');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
 

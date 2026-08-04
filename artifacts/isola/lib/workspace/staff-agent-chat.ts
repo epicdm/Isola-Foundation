@@ -127,13 +127,23 @@ export type StaffChatIneligibleReason =
   | 'inactive'
   | 'wrong_provider'
   | 'no_clawith_binding'
+  | 'no_clawith_tenant'
   | 'not_allowlisted';
 
 export interface StaffChatEligibleAgent {
   agentId: string;
+  /** Foundation's own tenant id. Used for Foundation-side authorization only
+   *  — never sent on the Clawith wire. See `clawithTenantId`. */
   tenantId: string;
   name: string;
   clawithAgentId: string;
+  /** The Clawith-side tenant namespace that owns `clawithAgentId`
+   *  (`ClawithBinding.clawith_tenant_id`). This, not `tenantId`, is what
+   *  `performStaffChatTurn` sends as the structured request's `tenant_id` —
+   *  the live endpoint's equality gate is against the CLAWITH tenant, not
+   *  Foundation's. See
+   *  ev-foundation-clawith-tenant-namespace-reconciliation-2026-08-04. */
+  clawithTenantId: string;
   paperclipCompanyId: string;
   /** Audit/context only — see module docstring. Never gates eligibility and
    *  never drives a Chatwoot call. */
@@ -168,14 +178,21 @@ export async function resolveStaffChatEligibility(
   const binding =
     (await prisma.clawithBinding.findFirst({
       where: { tenant_id: tenantId, agent_id: agentId },
-      select: { clawith_agent_id: true, paperclip_company_id: true },
+      select: { clawith_agent_id: true, paperclip_company_id: true, clawith_tenant_id: true },
     })) ??
     (await prisma.clawithBinding.findFirst({
       where: { tenant_id: tenantId, agent_id: null },
-      select: { clawith_agent_id: true, paperclip_company_id: true },
+      select: { clawith_agent_id: true, paperclip_company_id: true, clawith_tenant_id: true },
     }));
   if (!binding || !binding.clawith_agent_id || !binding.paperclip_company_id) {
     return { eligible: false, reason: 'no_clawith_binding' };
+  }
+  // Fail closed rather than send Foundation's own tenant id on the wire: the
+  // live structured endpoint's tenant_id gate is a strict equality check
+  // against the CLAWITH tenant, and no Foundation tenant id has ever matched
+  // it. See ev-foundation-clawith-tenant-namespace-reconciliation-2026-08-04.
+  if (!binding.clawith_tenant_id) {
+    return { eligible: false, reason: 'no_clawith_tenant' };
   }
 
   if (!isAgentAllowlistedForStaffChat(agentId, env)) {
@@ -194,6 +211,7 @@ export async function resolveStaffChatEligibility(
       tenantId: agent.tenant_id,
       name: agent.name,
       clawithAgentId: binding.clawith_agent_id,
+      clawithTenantId: binding.clawith_tenant_id,
       paperclipCompanyId: binding.paperclip_company_id,
       chatwootBindingModes: chatwootBindings.map((b) => b.mode),
     },
@@ -297,9 +315,14 @@ export async function performStaffChatTurn(input: PerformStaffChatTurnInput): Pr
   const contactRef = buildStaffContactRef(input.session.user.id, input.agent.agentId);
 
   const request = buildClawithRequest({
-    tenantId: input.agent.tenantId,
-    bindingTenantId: input.agent.tenantId,
-    conversationTenantId: input.agent.tenantId,
+    // The CLAWITH tenant, never Foundation's own `input.agent.tenantId` — the
+    // live endpoint's tenant_id gate checks against the Clawith agent's owning
+    // tenant, and Foundation's tenant id never matches it. Foundation-side
+    // authorization already happened separately (session/effectiveTenantId at
+    // the route layer, tenant-scoped lookups in resolveStaffChatEligibility).
+    tenantId: input.agent.clawithTenantId,
+    bindingTenantId: input.agent.clawithTenantId,
+    conversationTenantId: input.agent.clawithTenantId,
     businessId: input.agent.paperclipCompanyId,
     chatwootAccountId: STAFF_CHAT_CHATWOOT_ACCOUNT_ID,
     inboxId: STAFF_CHAT_INBOX_ID,
