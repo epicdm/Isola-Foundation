@@ -261,12 +261,19 @@ export async function generateReply(params: {
   // A denial never throws and never picks a different agent — it only
   // withholds the clawithBinding this turn would otherwise have used.
   let clawithDispatch: CustomerDispatchAuthorization = { allowed: true, reason: null };
-  if (agent.brain_provider === 'clawith' && clawithBinding) {
+  if (agent.brain_provider === 'clawith') {
+    // Called even when clawithBinding is null: the gate's own
+    // 'no_clawith_binding' denial (lib/clawith/customer-exposure-gate.ts)
+    // is what gives THIS failure mode an audit entry too — previously a
+    // missing binding fell straight to the console.warn below with no B4
+    // evidence at all.
     clawithDispatch = await authorizeCustomerDispatch({
       foundationTenantId: tenantId,
       requestedFoundationAgentId: agent.id,
       agentActive: agent.is_active,
-      clawithBinding: { tenant_id: clawithBinding.tenant_id, clawith_agent_id: clawithBinding.clawith_agent_id },
+      clawithBinding: clawithBinding
+        ? { tenant_id: clawithBinding.tenant_id, clawith_agent_id: clawithBinding.clawith_agent_id }
+        : null,
       correlationId: escalationCorrelationId ?? `corr-${sessionId}`,
       source: gatedLoop ? 'chatwoot_a2' : 'direct_whatsapp',
       contactRef: gatedLoop?.contactRef ?? null,
@@ -274,7 +281,7 @@ export async function generateReply(params: {
     if (!clawithDispatch.allowed) {
       console.warn(
         `[brain-provider] customer exposure gate DENIED clawith dispatch (reason=${clawithDispatch.reason}) ` +
-          `tenant=${tenantId} clawith_agent=${clawithBinding.clawith_agent_id}`,
+          `tenant=${tenantId} clawith_agent=${clawithBinding?.clawith_agent_id ?? '(none)'}`,
       );
     }
   }

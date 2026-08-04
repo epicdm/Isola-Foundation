@@ -198,6 +198,26 @@ describe('generateReply — B2 PUBLIC negative (fail closed, no substitution)', 
   });
 });
 
+describe('generateReply — B2 audits the no-binding-at-all case too (Codex P2 finding)', () => {
+  it('a clawith-provider agent with no ClawithBinding resolved still writes a B4 audit entry, and never calls the bridge', async () => {
+    const result = await generateReply({
+      ...baseParams,
+      agent: agent(),
+      tenantId: FOUNDATION_TENANT,
+      clawithBinding: null,
+    });
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(result.provider).toBe('native');
+    expect(auditMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'clawith.exposure.customer_denied',
+        tenantId: FOUNDATION_TENANT,
+        meta: expect.objectContaining({ reason: 'no_clawith_binding' }),
+      }),
+    );
+  });
+});
+
 describe('generateReply — B2 does not affect non-Clawith providers', () => {
   it('a native-provider agent is untouched by the exposure gate (no clawithBinding path is even evaluated)', async () => {
     const result = await generateReply({
