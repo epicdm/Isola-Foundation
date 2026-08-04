@@ -36,6 +36,12 @@ export interface ClawithClientOptions {
   timeoutMs?: number;
   retryDelayMs?: number;
   env?: NodeJS.ProcessEnv;
+  /** Overrides the target URL for this call only. Defaults to the module's
+   *  `CLAWITH_STRUCTURED_URL` (the gated inbox-46 loop's endpoint, driven by
+   *  `ISOLA_BRIDGE_URL`) so every existing caller is unaffected. Lets a second
+   *  caller (e.g. staff chat) target its own endpoint, independently
+   *  configurable and killable, without repointing `ISOLA_BRIDGE_URL`. */
+  url?: string;
 }
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -69,6 +75,7 @@ export async function callClawithStructured(
   const doFetch = options.fetchImpl ?? fetch;
   const sleep = options.sleep ?? defaultSleep;
   const timeoutMs = options.timeoutMs ?? request.response_deadline_ms;
+  const url = options.url ?? CLAWITH_STRUCTURED_URL;
   const startedAt = Date.now();
 
   const expected = {
@@ -83,7 +90,7 @@ export async function callClawithStructured(
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const res = await doFetch(CLAWITH_STRUCTURED_URL, {
+      const res = await doFetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
