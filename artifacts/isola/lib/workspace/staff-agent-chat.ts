@@ -30,6 +30,7 @@ import { buildClawithRequest } from '@/lib/clawith/request';
 import { ClawithFailure, isClawithFailure, isConfigurationFailure, type ClawithFailureKind } from '@/lib/clawith/errors';
 import { callClawithWithFallback } from '@/lib/clawith/fallback';
 import { recordClawithFailure } from '@/lib/clawith/alert';
+import { resolveAgentExposure } from '@/lib/clawith/agent-exposure-policy';
 
 // ── Allowlist (revised eligibility rule 5) ──────────────────────────────────
 
@@ -130,7 +131,8 @@ export type StaffChatIneligibleReason =
   | 'wrong_provider'
   | 'no_clawith_binding'
   | 'no_clawith_tenant'
-  | 'not_allowlisted';
+  | 'not_allowlisted'
+  | 'not_internal_classified';
 
 export interface StaffChatEligibleAgent {
   agentId: string;
@@ -199,6 +201,21 @@ export async function resolveStaffChatEligibility(
 
   if (!isAgentAllowlistedForStaffChat(agentId, env)) {
     return { eligible: false, reason: 'not_allowlisted' };
+  }
+
+  // B3 — Foundation-owned agent exposure enforcement
+  // (xp-foundation-agent-exposure-enforcement-2026-08-04): the allowlist
+  // above is an operational gate with no awareness of PUBLIC/INTERNAL
+  // classification — nothing prevented it from listing a PUBLIC customer
+  // agent's Foundation Agent id (see staff-agent-chat.test.ts's own
+  // pre-existing fixtures, which used EMA's real clawith_agent_id as the
+  // "eligible" agent throughout). This is the structural fix: even a
+  // misconfigured allowlist cannot route a staff turn to a non-INTERNAL
+  // agent, and an unclassified agent (e.g. Ledger, unresolved as of this
+  // packet) fails closed here rather than being silently reachable.
+  const exposure = resolveAgentExposure({ foundationTenantId: tenantId, clawithAgentId: binding.clawith_agent_id });
+  if (!exposure.matched || !exposure.enabled || exposure.classification !== 'INTERNAL') {
+    return { eligible: false, reason: 'not_internal_classified' };
   }
 
   const chatwootBindings = await prisma.chatwootBinding.findMany({

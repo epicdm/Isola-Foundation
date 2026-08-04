@@ -25,11 +25,23 @@ vi.mock('./claim-guard', async (importOriginal) => {
 const SALES_TENANT = 'ema_sales_tenant';
 const OTHER_TENANT = 'some-other-tenant';
 
-const CLAWITH_BINDING: ClawithBindingInput = {
-  clawith_agent_id: 'agent-123',
-  paperclip_agent_id: 'pc-agent',
-  paperclip_company_id: 'pc-co',
-};
+/** This suite's fixture tenants/agent id are synthetic and not part of the
+ *  real production B1 policy floor (lib/clawith/agent-exposure-policy.ts).
+ *  The B2 exposure gate is exercised end to end in
+ *  lib/brain-provider.exposure.test.ts against the real floor; here, an
+ *  additive extra-policy env entry (mirrors this file's existing
+ *  process.env.CLAWITH_SHARED_SECRET fixture pattern) authorizes exactly
+ *  this suite's synthetic (tenant, agent) pairs as PUBLIC so every
+ *  pre-existing claim-guard/escalation test below continues to exercise the
+ *  Clawith bridge path unrelated to exposure semantics. */
+function clawithBindingFor(tenantId: string): ClawithBindingInput {
+  return {
+    tenant_id: tenantId,
+    clawith_agent_id: 'agent-123',
+    paperclip_agent_id: 'pc-agent',
+    paperclip_company_id: 'pc-co',
+  };
+}
 
 function baseAgent(overrides: Partial<BrainAgent> = {}): BrainAgent {
   return {
@@ -37,6 +49,7 @@ function baseAgent(overrides: Partial<BrainAgent> = {}): BrainAgent {
     intelligence_tier: 'standard',
     brain_provider: 'clawith',
     flowise_flow_id: null,
+    is_active: true,
     ...overrides,
   };
 }
@@ -53,6 +66,14 @@ function mockBridgeReply(body: Record<string, unknown>, ok = true) {
 beforeEach(async () => {
   vi.clearAllMocks();
   process.env.CLAWITH_SHARED_SECRET = 'test-secret';
+  // B2 exposure gate fixture — authorizes this suite's synthetic tenant/agent
+  // pairs as PUBLIC so the pre-existing claim-guard/escalation tests below
+  // (which predate the exposure gate) keep exercising the Clawith bridge
+  // path. See lib/brain-provider.exposure.test.ts for the gate's own coverage.
+  process.env.AGENT_EXPOSURE_POLICY_EXTRA_JSON = JSON.stringify([
+    { foundationTenantId: SALES_TENANT, clawithAgentId: 'agent-123', classification: 'PUBLIC', enabled: true },
+    { foundationTenantId: OTHER_TENANT, clawithAgentId: 'agent-123', classification: 'PUBLIC', enabled: true },
+  ]);
   chatCompleteMock.mockResolvedValue({ text: 'Native fallback reply', inputTokens: 10, outputTokens: 10 });
   global.fetch = vi.fn();
   // guardReply is mocked at the module level solely so the guard-error test
@@ -78,7 +99,7 @@ describe('generateReply — claim-guard integration (Clawith path, mocked bridge
       ...baseParams,
       agent: baseAgent(),
       tenantId: SALES_TENANT,
-      clawithBinding: CLAWITH_BINDING,
+      clawithBinding: clawithBindingFor(SALES_TENANT),
     });
 
     expect(result.text).not.toMatch(/answers your phone calls/i);
@@ -95,7 +116,7 @@ describe('generateReply — claim-guard integration (Clawith path, mocked bridge
       ...baseParams,
       agent: baseAgent(),
       tenantId: SALES_TENANT,
-      clawithBinding: CLAWITH_BINDING,
+      clawithBinding: clawithBindingFor(SALES_TENANT),
     });
 
     expect(result.text).not.toMatch(/425/);
@@ -112,7 +133,7 @@ describe('generateReply — claim-guard integration (Clawith path, mocked bridge
       ...baseParams,
       agent: baseAgent(),
       tenantId: SALES_TENANT,
-      clawithBinding: CLAWITH_BINDING,
+      clawithBinding: clawithBindingFor(SALES_TENANT),
     });
 
     expect(result.text).toBe('The WA-Receptionist is EC$250 setup plus EC$149/mo.');
@@ -127,7 +148,7 @@ describe('generateReply — claim-guard integration (Clawith path, mocked bridge
       ...baseParams,
       agent: baseAgent(),
       tenantId: OTHER_TENANT,
-      clawithBinding: CLAWITH_BINDING,
+      clawithBinding: clawithBindingFor(OTHER_TENANT),
     });
 
     expect(result.text).toBe('Yes! Our AI answers your phone calls for you automatically.');
@@ -142,7 +163,7 @@ describe('generateReply — claim-guard integration (Clawith path, mocked bridge
       ...baseParams,
       agent: baseAgent(),
       tenantId: SALES_TENANT,
-      clawithBinding: CLAWITH_BINDING,
+      clawithBinding: clawithBindingFor(SALES_TENANT),
     });
 
     expect(result.needsHandoff).toBe(true);
@@ -163,7 +184,7 @@ describe('generateReply — escalation-claim handoff backstop (defect-lite-conci
       ...baseParams,
       agent: baseAgent(),
       tenantId: OTHER_TENANT,
-      clawithBinding: CLAWITH_BINDING,
+      clawithBinding: clawithBindingFor(OTHER_TENANT),
     });
 
     expect(result.needsHandoff).toBe(true);
@@ -186,7 +207,7 @@ describe('generateReply — escalation-claim handoff backstop (defect-lite-conci
       ...baseParams,
       agent: baseAgent(),
       tenantId: OTHER_TENANT,
-      clawithBinding: CLAWITH_BINDING,
+      clawithBinding: clawithBindingFor(OTHER_TENANT),
     });
 
     expect(result.needsHandoff).toBe(true);
@@ -203,7 +224,7 @@ describe('generateReply — escalation-claim handoff backstop (defect-lite-conci
       ...baseParams,
       agent: baseAgent(),
       tenantId: OTHER_TENANT,
-      clawithBinding: CLAWITH_BINDING,
+      clawithBinding: clawithBindingFor(OTHER_TENANT),
     });
 
     expect(result.needsHandoff).toBe(false);
@@ -219,7 +240,7 @@ describe('generateReply — Clawith path forwards conversationRef to the Isola b
       ...baseParams,
       agent: baseAgent(),
       tenantId: OTHER_TENANT,
-      clawithBinding: CLAWITH_BINDING,
+      clawithBinding: clawithBindingFor(OTHER_TENANT),
       conversationRef: 'opaque-ref-123',
     });
 
@@ -235,7 +256,7 @@ describe('generateReply — Clawith path forwards conversationRef to the Isola b
       ...baseParams,
       agent: baseAgent(),
       tenantId: OTHER_TENANT,
-      clawithBinding: CLAWITH_BINDING,
+      clawithBinding: clawithBindingFor(OTHER_TENANT),
     });
 
     const [, init] = (global.fetch as any).mock.calls[0];
@@ -250,7 +271,7 @@ describe('generateReply — Clawith path forwards conversationRef to the Isola b
       ...baseParams,
       agent: baseAgent(),
       tenantId: OTHER_TENANT,
-      clawithBinding: CLAWITH_BINDING,
+      clawithBinding: clawithBindingFor(OTHER_TENANT),
       conversationRef: 'opaque-ref-123',
       escalationCorrelationId: 'corr-abc',
     });
@@ -268,7 +289,7 @@ describe('generateReply — Clawith path forwards conversationRef to the Isola b
       sessionId: 'raw-conversation-db-id-should-not-leak',
       agent: baseAgent(),
       tenantId: OTHER_TENANT,
-      clawithBinding: CLAWITH_BINDING,
+      clawithBinding: clawithBindingFor(OTHER_TENANT),
       conversationRef: 'opaque-ref-123',
     });
 
@@ -311,7 +332,7 @@ describe('generateReply — claim-guard fail-closed on a guard error', () => {
       ...baseParams,
       agent: baseAgent(),
       tenantId: SALES_TENANT,
-      clawithBinding: CLAWITH_BINDING,
+      clawithBinding: clawithBindingFor(SALES_TENANT),
     });
 
     expect(result.text).not.toBe('This text never gets a chance to be checked.');
@@ -331,7 +352,7 @@ describe('generateReply — claim-guard fail-closed on a guard error', () => {
       ...baseParams,
       agent: baseAgent(),
       tenantId: OTHER_TENANT,
-      clawithBinding: CLAWITH_BINDING,
+      clawithBinding: clawithBindingFor(OTHER_TENANT),
     });
 
     expect(result.text).toBe('Unrelated tenant, unrelated reply text.');

@@ -17,7 +17,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/session';
 import { requireWorkspaceAccess } from '@/lib/workspace/authz';
-import { resolveStaffChatEligibility, performStaffChatTurn } from '@/lib/workspace/staff-agent-chat';
+import { resolveStaffChatEligibility, performStaffChatTurn, buildStaffChatCorrelationId } from '@/lib/workspace/staff-agent-chat';
 import { audit } from '@/lib/audit';
 
 export const revalidate = 0;
@@ -58,6 +58,22 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
     // exists on another tenant.
     if (eligibility.reason === 'agent_not_found') {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    }
+    // B4 — audit a refusal caused specifically by exposure classification
+    // (not the generic staff-chat allowlist/config gates above it), so a
+    // refused cross-domain attempt (a staff session requesting a
+    // non-INTERNAL agent) leaves evidence even though the turn never
+    // reaches performStaffChatTurn.
+    if (eligibility.reason === 'not_internal_classified') {
+      await audit({
+        tenantId: session.effectiveTenantId,
+        actorId: session.user.id,
+        action: 'clawith.exposure.staff_denied',
+        entity: 'Agent',
+        entityId: agentId,
+        requestId: buildStaffChatCorrelationId(threadId.trim(), turnId.trim()),
+        meta: { reason: eligibility.reason },
+      });
     }
     return NextResponse.json({
       state: 'blocked',

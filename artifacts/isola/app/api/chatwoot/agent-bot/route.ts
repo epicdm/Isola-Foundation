@@ -572,7 +572,7 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
     //   2. Per-tenant fallback — ClawithBinding WHERE tenant_id = tenantId AND agent_id IS NULL.
     //      Exactly the current behaviour when no per-agent row exists.
     const brainProvider: string = (agent as any).brain_provider ?? 'native';
-    let clawithBindingRow: { clawith_agent_id: string; paperclip_agent_id: string; paperclip_company_id: string } | null = null;
+    let clawithBindingRow: { tenant_id: string; clawith_agent_id: string; paperclip_agent_id: string; paperclip_company_id: string } | null = null;
     let odooBindingRow: { url: string; db: string; login: string | null; api_key_enc: string } | null = null;
     if (brainProvider === 'clawith') {
       // 1. Agent-specific binding (new)
@@ -699,6 +699,7 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
           intelligence_tier: agent.intelligence_tier,
           brain_provider:    brainProvider,
           flowise_flow_id:   (agent as any).flowise_flow_id ?? null,
+          is_active:         agent.is_active,
         },
         system:    buildSystemPrompt(agent),
         messages:  aiMessages,
@@ -708,6 +709,7 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
         tenantId,
         clawithBinding: clawithBindingRow
           ? {
+              tenant_id:            clawithBindingRow.tenant_id,
               clawith_agent_id:     clawithBindingRow.clawith_agent_id,
               paperclip_agent_id:   clawithBindingRow.paperclip_agent_id,
               paperclip_company_id: clawithBindingRow.paperclip_company_id,

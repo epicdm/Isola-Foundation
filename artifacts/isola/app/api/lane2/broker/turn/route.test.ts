@@ -106,6 +106,15 @@ beforeEach(() => {
   vi.clearAllMocks();
   process.env.LANE2_BROKER_SHARED_SECRET = SECRET;
   delete process.env.LANE2_BROKER_ALLOWED_DOOR_KEYS;
+  // B2 exposure gate fixture — this suite's TENANT_ID/CLAWITH_AGENT_ID are
+  // synthetic and not part of the real production B1 policy floor
+  // (lib/clawith/agent-exposure-policy.ts default-denies them). Authorize
+  // exactly this pair as PUBLIC so the pre-existing wiring proofs below keep
+  // exercising invokeClawithGated. See the dedicated "B2 exposure gate"
+  // describe block for the gate's own denial coverage on this route.
+  process.env.AGENT_EXPOSURE_POLICY_EXTRA_JSON = JSON.stringify([
+    { foundationTenantId: TENANT_ID, clawithAgentId: CLAWITH_AGENT_ID, classification: 'PUBLIC', enabled: true },
+  ]);
   H.claimInboundMessageIdMock.mockResolvedValue(false);
   H.prismaMock.chatwootBinding.findMany.mockResolvedValue([activeBinding()]);
   H.prismaMock.clawithBinding.findFirst.mockResolvedValue({
@@ -231,6 +240,54 @@ describe('clawith binding resolution', () => {
     const body = await res.json();
     expect(body).toMatchObject({ ok: false, outcome: 'clawith_binding_unresolved' });
     expect(H.invokeClawithGatedMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('B2 exposure gate (xp-foundation-agent-exposure-enforcement-2026-08-04)', () => {
+  it('denies dispatch when the bound clawith_agent_id has no PUBLIC policy for this tenant — never calls invokeClawithGated', async () => {
+    delete process.env.AGENT_EXPOSURE_POLICY_EXTRA_JSON; // withdraw this suite's own PUBLIC authorization
+    const res = await POST(signedRequest(envelope()));
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: false, outcome: 'exposure_denied', reason: 'not_public_classified' });
+    expect(H.invokeClawithGatedMock).not.toHaveBeenCalled();
+  });
+
+  it('denies dispatch when the classification is explicitly INTERNAL for this tenant/agent', async () => {
+    process.env.AGENT_EXPOSURE_POLICY_EXTRA_JSON = JSON.stringify([
+      { foundationTenantId: TENANT_ID, clawithAgentId: CLAWITH_AGENT_ID, classification: 'INTERNAL', enabled: true },
+    ]);
+    const res = await POST(signedRequest(envelope()));
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: false, outcome: 'exposure_denied', reason: 'not_public_classified' });
+    expect(H.invokeClawithGatedMock).not.toHaveBeenCalled();
+  });
+
+  it('denies dispatch when the policy entry is disabled', async () => {
+    process.env.AGENT_EXPOSURE_POLICY_EXTRA_JSON = JSON.stringify([
+      { foundationTenantId: TENANT_ID, clawithAgentId: CLAWITH_AGENT_ID, classification: 'PUBLIC', enabled: false },
+    ]);
+    const res = await POST(signedRequest(envelope()));
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: false, outcome: 'exposure_denied', reason: 'not_public_classified' });
+    expect(H.invokeClawithGatedMock).not.toHaveBeenCalled();
+  });
+
+  it('writes no audit entry of its own beyond the gate\'s internal denial record — the route does not double-audit', async () => {
+    delete process.env.AGENT_EXPOSURE_POLICY_EXTRA_JSON;
+    await POST(signedRequest(envelope()));
+    // The gate itself (lib/clawith/customer-exposure-gate.ts) is the audit
+    // author on denial — real in this test (not mocked), so it writes
+    // through the mocked @/lib/audit module exactly once.
+    expect(H.auditMock).toHaveBeenCalledTimes(1);
+    expect(H.auditMock).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'clawith.exposure.customer_denied', tenantId: TENANT_ID }),
+    );
+  });
+
+  it('an authorized PUBLIC pair (this suite\'s default fixture) is unaffected — proves the gate is not merely fail-open by accident', async () => {
+    const res = await POST(signedRequest(envelope()));
+    expect(res.status).toBe(200);
+    expect(H.invokeClawithGatedMock).toHaveBeenCalledTimes(1);
   });
 });
 
