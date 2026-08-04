@@ -67,13 +67,15 @@ const CJK_LOCALE_RE = /^(zh|ja|ko)\b/i;
  *  below. Literal phrase matches, not "any CJK text" — these are what let a
  *  CJK-locale request still catch a real localized provider failure (this is
  *  the exact shape of the original leak: DeepSeek/Moonshot/Qwen/Zhipu error
- *  text arrives in Chinese, not English). */
+ *  text arrives in Chinese, not English). Deliberately excludes a generic
+ *  "service unavailable" phrase: unlike these, it collides with ordinary
+ *  business copy (e.g. "fibre service is temporarily unavailable in this
+ *  area") that a CJK-locale customer reply can legitimately say. */
 const LOCALIZED_LEAK_SIGNATURES: RegExp[] = [
   /模型调用失败/, // model_call_failed
   /余额不足/, // insufficient balance
   /请求(过于)?频繁|频率限制|限流/, // rate limited
   /需要支付|信用(额度)?已用完|配额已(用完|超出)/, // payment required / credit exhausted / quota exceeded
-  /服务(暂时)?不可用/, // service unavailable
 ];
 const PROVIDER_LEAK_SIGNATURES: RegExp[] = [
   /\bHTTP[ _-]?[45]\d{2}\b/i,

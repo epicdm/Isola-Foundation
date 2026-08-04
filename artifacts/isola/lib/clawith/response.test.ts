@@ -203,6 +203,12 @@ describe('proof: a raw provider failure leaking through a structurally-valid 200
     expect(kindOf(() => parseClawithResponse(raw, zhExpected))).toBe('provider_error_leaked');
   });
 
+  it('does NOT flag a genuine CJK service-availability reply — "service unavailable" is ordinary business copy, not just a leak phrase', () => {
+    const zhExpected: ExpectedResponseIdentity = { ...EXPECTED, locale: 'zh-CN' };
+    const raw = body({ customer_reply: '很抱歉，该地区光纤服务暂时不可用，我们会在覆盖后通知您。' });
+    expect(kindOf(() => parseClawithResponse(raw, zhExpected))).toBe('no-error');
+  });
+
   it('still flags the identical raw Chinese runtime text when the request locale is NOT CJK', () => {
     const raw = body({ customer_reply: '模型调用失败，请稍后重试。' });
     expect(kindOf(() => parseClawithResponse(raw, { ...EXPECTED, locale: 'en-DM' }))).toBe(
