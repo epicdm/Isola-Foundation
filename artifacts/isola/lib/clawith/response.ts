@@ -55,9 +55,26 @@ const MUTATION_HINT = /\.(create|update|delete|schedule|send|log)$/;
 const UUID_ANYWHERE_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
 const CJK_RE = /[一-鿿]/;
 /** A request whose locale names one of these families expects a CJK-script
- *  reply as ordinary output — the CJK signature below would otherwise flag
- *  every legitimate Chinese/Japanese/Korean customer reply as a leak. */
+ *  reply as ordinary output — the broad CJK_RE catch-all below would
+ *  otherwise flag every legitimate Chinese/Japanese/Korean customer reply as
+ *  a leak. It is suppressed ONLY for these locales, and ONLY as the generic
+ *  "any CJK character" heuristic — the explicit localized phrases in
+ *  LOCALIZED_LEAK_SIGNATURES below still fire regardless of locale, because
+ *  Clawith's own providers (DeepSeek, Moonshot, Qwen, Zhipu) are Chinese AI
+ *  vendors whose native failure text is exactly this shape. */
 const CJK_LOCALE_RE = /^(zh|ja|ko)\b/i;
+/** Chinese-language equivalents of the explicit English failure vocabulary
+ *  below. Literal phrase matches, not "any CJK text" — these are what let a
+ *  CJK-locale request still catch a real localized provider failure (this is
+ *  the exact shape of the original leak: DeepSeek/Moonshot/Qwen/Zhipu error
+ *  text arrives in Chinese, not English). */
+const LOCALIZED_LEAK_SIGNATURES: RegExp[] = [
+  /模型调用失败/, // model_call_failed
+  /余额不足/, // insufficient balance
+  /请求(过于)?频繁|频率限制|限流/, // rate limited
+  /需要支付|信用(额度)?已用完|配额已(用完|超出)/, // payment required / credit exhausted / quota exceeded
+  /服务(暂时)?不可用/, // service unavailable
+];
 const PROVIDER_LEAK_SIGNATURES: RegExp[] = [
   /\bHTTP[ _-]?[45]\d{2}\b/i,
   /\binsufficient[ _-]?balance\b/i,
@@ -68,13 +85,16 @@ const PROVIDER_LEAK_SIGNATURES: RegExp[] = [
   UUID_ANYWHERE_RE,
   /"(error|error_code|error_type|status_code)"\s*:/i,
   /\b(deepseek|openai|anthropic|moonshot|qwen|zhipu)\b/i,
+  ...LOCALIZED_LEAK_SIGNATURES,
 ];
 
 /** True when `text` looks like a raw provider/runtime failure rather than an
  *  ordinary reply. Exported so both this module and its tests can reason
  *  about the exact signatures independent of where the check is wired in.
  *  `locale` is the request's own reply locale — pass it whenever it is known
- *  so a genuine CJK-language reply is not mistaken for raw runtime text. */
+ *  so a genuine CJK-language reply is not mistaken for raw runtime text. Only
+ *  the broad "any CJK character" catch-all is locale-gated; every explicit
+ *  failure phrase (English or localized) still fires no matter the locale. */
 export function looksLikeProviderErrorLeak(text: string, locale?: string): boolean {
   if (PROVIDER_LEAK_SIGNATURES.some((re) => re.test(text))) return true;
   if (locale !== undefined && CJK_LOCALE_RE.test(locale)) return false;

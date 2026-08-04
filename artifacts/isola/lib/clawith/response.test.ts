@@ -197,6 +197,12 @@ describe('proof: a raw provider failure leaking through a structurally-valid 200
     expect(kindOf(() => parseClawithResponse(raw, zhExpected))).toBe('no-error');
   });
 
+  it('still flags a raw Chinese runtime failure even under a zh-CN request locale — locale relaxes the broad script check, not the explicit failure phrases', () => {
+    const zhExpected: ExpectedResponseIdentity = { ...EXPECTED, locale: 'zh-CN' };
+    const raw = body({ customer_reply: '模型调用失败，请稍后重试。' });
+    expect(kindOf(() => parseClawithResponse(raw, zhExpected))).toBe('provider_error_leaked');
+  });
+
   it('still flags the identical raw Chinese runtime text when the request locale is NOT CJK', () => {
     const raw = body({ customer_reply: '模型调用失败，请稍后重试。' });
     expect(kindOf(() => parseClawithResponse(raw, { ...EXPECTED, locale: 'en-DM' }))).toBe(
