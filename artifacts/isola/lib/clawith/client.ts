@@ -92,6 +92,7 @@ export async function callClawithStructured(
     correlationId: request.correlation_id,
     tenantId: request.tenant_id,
     allowedToolNames: new Set(request.allowed_tools.map((t) => t.name)),
+    locale: request.locale,
   };
 
   let lastFailure: ClawithFailure | null = null;

@@ -31,6 +31,12 @@ export interface ExpectedResponseIdentity {
   tenantId: string;
   /** Tool names this request authorised. Anything else is rejected. */
   allowedToolNames: ReadonlySet<string>;
+  /** The locale THIS request asked Clawith to reply in. When it names a CJK
+   *  language, a CJK-script reply is the expected shape, not a leak — see
+   *  `looksLikeProviderErrorLeak`. Optional so callers (e.g. the reasoning-loop
+   *  orchestrator) that do not carry a request locale keep today's stricter
+   *  behaviour rather than silently opting out of the CJK check. */
+  locale?: string;
 }
 
 /** Tool names whose execution changes a business system of record. A reply
@@ -48,6 +54,10 @@ const MUTATION_HINT = /\.(create|update|delete|schedule|send|log)$/;
  *  available; this exists for the case where there isn't one. */
 const UUID_ANYWHERE_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
 const CJK_RE = /[一-鿿]/;
+/** A request whose locale names one of these families expects a CJK-script
+ *  reply as ordinary output — the CJK signature below would otherwise flag
+ *  every legitimate Chinese/Japanese/Korean customer reply as a leak. */
+const CJK_LOCALE_RE = /^(zh|ja|ko)\b/i;
 const PROVIDER_LEAK_SIGNATURES: RegExp[] = [
   /\bHTTP[ _-]?[45]\d{2}\b/i,
   /\binsufficient[ _-]?balance\b/i,
@@ -56,16 +66,19 @@ const PROVIDER_LEAK_SIGNATURES: RegExp[] = [
   /\brate[ _-]?limit(ed)?\b/i,
   /\brun[ _-]?id\b/i,
   UUID_ANYWHERE_RE,
-  CJK_RE,
   /"(error|error_code|error_type|status_code)"\s*:/i,
   /\b(deepseek|openai|anthropic|moonshot|qwen|zhipu)\b/i,
 ];
 
 /** True when `text` looks like a raw provider/runtime failure rather than an
  *  ordinary reply. Exported so both this module and its tests can reason
- *  about the exact signatures independent of where the check is wired in. */
-export function looksLikeProviderErrorLeak(text: string): boolean {
-  return PROVIDER_LEAK_SIGNATURES.some((re) => re.test(text));
+ *  about the exact signatures independent of where the check is wired in.
+ *  `locale` is the request's own reply locale — pass it whenever it is known
+ *  so a genuine CJK-language reply is not mistaken for raw runtime text. */
+export function looksLikeProviderErrorLeak(text: string, locale?: string): boolean {
+  if (PROVIDER_LEAK_SIGNATURES.some((re) => re.test(text))) return true;
+  if (locale !== undefined && CJK_LOCALE_RE.test(locale)) return false;
+  return CJK_RE.test(text);
 }
 
 function fail(kind: ClawithFailureKind, detail: string): never {
@@ -225,10 +238,13 @@ export function parseClawithResponse(raw: unknown, expected: ExpectedResponseIde
   // ever actually renders to a user (customer_reply, escalation's
   // customer-facing handoff message; escalation.explanation is
   // operator-only and never shown to anyone, so it is not checked here).
-  if (customerReply !== null && looksLikeProviderErrorLeak(customerReply)) {
+  if (customerReply !== null && looksLikeProviderErrorLeak(customerReply, expected.locale)) {
     fail('provider_error_leaked', customerReply.slice(0, 500));
   }
-  if (escalation.customer_handoff_message !== null && looksLikeProviderErrorLeak(escalation.customer_handoff_message)) {
+  if (
+    escalation.customer_handoff_message !== null &&
+    looksLikeProviderErrorLeak(escalation.customer_handoff_message, expected.locale)
+  ) {
     fail('provider_error_leaked', escalation.customer_handoff_message.slice(0, 500));
   }
 
