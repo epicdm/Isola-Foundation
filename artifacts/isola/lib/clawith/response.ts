@@ -38,6 +38,36 @@ export interface ExpectedResponseIdentity {
  *  Foundation says otherwise. */
 const MUTATION_HINT = /\.(create|update|delete|schedule|send|log)$/;
 
+/** Signatures of a raw provider/runtime failure leaking through as if it
+ *  were ordinary reply text. This is deliberately separate from HTTP-status
+ *  classification: a provider can fail with a 200 whose body is otherwise
+ *  well-formed but whose `customer_reply` (or handoff message) IS the raw
+ *  failure — an HTTP code quoted as prose, a billing message, a bare run id,
+ *  or runtime text in a language the agent was never asked to answer in.
+ *  Never trust user-facing language alone when a structured code is
+ *  available; this exists for the case where there isn't one. */
+const UUID_ANYWHERE_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
+const CJK_RE = /[一-鿿]/;
+const PROVIDER_LEAK_SIGNATURES: RegExp[] = [
+  /\bHTTP[ _-]?[45]\d{2}\b/i,
+  /\binsufficient[ _-]?balance\b/i,
+  /\bmodel_call_failed\b/i,
+  /\b(payment[ _-]?required|credit[ _-]?exhausted|quota[ _-]?exceeded)\b/i,
+  /\brate[ _-]?limit(ed)?\b/i,
+  /\brun[ _-]?id\b/i,
+  UUID_ANYWHERE_RE,
+  CJK_RE,
+  /"(error|error_code|error_type|status_code)"\s*:/i,
+  /\b(deepseek|openai|anthropic|moonshot|qwen|zhipu)\b/i,
+];
+
+/** True when `text` looks like a raw provider/runtime failure rather than an
+ *  ordinary reply. Exported so both this module and its tests can reason
+ *  about the exact signatures independent of where the check is wired in. */
+export function looksLikeProviderErrorLeak(text: string): boolean {
+  return PROVIDER_LEAK_SIGNATURES.some((re) => re.test(text));
+}
+
 function fail(kind: ClawithFailureKind, detail: string): never {
   throw new ClawithFailure(kind, detail);
 }
@@ -188,6 +218,19 @@ export function parseClawithResponse(raw: unknown, expected: ExpectedResponseIde
   const escalation = parseEscalation(r.escalation);
   const toolRequests = parseToolRequests(r.tool_requests, expected.allowedToolNames);
   const customerReply = str(r.customer_reply);
+
+  // A "successful" response whose visible text IS the raw failure is the
+  // exact leak this taxonomy exists to catch — checked before any of the
+  // structural contradiction checks below, and on both fields Foundation
+  // ever actually renders to a user (customer_reply, escalation's
+  // customer-facing handoff message; escalation.explanation is
+  // operator-only and never shown to anyone, so it is not checked here).
+  if (customerReply !== null && looksLikeProviderErrorLeak(customerReply)) {
+    fail('provider_error_leaked', customerReply.slice(0, 500));
+  }
+  if (escalation.customer_handoff_message !== null && looksLikeProviderErrorLeak(escalation.customer_handoff_message)) {
+    fail('provider_error_leaked', escalation.customer_handoff_message.slice(0, 500));
+  }
 
   // ── Contradiction checks ──────────────────────────────────────────────────
   // A response that says nothing, asks for nothing and escalates nothing is

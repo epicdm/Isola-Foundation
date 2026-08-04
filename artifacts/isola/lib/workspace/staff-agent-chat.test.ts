@@ -1,14 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { prismaMock } = vi.hoisted(() => ({
+const { prismaMock, recordClawithFailureMock } = vi.hoisted(() => ({
   prismaMock: {
     agent: { findFirst: vi.fn() },
     clawithBinding: { findFirst: vi.fn() },
     chatwootBinding: { findMany: vi.fn() },
   },
+  recordClawithFailureMock: vi.fn(),
 }));
 
 vi.mock('@/lib/prisma', () => ({ prisma: prismaMock }));
+vi.mock('@/lib/clawith/alert', () => ({ recordClawithFailure: recordClawithFailureMock }));
 
 import {
   FOUNDATION_STAFF_CHAT_AGENT_IDS_ENV,
@@ -24,6 +26,8 @@ import {
 } from './staff-agent-chat';
 import { CLAWITH_STRUCTURED_URL as LEGACY_CLAWITH_STRUCTURED_URL, MAX_ATTEMPTS } from '@/lib/clawith/client';
 import { CLAWITH_SCHEMA_VERSION } from '@/lib/clawith/contract';
+import { CLAWITH_APPROVED_FALLBACK_AGENTS_ENV } from '@/lib/clawith/fallback';
+import { resetAllCircuitBreakers } from '@/lib/clawith/circuit-breaker';
 import type { SessionCtx } from '@/lib/session';
 
 const TENANT = '43b006e4-33e0-42a8-bec7-4422ba290d79';
@@ -104,6 +108,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetAllCircuitBreakers();
 });
 
 describe('proof 1: allowlist parsing (revised rule 5)', () => {
@@ -702,6 +707,11 @@ describe('proof 11: failure classification maps onto the closed safe-state vocab
     ['agent_mismatch', 'degraded'],
     ['unsupported_tool', 'degraded'],
     ['contradictory_response', 'degraded'],
+    ['payment_required', 'unavailable'],
+    ['rate_limited', 'degraded'],
+    ['provider_unavailable', 'degraded'],
+    ['provider_error_leaked', 'unavailable'],
+    ['circuit_open', 'unavailable'],
   ];
 
   for (const [kind, expected] of cases) {
@@ -762,5 +772,155 @@ describe('proof 11: failure classification maps onto the closed safe-state vocab
     });
     expect(outcome.result.state).toBe('replied');
     expect(fetchImpl).toHaveBeenCalledTimes(MAX_ATTEMPTS);
+  });
+});
+
+describe('proof 13: a staff-chat 402 is sanitized end-to-end and alerts exactly once', () => {
+  it('produces state=unavailable, no raw detail, exactly one attempt and exactly one alert', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ error: 'Insufficient Balance' }, 402));
+    const outcome = await performStaffChatTurn({
+      session: session(),
+      agent: eligibleAgent(),
+      message: 'hello',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      env: env(),
+      clientOptions: { fetchImpl: fetchImpl as unknown as typeof fetch, sleep: async () => {} },
+    });
+
+    expect(outcome.result.state).toBe('unavailable');
+    expect(outcome.result.text).toBeNull();
+    expect(JSON.stringify(outcome.result)).not.toContain('402');
+    expect(JSON.stringify(outcome.result)).not.toContain('Insufficient Balance');
+    // 402 is not retryable on the same credential — one attempt, not MAX_ATTEMPTS.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    expect(recordClawithFailureMock).toHaveBeenCalledTimes(1);
+    const [failureArg, ctxArg] = recordClawithFailureMock.mock.calls[0] as unknown as [
+      { kind: string; status: number | null },
+      Record<string, unknown>,
+    ];
+    expect(failureArg).toMatchObject({ kind: 'payment_required', status: 402 });
+    expect(ctxArg).toMatchObject({ surface: 'staff_chat', correlationId: 'staffchat:thread-1:turn-1' });
+  });
+
+  it('a retried transient failure that exhausts MAX_ATTEMPTS still produces exactly one alert, not one per attempt', async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw Object.assign(new Error('timeout'), { name: 'TimeoutError' });
+    });
+    const outcome = await performStaffChatTurn({
+      session: session(),
+      agent: eligibleAgent(),
+      message: 'hello',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      env: env(),
+      clientOptions: { fetchImpl: fetchImpl as unknown as typeof fetch, sleep: async () => {} },
+    });
+    expect(outcome.result.state).toBe('timeout');
+    expect(fetchImpl).toHaveBeenCalledTimes(MAX_ATTEMPTS);
+    expect(recordClawithFailureMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('proof 14: approved fallback — attempted at most once, tenant-verified, never masks the primary failure', () => {
+  const FALLBACK_CLAWITH_AGENT_ID = '9a1c9e2e-6b1a-4b9a-8b1a-2f3c4d5e6f70';
+  const envWithFallback = env({
+    [CLAWITH_APPROVED_FALLBACK_AGENTS_ENV]: `${CLAWITH_AGENT_ID}:${FALLBACK_CLAWITH_AGENT_ID}`,
+  });
+
+  it('an approved, tenant-verified fallback is attempted exactly once, its reply is returned, and the masked primary 402 still alerts', async () => {
+    prismaMock.clawithBinding.findFirst.mockResolvedValue({ clawith_agent_id: FALLBACK_CLAWITH_AGENT_ID });
+    let call = 0;
+    const fetchImpl = vi.fn(async () => {
+      call += 1;
+      if (call === 1) return jsonResponse({ error: 'Insufficient Balance' }, 402);
+      return jsonResponse(
+        okBody({ agent_id: FALLBACK_CLAWITH_AGENT_ID, customer_reply: 'Fallback answer.' }),
+      );
+    });
+
+    const outcome = await performStaffChatTurn({
+      session: session(),
+      agent: eligibleAgent(),
+      message: 'hello',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      env: envWithFallback,
+      clientOptions: { fetchImpl: fetchImpl as unknown as typeof fetch, sleep: async () => {} },
+    });
+
+    expect(outcome.result.state).toBe('replied');
+    expect(outcome.result.text).toBe('Fallback answer.');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const [, secondInit] = fetchImpl.mock.calls[1] as unknown as [string, RequestInit];
+    expect(JSON.parse(secondInit.body as string).designated_agent_id).toBe(FALLBACK_CLAWITH_AGENT_ID);
+
+    // The customer/staff-visible turn recovered — but the primary credential's
+    // 402 is still a real failure event and must still be recorded, exactly
+    // once, not silently dropped because the fallback covered for it.
+    expect(recordClawithFailureMock).toHaveBeenCalledTimes(1);
+    const [failureArg] = recordClawithFailureMock.mock.calls[0] as unknown as [{ kind: string }];
+    expect(failureArg).toMatchObject({ kind: 'payment_required' });
+  });
+
+  it('refuses an unapproved or cross-tenant fallback — no ClawithBinding row confirms the pairing for THIS tenant', async () => {
+    // env names a pairing, but the tenant-scoped lookup finds no row for it —
+    // simulating a misconfigured env var naming another tenant's agent.
+    prismaMock.clawithBinding.findFirst.mockResolvedValue(null);
+    const fetchImpl = vi.fn(async () => jsonResponse({ error: 'Insufficient Balance' }, 402));
+
+    const outcome = await performStaffChatTurn({
+      session: session(),
+      agent: eligibleAgent(),
+      message: 'hello',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      env: envWithFallback,
+      clientOptions: { fetchImpl: fetchImpl as unknown as typeof fetch, sleep: async () => {} },
+    });
+
+    expect(outcome.result.state).toBe('unavailable');
+    // Never attempted a second call against the unverified fallback agent.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(recordClawithFailureMock).toHaveBeenCalledTimes(1);
+    const [failureArg] = recordClawithFailureMock.mock.calls[0] as unknown as [{ kind: string }];
+    expect(failureArg).toMatchObject({ kind: 'payment_required' });
+  });
+
+  it('when the approved fallback also fails, the sanitized response reflects the FALLBACK failure with no raw detail — and still exactly one alert', async () => {
+    prismaMock.clawithBinding.findFirst.mockResolvedValue({ clawith_agent_id: FALLBACK_CLAWITH_AGENT_ID });
+    let call = 0;
+    const fetchImpl = vi.fn(async () => {
+      call += 1;
+      if (call === 1) return jsonResponse({ error: 'Insufficient Balance' }, 402);
+      // rate_limited (429) is deliberately non-retryable on the tight in-call
+      // loop, so this stays a single fallback attempt, not MAX_ATTEMPTS.
+      return jsonResponse({ error: 'Too Many Requests' }, 429);
+    });
+
+    const outcome = await performStaffChatTurn({
+      session: session(),
+      agent: eligibleAgent(),
+      message: 'hello',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      env: envWithFallback,
+      clientOptions: { fetchImpl: fetchImpl as unknown as typeof fetch, sleep: async () => {} },
+    });
+
+    expect(outcome.result.state).toBe('degraded');
+    expect(outcome.result.text).toBeNull();
+    expect(JSON.stringify(outcome.result)).not.toContain('429');
+    expect(JSON.stringify(outcome.result)).not.toContain('Too Many Requests');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+    // Only the terminal (fallback) failure is recorded here — when the
+    // fallback itself fails, callClawithWithFallback throws the FALLBACK's
+    // failure, not the primary's, so performStaffChatTurn's catch block
+    // records that one. Still exactly one alert, never two.
+    expect(recordClawithFailureMock).toHaveBeenCalledTimes(1);
+    const [failureArg] = recordClawithFailureMock.mock.calls[0] as unknown as [{ kind: string }];
+    expect(failureArg).toMatchObject({ kind: 'rate_limited' });
   });
 });

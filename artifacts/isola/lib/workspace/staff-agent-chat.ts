@@ -24,10 +24,12 @@
 
 import { prisma } from '@/lib/prisma';
 import type { SessionCtx } from '@/lib/session';
-import { callClawithStructured, type ClawithClientOptions } from '@/lib/clawith/client';
+import type { ClawithClientOptions } from '@/lib/clawith/client';
 import type { ClawithRequest, ClawithToolDefinition } from '@/lib/clawith/contract';
 import { buildClawithRequest } from '@/lib/clawith/request';
-import { ClawithFailure, isClawithFailure, type ClawithFailureKind } from '@/lib/clawith/errors';
+import { ClawithFailure, isClawithFailure, isConfigurationFailure, type ClawithFailureKind } from '@/lib/clawith/errors';
+import { callClawithWithFallback } from '@/lib/clawith/fallback';
+import { recordClawithFailure } from '@/lib/clawith/alert';
 
 // ── Allowlist (revised eligibility rule 5) ──────────────────────────────────
 
@@ -276,10 +278,22 @@ const CONFIGURATION_KINDS: ReadonlySet<ClawithFailureKind> = new Set<ClawithFail
   'tenant_mismatch',
 ]);
 
+/** Non-retryable-presenting failures — a payment/credential problem or a
+ *  caught provider-error leak reads the same as "not available right now",
+ *  not "hit a snag, try again" (`degraded`). `rate_limited` deliberately
+ *  stays `degraded`: retrying later is a legitimate response to a rate
+ *  limit, unlike the other three. */
+const UNAVAILABLE_PRESENTING_KINDS: ReadonlySet<ClawithFailureKind> = new Set<ClawithFailureKind>([
+  'payment_required',
+  'provider_error_leaked',
+  'circuit_open',
+]);
+
 export function mapFailureToStaffChatState(kind: ClawithFailureKind): StaffChatState {
   if (kind === 'timeout') return 'timeout';
   if (kind === 'auth_rejected') return 'rejected';
   if (CONFIGURATION_KINDS.has(kind)) return 'unavailable';
+  if (UNAVAILABLE_PRESENTING_KINDS.has(kind)) return 'unavailable';
   return 'degraded';
 }
 
@@ -370,7 +384,28 @@ export async function performStaffChatTurn(input: PerformStaffChatTurnInput): Pr
   };
 
   try {
-    const { response, attempts } = await callClawithStructured(request, clientOptions);
+    const { response, attempts, usedFallback, primaryFailure } = await callClawithWithFallback({
+      request,
+      tenantId: input.agent.tenantId,
+      clientOptions,
+      env,
+    });
+
+    // See invoke.ts's identical guard: a fallback that recovers the turn
+    // still means the primary credential failed, and that failure event
+    // must not go unrecorded — otherwise an operator never learns a 402
+    // happened until the fallback also fails.
+    if (usedFallback && primaryFailure) {
+      await recordClawithFailure(primaryFailure, {
+        tenantId: input.agent.tenantId,
+        agentId: input.agent.agentId,
+        clawithAgentId: input.agent.clawithAgentId,
+        surface: 'staff_chat',
+        correlationId,
+        actorId: input.session.user.id,
+        env,
+      });
+    }
 
     if (response.escalation.requested) {
       return {
@@ -414,6 +449,23 @@ export async function performStaffChatTurn(input: PerformStaffChatTurnInput): Pr
     const failure = isClawithFailure(err)
       ? err
       : new ClawithFailure('network_error', (err as Error | null)?.message ?? null);
+
+    // Configuration failures are a Foundation-side defect, not a provider
+    // event — already funneled to the quiet `unavailable` state above; an
+    // operator alert for "no secret configured in this environment" would
+    // be noise, not signal, and would fire on every turn while it persists.
+    if (!isConfigurationFailure(failure.kind)) {
+      await recordClawithFailure(failure, {
+        tenantId: input.agent.tenantId,
+        agentId: input.agent.agentId,
+        clawithAgentId: input.agent.clawithAgentId,
+        surface: 'staff_chat',
+        correlationId,
+        actorId: input.session.user.id,
+        env,
+      });
+    }
+
     return {
       sentRequest: request,
       result: {

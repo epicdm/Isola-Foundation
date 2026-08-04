@@ -2,10 +2,25 @@
  * Proof 15 and the §6 guarantee: on the gated inbox-46 path, no Clawith
  * failure may produce a reply from an unrelated native brain.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CLAWITH_SCHEMA_VERSION, type ClawithToolDefinition } from './contract';
 import { ClawithFailure, isConfigurationFailure, isRetryable, classifyHttpStatus, classifyThrown } from './errors';
-import { SAFE_UNAVAILABILITY_REPLY, invokeClawithGated, outcomeForFailure } from './invoke';
+
+const { auditMock, prismaMock } = vi.hoisted(() => ({
+  auditMock: vi.fn(),
+  prismaMock: { clawithBinding: { findFirst: vi.fn() } },
+}));
+vi.mock('../audit', () => ({ audit: auditMock }));
+vi.mock('../prisma', () => ({ prisma: prismaMock }));
+
+const { resetAllCircuitBreakers } = await import('./circuit-breaker');
+const { SAFE_UNAVAILABILITY_REPLY, invokeClawithGated, outcomeForFailure } = await import('./invoke');
+
+beforeEach(() => {
+  auditMock.mockClear();
+  prismaMock.clawithBinding.findFirst.mockReset();
+  resetAllCircuitBreakers();
+});
 
 const AGENT = '81b38cd6-9fba-4cc8-8f87-1bce1a4aa162';
 const TENANT = '43b006e4-33e0-42a8-bec7-4422ba290d79';
@@ -72,6 +87,9 @@ const FAILURE_KINDS = [
   'timeout',
   'auth_rejected',
   'http_error',
+  'payment_required',
+  'rate_limited',
+  'provider_unavailable',
   'network_error',
   'invalid_response',
   'correlation_mismatch',
@@ -79,6 +97,8 @@ const FAILURE_KINDS = [
   'tenant_mismatch',
   'unsupported_tool',
   'contradictory_response',
+  'provider_error_leaked',
+  'circuit_open',
 ] as const;
 
 describe('proof 15: a gated inbox-46 failure never falls back to native', () => {
@@ -119,6 +139,82 @@ describe('proof 15: a gated inbox-46 failure never falls back to native', () => 
     expect((outcome as { failure: { kind: string; status: number | null } }).failure).toMatchObject({
       kind: 'auth_rejected',
       status: 401,
+    });
+  });
+
+  it('a customer-facing 402 is sanitized — no HTTP status, provider name, balance or run id in the text', async () => {
+    const fetchImpl = vi.fn(async () => okResponse({ error: 'Insufficient Balance', code: 'model_call_failed' }, 402));
+    const outcome = await invokeClawithGated(input({ correlationId: 'corr-402' }, fetchImpl));
+
+    expect(outcome.kind).toBe('safe_unavailable');
+    expect(outcome.text).toBe(SAFE_UNAVAILABILITY_REPLY);
+    for (const banned of ['402', 'HTTP', 'Insufficient', 'Balance', 'model_call_failed', 'corr-402']) {
+      expect(outcome.text).not.toContain(banned);
+    }
+    expect((outcome as { failure: { kind: string; status: number | null } }).failure).toMatchObject({
+      kind: 'payment_required',
+      status: 402,
+    });
+    // fetchImpl called once — a 402 is never retried against the same credential.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves the raw diagnostic internally via audit() even though the customer text is sanitized', async () => {
+    const fetchImpl = vi.fn(async () => okResponse({ error: 'Insufficient Balance' }, 402));
+    await invokeClawithGated(input({ correlationId: 'corr-402b' }, fetchImpl));
+
+    expect(auditMock).toHaveBeenCalledTimes(1);
+    const [call] = auditMock.mock.calls[0] as unknown as [Record<string, unknown>];
+    expect(call).toMatchObject({
+      action: 'clawith.failure',
+      requestId: 'corr-402b',
+      meta: { kind: 'payment_required', status: 402, surface: 'customer_dispatch' },
+    });
+  });
+
+  it('passes the SAME correlation id into the alert path on every retry of the same turn — the key alert.ts dedupes the WhatsApp leg on (see alert.test.ts)', async () => {
+    const fetchImpl = vi.fn(async () => okResponse({ error: 'Insufficient Balance' }, 402));
+    await invokeClawithGated(input({ correlationId: 'corr-402c' }, fetchImpl));
+    await invokeClawithGated(input({ correlationId: 'corr-402c' }, fetchImpl));
+
+    expect(auditMock).toHaveBeenCalledTimes(2);
+    const keys = (auditMock.mock.calls as unknown as [{ requestId: string }][]).map(([c]) => c.requestId);
+    expect(keys[0]).toBe('corr-402c');
+    expect(keys[1]).toBe('corr-402c');
+  });
+
+  it('an approved fallback that recovers the turn still alerts on the primary 402 — a masked failure is not a silent one', async () => {
+    const FALLBACK_AGENT = '9a1c9e2e-6b1a-4b9a-8b1a-2f3c4d5e6f70';
+    const envWithFallback = {
+      ...ENV,
+      CLAWITH_APPROVED_FALLBACK_AGENTS: `${AGENT}:${FALLBACK_AGENT}`,
+    } as unknown as NodeJS.ProcessEnv;
+    prismaMock.clawithBinding.findFirst.mockResolvedValue({ clawith_agent_id: FALLBACK_AGENT });
+
+    let call = 0;
+    const fetchImpl = vi.fn(async () => {
+      call += 1;
+      if (call === 1) return okResponse({ error: 'Insufficient Balance' }, 402);
+      return okResponse({ agent_id: FALLBACK_AGENT, correlation_id: 'corr-fb-1', customer_reply: 'Yes, we do (fallback).' });
+    });
+
+    const outcome = await invokeClawithGated(
+      input({ correlationId: 'corr-fb-1', clientOptions: { env: envWithFallback, sleep: async () => {}, fetchImpl } }),
+    );
+
+    expect(outcome.kind).toBe('reply');
+    expect(outcome.text).toBe('Yes, we do (fallback).');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+    // The customer got a normal reply — but the primary credential's 402 is
+    // still a failure event and must still be recorded, not dropped just
+    // because the fallback covered for it.
+    expect(auditMock).toHaveBeenCalledTimes(1);
+    const [call0] = auditMock.mock.calls[0] as unknown as [Record<string, unknown>];
+    expect(call0).toMatchObject({
+      action: 'clawith.failure',
+      requestId: 'corr-fb-1',
+      meta: { kind: 'payment_required', status: 402, surface: 'customer_dispatch' },
     });
   });
 
@@ -198,7 +294,17 @@ describe('failure taxonomy', () => {
     expect(isRetryable('timeout')).toBe(true);
     expect(isRetryable('network_error')).toBe(true);
     expect(isRetryable('http_error')).toBe(true);
-    for (const kind of ['auth_rejected', 'invalid_response', 'secret_missing', 'unsupported_tool'] as const) {
+    expect(isRetryable('provider_unavailable')).toBe(true);
+    for (const kind of [
+      'auth_rejected',
+      'invalid_response',
+      'secret_missing',
+      'unsupported_tool',
+      'payment_required',
+      'rate_limited',
+      'provider_error_leaked',
+      'circuit_open',
+    ] as const) {
       expect(isRetryable(kind), kind).toBe(false);
     }
   });
@@ -215,6 +321,11 @@ describe('failure taxonomy', () => {
   it('classifies statuses and thrown errors', () => {
     expect(classifyHttpStatus(401)).toBe('auth_rejected');
     expect(classifyHttpStatus(403)).toBe('auth_rejected');
+    expect(classifyHttpStatus(402)).toBe('payment_required');
+    expect(classifyHttpStatus(429)).toBe('rate_limited');
+    expect(classifyHttpStatus(502)).toBe('provider_unavailable');
+    expect(classifyHttpStatus(503)).toBe('provider_unavailable');
+    expect(classifyHttpStatus(504)).toBe('provider_unavailable');
     expect(classifyHttpStatus(500)).toBe('http_error');
     expect(classifyHttpStatus(404)).toBe('http_error');
     const timeout = new Error('t');

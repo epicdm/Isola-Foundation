@@ -23,14 +23,25 @@ interface ChatTurn {
 
 /** Copy for every state Port records for this feature. Never a raw provider
  *  error, stack trace or upstream detail — see route.ts, which never sends
- *  one down in the first place. */
-const STATE_COPY: Record<Exclude<StaffChatState, 'replied' | 'escalated'>, string> = {
-  blocked: "This assistant isn't available for staff chat right now.",
-  degraded: 'The assistant hit a snag answering that.',
-  timeout: "The assistant didn't respond in time.",
-  unavailable: "The assistant isn't configured for chat in this environment right now.",
-  rejected: 'The assistant declined this request. Try again in a moment.',
-};
+ *  one down in the first place; `unavailable` in particular now also covers
+ *  non-retryable provider failures (payment/circuit-breaker/leak), so its
+ *  copy makes no claim about environment configuration. Every state here is
+ *  zero-tool (`allowed_tools: []` always), so "no action was taken" is true
+ *  for all of them. */
+function stateCopy(state: Exclude<StaffChatState, 'replied' | 'escalated'>, agentName: string): string {
+  switch (state) {
+    case 'blocked':
+      return `${agentName} isn't available for staff chat right now. No action was taken.`;
+    case 'degraded':
+      return `${agentName} hit a snag answering that. No action was taken — you can retry.`;
+    case 'timeout':
+      return `${agentName} didn't respond in time. No action was taken — you can retry.`;
+    case 'unavailable':
+      return `${agentName} is temporarily unavailable. No action was taken. This has been recorded — retry shortly or contact an administrator if it continues.`;
+    case 'rejected':
+      return `${agentName} declined this request. No action was taken — try again in a moment.`;
+  }
+}
 
 const RETRYABLE_STATES: ReadonlySet<StaffChatState> = new Set(['degraded', 'timeout', 'rejected']);
 
@@ -72,7 +83,7 @@ export function StaffAgentChat({ agentId, agentName }: { agentId: string; agentN
           {
             id: newId(),
             role: 'system',
-            text: STATE_COPY.degraded,
+            text: stateCopy('degraded', agentName),
             state: 'degraded',
             retry: { message, turnId },
           },
@@ -87,7 +98,7 @@ export function StaffAgentChat({ agentId, agentName }: { agentId: string; agentN
         return;
       }
 
-      const copy = STATE_COPY[data.state] ?? STATE_COPY.degraded;
+      const copy = stateCopy(data.state as Exclude<StaffChatState, 'replied' | 'escalated'>, agentName);
       setTurns((t) => [
         ...t,
         {
@@ -104,7 +115,7 @@ export function StaffAgentChat({ agentId, agentName }: { agentId: string; agentN
         {
           id: newId(),
           role: 'system',
-          text: STATE_COPY.degraded,
+          text: stateCopy('degraded', agentName),
           state: 'degraded',
           retry: { message, turnId },
         },
