@@ -9,7 +9,7 @@
  */
 
 import { CLAWITH_SCHEMA_VERSION, type ClawithRequest, type ClawithResponse } from './contract';
-import { isCircuitOpen, recordClawithOutcome } from './circuit-breaker';
+import { circuitKeyFor, isCircuitOpen, recordClawithOutcome } from './circuit-breaker';
 import {
   ClawithFailure,
   classifyHttpStatus,
@@ -73,11 +73,12 @@ export async function callClawithStructured(
     throw new ClawithFailure('secret_missing', 'CLAWITH_SHARED_SECRET is not configured');
   }
 
-  if (isCircuitOpen(request.designated_agent_id)) {
+  const circuitKey = circuitKeyFor(request.tenant_id, request.designated_agent_id);
+  if (isCircuitOpen(circuitKey)) {
     // A known-failing credential was already caught (payment/leak) within
     // the cooldown window — refused before any network attempt, same as
     // the secret check above.
-    throw new ClawithFailure('circuit_open', 'circuit breaker open for this agent/credential');
+    throw new ClawithFailure('circuit_open', 'circuit breaker open for this tenant/agent');
   }
 
   const doFetch = options.fetchImpl ?? fetch;
@@ -128,7 +129,7 @@ export async function callClawithStructured(
       }
 
       const parsed = parseClawithResponse(body, expected);
-      recordClawithOutcome(request.designated_agent_id, 'success');
+      recordClawithOutcome(circuitKey, 'success');
       return {
         response: parsed,
         attempts: attempt,
@@ -144,7 +145,7 @@ export async function callClawithStructured(
         await sleep(options.retryDelayMs ?? 250);
         continue;
       }
-      recordClawithOutcome(request.designated_agent_id, failure.kind);
+      recordClawithOutcome(circuitKey, failure.kind);
       throw failure;
     }
   }

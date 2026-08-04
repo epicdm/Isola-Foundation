@@ -26,7 +26,6 @@ import {
 } from './staff-agent-chat';
 import { CLAWITH_STRUCTURED_URL as LEGACY_CLAWITH_STRUCTURED_URL, MAX_ATTEMPTS } from '@/lib/clawith/client';
 import { CLAWITH_SCHEMA_VERSION } from '@/lib/clawith/contract';
-import { CLAWITH_APPROVED_FALLBACK_AGENTS_ENV } from '@/lib/clawith/fallback';
 import { resetAllCircuitBreakers } from '@/lib/clawith/circuit-breaker';
 import type { SessionCtx } from '@/lib/session';
 
@@ -823,51 +822,18 @@ describe('proof 13: a staff-chat 402 is sanitized end-to-end and alerts exactly 
   });
 });
 
-describe('proof 14: approved fallback — attempted at most once, tenant-verified, never masks the primary failure', () => {
+describe('proof 14: automatic fallback to a different Clawith agent is disabled — same logical agent, one attempt, no masking', () => {
   const FALLBACK_CLAWITH_AGENT_ID = '9a1c9e2e-6b1a-4b9a-8b1a-2f3c4d5e6f70';
-  const envWithFallback = env({
-    [CLAWITH_APPROVED_FALLBACK_AGENTS_ENV]: `${CLAWITH_AGENT_ID}:${FALLBACK_CLAWITH_AGENT_ID}`,
+  // The shape the old CLAWITH_APPROVED_FALLBACK_AGENTS env var used to accept
+  // (see ev-shared-model-failure-pr72-review-report-2026-08-04) — must now be
+  // completely inert. fallback.ts no longer reads any such variable, and
+  // there is no export left to name it by, so the literal env var name is
+  // reproduced here directly.
+  const envWithLegacyFallbackVar = env({
+    CLAWITH_APPROVED_FALLBACK_AGENTS: `${CLAWITH_AGENT_ID}:${FALLBACK_CLAWITH_AGENT_ID}`,
   });
 
-  it('an approved, tenant-verified fallback is attempted exactly once, its reply is returned, and the masked primary 402 still alerts', async () => {
-    prismaMock.clawithBinding.findFirst.mockResolvedValue({ clawith_agent_id: FALLBACK_CLAWITH_AGENT_ID });
-    let call = 0;
-    const fetchImpl = vi.fn(async () => {
-      call += 1;
-      if (call === 1) return jsonResponse({ error: 'Insufficient Balance' }, 402);
-      return jsonResponse(
-        okBody({ agent_id: FALLBACK_CLAWITH_AGENT_ID, customer_reply: 'Fallback answer.' }),
-      );
-    });
-
-    const outcome = await performStaffChatTurn({
-      session: session(),
-      agent: eligibleAgent(),
-      message: 'hello',
-      threadId: 'thread-1',
-      turnId: 'turn-1',
-      env: envWithFallback,
-      clientOptions: { fetchImpl: fetchImpl as unknown as typeof fetch, sleep: async () => {} },
-    });
-
-    expect(outcome.result.state).toBe('replied');
-    expect(outcome.result.text).toBe('Fallback answer.');
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    const [, secondInit] = fetchImpl.mock.calls[1] as unknown as [string, RequestInit];
-    expect(JSON.parse(secondInit.body as string).designated_agent_id).toBe(FALLBACK_CLAWITH_AGENT_ID);
-
-    // The customer/staff-visible turn recovered — but the primary credential's
-    // 402 is still a real failure event and must still be recorded, exactly
-    // once, not silently dropped because the fallback covered for it.
-    expect(recordClawithFailureMock).toHaveBeenCalledTimes(1);
-    const [failureArg] = recordClawithFailureMock.mock.calls[0] as unknown as [{ kind: string }];
-    expect(failureArg).toMatchObject({ kind: 'payment_required' });
-  });
-
-  it('refuses an unapproved or cross-tenant fallback — no ClawithBinding row confirms the pairing for THIS tenant', async () => {
-    // env names a pairing, but the tenant-scoped lookup finds no row for it —
-    // simulating a misconfigured env var naming another tenant's agent.
-    prismaMock.clawithBinding.findFirst.mockResolvedValue(null);
+  it('a primary 402 is never covered by a second agent — one attempt, sanitized unavailable, no ClawithBinding lookup', async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({ error: 'Insufficient Balance' }, 402));
 
     const outcome = await performStaffChatTurn({
@@ -876,51 +842,42 @@ describe('proof 14: approved fallback — attempted at most once, tenant-verifie
       message: 'hello',
       threadId: 'thread-1',
       turnId: 'turn-1',
-      env: envWithFallback,
+      env: envWithLegacyFallbackVar,
       clientOptions: { fetchImpl: fetchImpl as unknown as typeof fetch, sleep: async () => {} },
     });
 
     expect(outcome.result.state).toBe('unavailable');
-    // Never attempted a second call against the unverified fallback agent.
+    expect(outcome.result.text).toBeNull();
+    expect(JSON.stringify(outcome.result)).not.toContain('402');
+    expect(JSON.stringify(outcome.result)).not.toContain('Insufficient Balance');
+    // Never attempted a second call against any other agent.
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+    // The legacy pairing env var is never even read — no lookup for a
+    // fallback agent's ClawithBinding happens at all.
+    expect(prismaMock.clawithBinding.findFirst).not.toHaveBeenCalled();
+
     expect(recordClawithFailureMock).toHaveBeenCalledTimes(1);
     const [failureArg] = recordClawithFailureMock.mock.calls[0] as unknown as [{ kind: string }];
     expect(failureArg).toMatchObject({ kind: 'payment_required' });
   });
 
-  it('when the approved fallback also fails, the sanitized response reflects the FALLBACK failure with no raw detail — and still exactly one alert', async () => {
-    prismaMock.clawithBinding.findFirst.mockResolvedValue({ clawith_agent_id: FALLBACK_CLAWITH_AGENT_ID });
-    let call = 0;
-    const fetchImpl = vi.fn(async () => {
-      call += 1;
-      if (call === 1) return jsonResponse({ error: 'Insufficient Balance' }, 402);
-      // rate_limited (429) is deliberately non-retryable on the tight in-call
-      // loop, so this stays a single fallback attempt, not MAX_ATTEMPTS.
-      return jsonResponse({ error: 'Too Many Requests' }, 429);
-    });
+  it('every attempt sends the same designated_agent_id the caller resolved — never the legacy fallback agent id', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(okBody()));
 
-    const outcome = await performStaffChatTurn({
+    await performStaffChatTurn({
       session: session(),
       agent: eligibleAgent(),
       message: 'hello',
       threadId: 'thread-1',
       turnId: 'turn-1',
-      env: envWithFallback,
+      env: envWithLegacyFallbackVar,
       clientOptions: { fetchImpl: fetchImpl as unknown as typeof fetch, sleep: async () => {} },
     });
 
-    expect(outcome.result.state).toBe('degraded');
-    expect(outcome.result.text).toBeNull();
-    expect(JSON.stringify(outcome.result)).not.toContain('429');
-    expect(JSON.stringify(outcome.result)).not.toContain('Too Many Requests');
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-
-    // Only the terminal (fallback) failure is recorded here — when the
-    // fallback itself fails, callClawithWithFallback throws the FALLBACK's
-    // failure, not the primary's, so performStaffChatTurn's catch block
-    // records that one. Still exactly one alert, never two.
-    expect(recordClawithFailureMock).toHaveBeenCalledTimes(1);
-    const [failureArg] = recordClawithFailureMock.mock.calls[0] as unknown as [{ kind: string }];
-    expect(failureArg).toMatchObject({ kind: 'rate_limited' });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    const sentAgentId = JSON.parse(init.body as string).designated_agent_id;
+    expect(sentAgentId).toBe(CLAWITH_AGENT_ID);
+    expect(sentAgentId).not.toBe(FALLBACK_CLAWITH_AGENT_ID);
   });
 });

@@ -183,32 +183,26 @@ describe('proof 15: a gated inbox-46 failure never falls back to native', () => 
     expect(keys[1]).toBe('corr-402c');
   });
 
-  it('an approved fallback that recovers the turn still alerts on the primary 402 — a masked failure is not a silent one', async () => {
-    const FALLBACK_AGENT = '9a1c9e2e-6b1a-4b9a-8b1a-2f3c4d5e6f70';
-    const envWithFallback = {
+  it('a 402 is never masked by an automatic fallback to a different agent — a legacy fallback-pairing env var is inert', async () => {
+    const OTHER_AGENT = '9a1c9e2e-6b1a-4b9a-8b1a-2f3c4d5e6f70';
+    const envWithLegacyFallbackVar = {
       ...ENV,
-      CLAWITH_APPROVED_FALLBACK_AGENTS: `${AGENT}:${FALLBACK_AGENT}`,
+      CLAWITH_APPROVED_FALLBACK_AGENTS: `${AGENT}:${OTHER_AGENT}`,
     } as unknown as NodeJS.ProcessEnv;
-    prismaMock.clawithBinding.findFirst.mockResolvedValue({ clawith_agent_id: FALLBACK_AGENT });
 
-    let call = 0;
-    const fetchImpl = vi.fn(async () => {
-      call += 1;
-      if (call === 1) return okResponse({ error: 'Insufficient Balance' }, 402);
-      return okResponse({ agent_id: FALLBACK_AGENT, correlation_id: 'corr-fb-1', customer_reply: 'Yes, we do (fallback).' });
-    });
+    const fetchImpl = vi.fn(async () => okResponse({ error: 'Insufficient Balance' }, 402));
 
     const outcome = await invokeClawithGated(
-      input({ correlationId: 'corr-fb-1', clientOptions: { env: envWithFallback, sleep: async () => {}, fetchImpl } }),
+      input({ correlationId: 'corr-fb-1', clientOptions: { env: envWithLegacyFallbackVar, sleep: async () => {}, fetchImpl } }),
     );
 
-    expect(outcome.kind).toBe('reply');
-    expect(outcome.text).toBe('Yes, we do (fallback).');
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    // No fallback attempt: sanitized degraded response, not a reply from
+    // another agent, and the primary credential is never retried.
+    expect(outcome.kind).toBe('safe_unavailable');
+    expect(outcome.text).toBe(SAFE_UNAVAILABILITY_REPLY);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(prismaMock.clawithBinding.findFirst).not.toHaveBeenCalled();
 
-    // The customer got a normal reply — but the primary credential's 402 is
-    // still a failure event and must still be recorded, not dropped just
-    // because the fallback covered for it.
     expect(auditMock).toHaveBeenCalledTimes(1);
     const [call0] = auditMock.mock.calls[0] as unknown as [Record<string, unknown>];
     expect(call0).toMatchObject({

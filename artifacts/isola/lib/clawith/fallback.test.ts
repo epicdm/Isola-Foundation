@@ -11,16 +11,11 @@ const { prismaMock, callClawithStructuredMock } = vi.hoisted(() => ({
 vi.mock('../prisma', () => ({ prisma: prismaMock }));
 vi.mock('./client', () => ({ callClawithStructured: callClawithStructuredMock }));
 
-const {
-  callClawithWithFallback,
-  resolveApprovedFallback,
-  CLAWITH_APPROVED_FALLBACK_AGENTS_ENV,
-} = await import('./fallback');
+const { callClawithWithFallback } = await import('./fallback');
 
 const TENANT = '43b006e4-33e0-42a8-bec7-4422ba290d79';
 const PRIMARY_AGENT = '81b38cd6-9fba-4cc8-8f87-1bce1a4aa162';
-const FALLBACK_AGENT = '9a1c9e2e-6b1a-4b9a-8b1a-2f3c4d5e6f70';
-const UNAPPROVED_AGENT = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+const OTHER_AGENT = '9a1c9e2e-6b1a-4b9a-8b1a-2f3c4d5e6f70';
 
 const TOOL: ClawithToolDefinition = {
   name: 'crm.contact.lookup',
@@ -79,56 +74,15 @@ function okResult(agentId = PRIMARY_AGENT) {
   };
 }
 
-const envWithFallback = {
-  [CLAWITH_APPROVED_FALLBACK_AGENTS_ENV]: `${PRIMARY_AGENT}:${FALLBACK_AGENT}`,
+// A pairing naming a different agent as an "approved fallback" — the exact
+// shape the old CLAWITH_APPROVED_FALLBACK_AGENTS env var used to accept.
+// It must now be inert: nothing in fallback.ts reads it any more.
+const envThatUsedToConfigureFallback = {
+  CLAWITH_APPROVED_FALLBACK_AGENTS: `${PRIMARY_AGENT}:${OTHER_AGENT}`,
 } as unknown as NodeJS.ProcessEnv;
 
 beforeEach(() => {
   vi.clearAllMocks();
-});
-
-describe('resolveApprovedFallback — tenant-verified, not just config-trusted', () => {
-  it('returns null when no fallback pairing is configured at all', async () => {
-    const result = await resolveApprovedFallback({
-      tenantId: TENANT,
-      primaryClawithAgentId: PRIMARY_AGENT,
-      env: {} as NodeJS.ProcessEnv,
-    });
-    expect(result).toBeNull();
-    expect(prismaMock.clawithBinding.findFirst).not.toHaveBeenCalled();
-  });
-
-  it('refuses the pairing when no ClawithBinding row exists for THIS tenant — cross-tenant fallback refused', async () => {
-    prismaMock.clawithBinding.findFirst.mockResolvedValue(null);
-    const result = await resolveApprovedFallback({
-      tenantId: TENANT,
-      primaryClawithAgentId: PRIMARY_AGENT,
-      env: envWithFallback,
-    });
-    expect(result).toBeNull();
-    expect(prismaMock.clawithBinding.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { tenant_id: TENANT, clawith_agent_id: FALLBACK_AGENT } }),
-    );
-  });
-
-  it('approves the pairing once a real ClawithBinding row for this tenant confirms it', async () => {
-    prismaMock.clawithBinding.findFirst.mockResolvedValue({ clawith_agent_id: FALLBACK_AGENT });
-    const result = await resolveApprovedFallback({
-      tenantId: TENANT,
-      primaryClawithAgentId: PRIMARY_AGENT,
-      env: envWithFallback,
-    });
-    expect(result).toBe(FALLBACK_AGENT);
-  });
-
-  it('ignores a malformed or self-referential pairing entry', async () => {
-    const result = await resolveApprovedFallback({
-      tenantId: TENANT,
-      primaryClawithAgentId: PRIMARY_AGENT,
-      env: { [CLAWITH_APPROVED_FALLBACK_AGENTS_ENV]: `${PRIMARY_AGENT}:${PRIMARY_AGENT}` } as unknown as NodeJS.ProcessEnv,
-    });
-    expect(result).toBeNull();
-  });
 });
 
 describe('callClawithWithFallback — normal success is unchanged', () => {
@@ -142,95 +96,60 @@ describe('callClawithWithFallback — normal success is unchanged', () => {
   });
 });
 
-describe('callClawithWithFallback — configuration failures never attempt a fallback', () => {
-  it('rethrows a secret_missing failure without ever attempting fallback', async () => {
-    prismaMock.clawithBinding.findFirst.mockResolvedValue({ clawith_agent_id: FALLBACK_AGENT });
-    callClawithStructuredMock.mockRejectedValue(new ClawithFailure('secret_missing', null));
-    await expect(
-      callClawithWithFallback({ request: request(), tenantId: TENANT, env: envWithFallback }),
-    ).rejects.toMatchObject({ kind: 'secret_missing' });
-    expect(callClawithStructuredMock).toHaveBeenCalledTimes(1);
-  });
-});
+describe('callClawithWithFallback — automatic fallback to a different Clawith agent is disabled', () => {
+  it('rethrows a payment_required failure immediately — no second agent is ever attempted', async () => {
+    const primaryFailure = new ClawithFailure('payment_required', 'Insufficient Balance', 402);
+    callClawithStructuredMock.mockRejectedValue(primaryFailure);
 
-describe('callClawithWithFallback — no approved fallback configured', () => {
-  it('immediately rethrows the primary failure — requirement 13, no waiting on a fallback that does not exist', async () => {
-    callClawithStructuredMock.mockRejectedValue(new ClawithFailure('payment_required', 'Insufficient Balance', 402));
     await expect(
       callClawithWithFallback({ request: request(), tenantId: TENANT, env: {} as NodeJS.ProcessEnv }),
-    ).rejects.toMatchObject({ kind: 'payment_required' });
+    ).rejects.toBe(primaryFailure);
     expect(callClawithStructuredMock).toHaveBeenCalledTimes(1);
   });
 
-  it('immediately rethrows when the configured pairing does not resolve for this tenant', async () => {
-    prismaMock.clawithBinding.findFirst.mockResolvedValue(null);
-    callClawithStructuredMock.mockRejectedValue(new ClawithFailure('payment_required', null, 402));
-    await expect(
-      callClawithWithFallback({ request: request(), tenantId: TENANT, env: envWithFallback }),
-    ).rejects.toMatchObject({ kind: 'payment_required' });
-    expect(callClawithStructuredMock).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('callClawithWithFallback — an approved fallback is attempted exactly once', () => {
-  it('retries against the approved fallback agent and succeeds, preserving every other request field', async () => {
-    prismaMock.clawithBinding.findFirst.mockResolvedValue({ clawith_agent_id: FALLBACK_AGENT });
+  it('stays disabled even when a legacy fallback-pairing env var names an approved agent', async () => {
     const primaryFailure = new ClawithFailure('payment_required', 'Insufficient Balance', 402);
-    callClawithStructuredMock.mockRejectedValueOnce(primaryFailure).mockResolvedValueOnce(okResult(FALLBACK_AGENT));
-
-    const result = await callClawithWithFallback({ request: request(), tenantId: TENANT, env: envWithFallback });
-
-    expect(result.usedFallback).toBe(true);
-    expect(result.primaryFailure).toBe(primaryFailure);
-    expect(callClawithStructuredMock).toHaveBeenCalledTimes(2);
-
-    const [firstReq] = callClawithStructuredMock.mock.calls[0] as unknown as [ReturnType<typeof request>];
-    const [secondReq] = callClawithStructuredMock.mock.calls[1] as unknown as [ReturnType<typeof request>];
-
-    expect(firstReq.designated_agent_id).toBe(PRIMARY_AGENT);
-    expect(secondReq.designated_agent_id).toBe(FALLBACK_AGENT);
-
-    // Everything else about the turn's identity is untouched — same object
-    // with only designated_agent_id swapped.
-    const { designated_agent_id: _a, ...firstRest } = firstReq;
-    const { designated_agent_id: _b, ...secondRest } = secondReq;
-    expect(secondRest).toEqual(firstRest);
-    expect(secondReq.tenant_id).toBe(firstReq.tenant_id);
-    expect(secondReq.correlation_id).toBe(firstReq.correlation_id);
-    expect(secondReq.allowed_tools).toEqual(firstReq.allowed_tools);
-  });
-
-  it('attempts the fallback at most once — a second fallback failure is not retried again', async () => {
-    prismaMock.clawithBinding.findFirst.mockResolvedValue({ clawith_agent_id: FALLBACK_AGENT });
-    const primaryFailure = new ClawithFailure('payment_required', null, 402);
-    const fallbackFailure = new ClawithFailure('provider_unavailable', 'down', 503);
-    callClawithStructuredMock.mockRejectedValueOnce(primaryFailure).mockRejectedValueOnce(fallbackFailure);
+    callClawithStructuredMock.mockRejectedValue(primaryFailure);
 
     await expect(
-      callClawithWithFallback({ request: request(), tenantId: TENANT, env: envWithFallback }),
-    ).rejects.toMatchObject({ kind: 'provider_unavailable' });
-    expect(callClawithStructuredMock).toHaveBeenCalledTimes(2);
+      callClawithWithFallback({ request: request(), tenantId: TENANT, env: envThatUsedToConfigureFallback }),
+    ).rejects.toBe(primaryFailure);
+
+    expect(callClawithStructuredMock).toHaveBeenCalledTimes(1);
+    // Never even resolves a candidate agent — the env var is not read at all.
+    expect(prismaMock.clawithBinding.findFirst).not.toHaveBeenCalled();
+    const [[calledReq]] = callClawithStructuredMock.mock.calls as unknown as [[ReturnType<typeof request>]];
+    expect(calledReq.designated_agent_id).toBe(PRIMARY_AGENT);
+  });
+
+  it('rethrows every failure kind unchanged, including provider_error_leaked — never masked by a retry', async () => {
+    const primaryFailure = new ClawithFailure('provider_error_leaked', 'model_call_failed', null);
+    callClawithStructuredMock.mockRejectedValue(primaryFailure);
+
+    await expect(
+      callClawithWithFallback({ request: request(), tenantId: TENANT, env: envThatUsedToConfigureFallback }),
+    ).rejects.toBe(primaryFailure);
+    expect(callClawithStructuredMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('wraps a non-ClawithFailure thrown error into a classified failure without attempting a second agent', async () => {
+    callClawithStructuredMock.mockRejectedValue(new Error('socket hang up'));
+
+    await expect(
+      callClawithWithFallback({ request: request(), tenantId: TENANT, env: envThatUsedToConfigureFallback }),
+    ).rejects.toMatchObject({ kind: 'network_error' });
+    expect(callClawithStructuredMock).toHaveBeenCalledTimes(1);
   });
 });
 
-describe('callClawithWithFallback — never a cross-tenant or unapproved agent/credential', () => {
-  it('never calls callClawithStructured with an agent id that was not tenant-verified', async () => {
-    // env names a pairing, but the tenant-scoped lookup finds nothing —
-    // simulating a misconfigured env var naming another tenant's agent.
-    prismaMock.clawithBinding.findFirst.mockResolvedValue(null);
-    callClawithStructuredMock.mockRejectedValue(new ClawithFailure('payment_required', null, 402));
-
-    await expect(
-      callClawithWithFallback({
-        request: request(),
-        tenantId: TENANT,
-        env: { [CLAWITH_APPROVED_FALLBACK_AGENTS_ENV]: `${PRIMARY_AGENT}:${UNAPPROVED_AGENT}` } as unknown as NodeJS.ProcessEnv,
-      }),
-    ).rejects.toMatchObject({ kind: 'payment_required' });
+describe('callClawithWithFallback — same logical agent identity is preserved', () => {
+  it('never sends a request with any designated_agent_id other than the one the caller supplied', async () => {
+    callClawithStructuredMock.mockResolvedValue(okResult());
+    await callClawithWithFallback({ request: request(PRIMARY_AGENT), tenantId: TENANT, env: envThatUsedToConfigureFallback });
 
     for (const [calledReq] of callClawithStructuredMock.mock.calls as unknown as [ReturnType<typeof request>][]) {
-      expect(calledReq.designated_agent_id).not.toBe(UNAPPROVED_AGENT);
+      expect(calledReq.designated_agent_id).toBe(PRIMARY_AGENT);
+      expect(calledReq.designated_agent_id).not.toBe(OTHER_AGENT);
     }
-    expect(callClawithStructuredMock).toHaveBeenCalledTimes(1);
   });
 });
