@@ -68,6 +68,8 @@ STAFF_NOTIFICATION_PHONE_NUMBER_ID = "1029700810228517"
 # readback is now the authority that satisfies it. Eight other preconditions on
 # the manager notification remain enforced and fail-closed.
 STAFF_MANAGER_VERIFICATION_TEMPLATE_APPROVED = "true"
+CLAWITH_STRUCTURED_URL = "https://agents.epic.dm/api/isola/bridge/structured/message"
+FOUNDATION_STAFF_CHAT_AGENT_IDS = "a955edf4-a4c7-4669-b7dc-8dd3526716cf"
 
 [userenv.development]
 EMA_OTP_WHATSAPP_PHONE_NUMBER_ID = "1023804347491554"
