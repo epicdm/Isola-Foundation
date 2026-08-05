@@ -3,6 +3,8 @@ import { getSessionFromCookie } from '@/lib/session';
 import { prisma } from '@/lib/prisma';
 import { audit } from '@/lib/audit';
 import { getCurrentUsage } from '@/lib/meter';
+import { WHATSAPP_NUMBER_PUBLIC_SELECT, toPublicWhatsAppNumbers } from '@/lib/whatsapp-number-public';
+import { CHATWOOT_BINDING_PUBLIC_SELECT, toPublicChatwootBindings } from '@/lib/chatwoot-binding-public';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -18,8 +20,13 @@ export async function GET(req: NextRequest, { params }: Params) {
         subscription: true,
         wallet: true,
         agents: true,
-        whatsapp_numbers: true,
-        chatwoot_bindings: true,
+        // CB-0: both of these relations are credential-bearing —
+        // `WhatsAppNumber.access_token` is a live Meta token and
+        // `ChatwootBinding.token` is a Chatwoot Application API agent token.
+        // `include: true` returned both to the browser. Admin is a role, not a
+        // reason to ship credentials to a client.
+        whatsapp_numbers: { select: WHATSAPP_NUMBER_PUBLIC_SELECT },
+        chatwoot_bindings: { select: CHATWOOT_BINDING_PUBLIC_SELECT },
         _count: { select: { users: true, conversations: true, wallet_txns: true } },
       },
     }),
@@ -27,7 +34,20 @@ export async function GET(req: NextRequest, { params }: Params) {
   ]);
 
   if (!tenant) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-  return NextResponse.json({ tenant, usage });
+
+  // Two layers, deliberately — same as `app/api/onboard/whatsapp/route.ts`.
+  // The nested selects above keep the credentials out of process memory; these
+  // serialisers clamp the response shape even if a select is ever dropped or
+  // the rows arrive from somewhere else. A select alone is one edit away from
+  // leaking again.
+  return NextResponse.json({
+    tenant: {
+      ...tenant,
+      whatsapp_numbers: toPublicWhatsAppNumbers(tenant.whatsapp_numbers),
+      chatwoot_bindings: toPublicChatwootBindings(tenant.chatwoot_bindings),
+    },
+    usage,
+  });
 }
 
 export async function PATCH(req: NextRequest, { params }: Params) {
