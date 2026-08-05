@@ -73,6 +73,14 @@ function forensicsFor(text: string): GuardResult['forensics'] {
 // false escalation. Those rules are checked with isNegatedClaim() below so
 // only an affirmative claim blocks. Left false (the default) for the rest of
 // the deny-list, which is first-pass and tuned from the audit log instead.
+// Shared building blocks for the complex_ivr / complex_ivr_passive rule pair below — kept as
+// one source each so a term added for one direction (active vs. passive attribution) can never
+// accidentally diverge from the other.
+const IVR_OBJECT = 'IVR|multi-?level (?:phone )?menu|call menu';
+const IVR_BUILD_VERBS =
+  'build|builds|built|building|configure|configures|configured|configuring|design|designs|designed|designing|creat(?:e|es|ed|ing)|deploy|deploys|deployed|deploying|set\\s?up|sets\\s?up|setting\\s?up|implement|implements|implemented|implementing';
+const IVR_PASSIVE_PARTICIPLES = 'built|configured|designed|created|deployed|set\\s?up|implemented';
+
 const HARD_NEVERS: { id: string; pattern: RegExp; requiresPositiveClaim?: boolean }[] = [
   // voice_ai — the sales agent (in ANY grammatical person) claiming an AI answers/handles
   // phone or VOICE calls. Covers the literal "voice AI", third-person "our AI answers your
@@ -95,25 +103,46 @@ const HARD_NEVERS: { id: string; pattern: RegExp; requiresPositiveClaim?: boolea
   { id: 'unlimited_autonomy', pattern: /\bunlimited autonomy\b|\bfully autonomous\b|\bno human (oversight|involvement|needed)\b/i },
   { id: 'guaranteed_accuracy', pattern: /\bguarantee[sd]?\b[^.?!]{0,40}\b(sales|accuracy|results|conversion)s?\b/i, requiresPositiveClaim: true },
   { id: 'missed_call_recovery', pattern: /\bmissed[\s-]call recovery\b|\brecovers?\s+(every|all)\s+missed calls?\b/i },
-  // complex_ivr — narrowed 2026-08-05 (defect-foundation-claim-guard-complex-ivr-overbroad-post-generation-filter-2026-08-05):
+  // complex_ivr(_passive) — narrowed 2026-08-05, extended 2026-08-05 to cover passive-voice
+  // attribution too (defect-foundation-claim-guard-complex-ivr-overbroad-post-generation-filter-2026-08-05):
   // the original bare-keyword form (/\bIVR\b|.../) blocked ANY mention of "IVR"/"multi-level
   // menu", including an honest description of a real, ratified call-routing feature or a
   // recommendation that the customer consider one — a live customer asking for a service
-  // recommendation got deflected even though nothing was fabricated. Subject-anchored now
-  // (mirrors ai_places_call/voice_ai above): only fires when I/we/our-AI/assistant/bot/system
-  // claims to itself build/configure/design/create/deploy/set-up/implement a custom IVR or
-  // multi-level menu — the actual fabrication this rule exists to catch (an unsupported
-  // autonomous-build promise), not a neutral mention. [^.?!]{0,40} bounds the verb→object gap
-  // to the same sentence (same idiom as guaranteed_accuracy above), so a "we" earlier in a
-  // reply can never latch onto an unrelated IVR mention in a different sentence/clause, and a
-  // third-party subject ("a specialist would need to design...") never matches at all since it
-  // isn't I/we/our-AI to begin with. Passive-voice claims ("a custom IVR will be built by our
-  // AI") aren't covered by this narrow pass — first-pass, tune from the audit log as this file's
-  // header already documents.
+  // recommendation got deflected even though nothing was fabricated. Both rules below are
+  // subject-anchored (mirrors ai_places_call/voice_ai above) so only an autonomous
+  // AI/assistant/bot/system capability claim fires — never a neutral mention, a recommendation
+  // to discuss, a human/team/specialist attribution, or a negated claim. IVR_OBJECT is shared
+  // between both directions so a term added to one can never accidentally diverge from the other.
+  //
+  // complex_ivr (active voice): "I/we/our AI can build/configure/design/create/deploy/set-up/
+  // implement a custom IVR/multi-level menu." [^.?!]{0,40} bounds the verb→object gap to the
+  // same sentence (same idiom as guaranteed_accuracy above), so a "we" earlier in a reply can
+  // never latch onto an unrelated IVR mention in a different sentence/clause, and a third-party
+  // subject ("a specialist would need to design...") never matches at all since it isn't
+  // I/we/our-AI to begin with.
+  //
+  // complex_ivr_passive: "A custom IVR will/can/could/would/may/might be built/configured/
+  // designed/created/deployed/set-up/implemented (and ...)* by our AI/assistant/bot/system." —
+  // the deciding factor is strictly the agent phrase after "by": human attribution ("by a
+  // qualified telecom specialist", "by our team") or no "by [[agent]" clause at all ("may be
+  // designed during a consultation with an engineer") never matches, since the agent group only
+  // accepts our-AI/assistant/bot/system. A modal with an interposed "need to" ("would need to be
+  // configured by our AI") isn't covered by this narrow pass — first-pass, tune from the audit
+  // log as this file's header already documents.
   {
     id: 'complex_ivr',
-    pattern:
-      /\b(?:I|we|our\s+(?:AI|assistant|bot|system))\b(?:'ll| will| can| could| would| also)*\s+(?:build|builds|built|building|configure|configures|configured|configuring|design|designs|designed|designing|creat(?:e|es|ed|ing)|deploy|deploys|deployed|deploying|set\s?up|sets\s?up|setting\s?up|implement|implements|implemented|implementing)\b[^.?!]{0,40}\b(?:IVR|multi-?level (?:phone )?menu)\b/i,
+    pattern: new RegExp(
+      `\\b(?:I|we|our\\s+(?:AI|assistant|bot|system))\\b(?:'ll| will| can| could| would| also)*\\s+(?:${IVR_BUILD_VERBS})\\b[^.?!]{0,40}\\b(?:${IVR_OBJECT})\\b`,
+      'i',
+    ),
+    requiresPositiveClaim: true,
+  },
+  {
+    id: 'complex_ivr_passive',
+    pattern: new RegExp(
+      `\\b(?:${IVR_OBJECT})\\b[^.?!]{0,30}?\\b(?:will|can|could|would|may|might)\\s+be\\s+(?:${IVR_PASSIVE_PARTICIPLES})(?:\\s*(?:,|and)\\s*(?:${IVR_PASSIVE_PARTICIPLES}))*\\s+by\\s+our\\s+(?:AI|assistant|bot|system)\\b`,
+      'i',
+    ),
     requiresPositiveClaim: true,
   },
   { id: 'instant_self_service', pattern: /\binstant self-?service\b|\b14-?day free\b|\bself-?serve sign-?up\b/i },

@@ -203,6 +203,42 @@ describe('guardReply — complex_ivr narrowing (defect-foundation-claim-guard-co
   });
 });
 
+describe('guardReply — complex_ivr_passive (passive-voice autonomous attribution, release-blocking follow-up 2026-08-05)', () => {
+  // Passive construction attributing the build/configure/design/deploy/set-up to our own
+  // AI/assistant/bot/system — the same fabrication as complex_ivr, phrased passively.
+  const blocked: { label: string; text: string }[] = [
+    { label: 'passive build, "by our AI"', text: 'A custom IVR will be built by our AI.' },
+    { label: 'passive configure, "by our assistant"', text: 'A multi-level phone menu can be configured by our assistant.' },
+    { label: 'passive compound (designed and deployed), "by our system"', text: 'Your IVR will be designed and deployed by our system.' },
+    { label: 'passive set-up, "call menu" object, "by our bot"', text: 'A custom call menu will be set up by our bot.' },
+  ];
+  for (const { label, text } of blocked) {
+    it(`blocks: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe('complex_ivr_passive');
+      expect(result.text).not.toBe(text);
+    });
+  }
+
+  // Human attribution, a missing "by [agent]" clause, or a neutral/discussion mention must all
+  // pass — the passive rule only fires on our-AI/assistant/bot/system as the stated builder.
+  const allowed: { label: string; text: string }[] = [
+    { label: 'human attribution: "by a qualified telecom specialist"', text: 'A custom IVR can be built by a qualified telecom specialist.' },
+    { label: 'human attribution: "by our team" (+ "would need to be" modal)', text: 'A multi-level phone menu would need to be configured by our team.' },
+    { label: 'no "by [agent]" clause at all ("during a consultation with")', text: 'An IVR may be designed during a consultation with an engineer.' },
+    { label: 'neutral informational description', text: 'EPIC offers IVR and call-routing features.' },
+    { label: 'recommendation to discuss, not a build claim', text: 'We can discuss available IVR options with you.' },
+  ];
+  for (const { label, text } of allowed) {
+    it(`does not block: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(false);
+      expect(result.text).toBe(text);
+    });
+  }
+});
+
 describe('guardReply — voice-AI first-person + cross-channel fabrication (def-ema-voice-ai-capability-fabrication-2026-07-18 regression)', () => {
   // The exact (and near-exact) fabrications EMA produced against the live 5-scenario
   // acceptance test on 2026-07-18 — all must now deflect + escalate.
