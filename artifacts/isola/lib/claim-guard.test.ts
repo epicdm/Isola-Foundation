@@ -982,3 +982,38 @@ describe('guardReply — hyphenated participles', () => {
     });
   }
 });
+
+// ─── Correction round 2, Codex follow-up at 95f828f ──────────────────────────
+
+describe('guardReply — adverb between the copula and the passive participle', () => {
+  // The causative matcher already tolerated a modifier before the participle, so
+  // "get your IVR fully configured" blocked while the far more common passive
+  // "your IVR will be fully configured by our assistant" did not.
+  const BLOCKED: { label: string; text: string }[] = [
+    { label: 'modal passive + "fully"', text: 'Your IVR will be fully configured by our assistant.' },
+    { label: 'modal passive + "fully" (bot agent)', text: 'Your call menu can be fully configured by our bot.' },
+    { label: 'modal passive + "custom"', text: 'A custom IVR will be custom designed by our AI.' },
+    { label: 'modal passive + "professionally"', text: 'A multi-level phone menu would be professionally built by our system.' },
+    { label: 'perfect passive + "expertly"', text: 'Your IVR has been expertly configured by our assistant.' },
+  ];
+  for (const { label, text } of BLOCKED) {
+    it(`blocks: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe('complex_ivr_passive');
+    });
+  }
+
+  // The gap must not weaken the human-attribution boundary — that is what separates a
+  // fabrication from an honest referral.
+  const PASSES: { label: string; text: string }[] = [
+    { label: 'human agent', text: 'A custom IVR can be built by a qualified telecom specialist.' },
+    { label: 'no "by [agent]" clause', text: 'An IVR may be designed during a consultation with an engineer.' },
+    { label: 'no "by [agent]" clause, alternate phrasing', text: 'Your IVR may be designed during consultation with an engineer.' },
+  ];
+  for (const { label, text } of PASSES) {
+    it(`passes: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(false);
+    });
+  }
+});

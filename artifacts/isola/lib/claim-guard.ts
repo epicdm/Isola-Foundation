@@ -241,7 +241,11 @@ const IVR_CAUSATIVE_PATTERN = new RegExp(
  *  while "We provide documentation: an IVR overview and setup guide" (existing material) does not. */
 const PROVISION_VERB_WORDS: ReadonlySet<string> = new Set(['provide', 'provides', 'providing']);
 const IVR_PASSIVE_PATTERN = new RegExp(
-  `\\b${IVR_OBJECT}\\b[\\s\\S]*?\\b${IVR_BE_PHRASE}\\s+${IVR_PARTICIPLES}(?:\\s*(?:,|and)\\s*${IVR_PARTICIPLES})*\\s+by\\s+${IVR_PASSIVE_AGENT}\\b`,
+  // A bounded modifier gap between the copula and the participle. The causative matcher already
+  // allowed one, so "get your IVR fully configured" blocked while the far more common passive
+  // "your IVR will be fully configured by our assistant" did not — the hyphenated-participle fix
+  // only covered "fully-configured". Two tokens, so it cannot bridge a clause.
+  `\\b${IVR_OBJECT}\\b[\\s\\S]*?\\b${IVR_BE_PHRASE}(?:\\s+[\\w'-]+){0,2}?\\s+${IVR_PARTICIPLES}(?:\\s*(?:,|and)\\s*${IVR_PARTICIPLES})*\\s+by\\s+${IVR_PASSIVE_AGENT}\\b`,
   'i',
 );
 
