@@ -218,6 +218,20 @@ const IVR_AUX_PREDICATE_HEAD = new RegExp(
   'gi',
 );
 
+/**
+ * CAUSATIVE claims: "we can GET your IVR CONFIGURED", "we can HAVE your call menu SET UP". The
+ * object precedes the participle here, so the forward-only verb-then-object scan below is
+ * structurally blind to them — the capability word ("configured") comes AFTER the IVR noun rather
+ * than before it. This is ordinary sales phrasing, not a contrived construction, so it gets its
+ * own bounded pattern rather than a widening of the main scan. Both gaps around the object are
+ * bounded to three tokens, so it cannot bridge a clause.
+ */
+const IVR_CAUSATIVE_VERBS = '(?:get|gets|getting|got|have|has|having|had)';
+const IVR_CAUSATIVE_PATTERN = new RegExp(
+  `\\b${IVR_ACTIVE_SUBJECT}\\b(?:${IVR_AUX_ALTERNATION})*${IVR_ADVERB_PHRASE}\\s+${IVR_CAUSATIVE_VERBS}\\s+(?:[\\w'-]+\\s+){0,3}${IVR_OBJECT}\\b\\s+(?:[\\w'-]+\\s+){0,3}${IVR_PARTICIPLES}\\b`,
+  'gi',
+);
+
 /** Verbs that promise the agent will SUPPLY the thing rather than build it. Only reachable from
  *  the auxiliary path above, so "We can provide you with a custom call menu" (a promise) blocks
  *  while "We provide documentation: an IVR overview and setup guide" (existing material) does not. */
@@ -433,6 +447,13 @@ function containsActiveAgentCapabilityClaim(clause: string): boolean {
   while ((aux = IVR_AUX_PREDICATE_HEAD.exec(clause))) {
     if (NEGATION_WORDS.test(clause.slice(0, aux.index))) continue;
     if (findPredicateCapabilityObject(clause, aux.index + aux[0].length)) return true;
+  }
+
+  // Causative ("get your IVR configured") — object before participle, invisible to the scans above.
+  IVR_CAUSATIVE_PATTERN.lastIndex = 0;
+  let causative: RegExpExecArray | null;
+  while ((causative = IVR_CAUSATIVE_PATTERN.exec(clause))) {
+    if (!NEGATION_WORDS.test(clause.slice(0, causative.index))) return true;
   }
   return false;
 }

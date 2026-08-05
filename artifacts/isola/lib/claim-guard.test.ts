@@ -921,3 +921,35 @@ describe('guardReply — longer human subjects in subordinate clauses', () => {
     expect(guardReply('We can configure your greeting, and a call menu can route callers.', SALES_TENANT).blocked).toBe(false);
   });
 });
+
+// ─── Correction round 2, Codex follow-up at 58ddee5 ──────────────────────────
+
+describe('guardReply — causative claims (object before participle)', () => {
+  // "get your IVR configured" / "have your call menu set up" put the object BEFORE the capability
+  // word, so the forward-only verb-then-object scan was structurally blind to them. Ordinary
+  // sales phrasing, so it gets its own bounded pattern.
+  const BLOCKED: { label: string; text: string }[] = [
+    { label: 'get + IVR + configured', text: 'We can get your IVR configured for you.' },
+    { label: 'have + IVR + set up', text: 'We can have your IVR set up for you.' },
+    { label: 'get + call menu + built (agent subject)', text: 'Our assistant can get your call menu built today.' },
+    { label: 'get + custom IVR + implemented (first person)', text: 'I can get a custom IVR implemented for your business.' },
+  ];
+  for (const { label, text } of BLOCKED) {
+    it(`blocks: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe('complex_ivr');
+    });
+  }
+
+  // The participle must be a CAPABILITY participle, and negation still wins.
+  const PASSES: { label: string; text: string }[] = [
+    { label: 'non-capability participle ("reviewed")', text: 'We can have your IVR options reviewed by a specialist.' },
+    { label: 'negated causative', text: 'We cannot get your IVR configured today.' },
+  ];
+  for (const { label, text } of PASSES) {
+    it(`passes: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(false);
+    });
+  }
+});
