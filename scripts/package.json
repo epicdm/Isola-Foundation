@@ -7,9 +7,10 @@
     "hello": "tsx ./src/hello.ts",
     "guard-not-prod-db": "tsx ./src/guard-not-prod-db.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test ./src/guard-not-prod-db.test.ts ./src/guard-not-prod-db.integration.test.ts ./src/guard-cw00-checksum-exception.test.ts ./src/guard-repo-contamination.test.ts",
+    "test": "tsx --test ./src/guard-not-prod-db.test.ts ./src/guard-not-prod-db.integration.test.ts ./src/guard-cw00-checksum-exception.test.ts ./src/guard-repo-contamination.test.ts ./src/guard-chatwoot-safe-read.test.ts ./src/guard-chatwoot-safe-read.integration.test.ts",
     "guard-cw00-checksum": "tsx ./src/guard-cw00-checksum-exception.ts",
-    "guard-repo-contamination": "tsx ./src/guard-repo-contamination.ts"
+    "guard-repo-contamination": "tsx ./src/guard-repo-contamination.ts",
+    "guard-chatwoot-safe-read": "tsx ./src/guard-chatwoot-safe-read.ts"
   },
   "dependencies": {
     "dotenv": "^16.6.1"
