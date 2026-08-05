@@ -187,14 +187,174 @@ const IVR_ADVERB = '(?:also|now|currently|directly|\\w+ly)';
 // automatically configure an IVR" slipped through unblocked.
 const IVR_ADVERB_PHRASE = `(?:\\s+${IVR_ADVERB}(?:\\s+and\\s+${IVR_ADVERB})?)?`;
 
-const IVR_ACTIVE_PATTERN = new RegExp(
-  `\\b${IVR_ACTIVE_SUBJECT}\\b(?:'ll| will| can| could| would| also| is| are)*${IVR_ADVERB_PHRASE}\\s+${IVR_VERB_FORMS}\\b[\\s\\S]*?\\b${IVR_OBJECT}\\b`,
-  'i',
+// Auxiliaries/copulas that may sit between the subject and the capability verb. Includes the
+// first-person progressive forms ("I am"/"I'm setting up", "we're building") that the original
+// list omitted entirely, which let an in-flight promise — the most literal possible fabrication —
+// through unblocked (Codex P1, PR #75). Contracted forms carry no leading space because the
+// apostrophe attaches directly to the subject ("I'm"); worded forms do.
+const IVR_AUX_ALTERNATION = `'ll|'m|'re| will| can| could| would| also| is| are| am`;
+
+/** Subject immediately followed by a capability verb, with NO auxiliary — bare present tense
+ *  ("Our AI builds your IVR") is still a fabrication. Adjacency is required here precisely
+ *  because there is no auxiliary to prove a predicate has started. */
+const IVR_BARE_PREDICATE_HEAD = new RegExp(
+  `\\b${IVR_ACTIVE_SUBJECT}\\b${IVR_ADVERB_PHRASE}\\s+${IVR_VERB_FORMS}\\b`,
+  'gi',
 );
+
+/** Subject + at least one auxiliary/modal. The capability verb is NOT required to be adjacent:
+ *  a compound predicate shares one subject across several verbs ("Our assistant can update
+ *  voicemail, and configure your call menu"), so the verb is located by a bounded forward scan
+ *  instead. Requiring an auxiliary is what keeps that scan honest — it proves a predicate is
+ *  underway, and it is why bare present "We provide documentation: an IVR overview" (no
+ *  auxiliary, and `provide` is provisioning rather than building) never enters this path. */
+const IVR_AUX_PREDICATE_HEAD = new RegExp(
+  `\\b${IVR_ACTIVE_SUBJECT}\\b(?:${IVR_AUX_ALTERNATION})+${IVR_ADVERB_PHRASE}`,
+  'gi',
+);
+
+/** Verbs that promise the agent will SUPPLY the thing rather than build it. Only reachable from
+ *  the auxiliary path above, so "We can provide you with a custom call menu" (a promise) blocks
+ *  while "We provide documentation: an IVR overview and setup guide" (existing material) does not. */
+const PROVISION_VERB_WORDS: ReadonlySet<string> = new Set(['provide', 'provides', 'providing']);
 const IVR_PASSIVE_PATTERN = new RegExp(
   `\\b${IVR_OBJECT}\\b[\\s\\S]*?\\b${IVR_BE_PHRASE}\\s+${IVR_PARTICIPLES}(?:\\s*(?:,|and)\\s*${IVR_PARTICIPLES})*\\s+by\\s+${IVR_PASSIVE_AGENT}\\b`,
   'i',
 );
+
+// ─── Bounded direct-object window (Defect 3) ─────────────────────────────────
+// The active matcher used to bridge verb→object with an unbounded `[\s\S]*?`. Within a single
+// clause that looked safe, but a clause can legitimately carry a long noun phrase plus an
+// ATTACHED subordinate/relative clause that no comma, conjunction, semicolon, colon or dash
+// separates — so "We can build a strong relationship with every customer who eventually asks
+// about IVR options down the road" wrongly deflected an honest answer. The gap is replaced with
+// a bounded grammatical scan: the IVR phrase must sit inside a short window after the capability
+// verb, functioning as that verb's direct object/complement, and the scan stops dead at any
+// subordinate-clause transition.
+
+/** Maximum tokens between a capability verb (or the most recent capability verb in a compound
+ *  predicate) and the head of its IVR/call-menu object. Sized from the longest legitimate direct
+ *  object in the block corpus — "build for your business a custom IVR" (6) — with one token of
+ *  headroom. Deliberately a named, test-covered constant rather than an inline magic number. */
+export const IVR_OBJECT_TOKEN_LIMIT = 7;
+
+/** Words that open a subordinate or relative clause. Reaching one means the IVR mention that
+ *  follows belongs to a DIFFERENT predicate than the capability verb, so it can never be that
+ *  verb's direct object. `that` is handled separately below — it is ambiguous. */
+const SUBORDINATE_CLAUSE_MARKERS: ReadonlySet<string> = new Set([
+  'who', 'whom', 'whose', 'which', 'where', 'when', 'because', 'although', 'while', 'unless',
+]);
+
+/** Bare capability-verb words. Encountering one mid-scan RESETS the window: a compound predicate
+ *  ("build and deploy your IVR", "configure your greeting, and set up an IVR") shares one subject,
+ *  and each verb is entitled to its own object window rather than inheriting the first verb's
+ *  spent budget. */
+const CAPABILITY_VERB_WORDS: ReadonlySet<string> = new Set([
+  'build', 'builds', 'built', 'building',
+  'configure', 'configures', 'configured', 'configuring',
+  'design', 'designs', 'designed', 'designing',
+  'create', 'creates', 'created', 'creating',
+  'deploy', 'deploys', 'deployed', 'deploying',
+  // Both the spaced form (tokenized as bare "set") and the hyphenated form (a single token).
+  // Bare "setup" is deliberately absent — it is a noun ("your business phone setup"), never a verb.
+  'set', 'sets', 'setting', 'set-up', 'sets-up', 'setting-up',
+  'implement', 'implements', 'implemented', 'implementing',
+  'provide', 'provides', 'providing',
+]);
+
+const IVR_OBJECT_ANCHORED = new RegExp(`^${IVR_OBJECT}\\b`, 'i');
+const OBJECT_SCAN_TERMINATOR = /[.?!;]/;
+
+/**
+ * True if an IVR/call-menu phrase functions as the direct object or complement of a capability
+ * verb ending at `fromIndex` in `clause`. Scans forward token by token, bounded by
+ * IVR_OBJECT_TOKEN_LIMIT, resetting the budget at each further capability verb, and stopping at
+ * any subordinate-clause transition or sentence-terminating punctuation.
+ */
+function findBoundedCapabilityObject(clause: string, fromIndex: number): boolean {
+  const rest = clause.slice(fromIndex);
+  const tokenRe = /[^\s]+/g;
+  let budget = 0;
+  let match: RegExpExecArray | null;
+  while ((match = tokenRe.exec(rest))) {
+    const raw = match[0];
+    // The object may start at this token — check BEFORE spending budget on it, so an object
+    // sitting exactly at the limit still counts.
+    if (IVR_OBJECT_ANCHORED.test(rest.slice(match.index))) return true;
+
+    const word = raw.replace(/^[^\w'-]+|[^\w'-]+$/g, '').toLowerCase();
+    if (SUBORDINATE_CLAUSE_MARKERS.has(word)) return false;
+    // `that` is a determiner when it directly introduces the object ("that IVR" / "that call
+    // menu") and a subordinate-clause marker otherwise ("a support plan that includes ...").
+    if (word === 'that') {
+      const after = rest.slice(match.index + raw.length).replace(/^\s+/, '');
+      return IVR_OBJECT_ANCHORED.test(after);
+    }
+    // A sentence terminator inside the clause ends the predicate regardless of budget.
+    if (OBJECT_SCAN_TERMINATOR.test(raw)) return false;
+
+    if (CAPABILITY_VERB_WORDS.has(word)) {
+      budget = 0;
+      continue;
+    }
+    budget += 1;
+    if (budget >= IVR_OBJECT_TOKEN_LIMIT) return false;
+  }
+  return false;
+}
+
+/** Maximum tokens between an auxiliary and the capability verb it governs, when they are not
+ *  adjacent (compound predicate). Bounded for the same reason as the object window. */
+const IVR_VERB_SCAN_LIMIT = 8;
+
+/** Words that end a predicate scan because what follows is negated or belongs to another clause.
+ *  `not`/`never`/`unable` matter most: without them, "I'm not setting up an IVR" would have its
+ *  negation stepped over by the compound-predicate scan and wrongly deflect an honest denial. */
+const PREDICATE_SCAN_STOPWORDS: ReadonlySet<string> = new Set([
+  'not', "n't", 'never', 'no', 'unable', 'cannot', "can't", "won't", "don't", "doesn't", "isn't", "aren't",
+]);
+
+/** From `fromIndex` (just after a subject+auxiliary), scan forward for the capability verb this
+ *  predicate governs, then hand off to the bounded object window. Stops at negation, at
+ *  subordinate-clause transitions, and at the token limit. */
+function findPredicateCapabilityObject(clause: string, fromIndex: number): boolean {
+  const rest = clause.slice(fromIndex);
+  const tokenRe = /[^\s]+/g;
+  let spent = 0;
+  let match: RegExpExecArray | null;
+  while ((match = tokenRe.exec(rest)) && spent < IVR_VERB_SCAN_LIMIT) {
+    const raw = match[0];
+    const word = raw.replace(/^[^\w'-]+|[^\w'-]+$/g, '').toLowerCase();
+    if (PREDICATE_SCAN_STOPWORDS.has(word)) return false;
+    if (SUBORDINATE_CLAUSE_MARKERS.has(word) || word === 'that') return false;
+    if (CAPABILITY_VERB_WORDS.has(word) || PROVISION_VERB_WORDS.has(word)) {
+      if (findBoundedCapabilityObject(clause, fromIndex + match.index + raw.length)) return true;
+    }
+    if (OBJECT_SCAN_TERMINATOR.test(raw)) return false;
+    spent += 1;
+  }
+  return false;
+}
+
+/** True if some occurrence of an active capability head in `clause` is un-negated AND has a
+ *  bounded IVR object. Each head is tried independently: an early head whose object window comes
+ *  up empty must not mask a later head that genuinely claims one. */
+function containsActiveAgentCapabilityClaim(clause: string): boolean {
+  IVR_BARE_PREDICATE_HEAD.lastIndex = 0;
+  let bare: RegExpExecArray | null;
+  while ((bare = IVR_BARE_PREDICATE_HEAD.exec(clause))) {
+    if (NEGATION_WORDS.test(clause.slice(0, bare.index))) continue;
+    if (findBoundedCapabilityObject(clause, bare.index + bare[0].length)) return true;
+  }
+
+  IVR_AUX_PREDICATE_HEAD.lastIndex = 0;
+  let aux: RegExpExecArray | null;
+  while ((aux = IVR_AUX_PREDICATE_HEAD.exec(clause))) {
+    if (NEGATION_WORDS.test(clause.slice(0, aux.index))) continue;
+    if (findPredicateCapabilityObject(clause, aux.index + aux[0].length)) return true;
+  }
+  return false;
+}
 
 // Normalizes for matching only — never applied to the text actually returned to the customer,
 // which is always the fixed DEFLECTION string regardless. Smart/curly apostrophes (’) become
@@ -214,7 +374,11 @@ function splitIntoSentences(text: string): string[] {
 // conjunction opens a new clause — deliberately broader than the aux list the fabrication
 // matchers use above (this is a grammatical "does a clause start here" check, not a capability
 // claim itself).
-const CLAUSE_AUX_MODAL = 'can|could|will|would|may|might|shall|should|must|is|are|was|were|has|have|had|do|does|did';
+const CLAUSE_AUX_MODAL =
+  'can|could|will|would|may|might|shall|should|must|is|are|am|was|were|has|have|had|do|does|did';
+/** Contracted auxiliaries attach directly to the subject with an apostrophe ("we're", "I'm"),
+ *  so they need their own branch — a `\s+aux` check can never see them. */
+const CLAUSE_AUX_CONTRACTION = "'(?:m|re|ll|s|ve|d)";
 
 // True if `rest` (the text immediately following a coordinating conjunction) plausibly opens a
 // new independent clause: a pronoun/agent subject, or a short determiner-headed noun subject (up
@@ -225,13 +389,27 @@ const CLAUSE_AUX_MODAL = 'can|could|will|would|may|might|shall|should|must|is|ar
 // conjunction stays inside its current clause exactly as if it had never been examined.
 function beginsFiniteClauseAfterConjunction(rest: string): boolean {
   const trimmed = rest.replace(/^[\s,]+/, '');
-  const agentSubject = new RegExp(`^${IVR_ACTIVE_SUBJECT}\\s+(?:${CLAUSE_AUX_MODAL})\\b`, 'i');
+  const finiteTail = `(?:\\s+(?:${CLAUSE_AUX_MODAL})|${CLAUSE_AUX_CONTRACTION})\\b`;
+  const agentSubject = new RegExp(`^${IVR_ACTIVE_SUBJECT}${finiteTail}`, 'i');
   if (agentSubject.test(trimmed)) return true;
   const genericSubject = new RegExp(
-    `^(?:I|we|you|he|she|it|they|(?:a|an|the|our|your|this|that)\\s+[a-z]+(?:\\s+[a-z]+){0,2}?)\\s+(?:${CLAUSE_AUX_MODAL})\\b`,
+    `^(?:I|we|you|he|she|it|they|(?:a|an|the|our|your|this|that)\\s+[a-z]+(?:\\s+[a-z]+){0,2}?)${finiteTail}`,
     'i',
   );
   return genericSubject.test(trimmed);
+}
+
+/**
+ * Decides whether punctuation that COULD open a new clause actually does. Applied to
+ * comma+coordinating-conjunction and to the colon, both of which the previous implementation
+ * split unconditionally — severing a shared subject from the second half of a compound predicate
+ * ("We can configure your greeting, and set up an IVR") or from a colon-introduced complement
+ * ("We can build this for you: a custom IVR"), which silently let both through unblocked
+ * (Codex P2, PR #75). Semicolons, spaced dashes and sentence boundaries stay unconditional —
+ * those genuinely cannot continue a predicate.
+ */
+function classifyPunctuationContinuation(rest: string): 'new-clause' | 'continuation' {
+  return beginsFiniteClauseAfterConjunction(rest) ? 'new-clause' : 'continuation';
 }
 
 const COORDINATING_CONJUNCTION = /\b(and|but|or|nor|so|yet)\b/gi;
@@ -244,7 +422,29 @@ const COORDINATING_CONJUNCTION = /\b(and|but|or|nor|so|yet)\b/gi;
 // object ("greeting and voicemail"), an ordinary list ("IVR and PBX options"), or a product-name
 // conjunction ("IVR and call routing") needs to be — none of those are clause boundaries.
 function splitIntoClauses(sentence: string): string[] {
-  const punctuationParts = sentence.split(/,\s+(?:and|but|or|nor|so|yet)\s+|;\s*|:\s*|\s+[—–]\s+/i);
+  // Unconditional boundaries first: a semicolon or a spaced em/en dash cannot continue a
+  // predicate, so they always end a clause.
+  const hardParts = sentence.split(/;\s*|\s+[—–]\s+/);
+
+  // Conditional boundaries: comma+coordinating-conjunction and colon each split ONLY when what
+  // follows genuinely opens an independent finite clause. Otherwise the text after the
+  // punctuation is a continuation of the current predicate and must keep its subject.
+  const CONDITIONAL_BOUNDARY = /,\s+(?:and|but|or|nor|so|yet)\s+|:\s*/gi;
+  const punctuationParts: string[] = [];
+  for (const hardPart of hardParts) {
+    let segmentStart = 0;
+    CONDITIONAL_BOUNDARY.lastIndex = 0;
+    let boundary: RegExpExecArray | null;
+    while ((boundary = CONDITIONAL_BOUNDARY.exec(hardPart))) {
+      const after = hardPart.slice(boundary.index + boundary[0].length);
+      if (classifyPunctuationContinuation(after) === 'new-clause') {
+        punctuationParts.push(hardPart.slice(segmentStart, boundary.index));
+        segmentStart = boundary.index + boundary[0].length;
+      }
+    }
+    punctuationParts.push(hardPart.slice(segmentStart));
+  }
+
   const clauses: string[] = [];
   for (const part of punctuationParts) {
     let remaining = part;
@@ -282,7 +482,7 @@ function checkComplexIvr(text: string): 'complex_ivr' | 'complex_ivr_passive' | 
   const normalized = normalizeForMatching(text);
   for (const sentence of splitIntoSentences(normalized)) {
     for (const clause of splitIntoClauses(sentence)) {
-      if (clauseHasUnnegatedMatch(clause, IVR_ACTIVE_PATTERN)) return 'complex_ivr';
+      if (containsActiveAgentCapabilityClaim(clause)) return 'complex_ivr';
       if (clauseHasUnnegatedMatch(clause, IVR_PASSIVE_PATTERN)) return 'complex_ivr_passive';
     }
   }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { guardReply, SALES_TENANT_IDS } from './claim-guard';
+import { guardReply, SALES_TENANT_IDS, IVR_OBJECT_TOKEN_LIMIT } from './claim-guard';
 
 const SALES_TENANT = 'ema_sales_tenant';
 const OTHER_TENANT = 'some-other-tenant-id';
@@ -482,4 +482,145 @@ describe('guardReply — price allow-list (dispatch scenarios 1-3 and 5)', () =>
     expect(result.blocked).toBe(true);
     expect(result.rule).toBe('non_ec_price');
   });
+});
+
+// ─── Correction round 2 (PR #75): three confirmed matcher defects ────────────
+// defect-foundation-claim-guard-complex-ivr-overbroad-post-generation-filter-2026-08-05
+
+describe('guardReply — defect 1: first-person progressive capability claims', () => {
+  const BLOCKED: { label: string; text: string }[] = [
+    { label: "contracted 'm (ASCII apostrophe)", text: "I'm setting up an IVR for you." },
+    { label: 'contracted smart-apostrophe m', text: 'I’m setting up an IVR for you.' },
+    { label: 'worded "am"', text: 'I am setting up an IVR.' },
+    { label: "contracted 're (ASCII apostrophe)", text: "We're setting up your IVR." },
+    { label: 'contracted smart-apostrophe re', text: 'We’re setting up your IVR.' },
+    { label: 'worded "are"', text: 'We are setting up your call menu.' },
+    { label: 'contracted m + adverb + multi-level phone menu', text: "I'm currently configuring a multi-level phone menu." },
+    { label: 'contracted re + adverb', text: "We're automatically building your IVR." },
+  ];
+  for (const { label, text } of BLOCKED) {
+    it(`blocks: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe('complex_ivr');
+    });
+  }
+
+  // Negation must survive the new auxiliary forms — the compound-predicate scan must never
+  // step over "not"/"unable" to reach the capability verb behind it.
+  const PASSES: { label: string; text: string }[] = [
+    { label: 'contracted m + not', text: "I'm not setting up an IVR." },
+    { label: 'am + not', text: 'I am not configuring a call menu.' },
+    { label: 'contracted re + unable to', text: "We're unable to build a custom IVR." },
+    { label: 'are + not + adverb', text: 'We are not currently setting up your phone menu.' },
+  ];
+  for (const { label, text } of PASSES) {
+    it(`passes: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(false);
+    });
+  }
+
+  // A negated first clause never excuses a positive later clause.
+  const LATER_POSITIVE: { label: string; text: string }[] = [
+    { label: 'comma+but, worded "am" second clause', text: "I'm not configuring the PBX today, but I am setting up your IVR." },
+    { label: 'comma+but, contracted re second clause', text: "We're unable to build the greeting, but we're configuring the call menu." },
+    { label: 'semicolon, smart-apostrophe second clause', text: 'I am not changing voicemail; I’m setting up your IVR instead.' },
+  ];
+  for (const { label, text } of LATER_POSITIVE) {
+    it(`blocks (later positive clause): ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(true);
+    });
+  }
+});
+
+describe('guardReply — defect 2: punctuation must not sever a shared subject', () => {
+  const BLOCKED: { label: string; text: string }[] = [
+    { label: 'comma+and continuing a compound predicate', text: 'We can configure your greeting, and set up an IVR.' },
+    { label: 'comma+and, different leading verb', text: 'Our assistant can update voicemail, and configure your call menu.' },
+    { label: 'colon introducing the direct object', text: 'We can build this for you: a custom IVR.' },
+    { label: 'colon introducing a complement', text: 'Our AI can provide the following: a multi-level phone menu.' },
+    { label: 'bare "and" compound predicate (no comma)', text: 'We can configure your greeting and set up an IVR.' },
+    { label: 'compound capability verbs sharing one object', text: 'Our assistant can build and deploy your call menu.' },
+  ];
+  for (const { label, text } of BLOCKED) {
+    it(`blocks: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(true);
+    });
+  }
+
+  // A comma+conjunction that genuinely opens an independent finite clause must still split, so
+  // the new clause is judged on its own subject.
+  it('still splits when the conjunction opens a finite clause with a non-agent subject (passes)', () => {
+    expect(guardReply('We can configure your greeting, and a call menu can route callers.', SALES_TENANT).blocked).toBe(false);
+  });
+  it('still splits when the conjunction opens a finite clause with an agent subject (blocks)', () => {
+    expect(guardReply('We cannot build that today, but our assistant will configure your IVR.', SALES_TENANT).blocked).toBe(true);
+  });
+  it('still splits on "and the system can ..." (blocks on the second clause)', () => {
+    expect(guardReply('We can explain the plans, and the system can create your call menu.', SALES_TENANT).blocked).toBe(true);
+  });
+
+  // A colon whose left side is not a capability claim, or whose verb is explanatory rather than
+  // constructive, must not block just because an IVR noun follows the colon.
+  const COLON_PASSES: { label: string; text: string }[] = [
+    { label: 'explanatory verb + colon', text: 'We can explain the following: how an IVR routes callers.' },
+    { label: 'bare present provisioning (no auxiliary) + colon', text: 'We provide documentation: an IVR overview and setup guide.' },
+    { label: 'discussion verb + colon', text: 'We can discuss this topic: IVR options for small businesses.' },
+  ];
+  for (const { label, text } of COLON_PASSES) {
+    it(`passes: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(false);
+    });
+  }
+
+  it('a comma list of objects is not a clause boundary and carries no IVR object (passes)', () => {
+    expect(guardReply('We can configure voicemail, greetings and call routing.', SALES_TENANT).blocked).toBe(false);
+  });
+  it('a three-verb compound predicate stays one clause and blocks', () => {
+    expect(guardReply('Our assistant can design, build and deploy your call menu.', SALES_TENANT).blocked).toBe(true);
+  });
+});
+
+describe('guardReply — defect 3: bounded direct-object window', () => {
+  it('exposes the token limit as a named, inspectable constant', () => {
+    expect(IVR_OBJECT_TOKEN_LIMIT).toBe(7);
+  });
+
+  // The false positive this defect was raised for: an honest relationship answer whose only IVR
+  // mention sits inside an attached relative clause with no punctuation boundary at all.
+  const PASSES: { label: string; text: string }[] = [
+    { label: 'relative clause introduced by "who"', text: 'We can build a strong relationship with every customer who eventually asks about IVR options down the road.' },
+    { label: 'subordinate clause introduced by "while"', text: 'We can build trust while explaining IVR options.' },
+    { label: '"that" as a subordinate-clause marker, not a determiner', text: 'We can create a support plan that includes a discussion of IVR options.' },
+    { label: 'relative clause introduced by "which"', text: 'We can design a strategy for businesses which may later consider an IVR.' },
+    { label: 'object beyond the token limit after a colon', text: 'We can build this for you: an explanation of how IVR works.' },
+    { label: 'separate finite clause owns the IVR subject', text: 'We can configure your greeting, and an IVR can route callers to sales.' },
+    { label: 'explanatory verb, not a capability verb', text: 'Our assistant can explain how a call menu works.' },
+    { label: 'help-understand framing', text: 'We can help your team understand multi-level phone menus.' },
+    { label: 'human attribution (specialist subject)', text: 'A human specialist can build a custom IVR.' },
+    { label: 'human attribution (engineering team subject)', text: 'Our engineering team can configure the call menu.' },
+  ];
+  for (const { label, text } of PASSES) {
+    it(`passes: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(false);
+    });
+  }
+
+  const BLOCKED: { label: string; text: string }[] = [
+    { label: 'minimal direct object', text: 'We can build an IVR.' },
+    { label: 'determiner + adjective + object', text: 'We can build a custom IVR for your business.' },
+    { label: 'adverb before verb, multi-word object', text: 'We can quickly build your multi-level phone menu.' },
+    { label: 'compound verb resets the object window', text: 'We can build and deploy your IVR.' },
+    { label: 'fronted prepositional phrase before the object', text: 'We can build for your business a custom IVR.' },
+    { label: 'provisioning verb with an auxiliary', text: 'We can provide you with a custom call menu.' },
+    { label: 'object followed by a reduced relative clause', text: 'Our assistant can create the call menu you described.' },
+    { label: 'adjective-stacked object', text: 'Our AI can configure a secure multi-level phone menu.' },
+    { label: 'first-person progressive (defect 1 interaction)', text: "I'm setting up an IVR for you." },
+    { label: 'colon complement (defect 2 interaction)', text: 'We can build this for you: a custom IVR.' },
+  ];
+  for (const { label, text } of BLOCKED) {
+    it(`blocks: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(true);
+    });
+  }
 });
