@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict'
+import { randomBytes } from 'node:crypto'
 import test from 'node:test'
 
 import {
   FORBIDDEN_FIELDS,
   GUARD_OWN_FILES,
+  findPrintedCredential,
   findUnsafeChatwootReads,
   isGuardOwnFixtureFile,
+  isProjectionMarker,
   isScannableFile,
   projectAgentBot,
   projectAllowlist,
@@ -14,12 +17,29 @@ import {
 } from './guard-chatwoot-safe-read'
 
 /**
- * The shape that actually leaked on 2026-08-05. Values are obvious placeholders —
- * no real credential appears in this repository, and the guard is field-driven,
- * so the value's shape is irrelevant to what it does.
+ * Synthetic credential values, BUILT AT RUNTIME.
+ *
+ * Two reasons, both deliberate, and both inherited from the CB-0 route tests:
+ * the file then contains no `secret_name: '<literal>'` assignment for a scanner
+ * (ours or GitHub's) to flag, and a fresh value each run means a test cannot
+ * accidentally pass because an assertion was comparing against a constant that
+ * had been copied into the code under test.
  */
-const PLACEHOLDER = 'PLACEHOLDER-NOT-REAL'
+const synthetic = (label: string): string =>
+  `SYNTHETIC-${label}-${randomBytes(12).toString('hex')}-NOT-A-REAL-VALUE`
 
+const SYNTHETIC = {
+  api_key: synthetic('API-KEY'),
+  webhook_verify_token: synthetic('VERIFY-TOKEN'),
+  access_token: synthetic('ACCESS-TOKEN'),
+  secret: synthetic('HMAC-SECRET'),
+  url_token: synthetic('URL-TOKEN'),
+} as const
+
+/** Every synthetic value, for "this must appear nowhere" assertions. */
+const ALL_SYNTHETIC: readonly string[] = Object.values(SYNTHETIC)
+
+/** The shape that actually leaked on 2026-08-05. */
 const LEAKED_INBOX_SHAPE = {
   id: 46,
   name: 'EPIC 295-6737 WhatsApp',
@@ -28,10 +48,10 @@ const LEAKED_INBOX_SHAPE = {
   provider: 'whatsapp_cloud',
   enable_auto_assignment: false,
   provider_config: {
-    api_key: PLACEHOLDER,
+    api_key: SYNTHETIC.api_key,
     phone_number_id: '278390858690809',
     business_account_id: '227366173803234',
-    webhook_verify_token: PLACEHOLDER,
+    webhook_verify_token: SYNTHETIC.webhook_verify_token,
   },
 }
 
@@ -41,8 +61,8 @@ const LEAKED_AGENT_BOT_SHAPE = {
   description: 'Foundation agent bot',
   bot_type: 'webhook',
   outgoing_url: 'https://isola-foundation.replit.app/api/chatwoot/agent-bot',
-  access_token: PLACEHOLDER,
-  secret: PLACEHOLDER,
+  access_token: SYNTHETIC.access_token,
+  secret: SYNTHETIC.secret,
 }
 
 test('projectInbox keeps the operational fields', () => {
@@ -60,7 +80,7 @@ test('projectInbox drops provider_config entirely — the WhatsApp incident', ()
   const serialised = JSON.stringify(out)
   assert.equal(serialised.includes('api_key'), false)
   assert.equal(serialised.includes('webhook_verify_token'), false)
-  assert.equal(serialised.includes(PLACEHOLDER), false)
+  for (const value of ALL_SYNTHETIC) assert.equal(serialised.includes(value), false)
 })
 
 test('projectAgentBot drops access_token and secret — the AgentBot incident', () => {
@@ -69,7 +89,8 @@ test('projectAgentBot drops access_token and secret — the AgentBot incident', 
   assert.equal(out.name, 'Isola Brain (A2)')
   assert.equal('access_token' in out, false)
   assert.equal('secret' in out, false)
-  assert.equal(JSON.stringify(out).includes('PLACEHOLDER'), false)
+  const serialised = JSON.stringify(out)
+  for (const value of ALL_SYNTHETIC) assert.equal(serialised.includes(value), false)
 })
 
 test('an unknown field Chatwoot adds tomorrow is dropped, not inspected', () => {
@@ -92,10 +113,10 @@ test('a bad allowlist edit fails loudly rather than leaking', () => {
 test('outgoing_url keeps its shape but loses any query string', () => {
   const out = projectAgentBot({
     ...LEAKED_AGENT_BOT_SHAPE,
-    outgoing_url: `https://hooks.isola.epic.dm/v1/events?token=${PLACEHOLDER}`,
+    outgoing_url: `https://hooks.isola.epic.dm/v1/events?token=${SYNTHETIC.url_token}`,
   })
   assert.equal(out.outgoing_url, 'https://hooks.isola.epic.dm/v1/events?<stripped>')
-  assert.equal(String(out.outgoing_url).includes(PLACEHOLDER), false)
+  assert.equal(String(out.outgoing_url).includes(SYNTHETIC.url_token), false)
 })
 
 test('stripQuery leaves a clean URL untouched and passes non-strings through', () => {
@@ -168,6 +189,152 @@ test('does not flag the mere word "secret" in ordinary prose', () => {
   )
 })
 
+/* ------------------------------------------------------------------------ *
+ * REGRESSION — the three shapes that review proved were NOT caught.
+ *
+ * Every one of these is a real incident command with a pipe appended. The
+ * original rule order asked "does this look projected?" first, accepted `jq`
+ * as proof that it was, and returned early before the credential-field rule
+ * ever ran — so the guard reported the repository CLEAN on all three.
+ * ------------------------------------------------------------------------ */
+
+const INBOX_READ = `curl -sS "$CW/api/v1/accounts/5/inboxes/46"`
+const AGENT_BOT_READ = `curl -sS "$CW/api/v1/accounts/5/inboxes/46/agent_bot"`
+
+test('BYPASS 1 — inbox endpoint piped to a jq selecting .provider_config', () => {
+  const findings = findUnsafeChatwootReads('runbook.sh', `${INBOX_READ} | jq '.provider_config'`)
+  assert.equal(findings.length, 1)
+  assert.equal(findings[0].kind, 'forbidden_field_printed')
+  assert.match(findings[0].reason, /provider_config/)
+})
+
+test('BYPASS 2 — inbox endpoint piped to a jq selecting .provider_config.api_key', () => {
+  const findings = findUnsafeChatwootReads(
+    'runbook.sh',
+    `${INBOX_READ} | jq '.provider_config.api_key'`,
+  )
+  assert.equal(findings.length, 1)
+  assert.equal(findings[0].kind, 'forbidden_field_printed')
+})
+
+test('BYPASS 3 — AgentBot endpoint piped to a jq selecting .access_token', () => {
+  const findings = findUnsafeChatwootReads('runbook.sh', `${AGENT_BOT_READ} | jq '.access_token'`)
+  assert.equal(findings.length, 1)
+  assert.equal(findings[0].kind, 'forbidden_field_printed')
+  assert.match(findings[0].reason, /access_token/)
+})
+
+test('using jq is not by itself evidence of projection', () => {
+  assert.equal(isProjectionMarker(`jq '{id, name}'`), true)
+  assert.equal(isProjectionMarker(`jq '.provider_config'`), false)
+  assert.equal(isProjectionMarker(`jq '.access_token'`), false)
+})
+
+test('every forbidden field the owner ruling names is caught when selected and printed', () => {
+  const required = [
+    'provider_config',
+    'api_key',
+    'access_token',
+    'webhook_verify_token',
+    'verify_token',
+    'app_secret',
+    'hmac_secret',
+  ]
+  for (const field of required) {
+    assert.ok(FORBIDDEN_FIELDS.includes(field), `${field} must be forbidden`)
+    assert.equal(
+      findPrintedCredential(`echo "$RESP" | jq '.${field}'`),
+      field,
+      `selecting .${field} into a sink must be a finding`,
+    )
+  }
+})
+
+test('an Authorization-style header reaching a sink is caught', () => {
+  assert.equal(findPrintedCredential('echo "Authorization: Bearer $TOK"'), 'authorization header')
+  assert.equal(
+    findPrintedCredential('console.log("api_access_token: " + tok)'),
+    'authorization header',
+  )
+  // Using a credential header is not printing one — a curl must not cry wolf.
+  assert.equal(findPrintedCredential('curl -H "api_access_token: $TOK" https://x.example'), null)
+})
+
+test('the correctly-projected authenticated read is not flagged', () => {
+  // Every legitimate Chatwoot read carries an auth header AND pipes to jq. If
+  // the guard flagged this it would be crying wolf on the command operators are
+  // told to run, and it would be ignored within a week.
+  const safe = `curl -sS -H "api_access_token: $TOK" "$CW/api/v1/accounts/5/inboxes/46" | jq '{id, name, channel_type}'`
+  assert.equal(findPrintedCredential(safe), null)
+  assert.deepEqual(findUnsafeChatwootReads('runbook.sh', safe), [])
+})
+
+test('a request header does not excuse selecting a credential downstream', () => {
+  const bad = `curl -sS -H "api_access_token: $TOK" "$CW/api/v1/accounts/5/inboxes/46" | jq '.provider_config'`
+  const findings = findUnsafeChatwootReads('runbook.sh', bad)
+  assert.equal(findings.length, 1)
+  assert.equal(findings[0].kind, 'forbidden_field_printed')
+})
+
+/* ------------------------------------------------------- output sinks */
+
+test('the sink list covers stderr, stdout writes and the PowerShell forms', () => {
+  const sinks = [
+    'console.error(inbox.provider_config)',
+    'console.warn(inbox.provider_config)',
+    'process.stdout.write(bot.access_token)',
+    'process.stderr.write(bot.access_token)',
+    `printf '%s' "$(echo "$R" | jq -r '.api_key')"`,
+    `cat resp.json | jq '.access_token' | tee leak.txt`,
+    'Write-Host $inbox.provider_config',
+    'Write-Output $bot.access_token',
+    '$bot | Select-Object -ExpandProperty access_token | ConvertTo-Json',
+  ]
+  for (const line of sinks) {
+    assert.notEqual(findPrintedCredential(line), null, `must flag: ${line}`)
+  }
+})
+
+/* --------------------------------------------------------- PowerShell */
+
+test('a PowerShell read of a sensitive endpoint is scanned and flagged', () => {
+  assert.equal(isScannableFile('ops/chatwoot-inbox.ps1'), true)
+  assert.equal(isScannableFile('ops/chatwoot.psm1'), true)
+  const findings = findUnsafeChatwootReads(
+    'ops/chatwoot-inbox.ps1',
+    '$r = Invoke-RestMethod "$CW/api/v1/accounts/5/inboxes/46"',
+  )
+  assert.equal(findings.length, 1)
+  assert.equal(findings[0].kind, 'unprojected_chatwoot_read')
+})
+
+test('PowerShell object output of a credential field is flagged', () => {
+  const findings = findUnsafeChatwootReads(
+    'ops/chatwoot-inbox.ps1',
+    ['$r = Get-Inbox 46', 'Write-Host $r.provider_config'].join('\n'),
+  )
+  assert.equal(findings.length, 1)
+  assert.equal(findings[0].kind, 'forbidden_field_printed')
+  assert.equal(findings[0].line, 2)
+})
+
+test('commented-out code that prints a credential is still flagged', () => {
+  // Commented-out code gets uncommented. Prose that merely NAMES a field does
+  // not select it, and stays exempt — that is the distinction being drawn.
+  const findings = findUnsafeChatwootReads('ops.ts', '// console.log(inbox.provider_config)')
+  assert.equal(findings.length, 1)
+  assert.equal(findings[0].kind, 'forbidden_field_printed')
+})
+
+test('a finding never carries the offending line or any value from it', () => {
+  const line = `${INBOX_READ} | jq '.provider_config' # ${SYNTHETIC.api_key}`
+  const findings = findUnsafeChatwootReads('runbook.sh', line)
+  assert.equal(findings.length, 1)
+  const serialised = JSON.stringify(findings)
+  for (const value of ALL_SYNTHETIC) assert.equal(serialised.includes(value), false)
+  assert.equal(serialised.includes('curl'), false)
+})
+
 test('reports one finding per offending line, with a 1-based line number', () => {
   const findings = findUnsafeChatwootReads(
     'multi.sh',
@@ -183,16 +350,24 @@ test('FORBIDDEN_FIELDS covers both fields from both incidents', () => {
   }
 })
 
-test('the guard excludes only its own two fixture-bearing files', () => {
-  assert.equal(GUARD_OWN_FILES.length, 2)
-  assert.equal(isGuardOwnFixtureFile('scripts/src/guard-chatwoot-safe-read.ts'), true)
-  assert.equal(isGuardOwnFixtureFile('scripts/src/guard-chatwoot-safe-read.test.ts'), true)
-  // Invoked from `scripts/`, git yields the package-relative path.
-  assert.equal(isGuardOwnFixtureFile('src/guard-chatwoot-safe-read.ts'), true)
-  assert.equal(isGuardOwnFixtureFile('src/guard-chatwoot-safe-read.test.ts'), true)
+test('the guard excludes only its own fixture-bearing files, by exact path', () => {
+  assert.equal(GUARD_OWN_FILES.length, 3)
+  for (const own of GUARD_OWN_FILES) {
+    assert.equal(isGuardOwnFixtureFile(own), true, own)
+    // Invoked from `scripts/`, git yields the package-relative path.
+    assert.equal(isGuardOwnFixtureFile(own.replace(/^scripts\//, '')), true, own)
+  }
   // A runbook cannot be parked next to the guard to escape the scan.
   assert.equal(isGuardOwnFixtureFile('scripts/src/chatwoot-runbook.md'), false)
   assert.equal(isGuardOwnFixtureFile('docs/isola/runbook.md'), false)
+})
+
+test('the exclusion is an exact path match, not a filename suffix match', () => {
+  // The earlier `endsWith` form silently excluded any file that happened to sit
+  // at `<anything>/src/guard-chatwoot-safe-read.ts`. Only the real paths count.
+  assert.equal(isGuardOwnFixtureFile('artifacts/isola/src/guard-chatwoot-safe-read.ts'), false)
+  assert.equal(isGuardOwnFixtureFile('vendor/scripts/src/guard-chatwoot-safe-read.ts'), false)
+  assert.equal(isGuardOwnFixtureFile('a/b/guard-chatwoot-safe-read.test.ts'), false)
 })
 
 test('the own-file exclusion normalises Windows separators', () => {
@@ -203,6 +378,7 @@ test('scans runbooks and scripts, ignores everything else', () => {
   assert.equal(isScannableFile('docs/isola/runbook.md'), true)
   assert.equal(isScannableFile('scripts/src/thing.ts'), true)
   assert.equal(isScannableFile('ops/deploy.sh'), true)
+  assert.equal(isScannableFile('ops/deploy.ps1'), true)
   assert.equal(isScannableFile('image.png'), false)
   assert.equal(isScannableFile('data.json'), false)
 })

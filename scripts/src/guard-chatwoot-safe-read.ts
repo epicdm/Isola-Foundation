@@ -112,6 +112,7 @@ export const FORBIDDEN_FIELDS: readonly string[] = [
   'verify_token',
   'secret',
   'app_secret',
+  'hmac_secret',
   'hmac_token',
   'authorization',
 ]
@@ -181,12 +182,89 @@ const SENSITIVE_ENDPOINT_RE =
  * Markers that show the author projected the response instead of printing it.
  * `jq` with an explicit object construction, an explicit field selection, or a
  * call into this helper all count.
+ *
+ * A marker is NEVER sufficient on its own — see `isProjectionMarker`. Using
+ * `jq` says nothing about what `jq` was asked to select.
  */
 const PROJECTION_MARKER_RE =
   /(guard-chatwoot-safe-read|projectInbox|projectAgentBot|projectAllowlist|jq\s+[-a-zA-Z]*\s*['"][^'"]*\{|jq\s+[-a-zA-Z]*\s*['"]\s*\.[A-Za-z_])/
 
 /** A line that is plainly commentary rather than an executable command. */
 const PROSE_RE = /^\s*(?:[*>#]|\/\/|--\s)/
+
+/**
+ * Anything that puts a value in front of a human, a log or a file.
+ *
+ * The first version of this list held five verbs and missed `console.error`,
+ * `process.stdout.write` and every PowerShell form — on the platform this
+ * repository is developed on. A sink list that only covers the shells the
+ * author happened to think of is a denylist wearing a different hat.
+ */
+const OUTPUT_SINK_RE =
+  /(\bjq\b|\becho\b|\bprintf\b|\bprint\b|\bputs\b|\btee\b|console\.(?:log|error|warn|info|debug)|process\.(?:stdout|stderr)\.write|Write-Host|Write-Output|Write-Error|ConvertTo-Json|Out-File)/i
+
+/**
+ * An explicit selection of a named field: `.api_key`, `["api_key"]`,
+ * `['api_key']`, or PowerShell's `-Property` / `-ExpandProperty api_key`.
+ *
+ * Deliberately NOT a bare word match — the word "secret" in a sentence is not a
+ * finding, and the guard has to stay usable inside defect write-ups.
+ */
+function forbiddenSelectorRe(field: string): RegExp {
+  return new RegExp(
+    `(?:[.\\[]\\s*["']?${field}["']?\\s*\\]?|-(?:Expand)?Property\\s+["']?${field}\\b)`,
+    'i',
+  )
+}
+
+/**
+ * An Authorization-style request header. Matched separately from the field
+ * selectors because a header is written `Authorization: Bearer …`, not
+ * `.authorization` — the selector form would never see it.
+ */
+const AUTH_HEADER_RE = /\b(authorization|api[_-]?access[_-]?token|x-api-key|api[_-]?key)\s*:/i
+
+/**
+ * The line passes a header to a request rather than printing one: `curl -H`,
+ * `--header`, PowerShell `-Headers`.
+ *
+ * Every authenticated Chatwoot read carries an `api_access_token:` header, and
+ * a correctly projected read pipes that same line into `jq`. Without this the
+ * auth-header rule fires on the safe form and the guard cries wolf on exactly
+ * the command operators are supposed to run. Field selectors are unaffected —
+ * a request header does not excuse selecting `.access_token` downstream.
+ */
+const REQUEST_HEADER_ARG_RE = /(?:^|\s)(?:-H\b|--header\b|-Headers\b)/i
+
+/**
+ * If a line both selects a credential field and reaches an output sink, name
+ * the field. Returns null otherwise.
+ *
+ * The sink is required. `curl -H "api_access_token: $TOK" …` USES a credential
+ * header; it does not print one, and flagging it would make the guard cry wolf
+ * on every authenticated read.
+ */
+export function findPrintedCredential(line: string): string | null {
+  if (!OUTPUT_SINK_RE.test(line)) return null
+  for (const field of FORBIDDEN_FIELDS) {
+    if (forbiddenSelectorRe(field).test(line)) return field
+  }
+  if (AUTH_HEADER_RE.test(line) && !REQUEST_HEADER_ARG_RE.test(line)) return 'authorization header'
+  return null
+}
+
+/**
+ * Whether a line shows real evidence of projection.
+ *
+ * A projection marker is not enough by itself. `… | jq '.provider_config'` uses
+ * `jq`, matches the marker pattern, and is a credential leak — that exact shape
+ * is why this function exists rather than a bare `PROJECTION_MARKER_RE.test()`.
+ * Selecting a forbidden field disqualifies the line no matter how it is spelt.
+ */
+export function isProjectionMarker(line: string): boolean {
+  if (!PROJECTION_MARKER_RE.test(line)) return false
+  return !FORBIDDEN_FIELDS.some((field) => forbiddenSelectorRe(field).test(line))
+}
 
 export type UnsafeReadKind = 'unprojected_chatwoot_read' | 'forbidden_field_printed'
 
@@ -199,14 +277,27 @@ export interface Finding {
 
 /**
  * Find command lines that read a credential-bearing Chatwoot endpoint without
- * projecting the response.
+ * projecting the response, or that print a credential field outright.
  *
- * STATED LIMITS — this is a lint, not a proof:
- *   - a read split across several lines (a shell variable holding the URL, then
- *     a later `curl "$URL"`) is NOT caught;
- *   - a `jq` filter that projects but happens to select a forbidden field IS
- *     caught, by the second rule, but only when the field is named literally.
- * The allowlist projection above is the real control; this stops the obvious
+ * RULE ORDER MATTERS, AND IT IS THE REASON THIS FUNCTION WAS WRONG ONCE.
+ * The credential-printed rule is evaluated FIRST, before any projection-marker
+ * logic. The original ordering asked "does this line look projected?" first,
+ * accepted `jq '.provider_config'` as proof that it was, and then returned
+ * early — so the single most likely way to re-leak (the incident command with
+ * one pipe appended) produced no finding at all, while the guard reported the
+ * repository clean. Projection is a property of WHAT was selected, never of
+ * which tool did the selecting.
+ *
+ * STATED LIMITS — this is a lint, not a proof. These are NOT covered, and are
+ * not claimed to be:
+ *   - a read split across lines (a variable holds the URL, a later line reads
+ *     it) — neither line carries both halves of the pattern;
+ *   - an arbitrary wrapper function with no recognisable endpoint and no
+ *     recognisable sink on the line;
+ *   - a URL assembled entirely at runtime from values this file cannot see;
+ *   - a credential hidden in URL userinfo or a path segment, outside the
+ *     Chatwoot read patterns above.
+ * The allowlist projection is the real control; this stops the obvious
  * regression from being written down and re-run by the next operator.
  */
 export function findUnsafeChatwootReads(file: string, contents: string): Finding[] {
@@ -217,9 +308,25 @@ export function findUnsafeChatwootReads(file: string, contents: string): Finding
     const line = raw.trim()
     if (line === '') return
 
-    const touchesSensitiveEndpoint = SENSITIVE_ENDPOINT_RE.test(line)
+    // RULE 1 — a credential field is selected and sent to an output sink.
+    // Evaluated first and unconditionally: no endpoint match, no projection
+    // marker and no prose marker can suppress it. Commented-out code counts,
+    // because commented-out code gets uncommented.
+    const printed = findPrintedCredential(line)
+    if (printed !== null) {
+      findings.push({
+        file,
+        line: index + 1,
+        kind: 'forbidden_field_printed',
+        reason: `selects and prints the credential field \`${printed}\``,
+      })
+      return // one finding per line is enough
+    }
 
-    if (touchesSensitiveEndpoint && !PROSE_RE.test(raw) && !PROJECTION_MARKER_RE.test(line)) {
+    // RULE 2 — a credential-bearing endpoint is read with nothing projecting
+    // the response. Prose describing the endpoint is exempt so Port records and
+    // defect write-ups stay writable.
+    if (SENSITIVE_ENDPOINT_RE.test(line) && !PROSE_RE.test(raw) && !isProjectionMarker(line)) {
       findings.push({
         file,
         line: index + 1,
@@ -228,31 +335,20 @@ export function findUnsafeChatwootReads(file: string, contents: string): Finding
           'reads a Chatwoot inbox/webhook/agent_bot endpoint without projecting the response through an explicit field allowlist',
       })
     }
-
-    if (touchesSensitiveEndpoint) return // one finding per line is enough
-
-    for (const field of FORBIDDEN_FIELDS) {
-      // Only a literal selection of the field, e.g. `.provider_config` or
-      // `["api_key"]`. A prose mention of the word "secret" is not a finding.
-      const selected = new RegExp(`[.\\[]\\s*["']?${field}["']?\\s*\\]?`, 'i')
-      if (selected.test(line) && /\b(jq|echo|print|console\.log|puts)\b/.test(line)) {
-        findings.push({
-          file,
-          line: index + 1,
-          kind: 'forbidden_field_printed',
-          reason: `selects and prints the credential field \`${field}\``,
-        })
-        return
-      }
-    }
   })
 
   return findings
 }
 
-/** Files worth scanning: operational runbooks and the scripts that implement them. */
+/**
+ * Files worth scanning: operational runbooks and the scripts that implement them.
+ *
+ * `.ps1`/`.psm1` are in the list because PowerShell is the primary shell on the
+ * platform this repository is developed on. Omitting them meant a runbook
+ * written the most natural way here would never have been read at all.
+ */
 export function isScannableFile(file: string): boolean {
-  return /\.(md|sh|bash|ts|js|mjs|cjs|yml|yaml)$/i.test(file)
+  return /\.(md|sh|bash|ts|js|mjs|cjs|yml|yaml|ps1|psm1)$/i.test(file)
 }
 
 /**
@@ -267,17 +363,26 @@ export function isScannableFile(file: string): boolean {
 export const GUARD_OWN_FILES: readonly string[] = [
   'scripts/src/guard-chatwoot-safe-read.ts',
   'scripts/src/guard-chatwoot-safe-read.test.ts',
+  'scripts/src/guard-chatwoot-safe-read.integration.test.ts',
 ]
 
+/**
+ * The exact path strings that count as this guard's own files.
+ *
+ * `git ls-files` is relative to the cwd it runs in, and this guard is invoked
+ * both from the repository root and from `scripts/` (pnpm --filter), so each
+ * file is registered in both spellings — and ONLY those two. An earlier version
+ * matched any path ENDING in the same filename, which quietly excluded
+ * `anything/src/guard-chatwoot-safe-read.ts` from the scan. The exclusion now
+ * names complete paths, so it cannot be widened by where a file happens to sit.
+ */
+const GUARD_OWN_FILE_FORMS: ReadonlySet<string> = new Set(
+  GUARD_OWN_FILES.flatMap((own) => [own, own.replace(/^scripts\//, '')]),
+)
+
 export function isGuardOwnFixtureFile(file: string): boolean {
-  // `git ls-files` is relative to the cwd it runs in, and this guard is invoked
-  // both from the repository root and from `scripts/` (pnpm --filter). Match the
-  // package-relative tail so the exclusion holds either way.
   const normalised = file.split(path.sep).join('/').replace(/^\.\//, '')
-  return GUARD_OWN_FILES.some((own) => {
-    const tail = own.replace(/^scripts\//, '')
-    return normalised === own || normalised === tail || normalised.endsWith(`/${tail}`)
-  })
+  return GUARD_OWN_FILE_FORMS.has(normalised)
 }
 
 function repositoryFiles(cwd: string): string[] {
