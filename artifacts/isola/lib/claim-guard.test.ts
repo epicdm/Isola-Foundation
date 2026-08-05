@@ -1017,3 +1017,48 @@ describe('guardReply — adverb between the copula and the passive participle', 
     });
   }
 });
+
+// ─── Correction round 2, Codex follow-up at c7a6bee ──────────────────────────
+
+describe('guardReply — adjunct between the passive participle and its agent', () => {
+  // "configured FOR YOU by our assistant" is the same prohibited claim as "configured by our
+  // assistant"; requiring the agent phrase to be immediately adjacent missed all of these.
+  const BLOCKED: { label: string; text: string }[] = [
+    { label: '"for you" before the agent', text: 'Your IVR will be configured for you by our assistant.' },
+    { label: '"for your business" before the agent', text: 'Your call menu can be built for your business by our bot.' },
+    { label: '"today" before the agent', text: 'A custom IVR would be designed today by our AI.' },
+    { label: 'both gaps at once (adverb + adjunct)', text: 'Your IVR has been expertly configured for you by our assistant.' },
+  ];
+  for (const { label, text } of BLOCKED) {
+    it(`blocks: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe('complex_ivr_passive');
+    });
+  }
+
+  it('still passes human attribution across the same adjunct', () => {
+    expect(
+      guardReply('A custom IVR can be built for you by a qualified telecom specialist.', SALES_TENANT).blocked,
+    ).toBe(false);
+  });
+});
+
+describe('guardReply — passive negation is not a modifier', () => {
+  // Regression guard: the copula-to-participle gap must refuse negation words, or an honest
+  // denial reads as "be <modifier> configured" and gets deflected — the exact over-blocking this
+  // defect exists to remove.
+  const PASSES: { label: string; text: string }[] = [
+    { label: 'is not configured by our assistant', text: 'Your IVR is not configured by our assistant.' },
+    { label: 'will not be configured by our assistant', text: 'Your IVR will not be configured by our assistant.' },
+  ];
+  for (const { label, text } of PASSES) {
+    it(`passes: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(false);
+    });
+  }
+
+  it('still blocks the affirmative form it is paired with', () => {
+    expect(guardReply('Your IVR is configured by our assistant.', SALES_TENANT).blocked).toBe(true);
+  });
+});

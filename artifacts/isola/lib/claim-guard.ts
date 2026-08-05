@@ -241,11 +241,14 @@ const IVR_CAUSATIVE_PATTERN = new RegExp(
  *  while "We provide documentation: an IVR overview and setup guide" (existing material) does not. */
 const PROVISION_VERB_WORDS: ReadonlySet<string> = new Set(['provide', 'provides', 'providing']);
 const IVR_PASSIVE_PATTERN = new RegExp(
-  // A bounded modifier gap between the copula and the participle. The causative matcher already
-  // allowed one, so "get your IVR fully configured" blocked while the far more common passive
-  // "your IVR will be fully configured by our assistant" did not — the hyphenated-participle fix
-  // only covered "fully-configured". Two tokens, so it cannot bridge a clause.
-  `\\b${IVR_OBJECT}\\b[\\s\\S]*?\\b${IVR_BE_PHRASE}(?:\\s+[\\w'-]+){0,2}?\\s+${IVR_PARTICIPLES}(?:\\s*(?:,|and)\\s*${IVR_PARTICIPLES})*\\s+by\\s+${IVR_PASSIVE_AGENT}\\b`,
+  // Two bounded gaps, both of which real passive sales copy uses:
+  //   copula → participle  ("will be FULLY configured")      — max 2 tokens
+  //   participle → by      ("configured FOR YOU by our AI")  — max 3 tokens
+  // The first gap explicitly refuses negation words. Without that exclusion "not" reads as an
+  // ordinary modifier and "Your IVR is not configured by our assistant" — an honest denial —
+  // would be deflected, which is precisely the over-blocking this defect exists to remove.
+  // Both gaps are short enough that neither can bridge a clause.
+  `\\b${IVR_OBJECT}\\b[\\s\\S]*?\\b${IVR_BE_PHRASE}(?:\\s+(?!not\\b|never\\b|n't\\b)[\\w'-]+){0,2}?\\s+${IVR_PARTICIPLES}(?:\\s*(?:,|and)\\s*${IVR_PARTICIPLES})*(?:\\s+[\\w'-]+){0,3}?\\s+by\\s+${IVR_PASSIVE_AGENT}\\b`,
   'i',
 );
 
