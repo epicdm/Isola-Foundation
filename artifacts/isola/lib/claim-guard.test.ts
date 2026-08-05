@@ -658,22 +658,53 @@ describe('guardReply — full auxiliary/modal coverage on the active matcher', (
   }
 });
 
-describe('guardReply — "that" as determiner vs subordinator', () => {
-  it('blocks a bare determiner object ("that IVR")', () => {
-    expect(guardReply('We can build that IVR.', SALES_TENANT).blocked).toBe(true);
-  });
-  it('blocks a determiner object behind a modifier ("that custom IVR")', () => {
-    expect(guardReply('We can build that custom IVR.', SALES_TENANT).blocked).toBe(true);
-  });
-  it('passes when "that" opens a subordinate clause whose own verb owns the IVR mention', () => {
-    expect(
-      guardReply('We can create a support plan that includes a discussion of IVR options.', SALES_TENANT).blocked,
-    ).toBe(false);
-  });
-  it('passes when the subordinate verb is a coverage verb ("that covers IVR options")', () => {
-    expect(guardReply('We can create a plan that covers IVR options.', SALES_TENANT).blocked).toBe(false);
-  });
-  it('passes when the subordinate clause carries its own auxiliary ("that will include")', () => {
-    expect(guardReply('We can design a roadmap that will include an IVR later.', SALES_TENANT).blocked).toBe(false);
-  });
+
+// ─── Correction round 2, Codex follow-up at 7f871af ──────────────────────────
+// Two further findings from the exact-SHA review: a compound-predicate bypass via
+// filler "that", and false positives from the lexical subordinator list it replaced.
+
+describe('guardReply — "that" position decides determiner vs relative pronoun', () => {
+  // Determiner: immediately after the capability verb, so it introduces that verb's own object.
+  const BLOCKED: { label: string; text: string }[] = [
+    { label: 'bare determiner object', text: 'We can build that IVR.' },
+    { label: 'determiner object behind a modifier', text: 'We can build that custom IVR.' },
+  ];
+  for (const { label, text } of BLOCKED) {
+    it(`blocks: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(true);
+    });
+  }
+
+  // Relative pronoun: an intervening noun phrase is its antecedent, so the subordinate clause's
+  // own verb owns the IVR mention. Position alone decides this — no lexical verb list, which is
+  // what previously mis-blocked "that helps explain" / "that lists" / "that evaluates".
+  const PASSES: { label: string; text: string }[] = [
+    { label: 'relative "that helps explain"', text: 'We can create a plan that helps explain IVR options.' },
+    { label: 'relative "that lists"', text: 'We can create a plan that lists IVR options.' },
+    { label: 'relative "that evaluates"', text: 'We can create a plan that evaluates IVR options.' },
+    { label: 'relative "that includes"', text: 'We can create a support plan that includes a discussion of IVR options.' },
+    { label: 'relative "that covers"', text: 'We can create a plan that covers IVR options.' },
+    { label: 'relative clause with its own auxiliary', text: 'We can design a roadmap that will include an IVR later.' },
+  ];
+  for (const { label, text } of PASSES) {
+    it(`passes: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(false);
+    });
+  }
+});
+
+describe('guardReply — filler "that" must not hide a later capability verb', () => {
+  // The verb scan used to stop dead on any "that", so a compound predicate whose first verb was
+  // non-capability ("do that", "help with that") slipped the matcher entirely.
+  const BLOCKED: { label: string; text: string }[] = [
+    { label: 'do that and configure', text: 'We can do that and configure your IVR.' },
+    { label: 'do that and create (agent subject)', text: 'Our assistant can do that and create your call menu.' },
+    { label: 'help with that and set up', text: 'We can help with that and set up an IVR.' },
+    { label: 'comma+and continuation after filler "that"', text: 'We can do that, and configure your IVR.' },
+  ];
+  for (const { label, text } of BLOCKED) {
+    it(`blocks: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(true);
+    });
+  }
 });

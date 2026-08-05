@@ -270,19 +270,6 @@ const CAPABILITY_VERB_WORDS: ReadonlySet<string> = new Set([
 const IVR_OBJECT_ANCHORED = new RegExp(`^${IVR_OBJECT}\\b`, 'i');
 const OBJECT_SCAN_TERMINATOR = /[.?!;]/;
 
-/** Verbs that, immediately after `that`, prove it opened a subordinate clause rather than
- *  determining this verb's object — the clause's own verb owns the IVR mention that follows,
- *  so it is not our capability verb's direct object. Auxiliaries/modals are included via
- *  CLAUSE_AUX_MODAL below ("a plan that will include an IVR"). */
-const THAT_SUBORDINATOR_VERB_HINTS: ReadonlySet<string> = new Set([
-  ...'can could will would may might shall should must is are am was were has have had do does did'.split(' '),
-  'includes', 'include', 'included', 'covers', 'cover', 'covered', 'explains', 'explain',
-  'describes', 'describe', 'discusses', 'discuss', 'mentions', 'mention', 'involves', 'involve',
-  'addresses', 'address', 'handles', 'handle', 'supports', 'support', 'offers', 'offer',
-  'provides', 'provide', 'requires', 'require', 'needs', 'need', 'allows', 'allow',
-  'enables', 'enable', 'uses', 'use', 'lets', 'let',
-]);
-
 /** A determiner `that` may be separated from its noun by a short modifier run ("that custom
  *  multi-level phone menu"). Bounded to three modifiers so it can never span a clause. */
 const THAT_DETERMINER_OBJECT = new RegExp(`^(?:[\\w'-]+\\s+){0,3}${IVR_OBJECT}\\b`, 'i');
@@ -306,17 +293,15 @@ function findBoundedCapabilityObject(clause: string, fromIndex: number): boolean
 
     const word = raw.replace(/^[^\w'-]+|[^\w'-]+$/g, '').toLowerCase();
     if (SUBORDINATE_CLAUSE_MARKERS.has(word)) return false;
-    // `that` is ambiguous: a determiner introducing this verb's object ("build that IVR", "build
-    // that custom IVR"), or a subordinate-clause marker whose own verb owns everything after it
-    // ("a support plan that includes a discussion of IVR options"). The discriminator is what
-    // FOLLOWS: a subordinator is followed by a verb, a determiner by an optional modifier run and
-    // then the noun. Checking only for an immediately-adjacent object was too strict — it let
-    // "We can build that custom IVR" through.
+    // `that` is ambiguous: a DETERMINER introducing this verb's own object ("build that IVR",
+    // "build that custom IVR"), or a RELATIVE PRONOUN whose antecedent is an intervening noun
+    // phrase and whose own verb owns everything after it ("create a support plan that includes a
+    // discussion of IVR options"). Position is the reliable discriminator, and needs no lexical
+    // verb list: a determiner sits immediately after the capability verb (budget still zero),
+    // whereas a relative pronoun can only appear once a noun phrase has been consumed.
     if (word === 'that') {
-      const after = rest.slice(match.index + raw.length).replace(/^\s+/, '');
-      const nextWord = (after.match(/^[\w'-]+/)?.[0] ?? '').toLowerCase();
-      if (THAT_SUBORDINATOR_VERB_HINTS.has(nextWord)) return false;
-      return THAT_DETERMINER_OBJECT.test(after);
+      if (budget !== 0) return false;
+      return THAT_DETERMINER_OBJECT.test(rest.slice(match.index + raw.length).replace(/^\s+/, ''));
     }
     // A sentence terminator inside the clause ends the predicate regardless of budget.
     if (OBJECT_SCAN_TERMINATOR.test(raw)) return false;
@@ -354,7 +339,13 @@ function findPredicateCapabilityObject(clause: string, fromIndex: number): boole
     const raw = match[0];
     const word = raw.replace(/^[^\w'-]+|[^\w'-]+$/g, '').toLowerCase();
     if (PREDICATE_SCAN_STOPWORDS.has(word)) return false;
-    if (SUBORDINATE_CLAUSE_MARKERS.has(word) || word === 'that') return false;
+    // `that` deliberately does NOT stop the VERB scan (unlike the object scan above, where its
+    // position is meaningful). Here it is usually a filler object of a non-capability verb — "We
+    // can do that and configure your IVR" — and stopping on it let a genuine compound-predicate
+    // claim through. A relative `that` is harmless to scan past: the clause it opens supplies no
+    // capability verb of its own in the honest cases ("a plan that covers IVR options"), and the
+    // bounded window plus SUBORDINATE_CLAUSE_MARKERS still cap how far the scan can reach.
+    if (SUBORDINATE_CLAUSE_MARKERS.has(word)) return false;
     if (CAPABILITY_VERB_WORDS.has(word) || PROVISION_VERB_WORDS.has(word)) {
       if (findBoundedCapabilityObject(clause, fromIndex + match.index + raw.length)) return true;
     }
