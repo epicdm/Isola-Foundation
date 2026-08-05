@@ -624,3 +624,56 @@ describe('guardReply — defect 3: bounded direct-object window', () => {
     });
   }
 });
+
+// ─── Correction round 2, Codex follow-up at 219ba56 ──────────────────────────
+// Two P1 findings from the exact-SHA review of the round above.
+
+describe('guardReply — full auxiliary/modal coverage on the active matcher', () => {
+  // The auxiliary alternation previously stopped at 'll/will/can/could/would/also/is/are, so
+  // these standard modal and perfect forms were unreachable by the active matcher entirely.
+  const BLOCKED: { label: string; text: string }[] = [
+    { label: 'modal "may"', text: 'We may configure your IVR.' },
+    { label: 'modal "might"', text: 'We might build your call menu.' },
+    { label: 'modal "should"', text: 'Our assistant should create your IVR.' },
+    { label: 'modal "must"', text: 'We must build a custom IVR.' },
+    { label: 'present perfect "has"', text: 'Our AI has configured your IVR.' },
+    { label: 'past progressive "was"', text: 'Our AI was setting up your call menu.' },
+  ];
+  for (const { label, text } of BLOCKED) {
+    it(`blocks: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe('complex_ivr');
+    });
+  }
+
+  const PASSES: { label: string; text: string }[] = [
+    { label: 'modal "may" + not', text: 'We may not configure your IVR.' },
+    { label: 'modal "might" + not', text: 'We might not build your call menu.' },
+  ];
+  for (const { label, text } of PASSES) {
+    it(`passes: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(false);
+    });
+  }
+});
+
+describe('guardReply — "that" as determiner vs subordinator', () => {
+  it('blocks a bare determiner object ("that IVR")', () => {
+    expect(guardReply('We can build that IVR.', SALES_TENANT).blocked).toBe(true);
+  });
+  it('blocks a determiner object behind a modifier ("that custom IVR")', () => {
+    expect(guardReply('We can build that custom IVR.', SALES_TENANT).blocked).toBe(true);
+  });
+  it('passes when "that" opens a subordinate clause whose own verb owns the IVR mention', () => {
+    expect(
+      guardReply('We can create a support plan that includes a discussion of IVR options.', SALES_TENANT).blocked,
+    ).toBe(false);
+  });
+  it('passes when the subordinate verb is a coverage verb ("that covers IVR options")', () => {
+    expect(guardReply('We can create a plan that covers IVR options.', SALES_TENANT).blocked).toBe(false);
+  });
+  it('passes when the subordinate clause carries its own auxiliary ("that will include")', () => {
+    expect(guardReply('We can design a roadmap that will include an IVR later.', SALES_TENANT).blocked).toBe(false);
+  });
+});

@@ -192,7 +192,12 @@ const IVR_ADVERB_PHRASE = `(?:\\s+${IVR_ADVERB}(?:\\s+and\\s+${IVR_ADVERB})?)?`;
 // list omitted entirely, which let an in-flight promise — the most literal possible fabrication —
 // through unblocked (Codex P1, PR #75). Contracted forms carry no leading space because the
 // apostrophe attaches directly to the subject ("I'm"); worded forms do.
-const IVR_AUX_ALTERNATION = `'ll|'m|'re| will| can| could| would| also| is| are| am`;
+// Every auxiliary/modal/copula that can carry a capability claim. The pre-correction list stopped
+// at 'll/will/can/could/would/also/is/are, so "We may configure your IVR", "Our assistant should
+// create your IVR" and the perfect "Our AI has configured your IVR" were all unreachable — the
+// same class of omission as the missing first-person forms, found by the same review.
+const IVR_AUX_ALTERNATION =
+  `'ll|'m|'re|'ve| will| can| could| would| may| might| shall| should| must| also| is| are| am| was| were| has| have| had| do| does| did`;
 
 /** Subject immediately followed by a capability verb, with NO auxiliary — bare present tense
  *  ("Our AI builds your IVR") is still a fabrication. Adjacency is required here precisely
@@ -265,6 +270,23 @@ const CAPABILITY_VERB_WORDS: ReadonlySet<string> = new Set([
 const IVR_OBJECT_ANCHORED = new RegExp(`^${IVR_OBJECT}\\b`, 'i');
 const OBJECT_SCAN_TERMINATOR = /[.?!;]/;
 
+/** Verbs that, immediately after `that`, prove it opened a subordinate clause rather than
+ *  determining this verb's object — the clause's own verb owns the IVR mention that follows,
+ *  so it is not our capability verb's direct object. Auxiliaries/modals are included via
+ *  CLAUSE_AUX_MODAL below ("a plan that will include an IVR"). */
+const THAT_SUBORDINATOR_VERB_HINTS: ReadonlySet<string> = new Set([
+  ...'can could will would may might shall should must is are am was were has have had do does did'.split(' '),
+  'includes', 'include', 'included', 'covers', 'cover', 'covered', 'explains', 'explain',
+  'describes', 'describe', 'discusses', 'discuss', 'mentions', 'mention', 'involves', 'involve',
+  'addresses', 'address', 'handles', 'handle', 'supports', 'support', 'offers', 'offer',
+  'provides', 'provide', 'requires', 'require', 'needs', 'need', 'allows', 'allow',
+  'enables', 'enable', 'uses', 'use', 'lets', 'let',
+]);
+
+/** A determiner `that` may be separated from its noun by a short modifier run ("that custom
+ *  multi-level phone menu"). Bounded to three modifiers so it can never span a clause. */
+const THAT_DETERMINER_OBJECT = new RegExp(`^(?:[\\w'-]+\\s+){0,3}${IVR_OBJECT}\\b`, 'i');
+
 /**
  * True if an IVR/call-menu phrase functions as the direct object or complement of a capability
  * verb ending at `fromIndex` in `clause`. Scans forward token by token, bounded by
@@ -284,11 +306,17 @@ function findBoundedCapabilityObject(clause: string, fromIndex: number): boolean
 
     const word = raw.replace(/^[^\w'-]+|[^\w'-]+$/g, '').toLowerCase();
     if (SUBORDINATE_CLAUSE_MARKERS.has(word)) return false;
-    // `that` is a determiner when it directly introduces the object ("that IVR" / "that call
-    // menu") and a subordinate-clause marker otherwise ("a support plan that includes ...").
+    // `that` is ambiguous: a determiner introducing this verb's object ("build that IVR", "build
+    // that custom IVR"), or a subordinate-clause marker whose own verb owns everything after it
+    // ("a support plan that includes a discussion of IVR options"). The discriminator is what
+    // FOLLOWS: a subordinator is followed by a verb, a determiner by an optional modifier run and
+    // then the noun. Checking only for an immediately-adjacent object was too strict — it let
+    // "We can build that custom IVR" through.
     if (word === 'that') {
       const after = rest.slice(match.index + raw.length).replace(/^\s+/, '');
-      return IVR_OBJECT_ANCHORED.test(after);
+      const nextWord = (after.match(/^[\w'-]+/)?.[0] ?? '').toLowerCase();
+      if (THAT_SUBORDINATOR_VERB_HINTS.has(nextWord)) return false;
+      return THAT_DETERMINER_OBJECT.test(after);
     }
     // A sentence terminator inside the clause ends the predicate regardless of budget.
     if (OBJECT_SCAN_TERMINATOR.test(raw)) return false;
