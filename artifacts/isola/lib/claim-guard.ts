@@ -360,8 +360,18 @@ function findPredicateCapabilityObject(clause: string, fromIndex: number): boole
     // can do that and configure your IVR" — and stopping on it let a genuine compound-predicate
     // claim through. A relative `that` is harmless to scan past: the clause it opens supplies no
     // capability verb of its own in the honest cases ("a plan that covers IVR options"), and the
-    // bounded window plus SUBORDINATE_CLAUSE_MARKERS still cap how far the scan can reach.
-    if (SUBORDINATE_CLAUSE_MARKERS.has(word)) return false;
+    // bounded window still caps how far the scan can reach.
+    //
+    // A subordinator stops the VERB scan only when it actually opens a FINITE subordinate clause.
+    // Stopping on the bare word was too blunt: the same markers also introduce reduced adjuncts
+    // that merely interrupt the predicate ("We can, if needed, configure your IVR" / "Our AI has
+    // since configured your IVR"), and treating those as clause boundaries hid the capability verb
+    // behind them — a false negative, the worst direction for a fabrication guard. The object-window
+    // scan keeps the unconditional stop, where the marker really does end the object.
+    if (SUBORDINATE_CLAUSE_MARKERS.has(word)) {
+      const afterMarker = rest.slice(match.index + raw.length).replace(/^[\s,]+/, '');
+      if (beginsFiniteClauseAfterConjunction(afterMarker)) return false;
+    }
     if (CAPABILITY_VERB_WORDS.has(word) || PROVISION_VERB_WORDS.has(word)) {
       if (findBoundedCapabilityObject(clause, fromIndex + match.index + raw.length)) return true;
     }

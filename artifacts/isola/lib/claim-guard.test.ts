@@ -747,3 +747,40 @@ describe('guardReply — conditional/temporal subordinators and topic prepositio
     expect(guardReply('We can build for your business a custom IVR.', SALES_TENANT).blocked).toBe(true);
   });
 });
+
+// ─── Correction round 2, Codex follow-up at 96e4bd3 ──────────────────────────
+
+describe('guardReply — reduced adjuncts must not hide the capability verb', () => {
+  // A subordinator that merely interrupts the predicate ("if needed", "after approval",
+  // "once approved", adverbial "since") is not a clause boundary. Stopping the verb scan on the
+  // bare marker word hid the fabrication verb behind it — a false negative.
+  const BLOCKED: { label: string; text: string }[] = [
+    { label: 'comma-delimited "if needed"', text: 'We can, if needed, configure your IVR.' },
+    { label: 'undelimited "if needed"', text: 'We can if needed configure your IVR.' },
+    { label: 'comma-delimited "after approval"', text: 'We can, after approval, build your call menu.' },
+    { label: 'comma-delimited "once approved"', text: 'Our assistant can, once approved, set up an IVR.' },
+    { label: 'adverbial "since" before a perfect participle', text: 'Our AI has since configured your IVR.' },
+  ];
+  for (const { label, text } of BLOCKED) {
+    it(`blocks: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(true);
+    });
+  }
+
+  // The same markers still end the scan when they genuinely open a finite subordinate clause,
+  // so the honest conditional/temporal answers keep passing.
+  const PASSES: { label: string; text: string }[] = [
+    { label: 'finite "if" clause', text: 'We can create a plan if IVR options come up later.' },
+    { label: 'finite "if" clause after a short object', text: 'We can build trust if IVR options matter to your team.' },
+    { label: 'finite "after" clause', text: 'We can design a roadmap after IVR options are reviewed by a specialist.' },
+    { label: 'topic "about"', text: 'We can build a plan about IVR options.' },
+    { label: 'relative "who" clause', text: 'We can build a strong relationship with every customer who eventually asks about IVR options down the road.' },
+    { label: 'subordinate "while" clause', text: 'We can build trust while explaining IVR options.' },
+    { label: 'relative "which" clause', text: 'We can design a strategy for businesses which may later consider an IVR.' },
+  ];
+  for (const { label, text } of PASSES) {
+    it(`passes: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(false);
+    });
+  }
+});
