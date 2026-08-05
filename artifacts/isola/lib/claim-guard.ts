@@ -491,8 +491,23 @@ function containsActiveAgentCapabilityClaim(clause: string): boolean {
 // "set‑up" using U+2011) becomes an ASCII hyphen; a SPACED dash ("call it good — but not") is
 // left untouched, since that spacing is exactly what marks it as a clause-boundary dash below,
 // not a word-joining hyphen.
+//
+// The apostrophe class is U+2018, U+2019 and U+FF07 — every code point Unicode assigns to
+// Word_Break=MidNumLet that reads as an apostrophe (UAX #29). U+FF07 was added after a measured
+// miss: "We＇d configure your IVR for you" passed unblocked while its ASCII and curly
+// equivalents blocked, so a contraction carrying it escaped the first-person matcher entirely
+// (ev-pr75-unicode-apostrophe-normalization-gap-2026-08-05).
+//
+// Why an EXPLICIT mapping and not String.prototype.normalize('NFKC'): the two are not
+// interchangeable in either direction. NFKC would NOT subsume this function — U+2018 and U+2019
+// have no compatibility decomposition, so NFKC leaves them untouched and the curly-apostrophe
+// handling would still have to be explicit. And NFKC would do far more than asked: UAX #15 states
+// that Normalization Forms KC and KD "must not be blindly applied to arbitrary text" because they
+// "erase many formatting distinctions" and "may remove distinctions that are important to the
+// semantics of the text". A fabrication filter reading customer-facing copy is exactly the wrong
+// place to erase distinctions wholesale, so each code point is admitted deliberately.
 function normalizeForMatching(text: string): string {
-  return text.replace(/[‘’]/g, "'").replace(/(\w)[‐‑‒–—](\w)/g, '$1-$2');
+  return text.replace(/[‘’＇]/g, "'").replace(/(\w)[‐‑‒–—](\w)/g, '$1-$2');
 }
 
 function splitIntoSentences(text: string): string[] {

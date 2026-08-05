@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { guardReply, SALES_TENANT_IDS, IVR_OBJECT_TOKEN_LIMIT } from './claim-guard';
+import { guardReply, SALES_TENANT_IDS, IVR_OBJECT_TOKEN_LIMIT, DEFLECTION } from './claim-guard';
 
 const SALES_TENANT = 'ema_sales_tenant';
 const OTHER_TENANT = 'some-other-tenant-id';
@@ -1138,5 +1138,72 @@ describe('guardReply — spaced "multi level" spelling', () => {
 
   it('still passes a neutral educational mention', () => {
     expect(guardReply('We can help your team understand multi-level phone menus.', SALES_TENANT).blocked).toBe(false);
+  });
+});
+
+// ─── U+FF07 apostrophe normalization ─────────────────────────────────────────
+// ev-pr75-unicode-apostrophe-normalization-gap-2026-08-05. UAX #29 assigns
+// Word_Break=MidNumLet to U+2018, U+2019 and U+FF07 alike, but normalizeForMatching()
+// originally folded only the first two, so a contraction carrying U+FF07 escaped the
+// first-person matcher entirely. Every apostrophe here is built with String.fromCodePoint
+// so the test asserts a specific scalar rather than whatever the editor or file encoding
+// happens to render.
+
+const AP_ASCII = String.fromCodePoint(0x0027); // APOSTROPHE
+const AP_LEFT = String.fromCodePoint(0x2018); // LEFT SINGLE QUOTATION MARK
+const AP_RIGHT = String.fromCodePoint(0x2019); // RIGHT SINGLE QUOTATION MARK
+const AP_FULLWIDTH = String.fromCodePoint(0xff07); // FULLWIDTH APOSTROPHE
+
+describe('guardReply — U+FF07 FULLWIDTH APOSTROPHE is an apostrophe', () => {
+  it('blocks a contracted "would" written with U+FF07', () => {
+    const result = guardReply(`We${AP_FULLWIDTH}d configure your IVR for you.`, SALES_TENANT);
+    expect(result.blocked).toBe(true);
+    expect(result.rule).toBe('complex_ivr');
+  });
+
+  it('blocks a first-person progressive written with U+FF07', () => {
+    const result = guardReply(`I${AP_FULLWIDTH}m setting up an IVR for you.`, SALES_TENANT);
+    expect(result.blocked).toBe(true);
+    expect(result.rule).toBe('complex_ivr');
+  });
+
+  // Equivalence controls: the three apostrophes must be indistinguishable to the matcher.
+  const EQUIVALENT: Array<[string, string]> = [
+    ['U+0027 APOSTROPHE', AP_ASCII],
+    ['U+2018 LEFT SINGLE QUOTATION MARK', AP_LEFT],
+    ['U+2019 RIGHT SINGLE QUOTATION MARK', AP_RIGHT],
+    ['U+FF07 FULLWIDTH APOSTROPHE', AP_FULLWIDTH],
+  ];
+  for (const [label, ap] of EQUIVALENT) {
+    it(`equivalence — contracted "would" blocks with ${label}`, () => {
+      expect(guardReply(`We${ap}d configure your IVR for you.`, SALES_TENANT).blocked).toBe(true);
+    });
+    it(`equivalence — first-person progressive blocks with ${label}`, () => {
+      expect(guardReply(`I${ap}m setting up an IVR for you.`, SALES_TENANT).blocked).toBe(true);
+    });
+  }
+
+  // Normalization must not disturb negation: folding the apostrophe changes which auxiliary is
+  // recognised, never whether the sentence is a denial.
+  it('does NOT block a negated first-person progressive written with U+FF07', () => {
+    expect(guardReply(`I${AP_FULLWIDTH}m not setting up an IVR for you.`, SALES_TENANT).blocked).toBe(false);
+  });
+
+  it('negation control holds for every apostrophe form alike', () => {
+    for (const [, ap] of EQUIVALENT) {
+      expect(guardReply(`I${ap}m not setting up an IVR for you.`, SALES_TENANT).blocked).toBe(false);
+    }
+  });
+
+  // The customer never receives normalized text — a block always returns the fixed deflection,
+  // and the forensic hash is taken over the ORIGINAL bytes, not the normalized form.
+  it('returns the standard deflection and hashes the original text, not the normalized text', () => {
+    const raw = `We${AP_FULLWIDTH}d configure your IVR for you.`;
+    const result = guardReply(raw, SALES_TENANT);
+    expect(result.text).toBe(DEFLECTION);
+    expect(result.forensics?.originalLength).toBe(raw.length);
+    expect(result.forensics?.originalSha256).not.toBe(
+      guardReply(`We${AP_ASCII}d configure your IVR for you.`, SALES_TENANT).forensics?.originalSha256,
+    );
   });
 });
