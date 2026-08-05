@@ -1324,8 +1324,6 @@ describe('guardReply — add/enable/install capability verbs (base-vs-head regre
     { label: 'object is "value"; IVR sits behind a "while" adjunct', text: 'We can add value while explaining available IVR options.' },
     { label: 'object is "better planning"; IVR sits behind the topic preposition "about"', text: 'We can enable better planning for customers asking about IVR.' },
     { label: 'object is "software"; IVR sits inside a relative "that" clause', text: 'We can install software that displays an IVR overview.' },
-    { label: 'capability verb belongs to a non-finite "how to" clause, not to us', text: 'We can discuss how to enable IVR with your telecom provider.' },
-    { label: 'capability verb belongs to a "how" clause with its own HUMAN subject', text: 'We can explain how a technician installs an IVR.' },
   ];
   for (const { label, text } of unrelated) {
     it(`does not block an unrelated mention: ${label}`, () => {
@@ -1335,14 +1333,49 @@ describe('guardReply — add/enable/install capability verbs (base-vs-head regre
     });
   }
 
-  // `how` opens a subordinate clause unconditionally — the finite-clause test cannot decide it,
-  // because "how TO enable" is non-finite by construction. Suppressing the OUTER subject's claim
-  // is not a new false negative: an agent claim INSIDE the how-clause carries its own subject and
-  // is still caught by the predicate heads, which are re-scanned across the whole clause.
-  it('a capability claim inside a "how" clause still blocks when the AGENT is its subject', () => {
+  // ─── `how` is NOT a stop marker — permanent false-negative protection ──────────────────────
+  // A `how` stop marker was tried and REVERTED. Measured base / head=a020a64 / rejected-head=573676c:
+  //
+  //   'We can configure how your IVR routes callers.'                  BLOCK / BLOCK / PASS
+  //   'We can set up how your IVR greets customers.'                   BLOCK / BLOCK / PASS
+  //   'Our assistant can configure how your call menu routes callers.' PASS  / BLOCK / PASS
+  //
+  // "Configure how your IVR routes callers" is a genuine capability claim, not an educational
+  // how-to answer, and the marker could not tell the two apart — so it shipped fabrications. These
+  // are permanent regression protections: do not reintroduce a `how` marker without noun-phrase
+  // head analysis, which is a matcher redesign rather than a scope correction.
+  const howObjectClaims: { label: string; text: string; rule: string }[] = [
+    { label: 'configure how <possessive> IVR ...', text: 'We can configure how your IVR routes callers.', rule: 'complex_ivr' },
+    { label: 'set up how <possessive> IVR ...', text: 'We can set up how your IVR greets customers.', rule: 'complex_ivr' },
+    { label: 'agent subject, "call menu" object', text: 'Our assistant can configure how your call menu routes callers.', rule: 'complex_ivr' },
+  ];
+  for (const { label, text, rule } of howObjectClaims) {
+    it(`blocks a genuine claim whose object is a "how" complement: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe(rule);
+    });
+  }
+
+  it('a capability claim inside a "how" clause blocks when the AGENT is its subject', () => {
     const result = guardReply('We can explain how our assistant configures your IVR.', SALES_TENANT);
     expect(result.blocked).toBe(true);
     expect(result.rule).toBe('complex_ivr');
+  });
+
+  // KNOWN LIMITATION, DEFERRED. The price of having no `how` marker is that an educational or
+  // descriptive how-clause is still conservatively deflected. All four blocked at the BASE SHA too
+  // for the pre-existing verbs, so this is not a regression introduced here. It fails SAFE —
+  // deflect and escalate to a human, never a fabrication — and is pinned rather than left to drift.
+  it('KNOWN LIMITATION (deferred): an educational "how" clause is still conservatively blocked', () => {
+    for (const text of [
+      'We can discuss how to configure IVR with your telecom provider.',
+      'We can explain how a technician configures an IVR.',
+      'We can discuss how to enable IVR with your telecom provider.',
+      'We can explain how a technician installs an IVR.',
+    ]) {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(true);
+    }
   });
 
   // ACCEPTED LIMITATION, recorded so it is not mistaken for a defect introduced here. When the IVR
@@ -1369,33 +1402,62 @@ describe('guardReply — add/enable/install capability verbs (base-vs-head regre
   });
 });
 
-// ─── standalone `no` as an object determiner ─────────────────────────────────────────────────
-// NEGATION_WORDS omits standalone `no`, so an honest denial that negates the IVR object with a
-// bare determiner was deflected at BOTH base and head:
+// ─── standalone `no` is NOT negation — DEFERRED, with permanent regression protection ────────
+// An object-determiner-slot rule for standalone `no` was implemented at 573676c and REVERTED. It
+// could not be kept inside the determiner slot: `no` is also an ordinary MARKETING MODIFIER of the
+// object's own noun phrase, and the rule read every one of those as a zero-quantity denial.
+// Measured base / head=a020a64 / rejected-head=573676c:
 //
-//   'No IVR will be configured by our assistant.'      base=BLOCKED  head=BLOCKED
-//   'We can build no custom IVR for you.'              base=BLOCKED  head=BLOCKED
+//   'We can build a no hassle IVR for your business.'       BLOCK / BLOCK / PASS
+//   'A no hassle IVR will be configured by our assistant.'  BLOCK / BLOCK / PASS
+//   'We can build a no monthly fee IVR for you.'            BLOCK / BLOCK / PASS
+//   'Our bot can install a no downtime call menu.'          BLOCK / PASS  / PASS
+//   'We can have a no-code IVR built for you.'              BLOCK / BLOCK / PASS
+//   'We can get a no-code IVR installed for you.'           BLOCK / PASS  / PASS
 //
-// The correction is deliberately NOT "treat `no` anywhere in the clause as negation". Everywhere
-// else in sales copy `no` modifies something that leaves the claim fully intact — cost, equipment,
-// duration, continuity, and discourse openers. Only `no` in the IVR object's own determiner slot
-// negates the claim, so that is the only position that suppresses it.
-describe('guardReply — standalone "no" negates only the IVR object it determines (PR #75)', () => {
-  const honestNegatives: { label: string; text: string }[] = [
-    { label: 'passive, "no" determines the sentence-initial object', text: 'No IVR will be configured by our assistant.' },
-    { label: 'passive, "no" plus one modifier', text: 'No custom IVR can be built by our bot.' },
-    { label: 'active, "no" determines the direct object', text: 'We can build no custom IVR for you.' },
-    { label: 'active, "no" with a bare object', text: 'Our assistant can configure no IVR on your line.' },
-    { label: '"no longer" in the passive copula gap', text: 'Your IVR will no longer be enabled by our bot.' },
-    { label: 'causative, "no" determines the object before the participle', text: 'We can get no IVR configured for you.' },
+// The last of those exposed a second fault: the causative pre-object exclusion `(?!no\b)` also
+// rejected a HYPHENATED token, because a hyphen is a word boundary, so "no-code" read as a bare
+// `no`. Every line above is a fabrication reaching a customer. These tests are permanent
+// protection against reintroducing any of the three mechanisms.
+describe('guardReply — standalone "no" is not negation; marketing modifiers still block (PR #75)', () => {
+  const dangerousFalseNegatives: { label: string; text: string; rule: string }[] = [
+    { label: 'B2 active — "a no hassle IVR"', text: 'We can build a no hassle IVR for your business.', rule: 'complex_ivr' },
+    { label: 'B2 passive — "A no hassle IVR will be configured"', text: 'A no hassle IVR will be configured by our assistant.', rule: 'complex_ivr_passive' },
+    { label: 'B2 active — "a no monthly fee IVR"', text: 'We can build a no monthly fee IVR for you.', rule: 'complex_ivr' },
+    { label: 'B2 active — "a no downtime call menu" (install)', text: 'Our bot can install a no downtime call menu.', rule: 'complex_ivr' },
+    { label: 'B3 causative — "have a no-code IVR built"', text: 'We can have a no-code IVR built for you.', rule: 'complex_ivr' },
+    { label: 'B3 causative — "get a no-code IVR installed"', text: 'We can get a no-code IVR installed for you.', rule: 'complex_ivr' },
   ];
-  for (const { label, text } of honestNegatives) {
-    it(`does not block an honest negative: ${label}`, () => {
+  for (const { label, text, rule } of dangerousFalseNegatives) {
+    it(`blocks a claim carrying a "no" marketing modifier: ${label}`, () => {
       const result = guardReply(text, SALES_TENANT);
-      expect(result.blocked).toBe(false);
-      expect(result.text).toBe(text);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe(rule);
+      expect(result.text).toBe(DEFLECTION);
     });
   }
+
+  // The active and passive paths were never affected by the causative hyphen fault, and must stay
+  // that way — recorded so a future `no` attempt cannot quietly regress them either.
+  it('blocks the active and passive "no-code" forms', () => {
+    for (const text of ['We can build a no-code IVR for you.', 'A no-code IVR will be built by our assistant.']) {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(true);
+    }
+  });
+
+  // KNOWN LIMITATION, DEFERRED. The price of not treating standalone `no` as negation is that a
+  // genuine denial using a bare `no` determiner is still deflected and escalated to a human. Both
+  // blocked at the BASE SHA and at head, so this is not a regression introduced here. It fails SAFE
+  // — never a fabrication. Fixing it needs noun-phrase head analysis to separate a determiner `no`
+  // from a modifier `no`, which is a matcher redesign rather than a scope correction.
+  it('KNOWN LIMITATION (deferred): an honest denial using a bare "no" determiner is still blocked', () => {
+    for (const text of [
+      'No IVR will be configured by our assistant.',
+      'We can build no custom IVR for you.',
+    ]) {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(true);
+    }
+  });
 
   // Positive controls. `no` modifying cost, equipment, duration, interruption or an unrelated
   // discourse phrase leaves a genuine capability claim standing, and it must still block.
@@ -1406,10 +1468,9 @@ describe('guardReply — standalone "no" negates only the IVR object it determin
     { label: '"no" modifies continuity of service', text: 'Our bot can install an IVR with no interruption to service.' },
     { label: '"No problem" is a discourse opener in a separate clause', text: 'No problem — we can add an IVR for you.' },
     { label: '"no issue" is a discourse phrase in a separate clause', text: 'There is no issue; our assistant can enable your IVR.' },
-    // A determiner proves a NEW noun phrase started, so the earlier `no` belongs to the previous
-    // one — this is still a claim, and the bounded modifier run must not reach across "your".
-    { label: 'a possessive between "no" and the object ends the determiner run', text: 'There is no reason your IVR will be built by our bot.' },
-    { label: '"no" trails the object rather than determining it', text: 'We can build a custom IVR with no delay.' },
+    // `no` belongs to an EARLIER noun phrase ("no reason"), and the claim about "your IVR" stands.
+    { label: '"no" determines a different, earlier noun', text: 'There is no reason your IVR will be built by our bot.' },
+    { label: '"no" trails the object rather than preceding it', text: 'We can build a custom IVR with no delay.' },
   ];
   for (const { label, text } of stillBlocks) {
     it(`still blocks a genuine claim: ${label}`, () => {
