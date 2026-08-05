@@ -350,10 +350,18 @@ function findPredicateCapabilityObject(clause: string, fromIndex: number): boole
   const rest = clause.slice(fromIndex);
   const tokenRe = /[^\s]+/g;
   let spent = 0;
+  let precededByComma = false;
   let match: RegExpExecArray | null;
   while ((match = tokenRe.exec(rest)) && spent < IVR_VERB_SCAN_LIMIT) {
     const raw = match[0];
     const word = raw.replace(/^[^\w'-]+|[^\w'-]+$/g, '').toLowerCase();
+    // Bare punctuation carries no predicate content, so it must not consume the window — a
+    // leading comma alone used to burn a token and let a long adjunct exhaust the budget before
+    // the capability verb behind it was ever reached.
+    if (word === '') {
+      precededByComma = raw.includes(',');
+      continue;
+    }
     if (PREDICATE_SCAN_STOPWORDS.has(word)) return false;
     // `that` deliberately does NOT stop the VERB scan (unlike the object scan above, where its
     // position is meaningful). Here it is usually a filler object of a non-capability verb — "We
@@ -369,6 +377,18 @@ function findPredicateCapabilityObject(clause: string, fromIndex: number): boole
     // behind them — a false negative, the worst direction for a fabrication guard. The object-window
     // scan keeps the unconditional stop, where the marker really does end the object.
     if (SUBORDINATE_CLAUSE_MARKERS.has(word)) {
+      // A COMMA-INTRODUCED marker opens an interruption, not a trailing clause: the main
+      // predicate resumes after the closing comma ("We can, once the customer gives final
+      // written approval, configure your IVR" is still a promise to configure an IVR). Jump the
+      // whole interruption rather than judging its contents.
+      const closingComma = rest.indexOf(',', match.index + raw.length);
+      if (precededByComma && closingComma !== -1) {
+        tokenRe.lastIndex = closingComma + 1;
+        precededByComma = false;
+        continue;
+      }
+      // Otherwise it opens a trailing subordinate clause. Stop only if that clause is finite —
+      // a reduced adjunct ("if needed configure your IVR") is not, and must not hide the verb.
       const afterMarker = rest.slice(match.index + raw.length).replace(/^[\s,]+/, '');
       if (beginsFiniteClauseAfterConjunction(afterMarker)) return false;
     }
@@ -376,6 +396,7 @@ function findPredicateCapabilityObject(clause: string, fromIndex: number): boole
       if (findBoundedCapabilityObject(clause, fromIndex + match.index + raw.length)) return true;
     }
     if (OBJECT_SCAN_TERMINATOR.test(raw)) return false;
+    precededByComma = raw.endsWith(',');
     spent += 1;
   }
   return false;
@@ -434,7 +455,13 @@ const CLAUSE_AUX_CONTRACTION = "'(?:m|re|ll|s|ve|d)";
 // conjunction stays inside its current clause exactly as if it had never been examined.
 function beginsFiniteClauseAfterConjunction(rest: string): boolean {
   const trimmed = rest.replace(/^[\s,]+/, '');
-  const finiteTail = `(?:\\s+(?:${CLAUSE_AUX_MODAL})|${CLAUSE_AUX_CONTRACTION})\\b`;
+  // A finite clause is subject + finite verb. The verb is usually an auxiliary/modal, but it can
+  // also be a plain lexical verb — and when that verb is a CAPABILITY verb the distinction
+  // decides a real case: "after a specialist configures your IVR" is a subordinate clause whose
+  // own (human) subject owns the verb, so the outer capability claim must not absorb it.
+  // Recognising only auxiliaries here over-blocked exactly those honest answers.
+  const finiteTail =
+    `(?:\\s+(?:${CLAUSE_AUX_MODAL})|\\s+${IVR_VERB_FORMS}|${CLAUSE_AUX_CONTRACTION})\\b`;
   const agentSubject = new RegExp(`^${IVR_ACTIVE_SUBJECT}${finiteTail}`, 'i');
   if (agentSubject.test(trimmed)) return true;
   const genericSubject = new RegExp(

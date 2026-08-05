@@ -784,3 +784,43 @@ describe('guardReply — reduced adjuncts must not hide the capability verb', ()
     });
   }
 });
+
+// ─── Correction round 2, Codex follow-up at 4328fc6 ──────────────────────────
+// Two findings pulling in opposite directions, resolved by one root-cause change:
+// the finite-clause detector now recognises lexical verbs, and a comma-introduced
+// marker is treated as an interruption rather than a trailing clause.
+
+describe('guardReply — long and comma-introduced interruptions still reach the verb', () => {
+  const BLOCKED: { label: string; text: string }[] = [
+    { label: 'long coordinated adjunct', text: 'We can, if absolutely needed and only after approval, configure your IVR.' },
+    { label: 'comma-introduced finite interruption', text: 'We can, once the customer gives final written approval, configure your IVR.' },
+    { label: 'short comma-delimited adjunct', text: 'We can, if needed, configure your IVR.' },
+    { label: 'undelimited reduced adjunct', text: 'We can if needed configure your IVR.' },
+    { label: 'comma-delimited "after approval"', text: 'We can, after approval, build your call menu.' },
+    { label: 'comma-delimited "once approved"', text: 'Our assistant can, once approved, set up an IVR.' },
+    { label: 'adverbial "since"', text: 'Our AI has since configured your IVR.' },
+  ];
+  for (const { label, text } of BLOCKED) {
+    it(`blocks: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(true);
+    });
+  }
+});
+
+describe('guardReply — a trailing subordinate clause with its own subject keeps its verb', () => {
+  // These are the mirror image of the cases above: no comma introduces the marker, and the
+  // clause it opens has its own (human) subject plus a finite lexical verb, so the capability
+  // verb belongs to that clause and not to the outer claim.
+  const PASSES: { label: string; text: string }[] = [
+    { label: 'human subject + "configures" after "after"', text: 'We can build trust after a specialist configures your IVR.' },
+    { label: 'human subject + "configures" after "if"', text: 'We can create a plan if your specialist configures your IVR later.' },
+    { label: 'human subject + "builds" after "before"', text: 'We can design a roadmap before your engineer builds the call menu.' },
+    { label: 'non-finite continuation after "if"', text: 'We can create a plan if IVR options come up later.' },
+    { label: 'passive subordinate clause after "after"', text: 'We can design a roadmap after IVR options are reviewed by a specialist.' },
+  ];
+  for (const { label, text } of PASSES) {
+    it(`passes: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(false);
+    });
+  }
+});
