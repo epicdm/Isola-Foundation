@@ -248,6 +248,14 @@ export const IVR_OBJECT_TOKEN_LIMIT = 7;
  *  verb's direct object. `that` is handled separately below — it is ambiguous. */
 const SUBORDINATE_CLAUSE_MARKERS: ReadonlySet<string> = new Set([
   'who', 'whom', 'whose', 'which', 'where', 'when', 'because', 'although', 'while', 'unless',
+  // Conditional/temporal subordinators, and `whether` for embedded questions — an IVR mention
+  // behind any of these belongs to the subordinate clause's own predicate, not to the capability
+  // verb ("We can create a plan if IVR options come up later").
+  'if', 'after', 'before', 'until', 'whether', 'once', 'since', 'though', 'whereas',
+  // Topic preposition: "build a plan ABOUT IVR options" makes the IVR the plan's subject matter,
+  // not the thing being built. Deliberately only `about` — object-introducing prepositions such
+  // as `for` must keep scanning ("build for your business a custom IVR").
+  'about',
 ]);
 
 /** Bare capability-verb words. Encountering one mid-scan RESETS the window: a compound predicate
@@ -300,8 +308,16 @@ function findBoundedCapabilityObject(clause: string, fromIndex: number): boolean
     // verb list: a determiner sits immediately after the capability verb (budget still zero),
     // whereas a relative pronoun can only appear once a noun phrase has been consumed.
     if (word === 'that') {
+      // Relative pronoun: an antecedent noun phrase has already been consumed, so the clause it
+      // opens owns everything after it.
       if (budget !== 0) return false;
-      return THAT_DETERMINER_OBJECT.test(rest.slice(match.index + raw.length).replace(/^\s+/, ''));
+      // At budget zero it is either a determiner ("build that custom IVR") or a filler object
+      // ("build that for you: a custom IVR"). If the determiner reading resolves, that settles
+      // it; otherwise fall through and keep scanning rather than abandoning the predicate —
+      // stopping here let colon-introduced complements escape.
+      if (THAT_DETERMINER_OBJECT.test(rest.slice(match.index + raw.length).replace(/^\s+/, ''))) {
+        return true;
+      }
     }
     // A sentence terminator inside the clause ends the predicate regardless of budget.
     if (OBJECT_SCAN_TERMINATOR.test(raw)) return false;

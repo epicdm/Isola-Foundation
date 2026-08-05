@@ -708,3 +708,42 @@ describe('guardReply — filler "that" must not hide a later capability verb', (
     });
   }
 });
+
+// ─── Correction round 2, Codex follow-up at f663c7f ──────────────────────────
+
+describe('guardReply — filler "that" before a colon complement', () => {
+  // "that" at the head of the object window is either a determiner ("that custom IVR") or a
+  // filler object awaiting a complement ("that for you: a custom IVR"). Abandoning the scan when
+  // the determiner reading failed let the second form escape.
+  const BLOCKED: { label: string; text: string }[] = [
+    { label: 'build that for you: <object>', text: 'We can build that for you: a custom IVR.' },
+    { label: 'create that for you: <object>', text: 'We can create that for you: a call menu.' },
+    { label: 'provide that later: <object>', text: 'We can provide that later: a multi-level phone menu.' },
+  ];
+  for (const { label, text } of BLOCKED) {
+    it(`blocks: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(true);
+    });
+  }
+});
+
+describe('guardReply — conditional/temporal subordinators and topic prepositions', () => {
+  // An IVR mention behind a conditional, temporal or topic marker belongs to that clause's own
+  // predicate, never to the capability verb.
+  const PASSES: { label: string; text: string }[] = [
+    { label: 'conditional "if"', text: 'We can create a plan if IVR options come up later.' },
+    { label: 'conditional "if" after a short object', text: 'We can build trust if IVR options matter to your team.' },
+    { label: 'temporal "after"', text: 'We can design a roadmap after IVR options are reviewed by a specialist.' },
+    { label: 'topic preposition "about"', text: 'We can build a plan about IVR options.' },
+  ];
+  for (const { label, text } of PASSES) {
+    it(`passes: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(false);
+    });
+  }
+
+  // `about` must not generalise to object-introducing prepositions — `for` still scans through.
+  it('still blocks a fronted "for" prepositional phrase before the real object', () => {
+    expect(guardReply('We can build for your business a custom IVR.', SALES_TENANT).blocked).toBe(true);
+  });
+});
