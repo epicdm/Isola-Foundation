@@ -169,13 +169,20 @@ const IVR_PASSIVE_AGENT = `(?:(?:the|our)\\s+${IVR_AGENT}|${IVR_AGENT})`;
 // "set up" / "set-up" / "setting up" only — the separator is REQUIRED (not optional) so the
 // bare noun "setup" ("your business phone setup") can never be mistaken for a verb; a real verb
 // always has a space or hyphen between "set"/"setting" and "up".
+// add/enable/install are ordinary capability verbs, not synonyms bolted on for completeness: the
+// clause-bounded matcher that replaced the base keyword rule shipped without them, so "We can add
+// an IVR to your phone system", "We can enable IVR on your line" and "We can install a custom IVR"
+// all blocked at base 13551828 and passed at head a020a64 — five measured false negatives in
+// ordinary sales phrasing, the direction that ships a fabrication. Every verb here is pinned by a
+// named base-vs-head regression test; nothing broader (activate/provision/connect/supply/deliver/
+// furnish/integrate/turn on) is admitted without the same evidence.
 const IVR_VERB_FORMS =
-  '(?:build|builds|built|building|configure|configures|configured|configuring|design|designs|designed|designing|creat(?:e|es|ed|ing)|deploy|deploys|deployed|deploying|set[\\s-]up|sets[\\s-]up|setting[\\s-]up|implement|implements|implemented|implementing)';
+  '(?:build|builds|built|building|configure|configures|configured|configuring|design|designs|designed|designing|creat(?:e|es|ed|ing)|deploy|deploys|deployed|deploying|set[\\s-]up|sets[\\s-]up|setting[\\s-]up|implement|implements|implemented|implementing|add|adds|added|adding|enable|enables|enabled|enabling|install|installs|installed|installing)';
 // An optional hyphenated modifier is part of the participle token in sales copy
 // ("custom-built", "purpose-built", "fully-configured"), and a single token to the tokenizer —
 // without it, "get your call menu custom-built" read as having no participle at all.
 const IVR_PARTICIPLES =
-  '(?:[a-z]+-)?(?:built|configured|designed|created|deployed|set[\\s-]up|implemented)';
+  '(?:[a-z]+-)?(?:built|configured|designed|created|deployed|set[\\s-]up|implemented|added|enabled|installed)';
 // Covers modal ("will/can/could/would/may/might be"), simple present ("is/are"), present
 // progressive ("is/are being"), simple past ("was/were"), and present perfect ("has/have been")
 // passive forms — the full tense range a real Clawith reply might use.
@@ -238,7 +245,10 @@ const IVR_AUX_PREDICATE_HEAD = new RegExp(
  */
 const IVR_CAUSATIVE_VERBS = '(?:get|gets|getting|got|have|has|having|had)';
 const IVR_CAUSATIVE_PATTERN = new RegExp(
-  `\\b${IVR_ACTIVE_SUBJECT}\\b(?:${IVR_AUX_ALTERNATION})*${IVR_ADVERB_PHRASE}\\s+${IVR_CAUSATIVE_VERBS}\\s+(?:[\\w'-]+\\s+){0,3}${IVR_OBJECT}\\b\\s+(?:[\\w'-]+\\s+){0,3}${IVR_PARTICIPLES}\\b`,
+  // The gap before the object is that object's determiner/modifier run, so `no` is excluded from
+  // it for the same reason as in findBoundedCapabilityObject: "We can get NO IVR configured" is an
+  // honest denial, and the three matcher paths must agree on what negates a claim.
+  `\\b${IVR_ACTIVE_SUBJECT}\\b(?:${IVR_AUX_ALTERNATION})*${IVR_ADVERB_PHRASE}\\s+${IVR_CAUSATIVE_VERBS}\\s+(?:(?!no\\b)[\\w'-]+\\s+){0,3}${IVR_OBJECT}\\b\\s+(?:[\\w'-]+\\s+){0,3}${IVR_PARTICIPLES}\\b`,
   'gi',
 );
 
@@ -294,13 +304,26 @@ export const IVR_OBJECT_TOKEN_LIMIT = 7;
  *  is both correct and safe. */
 const RELATIVE_PRONOUN_MARKERS: ReadonlySet<string> = new Set(['who', 'whom', 'whose', 'which']);
 
+/** `how` heads an interrogative/nominal subordinate clause — "explain HOW a technician installs an
+ *  IVR", "discuss HOW to enable IVR with your telecom provider". Like a relative pronoun, and
+ *  unlike every adverbial subordinator below, it can NEVER head a reduced adjunct that merely
+ *  interrupts a predicate (there is no "We can, how needed, configure your IVR"), so it stops both
+ *  scans unconditionally rather than only when a finite clause follows — the finite-clause test
+ *  cannot help here because "how TO enable" is non-finite by construction.
+ *
+ *  Suppressing the OUTER subject's claim is safe rather than a new false negative: a genuine agent
+ *  claim inside the how-clause still carries its own subject ("explain how our assistant configures
+ *  your IVR"), and the bare/aux predicate heads are re-scanned across the whole clause, so that
+ *  inner claim is caught by its own head. */
+const ALWAYS_SUBORDINATING_MARKERS: ReadonlySet<string> = new Set([...RELATIVE_PRONOUN_MARKERS, 'how']);
+
 /** Adverbial subordinators and topic prepositions. Unlike relative pronouns these CAN head a
  *  reduced adjunct that merely interrupts a predicate, so the predicate scan stops on them only
  *  when they genuinely open a finite clause. Topic prepositions ("a plan ABOUT/AROUND IVR
  *  options") make the IVR the subject matter rather than the artifact; object-introducing
  *  prepositions such as `for` are deliberately excluded ("build for your business a custom IVR"). */
 const SUBORDINATE_CLAUSE_MARKERS: ReadonlySet<string> = new Set([
-  ...RELATIVE_PRONOUN_MARKERS,
+  ...ALWAYS_SUBORDINATING_MARKERS,
   'where', 'when', 'because', 'although', 'while', 'unless',
   'if', 'after', 'before', 'until', 'whether', 'once', 'since', 'though', 'whereas',
   'about', 'around', 'regarding', 'concerning',
@@ -320,11 +343,44 @@ const CAPABILITY_VERB_WORDS: ReadonlySet<string> = new Set([
   // Bare "setup" is deliberately absent — it is a noun ("your business phone setup"), never a verb.
   'set', 'sets', 'setting', 'set-up', 'sets-up', 'setting-up',
   'implement', 'implements', 'implemented', 'implementing',
+  // Same three families added to IVR_VERB_FORMS above, kept in step so the compound-predicate
+  // scan and the bare/aux predicate heads recognise exactly the same capability vocabulary.
+  'add', 'adds', 'added', 'adding',
+  'enable', 'enables', 'enabled', 'enabling',
+  'install', 'installs', 'installed', 'installing',
   'provide', 'provides', 'providing',
 ]);
 
 const IVR_OBJECT_ANCHORED = new RegExp(`^${IVR_OBJECT}\\b`, 'i');
 const OBJECT_SCAN_TERMINATOR = /[.?!;]/;
+
+/** Determiners and possessives. Each one STARTS a noun phrase, so reaching one proves any earlier
+ *  `no` determines a DIFFERENT noun and cannot be negating the IVR object that follows. */
+const NOUN_PHRASE_DETERMINERS = 'your|our|the|a|an|this|that|my|his|her|its|their|every|any|some';
+
+/**
+ * Standalone `no` acting as the DETERMINER of the IVR object's own noun phrase — "We can build NO
+ * custom IVR for you", "NO IVR will be configured by our assistant". In that position `no` negates
+ * the capability claim outright, so deflecting it escalated an honest denial to a human — the same
+ * over-blocking this defect exists to remove
+ * (defect-foundation-claim-guard-complex-ivr-overbroad-post-generation-filter-2026-08-05).
+ *
+ * Deliberately NOT added to NEGATION_WORDS, which is clause-wide: everywhere else in ordinary sales
+ * copy `no` modifies something that leaves the claim fully intact — cost ("with NO setup fee"),
+ * equipment ("with NO additional hardware"), duration ("in NO more than one day"), continuity
+ * ("with NO interruption to service") and discourse openers ("NO problem — we can add an IVR for
+ * you"). A clause-wide rule would pass every one of those as an honest denial, which is precisely
+ * the false-negative direction a fabrication guard must never take.
+ *
+ * Two bounds keep it in the determiner slot. The modifier run is capped at three tokens (the same
+ * bound THAT_DETERMINER_OBJECT uses for the same job), and no token may be a determiner or
+ * possessive — a determiner proves a new noun phrase has begun, so "there is NO reason YOUR IVR
+ * will be built by our bot" is still a claim and still blocks.
+ */
+const NO_DETERMINED_OBJECT_TAIL = new RegExp(
+  `\\bno(?:\\s+(?!(?:${NOUN_PHRASE_DETERMINERS})\\b)[\\w'-]+){0,3}\\s+$`,
+  'i',
+);
 
 /** A determiner `that` may be separated from its noun by a short modifier run ("that custom
  *  multi-level phone menu"). Bounded to three modifiers so it can never span a clause. */
@@ -344,8 +400,12 @@ function findBoundedCapabilityObject(clause: string, fromIndex: number): boolean
   while ((match = tokenRe.exec(rest))) {
     const raw = match[0];
     // The object may start at this token — check BEFORE spending budget on it, so an object
-    // sitting exactly at the limit still counts.
-    if (IVR_OBJECT_ANCHORED.test(rest.slice(match.index))) return true;
+    // sitting exactly at the limit still counts. A `no` sitting in this object's own determiner
+    // slot negates the claim ("configure NO IVR on your line"), so it ends the scan instead:
+    // the caller keeps trying later capability verbs, exactly as it does for any other miss.
+    if (IVR_OBJECT_ANCHORED.test(rest.slice(match.index))) {
+      return !NO_DETERMINED_OBJECT_TAIL.test(rest.slice(0, match.index));
+    }
 
     const word = raw.replace(/^[^\w'-]+|[^\w'-]+$/g, '').toLowerCase();
     if (SUBORDINATE_CLAUSE_MARKERS.has(word)) return false;
@@ -430,8 +490,8 @@ function findPredicateCapabilityObject(clause: string, fromIndex: number): boole
     // since configured your IVR"), and treating those as clause boundaries hid the capability verb
     // behind them — a false negative, the worst direction for a fabrication guard. The object-window
     // scan keeps the unconditional stop, where the marker really does end the object.
-    // A relative pronoun always opens a clause, and may be that clause's own subject.
-    if (RELATIVE_PRONOUN_MARKERS.has(word)) return false;
+    // A relative pronoun (or `how`) always opens a clause, and may be that clause's own subject.
+    if (ALWAYS_SUBORDINATING_MARKERS.has(word)) return false;
     if (SUBORDINATE_CLAUSE_MARKERS.has(word)) {
       // A COMMA-INTRODUCED marker opens an interruption, not a trailing clause: the main
       // predicate resumes after the closing comma ("We can, once the customer gives final
@@ -620,14 +680,19 @@ function splitIntoClauses(sentence: string): string[] {
   return clauses.map((c) => c.trim()).filter(Boolean);
 }
 
-// True if `pattern` matches somewhere in `clause` with no negation word (reusing NEGATION_WORDS
-// below) earlier in that SAME clause — clause-scoped, not sentence-scoped, so a negated claim in
-// one clause (already itself excluded by grammar in practice — see isNegatedClaim/NEGATION_WORDS
-// below) can never excuse a genuine positive claim in a different, later clause.
-function clauseHasUnnegatedMatch(clause: string, pattern: RegExp): boolean {
-  const global = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g');
+// True if IVR_PASSIVE_PATTERN matches somewhere in `clause` with no negation word (reusing
+// NEGATION_WORDS) earlier in that SAME clause — clause-scoped, not sentence-scoped, so a negated
+// claim in one clause (already itself excluded by grammar in practice — see isNegatedClaim/
+// NEGATION_WORDS) can never excuse a genuine positive claim in a different, later clause.
+function clauseHasUnnegatedPassiveClaim(clause: string): boolean {
+  const global = new RegExp(IVR_PASSIVE_PATTERN.source, IVR_PASSIVE_PATTERN.flags + 'g');
   for (const m of clause.matchAll(global)) {
-    if (!NEGATION_WORDS.test(clause.slice(0, m.index ?? 0))) return true;
+    const prefix = clause.slice(0, m.index ?? 0);
+    if (NEGATION_WORDS.test(prefix)) continue;
+    // IVR_PASSIVE_PATTERN always begins AT the IVR object, so whatever immediately precedes the
+    // match is that object's own determiner slot — "NO IVR will be configured by our assistant".
+    if (NO_DETERMINED_OBJECT_TAIL.test(prefix)) continue;
+    return true;
   }
   return false;
 }
@@ -637,7 +702,7 @@ function checkComplexIvr(text: string): 'complex_ivr' | 'complex_ivr_passive' | 
   for (const sentence of splitIntoSentences(normalized)) {
     for (const clause of splitIntoClauses(sentence)) {
       if (containsActiveAgentCapabilityClaim(clause)) return 'complex_ivr';
-      if (clauseHasUnnegatedMatch(clause, IVR_PASSIVE_PATTERN)) return 'complex_ivr_passive';
+      if (clauseHasUnnegatedPassiveClaim(clause)) return 'complex_ivr_passive';
     }
   }
   return null;

@@ -1207,3 +1207,215 @@ describe('guardReply — U+FF07 FULLWIDTH APOSTROPHE is an apostrophe', () => {
     );
   });
 });
+
+// ─── add / enable / install capability verbs ─────────────────────────────────────────────────
+// REGRESSION PROVENANCE. The clause-bounded matcher that replaced the base keyword rule shipped a
+// narrower capability vocabulary than the rule it replaced. Measured base-vs-head at
+// base=13551828855b2f942eb57f6f4a06777ce54561e2 vs head=a020a641f774acc923dc5a07f9abf2185b7c9d75,
+// running both implementations side by side over the same inputs:
+//
+//   'We can add an IVR to your phone system.'   base=BLOCKED  head=PASS   REGRESSION
+//   'We can enable IVR on your line.'           base=BLOCKED  head=PASS   REGRESSION
+//   'We can install a custom IVR.'              base=BLOCKED  head=PASS   REGRESSION
+//   'We can get an IVR added for you.'          base=BLOCKED  head=PASS   REGRESSION
+//   'Your IVR will be enabled by our bot.'      base=BLOCKED  head=PASS   REGRESSION
+//
+// Five false negatives in ordinary sales phrasing. This filter is the only enforcement point for
+// an externally generated reply, so a false negative ships a fabrication to a customer. The tests
+// below are the permanent guard against recurrence: each of the five appears verbatim, alongside
+// the inflected, causative and passive forms of the same three verb families. Two further cases
+// ('The assistant is enabling your call menu.', 'The call menu has been installed by our bot.')
+// passed at BOTH base and head — the base keyword rule never covered the phrase "call menu" — so
+// they are new coverage rather than regressions, and are labelled as such.
+describe('guardReply — add/enable/install capability verbs (base-vs-head regression, PR #75)', () => {
+  const REGRESSION_AT_HEAD: { label: string; text: string; rule: string }[] = [
+    { label: 'add — active modal (base=BLOCKED, head=PASS)', text: 'We can add an IVR to your phone system.', rule: 'complex_ivr' },
+    { label: 'enable — active modal (base=BLOCKED, head=PASS)', text: 'We can enable IVR on your line.', rule: 'complex_ivr' },
+    { label: 'install — active modal (base=BLOCKED, head=PASS)', text: 'We can install a custom IVR.', rule: 'complex_ivr' },
+    { label: 'add — causative (base=BLOCKED, head=PASS)', text: 'We can get an IVR added for you.', rule: 'complex_ivr' },
+    { label: 'enable — passive (base=BLOCKED, head=PASS)', text: 'Your IVR will be enabled by our bot.', rule: 'complex_ivr_passive' },
+  ];
+  for (const { label, text, rule } of REGRESSION_AT_HEAD) {
+    it(`closes the confirmed PR-introduced false negative: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe(rule);
+      expect(result.text).toBe(DEFLECTION);
+    });
+  }
+
+  const blockedActive: { label: string; text: string }[] = [
+    { label: 'add — "our assistant" subject', text: 'Our assistant can add a custom IVR for you.' },
+    { label: 'enable — "our bot" subject, future modal', text: 'Our bot will enable your IVR.' },
+    { label: 'install — "the system" subject, multi-level menu object', text: 'The system can install a multi-level phone menu.' },
+    // Inflections: bare present, present progressive, third-person singular.
+    { label: 'adds — bare present, no auxiliary', text: 'Our assistant adds an IVR for the customer.' },
+    { label: 'adding — present progressive', text: 'Our bot is adding an IVR for you.' },
+    { label: 'enables — bare present, no auxiliary', text: 'The AI enables IVR on your number.' },
+    { label: 'enabling — present progressive, "call menu" object (new coverage: base=PASS)', text: 'The assistant is enabling your call menu.' },
+    { label: 'installs — bare present, no auxiliary', text: 'Our bot installs a custom IVR.' },
+    { label: 'installing — present progressive', text: 'The AI is installing a multi-level phone menu.' },
+    // Causative: the object precedes the participle, so this is the IVR_CAUSATIVE_PATTERN path.
+    { label: 'causative "get ... enabled"', text: 'We can get your IVR enabled.' },
+    { label: 'causative "have ... installed"', text: 'We can have a custom IVR installed for you.' },
+  ];
+  for (const { label, text } of blockedActive) {
+    it(`blocks (active/causative): ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe('complex_ivr');
+      expect(result.text).not.toBe(text);
+    });
+  }
+
+  const blockedPassive: { label: string; text: string }[] = [
+    { label: 'added — modal passive', text: 'Your IVR will be added by our bot.' },
+    { label: 'installed — modal passive', text: 'A custom IVR will be installed by our assistant.' },
+    { label: 'enabled — present progressive passive', text: 'Your IVR is being enabled by our AI.' },
+    { label: 'installed — present perfect passive (new coverage: base=PASS)', text: 'The call menu has been installed by our bot.' },
+  ];
+  for (const { label, text } of blockedPassive) {
+    it(`blocks (passive): ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe('complex_ivr_passive');
+      expect(result.text).not.toBe(text);
+    });
+  }
+
+  // Negation controls. Widening the verb vocabulary must not widen what counts as a CLAIM: an
+  // honest denial using the same three verbs still has to reach the customer unchanged.
+  const negated: { label: string; text: string }[] = [
+    { label: 'cannot add', text: 'We cannot add an IVR to your phone system.' },
+    { label: 'are not enabling', text: 'We are not enabling IVR on your line.' },
+    { label: 'will never install', text: 'We will never install a custom IVR for you.' },
+    { label: 'passive "will not be enabled"', text: 'Your IVR will not be enabled by our bot.' },
+    { label: 'passive "has not been installed"', text: 'Your IVR has not been installed by our assistant.' },
+    { label: 'negated causative "cannot get ... added"', text: 'We cannot get an IVR added for you.' },
+  ];
+  for (const { label, text } of negated) {
+    it(`does not block a negated claim: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(false);
+      expect(result.text).toBe(text);
+    });
+  }
+
+  // Human attribution. The matcher blocks a claim only when OUR AI/assistant/bot/system is the
+  // subject or the passive agent. A named human doing the same three verbs is an honest answer and
+  // must stay one — the new vocabulary changes the verb, never the attribution model.
+  const humanAttribution: { label: string; text: string }[] = [
+    { label: 'human subject — "a technician can add"', text: 'A technician can add an IVR after reviewing your requirements.' },
+    { label: 'human subject — "our telecom engineer can enable"', text: 'Our telecom engineer can enable IVR on the PBX.' },
+    { label: 'human subject — "a human installer will install"', text: 'A human installer will install the call menu.' },
+    { label: 'human passive agent — "by a technician"', text: 'Your IVR will be enabled by a technician.' },
+  ];
+  for (const { label, text } of humanAttribution) {
+    it(`does not block human attribution: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(false);
+      expect(result.text).toBe(text);
+    });
+  }
+
+  // Unrelated mentions. The bounded object/complement window must keep a new capability verb from
+  // reaching an IVR mention that is not its direct object.
+  const unrelated: { label: string; text: string }[] = [
+    { label: 'object is "value"; IVR sits behind a "while" adjunct', text: 'We can add value while explaining available IVR options.' },
+    { label: 'object is "better planning"; IVR sits behind the topic preposition "about"', text: 'We can enable better planning for customers asking about IVR.' },
+    { label: 'object is "software"; IVR sits inside a relative "that" clause', text: 'We can install software that displays an IVR overview.' },
+    { label: 'capability verb belongs to a non-finite "how to" clause, not to us', text: 'We can discuss how to enable IVR with your telecom provider.' },
+    { label: 'capability verb belongs to a "how" clause with its own HUMAN subject', text: 'We can explain how a technician installs an IVR.' },
+  ];
+  for (const { label, text } of unrelated) {
+    it(`does not block an unrelated mention: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(false);
+      expect(result.text).toBe(text);
+    });
+  }
+
+  // `how` opens a subordinate clause unconditionally — the finite-clause test cannot decide it,
+  // because "how TO enable" is non-finite by construction. Suppressing the OUTER subject's claim
+  // is not a new false negative: an agent claim INSIDE the how-clause carries its own subject and
+  // is still caught by the predicate heads, which are re-scanned across the whole clause.
+  it('a capability claim inside a "how" clause still blocks when the AGENT is its subject', () => {
+    const result = guardReply('We can explain how our assistant configures your IVR.', SALES_TENANT);
+    expect(result.blocked).toBe(true);
+    expect(result.rule).toBe('complex_ivr');
+  });
+
+  // ACCEPTED LIMITATION, recorded so it is not mistaken for a defect introduced here. When the IVR
+  // token is a MODIFIER of a documentation head-noun ("an IVR OVERVIEW"), it still sits in the
+  // verb's object window and still blocks. This is not specific to the new verbs — it is identical
+  // for every capability verb the matcher already supported, and it blocked at the base SHA too:
+  //
+  //   'We can add an IVR overview to the documentation.'      base=BLOCKED  head=PASS   new=BLOCKED
+  //   'We can build an IVR overview to the documentation.'    base=BLOCKED  head=BLOCKED new=BLOCKED
+  //   'We can create an IVR overview for the documentation.'  base=BLOCKED  head=BLOCKED new=BLOCKED
+  //
+  // Separating them needs noun-phrase HEAD analysis ("IVR overview" is an overview; "IVR system"
+  // is an IVR), which is a matcher redesign rather than a vocabulary correction. It fails SAFE —
+  // deflect and escalate to a human, never a fabrication — so it is pinned here as current
+  // behaviour rather than silently left to drift.
+  it('ACCEPTED LIMITATION: an IVR-modified documentation noun still blocks, for new and pre-existing verbs alike', () => {
+    for (const text of [
+      'We can add an IVR overview to the documentation.',
+      'We can build an IVR overview to the documentation.',
+      'We can create an IVR overview for the documentation.',
+    ]) {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(true);
+    }
+  });
+});
+
+// ─── standalone `no` as an object determiner ─────────────────────────────────────────────────
+// NEGATION_WORDS omits standalone `no`, so an honest denial that negates the IVR object with a
+// bare determiner was deflected at BOTH base and head:
+//
+//   'No IVR will be configured by our assistant.'      base=BLOCKED  head=BLOCKED
+//   'We can build no custom IVR for you.'              base=BLOCKED  head=BLOCKED
+//
+// The correction is deliberately NOT "treat `no` anywhere in the clause as negation". Everywhere
+// else in sales copy `no` modifies something that leaves the claim fully intact — cost, equipment,
+// duration, continuity, and discourse openers. Only `no` in the IVR object's own determiner slot
+// negates the claim, so that is the only position that suppresses it.
+describe('guardReply — standalone "no" negates only the IVR object it determines (PR #75)', () => {
+  const honestNegatives: { label: string; text: string }[] = [
+    { label: 'passive, "no" determines the sentence-initial object', text: 'No IVR will be configured by our assistant.' },
+    { label: 'passive, "no" plus one modifier', text: 'No custom IVR can be built by our bot.' },
+    { label: 'active, "no" determines the direct object', text: 'We can build no custom IVR for you.' },
+    { label: 'active, "no" with a bare object', text: 'Our assistant can configure no IVR on your line.' },
+    { label: '"no longer" in the passive copula gap', text: 'Your IVR will no longer be enabled by our bot.' },
+    { label: 'causative, "no" determines the object before the participle', text: 'We can get no IVR configured for you.' },
+  ];
+  for (const { label, text } of honestNegatives) {
+    it(`does not block an honest negative: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(false);
+      expect(result.text).toBe(text);
+    });
+  }
+
+  // Positive controls. `no` modifying cost, equipment, duration, interruption or an unrelated
+  // discourse phrase leaves a genuine capability claim standing, and it must still block.
+  const stillBlocks: { label: string; text: string }[] = [
+    { label: '"no" modifies equipment, not the IVR', text: 'We can build an IVR with no additional hardware.' },
+    { label: '"no" modifies cost', text: 'Our assistant can configure an IVR with no setup fee.' },
+    { label: '"no" modifies duration', text: 'We can enable your IVR in no more than one day.' },
+    { label: '"no" modifies continuity of service', text: 'Our bot can install an IVR with no interruption to service.' },
+    { label: '"No problem" is a discourse opener in a separate clause', text: 'No problem — we can add an IVR for you.' },
+    { label: '"no issue" is a discourse phrase in a separate clause', text: 'There is no issue; our assistant can enable your IVR.' },
+    // A determiner proves a NEW noun phrase started, so the earlier `no` belongs to the previous
+    // one — this is still a claim, and the bounded modifier run must not reach across "your".
+    { label: 'a possessive between "no" and the object ends the determiner run', text: 'There is no reason your IVR will be built by our bot.' },
+    { label: '"no" trails the object rather than determining it', text: 'We can build a custom IVR with no delay.' },
+  ];
+  for (const { label, text } of stillBlocks) {
+    it(`still blocks a genuine claim: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.text).toBe(DEFLECTION);
+    });
+  }
+});
