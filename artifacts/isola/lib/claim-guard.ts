@@ -73,14 +73,6 @@ function forensicsFor(text: string): GuardResult['forensics'] {
 // false escalation. Those rules are checked with isNegatedClaim() below so
 // only an affirmative claim blocks. Left false (the default) for the rest of
 // the deny-list, which is first-pass and tuned from the audit log instead.
-// Shared building blocks for the complex_ivr / complex_ivr_passive rule pair below — kept as
-// one source each so a term added for one direction (active vs. passive attribution) can never
-// accidentally diverge from the other.
-const IVR_OBJECT = 'IVR|multi-?level (?:phone )?menu|call menu';
-const IVR_BUILD_VERBS =
-  'build|builds|built|building|configure|configures|configured|configuring|design|designs|designed|designing|creat(?:e|es|ed|ing)|deploy|deploys|deployed|deploying|set\\s?up|sets\\s?up|setting\\s?up|implement|implements|implemented|implementing';
-const IVR_PASSIVE_PARTICIPLES = 'built|configured|designed|created|deployed|set\\s?up|implemented';
-
 const HARD_NEVERS: { id: string; pattern: RegExp; requiresPositiveClaim?: boolean }[] = [
   // voice_ai — the sales agent (in ANY grammatical person) claiming an AI answers/handles
   // phone or VOICE calls. Covers the literal "voice AI", third-person "our AI answers your
@@ -103,59 +95,11 @@ const HARD_NEVERS: { id: string; pattern: RegExp; requiresPositiveClaim?: boolea
   { id: 'unlimited_autonomy', pattern: /\bunlimited autonomy\b|\bfully autonomous\b|\bno human (oversight|involvement|needed)\b/i },
   { id: 'guaranteed_accuracy', pattern: /\bguarantee[sd]?\b[^.?!]{0,40}\b(sales|accuracy|results|conversion)s?\b/i, requiresPositiveClaim: true },
   { id: 'missed_call_recovery', pattern: /\bmissed[\s-]call recovery\b|\brecovers?\s+(every|all)\s+missed calls?\b/i },
-  // complex_ivr(_passive) — narrowed 2026-08-05, extended 2026-08-05 to cover passive-voice
-  // attribution too (defect-foundation-claim-guard-complex-ivr-overbroad-post-generation-filter-2026-08-05):
-  // the original bare-keyword form (/\bIVR\b|.../) blocked ANY mention of "IVR"/"multi-level
-  // menu", including an honest description of a real, ratified call-routing feature or a
-  // recommendation that the customer consider one — a live customer asking for a service
-  // recommendation got deflected even though nothing was fabricated. Both rules below are
-  // subject-anchored (mirrors ai_places_call/voice_ai above) so only an autonomous
-  // AI/assistant/bot/system capability claim fires — never a neutral mention, a recommendation
-  // to discuss, a human/team/specialist attribution, or a negated claim. IVR_OBJECT is shared
-  // between both directions so a term added to one can never accidentally diverge from the other.
-  //
-  // complex_ivr (active voice): "I/we/our AI can build/configure/design/create/deploy/set-up/
-  // implement a custom IVR/multi-level menu." [^.?!]{0,40} bounds the verb→object gap to the
-  // same sentence (same idiom as guaranteed_accuracy above), so a "we" earlier in a reply can
-  // never latch onto an unrelated IVR mention in a different sentence/clause, and a third-party
-  // subject ("a specialist would need to design...") never matches at all since it isn't
-  // I/we/our-AI to begin with.
-  //
-  // complex_ivr_passive: "A custom IVR will/can/could/would/may/might be built/configured/
-  // designed/created/deployed/set-up/implemented (and ...)* by [the/our/bare] AI/assistant/bot/
-  // system." — the deciding factor is strictly the agent phrase after "by": human attribution
-  // ("by a qualified telecom specialist", "by our team") or no "by [agent]" clause at all ("may
-  // be designed during a consultation with an engineer") never matches, since the agent group
-  // only accepts AI/assistant/bot/system (bare, "the"-, or "our"-prefixed). A modal with an
-  // interposed "need to" ("would need to be configured by our AI") isn't covered by this narrow
-  // pass — first-pass, tune from the audit log as this file's header already documents.
-  //
-  // Codex review follow-up (2026-08-05, PR #75): the subject/agent group originally required
-  // "our AI/assistant/bot/system" — missing a bare or "the"-prefixed subject ("The assistant can
-  // build a custom IVR"), a real unsupported-capability claim just phrased without "our". Also
-  // the aux-contraction only matched an ASCII apostrophe ('ll); real generated text commonly
-  // uses the Unicode right single quote (’, "smart apostrophe") for contractions like
-  // "I’ll", which silently failed to match. Both are fixed below: the subject/agent group
-  // now accepts bare/"the"-prefixed/"our"-prefixed AI|assistant|bot|system, and the contraction
-  // alternative accepts either apostrophe character. (voice_ai/ai_places_call above may share
-  // this same apostrophe gap — flagged separately, not fixed here to keep this change scoped to
-  // the complex_ivr rule pair this defect/PR is about.)
-  {
-    id: 'complex_ivr',
-    pattern: new RegExp(
-      `\\b(?:I|we|(?:the|our)\\s+(?:AI|assistant|bot|system)|AI|assistant|bot|system)\\b(?:['’]ll| will| can| could| would| also)*\\s+(?:${IVR_BUILD_VERBS})\\b[^.?!]{0,40}\\b(?:${IVR_OBJECT})\\b`,
-      'i',
-    ),
-    requiresPositiveClaim: true,
-  },
-  {
-    id: 'complex_ivr_passive',
-    pattern: new RegExp(
-      `\\b(?:${IVR_OBJECT})\\b[^.?!]{0,30}?\\b(?:will|can|could|would|may|might)\\s+be\\s+(?:${IVR_PASSIVE_PARTICIPLES})(?:\\s*(?:,|and)\\s*(?:${IVR_PASSIVE_PARTICIPLES}))*\\s+by\\s+(?:(?:the|our)\\s+(?:AI|assistant|bot|system)|AI|assistant|bot|system)\\b`,
-      'i',
-    ),
-    requiresPositiveClaim: true,
-  },
+  // complex_ivr / complex_ivr_passive are NOT here — see checkComplexIvr() below, called
+  // directly from guardReply(). A single "verb ... N chars ... object" regex proved unable to
+  // stay both (a) narrow enough to skip a neutral mention and (b) unable to bridge across an
+  // "and"-joined clause boundary within one sentence — clause-bounded evaluation replaces the
+  // fixed-distance gap entirely (defect-foundation-claim-guard-complex-ivr-overbroad-post-generation-filter-2026-08-05).
   { id: 'instant_self_service', pattern: /\binstant self-?service\b|\b14-?day free\b|\bself-?serve sign-?up\b/i },
   { id: 'automated_refunds', pattern: /\bautomat(ed|ic) refunds?\b/i, requiresPositiveClaim: true },
   { id: 'every_intl_route', pattern: /\bevery international (route|destination)\b|\ball countries\b/i, requiresPositiveClaim: true },
@@ -192,6 +136,100 @@ function hasPositiveClaim(text: string, pattern: RegExp): boolean {
   return false;
 }
 
+// ─── complex_ivr / complex_ivr_passive: clause-bounded custom check ───────────
+// (defect-foundation-claim-guard-complex-ivr-overbroad-post-generation-filter-2026-08-05)
+//
+// This pair is deliberately NOT a HARD_NEVERS regex entry. The original single-regex design
+// ("subject ... verb ... N chars ... object") could not satisfy both requirements at once: a
+// gap wide enough to catch "I can build you a[n] ... custom IVR" reliably is also wide enough to
+// bridge across an "and"-joined independent clause ("We can configure your WhatsApp greeting,
+// and a call menu can route callers to sales") and wrongly attach an unrelated agent/verb to a
+// different clause's neutral IVR/menu mention. Instead: normalize the text, split it into
+// sentences and then independent CLAUSES (comma + coordinating conjunction, semicolon, colon, a
+// spaced em/en dash — never a bare hyphen like "set-up"), and run a small explicit active
+// matcher and a small explicit passive matcher independently within each clause. A clause
+// boundary is what makes the verb→object distance safe to leave unbounded *within* a clause —
+// the boundary itself is the safety net, not a magic character count.
+
+// Shared vocabulary for both directions, kept as one source each so a term added to one can
+// never accidentally diverge from the other.
+const IVR_OBJECT = '(?:IVR|multi-?level (?:phone )?menu|call menu)';
+// Subject (active) / agent (passive): bare, "the"-prefixed, or "our"-prefixed AI|assistant|bot|
+// system, plus bare I/we for the active subject only (passive attribution via "by us"/"by me" is
+// not in scope — untested and ungrammatical for "by we"/"by I").
+const IVR_AGENT = '(?:AI|assistant|bot|system)';
+const IVR_ACTIVE_SUBJECT = `(?:I|we|(?:the|our)\\s+${IVR_AGENT}|${IVR_AGENT})`;
+const IVR_PASSIVE_AGENT = `(?:(?:the|our)\\s+${IVR_AGENT}|${IVR_AGENT})`;
+// "set up" / "set-up" / "setting up" only — the separator is REQUIRED (not optional) so the
+// bare noun "setup" ("your business phone setup") can never be mistaken for a verb; a real verb
+// always has a space or hyphen between "set"/"setting" and "up".
+const IVR_VERB_FORMS =
+  '(?:build|builds|built|building|configure|configures|configured|configuring|design|designs|designed|designing|creat(?:e|es|ed|ing)|deploy|deploys|deployed|deploying|set[\\s-]up|sets[\\s-]up|setting[\\s-]up|implement|implements|implemented|implementing)';
+const IVR_PARTICIPLES = '(?:built|configured|designed|created|deployed|set[\\s-]up|implemented)';
+// Covers modal ("will/can/could/would/may/might be"), simple present ("is/are"), present
+// progressive ("is/are being"), simple past ("was/were"), and present perfect ("has/have been")
+// passive forms — the full tense range a real Clawith reply might use.
+const IVR_BE_PHRASE =
+  '(?:(?:is|are|was|were)(?:\\s+being)?|has\\s+been|have\\s+been|(?:will|can|could|would|may|might)\\s+be)';
+
+const IVR_ACTIVE_PATTERN = new RegExp(
+  `\\b${IVR_ACTIVE_SUBJECT}\\b(?:'ll| will| can| could| would| also| is| are)*\\s+${IVR_VERB_FORMS}\\b[\\s\\S]*?\\b${IVR_OBJECT}\\b`,
+  'i',
+);
+const IVR_PASSIVE_PATTERN = new RegExp(
+  `\\b${IVR_OBJECT}\\b[\\s\\S]*?\\b${IVR_BE_PHRASE}\\s+${IVR_PARTICIPLES}(?:\\s*(?:,|and)\\s*${IVR_PARTICIPLES})*\\s+by\\s+${IVR_PASSIVE_AGENT}\\b`,
+  'i',
+);
+
+// Normalizes for matching only — never applied to the text actually returned to the customer,
+// which is always the fixed DEFLECTION string regardless. Smart/curly apostrophes (’) become
+// ASCII ('), and a non-ASCII hyphen-like character directly between two word characters (e.g.
+// "set‑up" using U+2011) becomes an ASCII hyphen; a SPACED dash ("call it good — but not") is
+// left untouched, since that spacing is exactly what marks it as a clause-boundary dash below,
+// not a word-joining hyphen.
+function normalizeForMatching(text: string): string {
+  return text.replace(/[‘’]/g, "'").replace(/(\w)[‐‑‒–—](\w)/g, '$1-$2');
+}
+
+function splitIntoSentences(text: string): string[] {
+  return text.split(/(?<=[.?!])\s+/).filter((s) => s.trim().length > 0);
+}
+
+// Splits one sentence into independent clauses at a comma + coordinating conjunction, a
+// semicolon, a colon, or a spaced em/en dash. This is what stops an agent/verb phrase in one
+// clause from combining with an IVR/menu object that only appears in a different, independent
+// clause of the same sentence — never at a bare hyphen (no surrounding spaces), so "set-up" is
+// never split.
+function splitIntoClauses(sentence: string): string[] {
+  return sentence
+    .split(/,\s+(?:and|but|or|nor|so|yet)\s+|;\s*|:\s*|\s+[—–]\s+/i)
+    .map((c) => c.trim())
+    .filter(Boolean);
+}
+
+// True if `pattern` matches somewhere in `clause` with no negation word (reusing NEGATION_WORDS
+// below) earlier in that SAME clause — clause-scoped, not sentence-scoped, so a negated claim in
+// one clause (already itself excluded by grammar in practice — see isNegatedClaim/NEGATION_WORDS
+// below) can never excuse a genuine positive claim in a different, later clause.
+function clauseHasUnnegatedMatch(clause: string, pattern: RegExp): boolean {
+  const global = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g');
+  for (const m of clause.matchAll(global)) {
+    if (!NEGATION_WORDS.test(clause.slice(0, m.index ?? 0))) return true;
+  }
+  return false;
+}
+
+function checkComplexIvr(text: string): 'complex_ivr' | 'complex_ivr_passive' | null {
+  const normalized = normalizeForMatching(text);
+  for (const sentence of splitIntoSentences(normalized)) {
+    for (const clause of splitIntoClauses(sentence)) {
+      if (clauseHasUnnegatedMatch(clause, IVR_ACTIVE_PATTERN)) return 'complex_ivr';
+      if (clauseHasUnnegatedMatch(clause, IVR_PASSIVE_PATTERN)) return 'complex_ivr_passive';
+    }
+  }
+  return null;
+}
+
 // Currency-tagged price scan. This sales agent's entire ratified Claim
 // Register is EC$-denominated, so any US$ or unqualified $ figure is always
 // out of scope for it — block outright rather than allow-listing amounts
@@ -204,6 +242,9 @@ const PRICE = /(EC\$|US\$|\$)\s?([\d,]+(?:\.\d+)?)/gi;
  */
 export function guardReply(text: string, tenantId: string): GuardResult {
   if (!SALES_TENANT_IDS.has(tenantId)) return { text, blocked: false };
+
+  const ivrRule = checkComplexIvr(text);
+  if (ivrRule) return { text: DEFLECTION, blocked: true, rule: ivrRule, forensics: forensicsFor(text) };
 
   for (const { id, pattern, requiresPositiveClaim } of HARD_NEVERS) {
     const hit = requiresPositiveClaim ? hasPositiveClaim(text, pattern) : pattern.test(text);

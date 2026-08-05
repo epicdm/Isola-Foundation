@@ -132,16 +132,37 @@ describe('guardReply — negation-aware narrowing (fast-follow: honest disclaime
   });
 });
 
-describe('guardReply — complex_ivr narrowing (defect-foundation-claim-guard-complex-ivr-overbroad-post-generation-filter-2026-08-05)', () => {
-  // The original bare-keyword form blocked ANY mention of "IVR"/"multi-level menu" — including
-  // an honest, on-topic recommendation. These must all pass now that the rule is subject-anchored
-  // to an actual I/we/our-AI build/configure/design/create/deploy/set-up/implement claim.
+describe('guardReply — complex_ivr / complex_ivr_passive (clause-bounded redesign, defect-foundation-claim-guard-complex-ivr-overbroad-post-generation-filter-2026-08-05)', () => {
+  // Neutral mentions, recommendations, human attribution, negated claims, and — critically —
+  // an "and"-joined clause whose OTHER clause happens to mention IVR/call-menu, must all pass.
+  // The clause-bounded design (normalize -> split into sentences -> split into independent
+  // clauses -> match within one clause only) is what makes the last few of these safe without
+  // relying on a fixed character-distance gap.
   const allowed: { label: string; text: string }[] = [
     { label: 'neutral feature mention (our plan includes IVR)', text: 'Our business calling service includes IVR and call routing.' },
+    { label: 'neutral informational description', text: 'EPIC offers IVR and call-routing features.' },
     { label: 'third-party subject (the IVR itself, not us)', text: 'An IVR can route callers to sales, support or accounts.' },
+    { label: 'third-party subject, alternate phrasing', text: 'An IVR can route callers to sales and support.' },
     { label: 'recommendation to discuss, not a build claim', text: 'We can discuss available PBX and IVR options with you.' },
+    { label: 'recommendation to discuss, terse form', text: 'We can discuss available IVR options.' },
     { label: 'negated build claim', text: 'We cannot build a custom IVR automatically.' },
+    { label: 'negated build claim, adverb-before-verb phrasing', text: 'We cannot automatically build a custom IVR.' },
     { label: 'third-party subject needing a human specialist', text: 'A specialist would need to design a custom multi-level phone menu.' },
+    { label: 'human attribution: "by a qualified telecom specialist"', text: 'A custom IVR can be built by a qualified telecom specialist.' },
+    { label: 'human attribution: "by our team" (+ "would need to be" modal)', text: 'A multi-level phone menu would need to be configured by our team.' },
+    // present-tense passive is now covered for AI/assistant/bot/system — must still correctly
+    // exclude human ("our engineering team") attribution, the same as the modal form always did.
+    { label: 'human attribution, present-tense passive: "by our engineering team"', text: 'A multi-level menu is configured by our engineering team.' },
+    { label: 'no "by [agent]" clause at all ("during a consultation with")', text: 'An IVR may be designed during a consultation with an engineer.' },
+    { label: 'no "by [agent]" clause, alternate phrasing', text: 'Your IVR may be designed during consultation with an engineer.' },
+    // Cross-clause false positive (Codex P2, confirmed real against the prior single-regex
+    // design): an agent/verb phrase in one independent clause must never combine with an
+    // IVR/call-menu object that only appears in a different clause joined by ", and".
+    { label: 'cross-clause: configure-greeting clause, separate call-menu clause', text: 'We can configure your WhatsApp greeting, and a call menu can route callers to sales.' },
+    { label: 'cross-clause: explain-routing clause, separate IVR-direct clause', text: 'Our assistant can explain call routing, and an IVR can direct callers to departments.' },
+    // Semicolon clause boundary, AND the bare noun "setup" (one word, no separator) in the first
+    // clause must never be mistaken for the verb "set up"/"set-up".
+    { label: 'semicolon clause boundary + bare noun "setup" is not a verb', text: 'We can help with your business phone setup; a specialist would configure any custom IVR.' },
   ];
   for (const { label, text } of allowed) {
     it(`does not block: ${label}`, () => {
@@ -151,20 +172,27 @@ describe('guardReply — complex_ivr narrowing (defect-foundation-claim-guard-co
     });
   }
 
-  // The actual fabrication this rule exists to catch: the assistant itself claiming to
-  // autonomously build/configure/design/deploy/set-up a custom IVR — all must still block.
-  const blocked: { label: string; text: string }[] = [
+  // The actual fabrication this rule exists to catch: our own AI/assistant/bot/system claiming
+  // (actively or passively, in any of the covered tenses) to autonomously build/configure/
+  // design/create/deploy/set-up/implement a custom IVR or call menu.
+  const blockedActive: { label: string; text: string }[] = [
+    { label: 'first-person plural build claim', text: 'We can build you a custom IVR.' },
+    { label: '"our assistant" configure claim', text: 'Our assistant can configure a multi-level phone menu.' },
     { label: 'first-person build claim', text: 'I can build you a custom IVR.' },
     { label: 'first-person plural configure claim', text: 'We will configure a multi-level phone menu for your business.' },
     { label: 'AI-subject compound verb claim (design and deploy)', text: 'Our AI can design and deploy your IVR.' },
-    { label: 'contraction + set-up claim', text: "I'll set up an IVR with sales and support departments." },
-    // Codex review follow-up (2026-08-05, PR #75): both previously slipped through unblocked.
-    { label: '"the assistant" bare/determiner subject (Codex finding)', text: 'The assistant can build a custom IVR.' },
-    { label: 'smart/curly apostrophe contraction (Codex finding)', text: 'I’ll set up an IVR for you.' },
+    { label: 'contraction + set-up claim (space separator)', text: "I'll set up an IVR with sales and support departments." },
+    { label: '"the assistant" bare/determiner subject', text: 'The assistant can build a custom IVR.' },
+    { label: 'smart/curly apostrophe contraction', text: 'I’ll set up an IVR for you.' },
     { label: 'bare "bot" subject, no determiner', text: 'Bot can configure a custom IVR for your business.' },
+    { label: 'hyphenated set-up variant', text: 'Our AI will set-up your call menu.' },
+    { label: 'present progressive active ("is setting up")', text: 'Our AI is setting up your IVR.' },
+    // Clause-bounded negation: the FIRST clause is negated/different-object; the SECOND,
+    // independent clause (joined by ", but") is a genuine unnegated claim and must still block.
+    { label: 'negated first clause does not excuse a positive second clause', text: 'We cannot build the PBX today, but our assistant will configure your IVR tomorrow.' },
   ];
-  for (const { label, text } of blocked) {
-    it(`blocks: ${label}`, () => {
+  for (const { label, text } of blockedActive) {
+    it(`blocks (active): ${label}`, () => {
       const result = guardReply(text, SALES_TENANT);
       expect(result.blocked).toBe(true);
       expect(result.rule).toBe('complex_ivr');
@@ -172,9 +200,28 @@ describe('guardReply — complex_ivr narrowing (defect-foundation-claim-guard-co
     });
   }
 
+  const blockedPassive: { label: string; text: string }[] = [
+    { label: 'modal passive, "by our AI"', text: 'A custom IVR will be built by our AI.' },
+    { label: 'modal passive, "by our assistant"', text: 'A multi-level phone menu can be configured by our assistant.' },
+    { label: 'modal passive compound (designed and deployed), "by our system"', text: 'Your IVR will be designed and deployed by our system.' },
+    { label: 'modal passive set-up, "call menu" object, "by our bot"', text: 'A custom call menu will be set up by our bot.' },
+    { label: 'modal passive, bare/"the"-prefixed agent', text: 'A custom IVR will be built by the assistant.' },
+    // The three tenses the prior round's Codex review found missing:
+    { label: 'simple present passive ("is configured by")', text: 'Your IVR is configured by our assistant.' },
+    { label: 'present progressive passive ("is being set up by")', text: 'Your call menu is being set up by our bot.' },
+    { label: 'simple past passive ("was designed by")', text: 'The multi-level phone menu was designed by our system.' },
+    { label: 'present perfect passive ("has been implemented by")', text: 'A custom IVR has been implemented by the assistant.' },
+  ];
+  for (const { label, text } of blockedPassive) {
+    it(`blocks (passive): ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe('complex_ivr_passive');
+      expect(result.text).not.toBe(text);
+    });
+  }
+
   it('does not let an earlier build claim excuse a later, different sentence (sentence-aware, not text-wide)', () => {
-    // The earlier claim is itself blocked; this only additionally proves an unrelated, later
-    // sentence with a valid third-party subject is judged on its own, not swept in by the first.
     const result = guardReply(
       'I can build you a custom IVR. A specialist would need to design a custom multi-level phone menu for anything more advanced.',
       SALES_TENANT,
@@ -205,45 +252,6 @@ describe('guardReply — complex_ivr narrowing (defect-foundation-claim-guard-co
     expect(result.blocked).toBe(false);
     expect(result.forensics).toBeUndefined();
   });
-});
-
-describe('guardReply — complex_ivr_passive (passive-voice autonomous attribution, release-blocking follow-up 2026-08-05)', () => {
-  // Passive construction attributing the build/configure/design/deploy/set-up to our own
-  // AI/assistant/bot/system — the same fabrication as complex_ivr, phrased passively.
-  const blocked: { label: string; text: string }[] = [
-    { label: 'passive build, "by our AI"', text: 'A custom IVR will be built by our AI.' },
-    { label: 'passive configure, "by our assistant"', text: 'A multi-level phone menu can be configured by our assistant.' },
-    { label: 'passive compound (designed and deployed), "by our system"', text: 'Your IVR will be designed and deployed by our system.' },
-    { label: 'passive set-up, "call menu" object, "by our bot"', text: 'A custom call menu will be set up by our bot.' },
-    // Codex review follow-up (2026-08-05, PR #75): extends the same bare/"the"-prefixed subject
-    // fix to the passive agent group, for consistency with the active-voice rule.
-    { label: 'passive build, bare/"the"-prefixed agent (Codex-finding consistency)', text: 'A custom IVR will be built by the assistant.' },
-  ];
-  for (const { label, text } of blocked) {
-    it(`blocks: ${label}`, () => {
-      const result = guardReply(text, SALES_TENANT);
-      expect(result.blocked).toBe(true);
-      expect(result.rule).toBe('complex_ivr_passive');
-      expect(result.text).not.toBe(text);
-    });
-  }
-
-  // Human attribution, a missing "by [agent]" clause, or a neutral/discussion mention must all
-  // pass — the passive rule only fires on our-AI/assistant/bot/system as the stated builder.
-  const allowed: { label: string; text: string }[] = [
-    { label: 'human attribution: "by a qualified telecom specialist"', text: 'A custom IVR can be built by a qualified telecom specialist.' },
-    { label: 'human attribution: "by our team" (+ "would need to be" modal)', text: 'A multi-level phone menu would need to be configured by our team.' },
-    { label: 'no "by [agent]" clause at all ("during a consultation with")', text: 'An IVR may be designed during a consultation with an engineer.' },
-    { label: 'neutral informational description', text: 'EPIC offers IVR and call-routing features.' },
-    { label: 'recommendation to discuss, not a build claim', text: 'We can discuss available IVR options with you.' },
-  ];
-  for (const { label, text } of allowed) {
-    it(`does not block: ${label}`, () => {
-      const result = guardReply(text, SALES_TENANT);
-      expect(result.blocked).toBe(false);
-      expect(result.text).toBe(text);
-    });
-  }
 });
 
 describe('guardReply — voice-AI first-person + cross-channel fabrication (def-ema-voice-ai-capability-fabrication-2026-07-18 regression)', () => {
