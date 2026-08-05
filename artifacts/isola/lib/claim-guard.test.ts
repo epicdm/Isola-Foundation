@@ -824,3 +824,50 @@ describe('guardReply — a trailing subordinate clause with its own subject keep
     });
   }
 });
+
+// ─── Correction round 2, Codex follow-up at 470e51b ──────────────────────────
+
+describe('guardReply — relative pronoun as the subordinate clause subject', () => {
+  // "who" can BE the clause's own subject, so requiring an explicit subject after it walked the
+  // scan into the clause and attributed its verb to the outer claim.
+  it('passes: human specialist attributed via "who configures"', () => {
+    expect(guardReply('We can build trust with a specialist who configures your IVR later.', SALES_TENANT).blocked).toBe(false);
+  });
+  it('passes: "which may later consider an IVR"', () => {
+    expect(guardReply('We can design a strategy for businesses which may later consider an IVR.', SALES_TENANT).blocked).toBe(false);
+  });
+});
+
+describe('guardReply — topic prepositions beyond "about"', () => {
+  const PASSES: { label: string; text: string }[] = [
+    { label: '"around"', text: 'We can create a plan around IVR options.' },
+    { label: '"regarding"', text: 'We can create a plan regarding IVR options.' },
+    { label: '"about" (unchanged)', text: 'We can build a plan about IVR options.' },
+  ];
+  for (const { label, text } of PASSES) {
+    it(`passes: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(false);
+    });
+  }
+  it('still blocks the object-introducing preposition "for"', () => {
+    expect(guardReply('We can build for your business a custom IVR.', SALES_TENANT).blocked).toBe(true);
+  });
+});
+
+describe('guardReply — long unpunctuated interruptions still reach the verb', () => {
+  const BLOCKED: { label: string; text: string }[] = [
+    {
+      label: 'twelve-token unpunctuated adjunct',
+      text: 'We can after receiving final written approval from your business owner and telecom lead configure your IVR.',
+    },
+    {
+      label: 'contraction + long unpunctuated adjunct',
+      text: "We'll if absolutely needed and only after approval from your manager configure your IVR.",
+    },
+  ];
+  for (const { label, text } of BLOCKED) {
+    it(`blocks: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(true);
+    });
+  }
+});

@@ -246,16 +246,23 @@ export const IVR_OBJECT_TOKEN_LIMIT = 7;
 /** Words that open a subordinate or relative clause. Reaching one means the IVR mention that
  *  follows belongs to a DIFFERENT predicate than the capability verb, so it can never be that
  *  verb's direct object. `that` is handled separately below — it is ambiguous. */
+/** Relative pronouns. These ALWAYS open a subordinate clause — a relative pronoun can be the
+ *  clause's own subject ("a specialist WHO configures your IVR"), so requiring an explicit
+ *  subject after it, as the adverbial markers do, wrongly walked into the clause and attributed
+ *  its verb to the outer claim. They can never head a reduced adjunct, so an unconditional stop
+ *  is both correct and safe. */
+const RELATIVE_PRONOUN_MARKERS: ReadonlySet<string> = new Set(['who', 'whom', 'whose', 'which']);
+
+/** Adverbial subordinators and topic prepositions. Unlike relative pronouns these CAN head a
+ *  reduced adjunct that merely interrupts a predicate, so the predicate scan stops on them only
+ *  when they genuinely open a finite clause. Topic prepositions ("a plan ABOUT/AROUND IVR
+ *  options") make the IVR the subject matter rather than the artifact; object-introducing
+ *  prepositions such as `for` are deliberately excluded ("build for your business a custom IVR"). */
 const SUBORDINATE_CLAUSE_MARKERS: ReadonlySet<string> = new Set([
-  'who', 'whom', 'whose', 'which', 'where', 'when', 'because', 'although', 'while', 'unless',
-  // Conditional/temporal subordinators, and `whether` for embedded questions — an IVR mention
-  // behind any of these belongs to the subordinate clause's own predicate, not to the capability
-  // verb ("We can create a plan if IVR options come up later").
+  ...RELATIVE_PRONOUN_MARKERS,
+  'where', 'when', 'because', 'although', 'while', 'unless',
   'if', 'after', 'before', 'until', 'whether', 'once', 'since', 'though', 'whereas',
-  // Topic preposition: "build a plan ABOUT IVR options" makes the IVR the plan's subject matter,
-  // not the thing being built. Deliberately only `about` — object-introducing prepositions such
-  // as `for` must keep scanning ("build for your business a custom IVR").
-  'about',
+  'about', 'around', 'regarding', 'concerning',
 ]);
 
 /** Bare capability-verb words. Encountering one mid-scan RESETS the window: a compound predicate
@@ -334,7 +341,13 @@ function findBoundedCapabilityObject(clause: string, fromIndex: number): boolean
 
 /** Maximum tokens between an auxiliary and the capability verb it governs, when they are not
  *  adjacent (compound predicate). Bounded for the same reason as the object window. */
-const IVR_VERB_SCAN_LIMIT = 8;
+// Sized to survive a long unpunctuated reduced adjunct ("We can after receiving final written
+// approval from your business owner and telecom lead configure your IVR" — twelve tokens before
+// the verb), which a tighter budget let escape. Widening this is safe because the scan now stops
+// properly at relative pronouns and at genuinely finite subordinate clauses; the OBJECT window
+// (IVR_OBJECT_TOKEN_LIMIT) stays tight, and it is that window, not this one, that decides whether
+// an IVR mention is actually the verb's direct object.
+const IVR_VERB_SCAN_LIMIT = 16;
 
 /** Words that end a predicate scan because what follows is negated or belongs to another clause.
  *  `not`/`never`/`unable` matter most: without them, "I'm not setting up an IVR" would have its
@@ -376,6 +389,8 @@ function findPredicateCapabilityObject(clause: string, fromIndex: number): boole
     // since configured your IVR"), and treating those as clause boundaries hid the capability verb
     // behind them — a false negative, the worst direction for a fabrication guard. The object-window
     // scan keeps the unconditional stop, where the marker really does end the object.
+    // A relative pronoun always opens a clause, and may be that clause's own subject.
+    if (RELATIVE_PRONOUN_MARKERS.has(word)) return false;
     if (SUBORDINATE_CLAUSE_MARKERS.has(word)) {
       // A COMMA-INTRODUCED marker opens an interruption, not a trailing clause: the main
       // predicate resumes after the closing comma ("We can, once the customer gives final
