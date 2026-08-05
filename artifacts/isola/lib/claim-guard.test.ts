@@ -953,3 +953,32 @@ describe('guardReply — causative claims (object before participle)', () => {
     });
   }
 });
+
+// ─── Correction round 2, Codex follow-up at e657a3f ──────────────────────────
+
+describe('guardReply — hyphenated participles', () => {
+  // "custom-built" is one token to the tokenizer, so a bare-participle list read it as having no
+  // participle at all and the causative claim escaped.
+  const BLOCKED: { label: string; text: string }[] = [
+    { label: 'causative + custom-built', text: 'We can get your call menu custom-built today.' },
+    { label: 'causative + fully-configured', text: 'We can get your IVR fully-configured for you.' },
+    { label: 'passive + custom-built by our AI', text: 'A custom IVR will be custom-built by our AI.' },
+  ];
+  for (const { label, text } of BLOCKED) {
+    it(`blocks: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(true);
+    });
+  }
+
+  // The hyphenated prefix must not weaken human attribution or the participle allowlist.
+  const PASSES: { label: string; text: string }[] = [
+    { label: 'human attribution still passes', text: 'A custom IVR can be built by a qualified telecom specialist.' },
+    { label: 'non-capability participle still passes', text: 'We can have your IVR options reviewed by a specialist.' },
+    { label: 'consultation phrasing still passes', text: 'An IVR may be designed during a consultation with an engineer.' },
+  ];
+  for (const { label, text } of PASSES) {
+    it(`passes: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(false);
+    });
+  }
+});

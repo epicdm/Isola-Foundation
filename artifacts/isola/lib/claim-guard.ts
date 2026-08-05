@@ -169,7 +169,11 @@ const IVR_PASSIVE_AGENT = `(?:(?:the|our)\\s+${IVR_AGENT}|${IVR_AGENT})`;
 // always has a space or hyphen between "set"/"setting" and "up".
 const IVR_VERB_FORMS =
   '(?:build|builds|built|building|configure|configures|configured|configuring|design|designs|designed|designing|creat(?:e|es|ed|ing)|deploy|deploys|deployed|deploying|set[\\s-]up|sets[\\s-]up|setting[\\s-]up|implement|implements|implemented|implementing)';
-const IVR_PARTICIPLES = '(?:built|configured|designed|created|deployed|set[\\s-]up|implemented)';
+// An optional hyphenated modifier is part of the participle token in sales copy
+// ("custom-built", "purpose-built", "fully-configured"), and a single token to the tokenizer —
+// without it, "get your call menu custom-built" read as having no participle at all.
+const IVR_PARTICIPLES =
+  '(?:[a-z]+-)?(?:built|configured|designed|created|deployed|set[\\s-]up|implemented)';
 // Covers modal ("will/can/could/would/may/might be"), simple present ("is/are"), present
 // progressive ("is/are being"), simple past ("was/were"), and present perfect ("has/have been")
 // passive forms — the full tense range a real Clawith reply might use.
