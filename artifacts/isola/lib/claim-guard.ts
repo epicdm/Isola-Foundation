@@ -153,7 +153,9 @@ function hasPositiveClaim(text: string, pattern: RegExp): boolean {
 
 // Shared vocabulary for both directions, kept as one source each so a term added to one can
 // never accidentally diverge from the other.
-const IVR_OBJECT = '(?:IVR|multi-?level (?:phone )?menu|call menu)';
+// "multi level" (spaced) is as common in sales copy as "multi-level" and "multilevel"; matching
+// only the first two was a vocabulary miss, not an intentional scope boundary.
+const IVR_OBJECT = '(?:IVR|multi[\\s-]?level (?:phone )?menu|call menu)';
 // Subject (active) / agent (passive): bare, "the"-prefixed, or "our"-prefixed AI|assistant|bot|
 // system, plus bare I/we/it for the active subject only (passive attribution via "by us"/"by
 // me"/"by it" is not in scope — untested, and "by we"/"by I" is ungrammatical). "it" is included
@@ -177,8 +179,12 @@ const IVR_PARTICIPLES =
 // Covers modal ("will/can/could/would/may/might be"), simple present ("is/are"), present
 // progressive ("is/are being"), simple past ("was/were"), and present perfect ("has/have been")
 // passive forms — the full tense range a real Clawith reply might use.
+// The modal branch allows a bounded adverb between the modal and `be` ("will EVENTUALLY be
+// configured", "can ALSO be configured"). Negation words are excluded from that gap for the same
+// reason as the other passive gaps: "will NOT be configured by our assistant" is an honest
+// denial, and letting `not` pass as an adverb here would deflect it.
 const IVR_BE_PHRASE =
-  '(?:(?:is|are|was|were)(?:\\s+being)?|has\\s+been|have\\s+been|(?:will|can|could|would|may|might)\\s+be)';
+  "(?:(?:is|are|was|were)(?:\\s+being)?|has\\s+been|have\\s+been|had\\s+been|(?:will|can|could|would|may|might|shall|should|must)\\s+(?:(?!not\\b|never\\b|no\\b|n't\\b)[\\w'-]+\\s+){0,2}?be)";
 // A single bounded adverb: an explicit whitelist of common non-"-ly" modifiers, plus any "-ly"
 // word (covers automatically/quickly/securely/definitely/personally/etc. without enumerating
 // every one). Used ONLY in the narrow aux→verb gap below, so the position itself bounds the

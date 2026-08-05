@@ -1101,3 +1101,42 @@ describe('guardReply — a passive gap never swallows a negation', () => {
     expect(guardReply('Your IVR is configured by our assistant.', SALES_TENANT).blocked).toBe(true);
   });
 });
+
+// ─── Correction round 2, Codex follow-up at 6080582 ──────────────────────────
+
+describe('guardReply — adverb between the modal and "be"', () => {
+  const BLOCKED: { label: string; text: string }[] = [
+    { label: 'will eventually be', text: 'Your IVR will eventually be configured by our assistant.' },
+    { label: 'can also be', text: 'Your IVR can also be configured by our assistant.' },
+    { label: 'would quickly be', text: 'Your IVR would quickly be configured by our assistant.' },
+    { label: 'should soon be', text: 'Your call menu should soon be built by our bot.' },
+  ];
+  for (const { label, text } of BLOCKED) {
+    it(`blocks: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe('complex_ivr_passive');
+    });
+  }
+
+  it('passes: "will not be" — negation is not an adverb in that gap either', () => {
+    expect(guardReply('Your IVR will not be configured by our assistant.', SALES_TENANT).blocked).toBe(false);
+  });
+});
+
+describe('guardReply — spaced "multi level" spelling', () => {
+  const BLOCKED: { label: string; text: string }[] = [
+    { label: 'active, spaced spelling', text: 'We can build a multi level phone menu.' },
+    { label: 'passive, spaced spelling', text: 'Your multi level phone menu will be configured by our assistant.' },
+    { label: 'hyphenated spelling (unchanged)', text: 'We can build a multi-level phone menu.' },
+  ];
+  for (const { label, text } of BLOCKED) {
+    it(`blocks: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(true);
+    });
+  }
+
+  it('still passes a neutral educational mention', () => {
+    expect(guardReply('We can help your team understand multi-level phone menus.', SALES_TENANT).blocked).toBe(false);
+  });
+});
