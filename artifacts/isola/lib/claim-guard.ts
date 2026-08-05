@@ -155,10 +155,14 @@ function hasPositiveClaim(text: string, pattern: RegExp): boolean {
 // never accidentally diverge from the other.
 const IVR_OBJECT = '(?:IVR|multi-?level (?:phone )?menu|call menu)';
 // Subject (active) / agent (passive): bare, "the"-prefixed, or "our"-prefixed AI|assistant|bot|
-// system, plus bare I/we for the active subject only (passive attribution via "by us"/"by me" is
-// not in scope — untested and ungrammatical for "by we"/"by I").
+// system, plus bare I/we/it for the active subject only (passive attribution via "by us"/"by
+// me"/"by it" is not in scope — untested, and "by we"/"by I" is ungrammatical). "it" is included
+// so a pronoun referring back to "our AI" established in an earlier clause of the same sentence
+// ("Our AI does not build X, but it can configure your IVR") still resolves within its own
+// clause — the clause-bounded design below evaluates each clause independently, so the pronoun
+// itself has to be recognized here rather than relying on cross-clause context.
 const IVR_AGENT = '(?:AI|assistant|bot|system)';
-const IVR_ACTIVE_SUBJECT = `(?:I|we|(?:the|our)\\s+${IVR_AGENT}|${IVR_AGENT})`;
+const IVR_ACTIVE_SUBJECT = `(?:I|we|it|(?:the|our)\\s+${IVR_AGENT}|${IVR_AGENT})`;
 const IVR_PASSIVE_AGENT = `(?:(?:the|our)\\s+${IVR_AGENT}|${IVR_AGENT})`;
 // "set up" / "set-up" / "setting up" only — the separator is REQUIRED (not optional) so the
 // bare noun "setup" ("your business phone setup") can never be mistaken for a verb; a real verb
@@ -171,9 +175,20 @@ const IVR_PARTICIPLES = '(?:built|configured|designed|created|deployed|set[\\s-]
 // passive forms — the full tense range a real Clawith reply might use.
 const IVR_BE_PHRASE =
   '(?:(?:is|are|was|were)(?:\\s+being)?|has\\s+been|have\\s+been|(?:will|can|could|would|may|might)\\s+be)';
+// A single bounded adverb: an explicit whitelist of common non-"-ly" modifiers, plus any "-ly"
+// word (covers automatically/quickly/securely/definitely/personally/etc. without enumerating
+// every one). Used ONLY in the narrow aux→verb gap below, so the position itself bounds the
+// risk of an unrelated "-ly" word being mistaken for a real adverb here.
+const IVR_ADVERB = '(?:also|now|currently|directly|\\w+ly)';
+// Optional bounded adverb phrase between the auxiliary/modal and the capability verb: zero, one,
+// or exactly two adverbs joined by "and" ("securely and automatically") — never an arbitrary
+// noun, object, determiner, or clause. Codex review follow-up (2026-08-05, PR #75): the aux was
+// previously required to be immediately adjacent to the verb, so "Our assistant can
+// automatically configure an IVR" slipped through unblocked.
+const IVR_ADVERB_PHRASE = `(?:\\s+${IVR_ADVERB}(?:\\s+and\\s+${IVR_ADVERB})?)?`;
 
 const IVR_ACTIVE_PATTERN = new RegExp(
-  `\\b${IVR_ACTIVE_SUBJECT}\\b(?:'ll| will| can| could| would| also| is| are)*\\s+${IVR_VERB_FORMS}\\b[\\s\\S]*?\\b${IVR_OBJECT}\\b`,
+  `\\b${IVR_ACTIVE_SUBJECT}\\b(?:'ll| will| can| could| would| also| is| are)*${IVR_ADVERB_PHRASE}\\s+${IVR_VERB_FORMS}\\b[\\s\\S]*?\\b${IVR_OBJECT}\\b`,
   'i',
 );
 const IVR_PASSIVE_PATTERN = new RegExp(
@@ -195,16 +210,60 @@ function splitIntoSentences(text: string): string[] {
   return text.split(/(?<=[.?!])\s+/).filter((s) => s.trim().length > 0);
 }
 
-// Splits one sentence into independent clauses at a comma + coordinating conjunction, a
-// semicolon, a colon, or a spaced em/en dash. This is what stops an agent/verb phrase in one
-// clause from combining with an IVR/menu object that only appears in a different, independent
-// clause of the same sentence — never at a bare hyphen (no surrounding spaces), so "set-up" is
-// never split.
+// Auxiliary/modal/finite-verb-form vocabulary used ONLY to decide whether a bare coordinating
+// conjunction opens a new clause — deliberately broader than the aux list the fabrication
+// matchers use above (this is a grammatical "does a clause start here" check, not a capability
+// claim itself).
+const CLAUSE_AUX_MODAL = 'can|could|will|would|may|might|shall|should|must|is|are|was|were|has|have|had|do|does|did';
+
+// True if `rest` (the text immediately following a coordinating conjunction) plausibly opens a
+// new independent clause: a pronoun/agent subject, or a short determiner-headed noun subject (up
+// to 3 words), immediately followed by an auxiliary/modal. This is what tells "and a call menu
+// CAN route callers to sales" (a genuine new clause) apart from "and deploy your IVR" or "and
+// call routing" (a continuation of the same predicate/object — not a new clause). A bare
+// conjunction is never treated as a boundary on its own; failing this check means the
+// conjunction stays inside its current clause exactly as if it had never been examined.
+function beginsFiniteClauseAfterConjunction(rest: string): boolean {
+  const trimmed = rest.replace(/^[\s,]+/, '');
+  const agentSubject = new RegExp(`^${IVR_ACTIVE_SUBJECT}\\s+(?:${CLAUSE_AUX_MODAL})\\b`, 'i');
+  if (agentSubject.test(trimmed)) return true;
+  const genericSubject = new RegExp(
+    `^(?:I|we|you|he|she|it|they|(?:a|an|the|our|your|this|that)\\s+[a-z]+(?:\\s+[a-z]+){0,2}?)\\s+(?:${CLAUSE_AUX_MODAL})\\b`,
+    'i',
+  );
+  return genericSubject.test(trimmed);
+}
+
+const COORDINATING_CONJUNCTION = /\b(and|but|or|nor|so|yet)\b/gi;
+
+// Splits one sentence into independent clauses. An unambiguous punctuation-based boundary
+// (comma + coordinating conjunction, semicolon, colon, spaced em/en dash) always splits — never
+// a bare hyphen ("set-up"). A BARE coordinating conjunction (no comma) only splits when
+// beginsFiniteClauseAfterConjunction() confirms a new independent clause actually starts there;
+// otherwise it is left alone, exactly as a compound verb ("design and deploy"), a compound
+// object ("greeting and voicemail"), an ordinary list ("IVR and PBX options"), or a product-name
+// conjunction ("IVR and call routing") needs to be — none of those are clause boundaries.
 function splitIntoClauses(sentence: string): string[] {
-  return sentence
-    .split(/,\s+(?:and|but|or|nor|so|yet)\s+|;\s*|:\s*|\s+[—–]\s+/i)
-    .map((c) => c.trim())
-    .filter(Boolean);
+  const punctuationParts = sentence.split(/,\s+(?:and|but|or|nor|so|yet)\s+|;\s*|:\s*|\s+[—–]\s+/i);
+  const clauses: string[] = [];
+  for (const part of punctuationParts) {
+    let remaining = part;
+    COORDINATING_CONJUNCTION.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = COORDINATING_CONJUNCTION.exec(remaining))) {
+      const before = remaining.slice(0, match.index).trimEnd();
+      const after = remaining.slice(match.index + match[0].length);
+      if (before && beginsFiniteClauseAfterConjunction(after)) {
+        clauses.push(before);
+        remaining = after.replace(/^[\s,]+/, '');
+        COORDINATING_CONJUNCTION.lastIndex = 0;
+      } else {
+        COORDINATING_CONJUNCTION.lastIndex = match.index + match[0].length;
+      }
+    }
+    clauses.push(remaining);
+  }
+  return clauses.map((c) => c.trim()).filter(Boolean);
 }
 
 // True if `pattern` matches somewhere in `clause` with no negation word (reusing NEGATION_WORDS

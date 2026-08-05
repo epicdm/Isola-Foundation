@@ -254,6 +254,108 @@ describe('guardReply — complex_ivr / complex_ivr_passive (clause-bounded redes
   });
 });
 
+describe('guardReply — complex_ivr bounded adverb phrase + finite-clause conjunction detection (Codex review follow-up, PR #75)', () => {
+  // Codex found the active matcher required the verb IMMEDIATELY after the aux/modal, so a
+  // common adverb in between ("can automatically configure") slipped through unblocked. The
+  // fix is a BOUNDED optional adverb phrase (zero, one, or two "-ly"/whitelisted adverbs joined
+  // by "and") — never an arbitrary noun, object, determiner or clause.
+  const blockedAdverb: { label: string; text: string }[] = [
+    { label: '"-ly" adverb before verb', text: 'Our assistant can automatically configure an IVR.' },
+    { label: '"-ly" adverb, different verb', text: 'Our AI will quickly build a custom IVR.' },
+    { label: 'whitelisted non-"-ly" adverb ("also") + hyphenated set-up', text: 'Our bot can also set-up your call menu.' },
+    { label: 'two adverbs joined by "and" ("securely and automatically")', text: 'Our system can securely and automatically design a multi-level menu.' },
+    { label: '"-ly" adverb ("definitely")', text: 'We can definitely design a multi-level phone menu.' },
+    { label: '"-ly" adverb ("personally") + contraction', text: 'I’ll personally create a multi-level menu for you.' },
+    { label: 'whitelisted non-"-ly" adverb ("currently") + present progressive', text: 'Our assistant is currently setting up your IVR.' },
+  ];
+  for (const { label, text } of blockedAdverb) {
+    it(`blocks: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe('complex_ivr');
+      expect(result.text).not.toBe(text);
+    });
+  }
+
+  // Codex separately found the clause-splitter only recognized a comma-preceded conjunction, so
+  // an unpunctuated "and"/"but" left the whole sentence as one clause and reintroduced the
+  // cross-clause false positive. The fix treats a bare conjunction as a boundary only when the
+  // text after it plausibly opens a new independent clause (a subject immediately followed by an
+  // auxiliary/modal) — never merely because "and"/"but"/etc. appears.
+  const blockedCommaless: { label: string; text: string }[] = [
+    { label: 'comma-less "but": negated first clause, positive second clause', text: 'We cannot build that PBX today but our assistant will configure your IVR tomorrow.' },
+    { label: 'comma-less "and": unrelated first clause, positive second clause', text: 'We can discuss the plan and our AI can create your IVR.' },
+    { label: 'compound verb ("design and deploy") — same clause, must still block', text: 'Our AI can design and deploy your IVR.' },
+    { label: 'compound verb ("build and configure") — same clause, must still block', text: 'Our assistant can build and configure a multi-level phone menu.' },
+    // The "and" joining two adverbs must never itself be mistaken for a clause boundary — the
+    // whole clause (including the adverb phrase) must still resolve as one genuine claim.
+    { label: 'adverb-joining "and" ("securely and automatically") is not a clause boundary', text: 'Our system can securely and automatically configure the IVR.' },
+  ];
+  for (const { label, text } of blockedCommaless) {
+    it(`blocks: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe('complex_ivr');
+      expect(result.text).not.toBe(text);
+    });
+  }
+
+  // The critical negative space: a bare conjunction must NOT split a compound verb, a compound
+  // object, an ordinary list, or a product-name conjunction — all of these must still pass.
+  const allowedCommaless: { label: string; text: string }[] = [
+    { label: 'comma-less "and": separate clause with its own IVR/call-menu subject', text: 'We can configure your WhatsApp greeting and a call menu can route callers to sales.' },
+    { label: 'comma-less "and": separate clause, IVR subject', text: 'Our assistant can explain call routing and an IVR can direct callers to departments.' },
+    { label: 'ordinary list, no new clause', text: 'An IVR can route callers to sales and support.' },
+    { label: 'product-name conjunction, no new clause', text: 'EPIC offers IVR and call routing.' },
+    { label: 'compound object, no new clause', text: 'We can configure your greeting and voicemail.' },
+    { label: 'ordinary list, no new clause (2)', text: 'We can discuss IVR and PBX options.' },
+    { label: 'human attribution + adverb — subject is human, not our AI', text: 'A qualified specialist can automatically configure your IVR.' },
+    { label: 'human attribution ("our engineering team") + adverb, different object', text: 'Our engineering team can quickly design the custom call flow.' },
+    { label: 'comma-less "and": separate clause, human subject (specialist)', text: 'We can discuss your phone setup and a specialist would configure any custom IVR.' },
+    { label: 'adverb before an untracked verb ("explain") — never a capability claim', text: 'Our assistant can automatically explain how an IVR works.' },
+  ];
+  for (const { label, text } of allowedCommaless) {
+    it(`does not block: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(false);
+      expect(result.text).toBe(text);
+    });
+  }
+
+  // Negation must remain both sentence- and clause-aware with the new adverb phrase and
+  // comma-less conjunction logic in place.
+  const negationAllowed: { label: string; text: string }[] = [
+    { label: 'negated + adverb ("cannot automatically")', text: 'Our assistant cannot automatically configure an IVR.' },
+    { label: 'negated with "do not" + adverb', text: 'We do not directly build custom call menus.' },
+    { label: 'negated + adverb ("cannot currently")', text: 'Our AI cannot currently set up your IVR.' },
+  ];
+  for (const { label, text } of negationAllowed) {
+    it(`does not block: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(false);
+      expect(result.text).toBe(text);
+    });
+  }
+
+  const negationBlocked: { label: string; text: string }[] = [
+    {
+      label: 'comma-less "but": negated first clause + adverb in the positive second clause',
+      text: 'We cannot configure the PBX today but our assistant will automatically build your IVR tomorrow.',
+    },
+    {
+      label: 'comma "but" + pronoun "it" referring back to "Our AI" in the negated first clause',
+      text: 'Our AI does not build ordinary greetings, but it can directly configure your custom IVR.',
+    },
+  ];
+  for (const { label, text } of negationBlocked) {
+    it(`blocks: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe('complex_ivr');
+    });
+  }
+});
+
 describe('guardReply — voice-AI first-person + cross-channel fabrication (def-ema-voice-ai-capability-fabrication-2026-07-18 regression)', () => {
   // The exact (and near-exact) fabrications EMA produced against the live 5-scenario
   // acceptance test on 2026-07-18 — all must now deflect + escalate.
