@@ -7,10 +7,13 @@
  * `ChatwootBinding.token` (a Chatwoot Application API agent token) were all
  * serialised to the client. Admin is a role, not a reason to ship credentials.
  *
- * Scope note: `Tenant.magnus_sip_password` is NOT asserted against here. The
- * schema documents it as deliberately owner-visible for softphone setup, so
- * removing it is a product decision rather than a leak fix, and is recorded
- * separately rather than changed under CB-0.
+ * A second review pass found a third credential on the same responses:
+ * `Tenant.magnus_sip_password`, a plaintext SIP registration password, was
+ * returned by GET, by the PATCH read-back and by the tenant LIST endpoint. It
+ * is legitimately owner-visible — but the owner surface for it is
+ * `/api/voice/line` and `app/home/route.ts`, not the admin console, which hands
+ * one staff admin another tenant's live SIP credential. Nothing in the admin UI
+ * reads it, so it is omitted at the query.
  *
  * Every secret below is generated at runtime, never written as a literal.
  */
@@ -162,6 +165,16 @@ describe('GET /api/admin/tenants/[id] — credential containment', () => {
 
     expect(res.status).toBe(403);
     expect(prismaMock.tenant.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('omits the plaintext SIP password at the query, on GET', async () => {
+    prismaMock.tenant.findUnique.mockResolvedValue(TENANT_WITH_SECRETS);
+
+    await GET(request(), params);
+
+    expect(prismaMock.tenant.findUnique.mock.calls[0][0].omit).toEqual({
+      magnus_sip_password: true,
+    });
   });
 
   it('a missing tenant returns 404 with no row data', async () => {

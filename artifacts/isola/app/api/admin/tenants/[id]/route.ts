@@ -16,6 +16,13 @@ export async function GET(req: NextRequest, { params }: Params) {
   const [tenant, usage] = await Promise.all([
     prisma.tenant.findUnique({
       where: { id },
+      // `magnus_sip_password` is a plaintext SIP registration password. It is
+      // legitimately owner-visible, but the owner surface for it is
+      // `/api/voice/line` and `app/home/route.ts` — NOT this admin route, which
+      // hands one staff admin another tenant's live SIP credential. Nothing in
+      // the admin UI reads it. Prisma `omit` is type-checked against the model,
+      // so a rename fails the build rather than silently reopening this.
+      omit: { magnus_sip_password: true },
       include: {
         subscription: true,
         wallet: true,
@@ -60,6 +67,9 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 
   const tenant = await prisma.tenant.update({
     where: { id },
+    // Same reason as the GET above — the PATCH read-back was returning the
+    // plaintext SIP password too.
+    omit: { magnus_sip_password: true },
     data: {
       ...(business_name !== undefined && { business_name }),
       ...(status !== undefined && { status }),
