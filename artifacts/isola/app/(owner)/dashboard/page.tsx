@@ -4,6 +4,7 @@ import { MessageSquare, Wallet, Bot, PhoneCall, ArrowRight, Zap } from 'lucide-r
 import { getSession } from '@/lib/session';
 import { prisma } from '@/lib/prisma';
 import { getCurrentUsage, getUsageHistory } from '@/lib/meter';
+import { WHATSAPP_NUMBER_PUBLIC_SELECT } from '@/lib/whatsapp-number-public';
 import { TakeoverToggle } from './TakeoverToggle';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -36,7 +37,15 @@ export default async function DashboardPage() {
 
   const [openConvs, waNumbers, wallet, agent, usage, usageHistory, recentConversations] = await Promise.all([
     prisma.conversation.count({ where: { tenant_id: tenantId, status: 'open' } }),
-    prisma.whatsAppNumber.findMany({ where: { tenant_id: tenantId } }),
+    // CB-0 defence in depth. This server component renders only phone_number
+    // and display_name, so the token was never serialised into the RSC payload
+    // — but the raw row was still being read, and one refactor that passes
+    // `waNumbers` to a client component would have turned that into a leak.
+    // Same projection the API boundary uses.
+    prisma.whatsAppNumber.findMany({
+      where: { tenant_id: tenantId },
+      select: WHATSAPP_NUMBER_PUBLIC_SELECT,
+    }),
     prisma.wallet.findUnique({ where: { tenant_id: tenantId } }),
     prisma.agent.findFirst({ where: { tenant_id: tenantId } }),
     getCurrentUsage(tenantId),
