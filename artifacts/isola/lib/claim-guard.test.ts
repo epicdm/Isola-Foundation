@@ -158,6 +158,10 @@ describe('guardReply — complex_ivr narrowing (defect-foundation-claim-guard-co
     { label: 'first-person plural configure claim', text: 'We will configure a multi-level phone menu for your business.' },
     { label: 'AI-subject compound verb claim (design and deploy)', text: 'Our AI can design and deploy your IVR.' },
     { label: 'contraction + set-up claim', text: "I'll set up an IVR with sales and support departments." },
+    // Codex review follow-up (2026-08-05, PR #75): both previously slipped through unblocked.
+    { label: '"the assistant" bare/determiner subject (Codex finding)', text: 'The assistant can build a custom IVR.' },
+    { label: 'smart/curly apostrophe contraction (Codex finding)', text: 'I’ll set up an IVR for you.' },
+    { label: 'bare "bot" subject, no determiner', text: 'Bot can configure a custom IVR for your business.' },
   ];
   for (const { label, text } of blocked) {
     it(`blocks: ${label}`, () => {
@@ -211,6 +215,9 @@ describe('guardReply — complex_ivr_passive (passive-voice autonomous attributi
     { label: 'passive configure, "by our assistant"', text: 'A multi-level phone menu can be configured by our assistant.' },
     { label: 'passive compound (designed and deployed), "by our system"', text: 'Your IVR will be designed and deployed by our system.' },
     { label: 'passive set-up, "call menu" object, "by our bot"', text: 'A custom call menu will be set up by our bot.' },
+    // Codex review follow-up (2026-08-05, PR #75): extends the same bare/"the"-prefixed subject
+    // fix to the passive agent group, for consistency with the active-voice rule.
+    { label: 'passive build, bare/"the"-prefixed agent (Codex-finding consistency)', text: 'A custom IVR will be built by the assistant.' },
   ];
   for (const { label, text } of blocked) {
     it(`blocks: ${label}`, () => {

@@ -122,17 +122,28 @@ const HARD_NEVERS: { id: string; pattern: RegExp; requiresPositiveClaim?: boolea
   // I/we/our-AI to begin with.
   //
   // complex_ivr_passive: "A custom IVR will/can/could/would/may/might be built/configured/
-  // designed/created/deployed/set-up/implemented (and ...)* by our AI/assistant/bot/system." —
-  // the deciding factor is strictly the agent phrase after "by": human attribution ("by a
-  // qualified telecom specialist", "by our team") or no "by [[agent]" clause at all ("may be
-  // designed during a consultation with an engineer") never matches, since the agent group only
-  // accepts our-AI/assistant/bot/system. A modal with an interposed "need to" ("would need to be
-  // configured by our AI") isn't covered by this narrow pass — first-pass, tune from the audit
-  // log as this file's header already documents.
+  // designed/created/deployed/set-up/implemented (and ...)* by [the/our/bare] AI/assistant/bot/
+  // system." — the deciding factor is strictly the agent phrase after "by": human attribution
+  // ("by a qualified telecom specialist", "by our team") or no "by [agent]" clause at all ("may
+  // be designed during a consultation with an engineer") never matches, since the agent group
+  // only accepts AI/assistant/bot/system (bare, "the"-, or "our"-prefixed). A modal with an
+  // interposed "need to" ("would need to be configured by our AI") isn't covered by this narrow
+  // pass — first-pass, tune from the audit log as this file's header already documents.
+  //
+  // Codex review follow-up (2026-08-05, PR #75): the subject/agent group originally required
+  // "our AI/assistant/bot/system" — missing a bare or "the"-prefixed subject ("The assistant can
+  // build a custom IVR"), a real unsupported-capability claim just phrased without "our". Also
+  // the aux-contraction only matched an ASCII apostrophe ('ll); real generated text commonly
+  // uses the Unicode right single quote (’, "smart apostrophe") for contractions like
+  // "I’ll", which silently failed to match. Both are fixed below: the subject/agent group
+  // now accepts bare/"the"-prefixed/"our"-prefixed AI|assistant|bot|system, and the contraction
+  // alternative accepts either apostrophe character. (voice_ai/ai_places_call above may share
+  // this same apostrophe gap — flagged separately, not fixed here to keep this change scoped to
+  // the complex_ivr rule pair this defect/PR is about.)
   {
     id: 'complex_ivr',
     pattern: new RegExp(
-      `\\b(?:I|we|our\\s+(?:AI|assistant|bot|system))\\b(?:'ll| will| can| could| would| also)*\\s+(?:${IVR_BUILD_VERBS})\\b[^.?!]{0,40}\\b(?:${IVR_OBJECT})\\b`,
+      `\\b(?:I|we|(?:the|our)\\s+(?:AI|assistant|bot|system)|AI|assistant|bot|system)\\b(?:['’]ll| will| can| could| would| also)*\\s+(?:${IVR_BUILD_VERBS})\\b[^.?!]{0,40}\\b(?:${IVR_OBJECT})\\b`,
       'i',
     ),
     requiresPositiveClaim: true,
@@ -140,7 +151,7 @@ const HARD_NEVERS: { id: string; pattern: RegExp; requiresPositiveClaim?: boolea
   {
     id: 'complex_ivr_passive',
     pattern: new RegExp(
-      `\\b(?:${IVR_OBJECT})\\b[^.?!]{0,30}?\\b(?:will|can|could|would|may|might)\\s+be\\s+(?:${IVR_PASSIVE_PARTICIPLES})(?:\\s*(?:,|and)\\s*(?:${IVR_PASSIVE_PARTICIPLES}))*\\s+by\\s+our\\s+(?:AI|assistant|bot|system)\\b`,
+      `\\b(?:${IVR_OBJECT})\\b[^.?!]{0,30}?\\b(?:will|can|could|would|may|might)\\s+be\\s+(?:${IVR_PASSIVE_PARTICIPLES})(?:\\s*(?:,|and)\\s*(?:${IVR_PASSIVE_PARTICIPLES}))*\\s+by\\s+(?:(?:the|our)\\s+(?:AI|assistant|bot|system)|AI|assistant|bot|system)\\b`,
       'i',
     ),
     requiresPositiveClaim: true,
