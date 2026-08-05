@@ -197,7 +197,7 @@ const IVR_ADVERB_PHRASE = `(?:\\s+${IVR_ADVERB}(?:\\s+and\\s+${IVR_ADVERB})?)?`;
 // create your IVR" and the perfect "Our AI has configured your IVR" were all unreachable — the
 // same class of omission as the missing first-person forms, found by the same review.
 const IVR_AUX_ALTERNATION =
-  `'ll|'m|'re|'ve| will| can| could| would| may| might| shall| should| must| also| is| are| am| was| were| has| have| had| do| does| did`;
+  `'ll|'m|'re|'ve|'d| will| can| could| would| may| might| shall| should| must| also| is| are| am| was| were| has| have| had| do| does| did`;
 
 /** Subject immediately followed by a capability verb, with NO auxiliary — bare present tense
  *  ("Our AI builds your IVR") is still a fabrication. Adjacency is required here precisely
@@ -479,8 +479,12 @@ function beginsFiniteClauseAfterConjunction(rest: string): boolean {
     `(?:\\s+(?:${CLAUSE_AUX_MODAL})|\\s+${IVR_VERB_FORMS}|${CLAUSE_AUX_CONTRACTION})\\b`;
   const agentSubject = new RegExp(`^${IVR_ACTIVE_SUBJECT}${finiteTail}`, 'i');
   if (agentSubject.test(trimmed)) return true;
+  // The noun phrase allows up to four modifiers, not two: real subordinate subjects are routinely
+  // longer than a two-word phrase ("your existing telecom service provider configures your IVR"),
+  // and a short cap meant the clause went unrecognised and its verb was absorbed by the outer
+  // capability claim — a realistic false positive on ordinary sales phrasing.
   const genericSubject = new RegExp(
-    `^(?:I|we|you|he|she|it|they|(?:a|an|the|our|your|this|that)\\s+[a-z]+(?:\\s+[a-z]+){0,2}?)${finiteTail}`,
+    `^(?:I|we|you|he|she|it|they|(?:a|an|the|our|your|this|that)\\s+[a-z]+(?:\\s+[a-z]+){0,4}?)${finiteTail}`,
     'i',
   );
   return genericSubject.test(trimmed);

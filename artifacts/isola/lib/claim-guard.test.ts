@@ -871,3 +871,53 @@ describe('guardReply — long unpunctuated interruptions still reach the verb', 
     });
   }
 });
+
+// ─── Correction round 2, Codex follow-up at 28fa7ef ──────────────────────────
+
+describe('guardReply — contracted "would"', () => {
+  // The contraction list carried 'll/'m/'re/'ve but not 'd, so a conditional promise — ordinary
+  // sales phrasing — was a straightforward fabrication miss.
+  const BLOCKED: { label: string; text: string }[] = [
+    { label: "we'd + configure", text: "We'd configure your IVR for you." },
+    { label: 'smart-apostrophe we’d + set up', text: 'We’d set up your call menu.' },
+    { label: "I'd + build", text: "I'd build a custom IVR for you." },
+  ];
+  for (const { label, text } of BLOCKED) {
+    it(`blocks: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe('complex_ivr');
+    });
+  }
+  it("passes: we'd + not", () => {
+    expect(guardReply("We'd not configure your IVR.", SALES_TENANT).blocked).toBe(false);
+  });
+});
+
+describe('guardReply — longer human subjects in subordinate clauses', () => {
+  // The finite-clause detector capped the subject noun phrase at two modifiers, so a realistic
+  // longer subject went unrecognised and its verb was absorbed by the outer capability claim.
+  const PASSES: { label: string; text: string }[] = [
+    {
+      label: 'four-modifier subject after "after"',
+      text: 'We can create a support plan after your existing telecom service provider configures your IVR.',
+    },
+    {
+      label: 'four-modifier subject after "before"',
+      text: 'We can create a roadmap before your local telecom engineering team builds the call menu.',
+    },
+  ];
+  for (const { label, text } of PASSES) {
+    it(`passes: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(false);
+    });
+  }
+
+  // The widened noun phrase must not turn a compound predicate into a clause boundary.
+  it('still blocks a three-verb compound predicate', () => {
+    expect(guardReply('Our assistant can design, build and deploy your call menu.', SALES_TENANT).blocked).toBe(true);
+  });
+  it('still splits on a genuine finite clause with a non-agent subject', () => {
+    expect(guardReply('We can configure your greeting, and a call menu can route callers.', SALES_TENANT).blocked).toBe(false);
+  });
+});
