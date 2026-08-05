@@ -24,7 +24,11 @@ import type { User, Tenant } from '@prisma/client';
 
 const { getSessionFromCookieMock, prismaMock, getCurrentUsageMock } = vi.hoisted(() => ({
   getSessionFromCookieMock: vi.fn(),
-  prismaMock: { tenant: { findUnique: vi.fn() } },
+  prismaMock: {
+    tenant: { findUnique: vi.fn(), update: vi.fn() },
+    subscription: { upsert: vi.fn() },
+    agent: { findFirst: vi.fn(), updateMany: vi.fn() },
+  },
   getCurrentUsageMock: vi.fn(),
 }));
 
@@ -33,7 +37,7 @@ vi.mock('@/lib/prisma', () => ({ prisma: prismaMock }));
 vi.mock('@/lib/audit', () => ({ audit: vi.fn() }));
 vi.mock('@/lib/meter', () => ({ getCurrentUsage: getCurrentUsageMock }));
 
-import { GET } from './route';
+import { GET, PATCH } from './route';
 import { WHATSAPP_NUMBER_PUBLIC_FIELDS } from '@/lib/whatsapp-number-public';
 import { CHATWOOT_BINDING_PUBLIC_FIELDS } from '@/lib/chatwoot-binding-public';
 
@@ -175,6 +179,26 @@ describe('GET /api/admin/tenants/[id] — credential containment', () => {
     expect(prismaMock.tenant.findUnique.mock.calls[0][0].omit).toEqual({
       magnus_sip_password: true,
     });
+  });
+
+  it('omits the plaintext SIP password on the PATCH read-back too', async () => {
+    prismaMock.tenant.update.mockResolvedValue({ id: 'tenant-9', business_name: 'EPIC Renamed' });
+
+    const patchReq = new NextRequest('http://localhost/api/admin/tenants/tenant-9', {
+      method: 'PATCH',
+      headers: { cookie: 'sid=abc', 'content-type': 'application/json' },
+      body: JSON.stringify({ business_name: 'EPIC Renamed' }),
+    });
+
+    const res = await PATCH(patchReq, params);
+    const body = JSON.parse(await res.text());
+
+    expect(res.status).toBe(200);
+    expect(prismaMock.tenant.update.mock.calls[0][0].omit).toEqual({
+      magnus_sip_password: true,
+    });
+    expect(body.tenant).not.toHaveProperty('magnus_sip_password');
+    expect(body.tenant.business_name).toBe('EPIC Renamed');
   });
 
   it('a missing tenant returns 404 with no row data', async () => {
