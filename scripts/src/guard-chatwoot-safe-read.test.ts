@@ -7,9 +7,12 @@ import {
   GUARD_OWN_FILES,
   findPrintedCredential,
   findUnsafeChatwootReads,
+  isCommandLike,
   isGuardOwnFixtureFile,
   isProjectionMarker,
+  isProse,
   isScannableFile,
+  mentionsChatwootEndpoint,
   projectAgentBot,
   projectAllowlist,
   projectInbox,
@@ -170,10 +173,24 @@ test('does NOT flag the same read when it is projected through the helper', () =
 test('does NOT flag prose describing the endpoint — Port records must stay writable', () => {
   const prose = [
     '> a call to GET /api/v1/accounts/5/inboxes/46 returned provider_config',
-    '# GET /api/v1/accounts/5/inboxes/{id}/agent_bot leaks access_token',
+    '# the agent_bot read on /api/v1/accounts/5/inboxes/{id}/agent_bot leaks access_token',
     '// see /api/v1/accounts/5/inboxes/46 for the WhatsApp channel',
   ].join('\n')
   assert.deepEqual(findUnsafeChatwootReads('defect.md', prose), [])
+})
+
+test('a heading that OPENS with a bare method reads as an instruction, not a title', () => {
+  // Narrowed deliberately under the bare-method/path rule: "GET <path> …" at the
+  // start of a line is an instruction wherever it appears, including a markdown
+  // heading. To write it as narration, lead with the noun — as the test above
+  // does. This is the one case where the ruling's mechanical criterion is
+  // stricter than a human reading, and stricter is the right side to err on.
+  const findings = findUnsafeChatwootReads(
+    'defect.md',
+    '# GET /api/v1/accounts/5/inboxes/{id}/agent_bot leaks access_token',
+  )
+  assert.equal(findings.length, 1)
+  assert.equal(findings[0].kind, 'unprojected_chatwoot_read')
 })
 
 test('flags a jq filter that selects a credential field directly', () => {
@@ -354,8 +371,6 @@ test('the guard excludes only its own fixture-bearing files, by exact path', () 
   assert.equal(GUARD_OWN_FILES.length, 3)
   for (const own of GUARD_OWN_FILES) {
     assert.equal(isGuardOwnFixtureFile(own), true, own)
-    // Invoked from `scripts/`, git yields the package-relative path.
-    assert.equal(isGuardOwnFixtureFile(own.replace(/^scripts\//, '')), true, own)
   }
   // A runbook cannot be parked next to the guard to escape the scan.
   assert.equal(isGuardOwnFixtureFile('scripts/src/chatwoot-runbook.md'), false)
@@ -368,6 +383,193 @@ test('the exclusion is an exact path match, not a filename suffix match', () => 
   assert.equal(isGuardOwnFixtureFile('artifacts/isola/src/guard-chatwoot-safe-read.ts'), false)
   assert.equal(isGuardOwnFixtureFile('vendor/scripts/src/guard-chatwoot-safe-read.ts'), false)
   assert.equal(isGuardOwnFixtureFile('a/b/guard-chatwoot-safe-read.test.ts'), false)
+})
+
+test('the package-relative spelling is no longer excluded — discovery is root-anchored', () => {
+  // It only ever existed to paper over the cwd bug. File discovery now resolves
+  // the repository root, so `src/…` can never be produced for these files, and
+  // keeping the alias would exclude a real `src/guard-chatwoot-safe-read.ts`.
+  assert.equal(isGuardOwnFixtureFile('src/guard-chatwoot-safe-read.ts'), false)
+  assert.equal(isGuardOwnFixtureFile('src/guard-chatwoot-safe-read.test.ts'), false)
+})
+
+/* --------------------------------------------- markdown bullet equivalence */
+
+const BULLETS = ['*', '-', '+'] as const
+
+test('an unsafe command is flagged identically under *, - and + bullets', () => {
+  const unsafe = `${INBOX_READ} | jq '.provider_config'`
+  const kinds = BULLETS.map((b) => {
+    const findings = findUnsafeChatwootReads('plan.md', `${b} ${unsafe}`)
+    assert.equal(findings.length, 1, `bullet ${b} must produce exactly one finding`)
+    return findings[0].kind
+  })
+  assert.deepEqual(kinds, ['forbidden_field_printed', 'forbidden_field_printed', 'forbidden_field_printed'])
+})
+
+test('an unprojected read is flagged identically under *, - and + bullets', () => {
+  for (const b of BULLETS) {
+    const findings = findUnsafeChatwootReads('plan.md', `${b} **Capture:** \`${INBOX_READ}\``)
+    assert.equal(findings.length, 1, `bullet ${b}`)
+    assert.equal(findings[0].kind, 'unprojected_chatwoot_read')
+  }
+})
+
+test('plain explanatory prose stays exempt under *, - and + alike', () => {
+  const sentences = [
+    'a call to GET /api/v1/accounts/5/inboxes/46 returned provider_config, which we then filtered',
+    'the AgentBot read at /api/v1/accounts/5/inboxes/46/agent_bot is what leaked the token',
+  ]
+  for (const b of BULLETS) {
+    for (const sentence of sentences) {
+      assert.deepEqual(
+        findUnsafeChatwootReads('defect.md', `${b} ${sentence}`),
+        [],
+        `bullet ${b}: ${sentence}`,
+      )
+    }
+  }
+})
+
+test('a bullet holding a runnable command is operational content, not prose', () => {
+  // The distinction is a code span: an instruction to run something, versus a
+  // sentence narrating a call that already happened.
+  assert.equal(isCommandLike('**Before-state:** `GET /api/v1/accounts/5/webhooks`'), true)
+  assert.equal(isCommandLike('`Invoke-RestMethod "$CW/api/v1/accounts/5/inboxes/46"`'), true)
+  assert.equal(isCommandLike('a call to GET /api/v1/accounts/5/inboxes/46 returned provider_config'), false)
+  assert.equal(isProse('- **Before-state:** `GET /api/v1/accounts/5/webhooks`'), false)
+  assert.equal(isProse('- the endpoint returned more than we expected'), true)
+})
+
+/* ----------------------------------------------- abbreviated endpoint paths */
+
+test('an abbreviated endpoint is detected in both ellipsis spellings', () => {
+  assert.equal(mentionsChatwootEndpoint('GET …/webhooks'), true)
+  assert.equal(mentionsChatwootEndpoint('GET .../webhooks'), true)
+  assert.equal(mentionsChatwootEndpoint('DELETE …/inboxes/46'), true)
+  assert.equal(mentionsChatwootEndpoint('…/agent_bot'), true)
+})
+
+test('a sentence that merely trails off is not an endpoint', () => {
+  // The detection must be narrow: ellipsis immediately followed by a Chatwoot
+  // resource. Prose is full of ellipses.
+  assert.equal(mentionsChatwootEndpoint('we captured the flags first …'), false)
+  assert.equal(mentionsChatwootEndpoint('the response was large ... so we trimmed it'), false)
+  assert.equal(mentionsChatwootEndpoint('see the plan for details ...'), false)
+  assert.deepEqual(
+    findUnsafeChatwootReads('plan.md', '- the retirement went fine … nothing else changed'),
+    [],
+  )
+})
+
+test('the fifth R1 instruction — an abbreviated verification read — is now flagged', () => {
+  for (const bullet of BULLETS) {
+    const findings = findUnsafeChatwootReads(
+      'plan.md',
+      `${bullet} **Verification:** \`GET …/webhooks\` no longer lists 72 or 73`,
+    )
+    assert.equal(findings.length, 1, `bullet ${bullet}`)
+    assert.equal(findings[0].kind, 'unprojected_chatwoot_read')
+  }
+  // ASCII spelling, same outcome.
+  const ascii = findUnsafeChatwootReads('plan.md', '- **Verification:** `GET .../webhooks` unchanged')
+  assert.equal(ascii.length, 1)
+  assert.equal(ascii[0].kind, 'unprojected_chatwoot_read')
+})
+
+test('an abbreviated read flowing into an unsafe sink is flagged as a credential print', () => {
+  const findings = findUnsafeChatwootReads('runbook.sh', `curl -sS "$CW/…/webhooks" | jq '.secret'`)
+  assert.equal(findings.length, 1)
+  assert.equal(findings[0].kind, 'forbidden_field_printed')
+})
+
+test('an abbreviated read that is explicitly projected is clean', () => {
+  const safe = `curl -sS -H "api_access_token: $TOK" "$CW/…/webhooks" | jq '[.payload[] | {id, url, name, subscriptions, account_id}]'`
+  assert.deepEqual(findUnsafeChatwootReads('runbook.sh', safe), [])
+})
+
+test('narrative prose about an abbreviated endpoint stays exempt', () => {
+  const narrative = [
+    'A prior GET request to …/webhooks returned every secret, which is how the leak happened.',
+    'The …/agent_bot read was the second exposure that day.',
+  ]
+  for (const line of narrative) {
+    assert.deepEqual(findUnsafeChatwootReads('defect.md', line), [], line)
+    for (const bullet of BULLETS) {
+      assert.deepEqual(findUnsafeChatwootReads('defect.md', `${bullet} ${line}`), [], `${bullet} ${line}`)
+    }
+  }
+})
+
+/* ------------------------------------------------ imperative / bare method */
+
+test('a bare HTTP method against a path is operational under every bullet', () => {
+  for (const bullet of BULLETS) {
+    const findings = findUnsafeChatwootReads(
+      'plan.md',
+      `${bullet} GET \`/api/v1/accounts/5/webhooks\``,
+    )
+    assert.equal(findings.length, 1, `bullet ${bullet}`)
+    assert.equal(findings[0].kind, 'unprojected_chatwoot_read')
+  }
+})
+
+test('an imperative instruction to run the request is operational', () => {
+  assert.equal(isCommandLike('Run the webhook GET and inspect the output.'), true)
+  assert.equal(isCommandLike('Call /api/v1/accounts/5/webhooks and record the ids.'), true)
+  assert.equal(isCommandLike('Capture using the before-state read.'), true)
+  assert.equal(isCommandLike('Verify using the webhook list.'), true)
+  const findings = findUnsafeChatwootReads('plan.md', '- Fetch /api/v1/accounts/5/webhooks and record it')
+  assert.equal(findings.length, 1)
+  assert.equal(findings[0].kind, 'unprojected_chatwoot_read')
+})
+
+test('an imperative verb used as a NOUN mid-sentence does not make prose operational', () => {
+  // "a call to GET …" — matching the verb anywhere would flag every write-up of
+  // the incident. The imperative must open the instruction.
+  const narrative = 'a call to GET /api/v1/accounts/5/inboxes/46 returned provider_config'
+  assert.equal(isCommandLike(narrative), false)
+  assert.deepEqual(findUnsafeChatwootReads('defect.md', `> ${narrative}`), [])
+  assert.deepEqual(findUnsafeChatwootReads('defect.md', narrative), [])
+})
+
+test("the owner's narrative example is exempt and the operational one is scanned", () => {
+  assert.deepEqual(
+    findUnsafeChatwootReads(
+      'defect.md',
+      'A prior GET request to /api/v1/accounts/5/inboxes/46 returned provider_config.',
+    ),
+    [],
+  )
+  const operational = findUnsafeChatwootReads(
+    'plan.md',
+    'GET /api/v1/accounts/5/inboxes/46 and print the response.',
+  )
+  assert.equal(operational.length, 1)
+})
+
+test('in a script an unmarked line is code, not prose', () => {
+  // Markdown paragraphs are narration; a bare line in a shell script is not.
+  assert.equal(
+    findUnsafeChatwootReads('runbook.sh', '"$CW/api/v1/accounts/5/inboxes/46"').length,
+    1,
+  )
+  assert.deepEqual(findUnsafeChatwootReads('plan.md', 'the inboxes endpoint /api/v1/accounts/5/inboxes/46 exists'), [])
+})
+
+/* ------------------------------------------- write responses may be discarded */
+
+test('a write whose response body is discarded is not a finding', () => {
+  const suppressed = `curl -sS -X DELETE -o /dev/null -w '%{http_code}\\n' "$CW/api/v1/accounts/5/webhooks/72"`
+  assert.equal(isProjectionMarker(suppressed), true)
+  assert.deepEqual(findUnsafeChatwootReads('runbook.sh', suppressed), [])
+})
+
+test('discarding the body does not excuse selecting a credential first', () => {
+  const bad = `curl -sS "$CW/api/v1/accounts/5/inboxes/46" | jq '.provider_config' > /dev/null`
+  const findings = findUnsafeChatwootReads('runbook.sh', bad)
+  assert.equal(findings.length, 1)
+  assert.equal(findings[0].kind, 'forbidden_field_printed')
 })
 
 test('the own-file exclusion normalises Windows separators', () => {

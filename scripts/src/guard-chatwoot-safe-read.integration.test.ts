@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -65,7 +65,9 @@ function withRepo(fileName: string, contents: string, fn: (dir: string) => void)
   const dir = mkdtempSync(path.join(tmpdir(), 'guard-chatwoot-safe-read-'))
   try {
     execFileSync('git', ['init', '--quiet'], { cwd: dir, stdio: 'pipe' })
-    writeFileSync(path.join(dir, fileName), contents)
+    const target = path.join(dir, fileName)
+    mkdirSync(path.dirname(target), { recursive: true })
+    writeFileSync(target, contents)
     fn(dir)
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -134,6 +136,57 @@ test('CLI --json reports the finding as structured data, still without the secre
     assert.equal(parsed.findings[0].file, 'runbook.sh')
     assert.equal(parsed.findings[0].line, 3)
     assert.equal(JSON.stringify(parsed).includes(SECRET), false)
+  })
+})
+
+/* ------------------------------------------------------------------------ *
+ * cwd independence.
+ *
+ * This is the failure that let four unprojected reads sit in an execution plan
+ * while the guard reported the repository clean: `git ls-files` is relative to
+ * its cwd, and the documented `pnpm --filter` invocation runs from `scripts/`,
+ * so `docs/` was never enumerated. A repository guard must not depend on where
+ * it was called from.
+ * ------------------------------------------------------------------------ */
+
+/** A repo whose runbook sits in `docs/`, with an unrelated `scripts/` subdir. */
+function withNestedRepo(fn: (root: string, subdir: string) => void): void {
+  withRepo('docs/runbook.sh', PROHIBITED_RUNBOOK, (root) => {
+    const subdir = path.join(root, 'scripts')
+    mkdirSync(subdir, { recursive: true })
+    writeFileSync(path.join(subdir, 'placeholder.ts'), 'export const noop = true\n')
+    fn(root, subdir)
+  })
+}
+
+test('the same prohibited fixture is detected from the repo root and from scripts/', () => {
+  withNestedRepo((root, subdir) => {
+    const fromRoot = runGuard(root, ['--json'])
+    const fromSubdir = runGuard(subdir, ['--json'])
+
+    assert.equal(fromRoot.status, 1, 'must fail from the repository root')
+    assert.equal(fromSubdir.status, 1, 'must fail from scripts/ — this was the bug')
+    // Byte-identical: same findings, same repository-root-relative paths.
+    assert.equal(fromSubdir.stdout, fromRoot.stdout)
+
+    const parsed = JSON.parse(fromRoot.stdout) as {
+      findings: Array<{ file: string; kind: string }>
+    }
+    assert.equal(parsed.findings.length, 1)
+    assert.equal(parsed.findings[0].file, 'docs/runbook.sh')
+    assert.equal(parsed.findings[0].kind, 'forbidden_field_printed')
+  })
+})
+
+test('a safe repository reports clean from either directory', () => {
+  withRepo('docs/runbook.sh', SAFE_RUNBOOK, (root) => {
+    const subdir = path.join(root, 'scripts')
+    mkdirSync(subdir, { recursive: true })
+    for (const cwd of [root, subdir]) {
+      const run = runGuard(cwd)
+      assert.equal(run.status, 0, `expected clean from ${cwd}`)
+      assert.match(run.stdout, /clean/)
+    }
   })
 })
 

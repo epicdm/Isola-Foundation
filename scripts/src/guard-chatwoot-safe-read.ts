@@ -179,6 +179,26 @@ const SENSITIVE_ENDPOINT_RE =
   /\/api\/v1\/accounts\/[^\s"'`/]+\/(inboxes|webhooks|agent_bots)(\/[^\s"'`]*)?/i
 
 /**
+ * The same endpoints written with the account prefix elided — `…/webhooks`,
+ * `.../inboxes/46`, `…/agent_bot`.
+ *
+ * A runbook abbreviates the second and third steps once the first has spelled
+ * the path out; the operator still runs the full URL. The R1C-1 verification
+ * step read `GET …/webhooks` and was invisible to this guard purely because of
+ * the ellipsis, while its sibling two lines up was caught.
+ *
+ * Deliberately narrow: the ellipsis must be immediately followed by `/` and a
+ * Chatwoot resource name. A sentence that merely trails off with "…" is not an
+ * endpoint and is not a finding.
+ */
+const ABBREVIATED_ENDPOINT_RE = /(?:…|\.\.\.)\/(?:inboxes|webhooks|agent_bots?)\b/i
+
+/** Either spelling of a credential-bearing Chatwoot endpoint. */
+export function mentionsChatwootEndpoint(line: string): boolean {
+  return SENSITIVE_ENDPOINT_RE.test(line) || ABBREVIATED_ENDPOINT_RE.test(line)
+}
+
+/**
  * Markers that show the author projected the response instead of printing it.
  * `jq` with an explicit object construction, an explicit field selection, or a
  * call into this helper all count.
@@ -189,8 +209,114 @@ const SENSITIVE_ENDPOINT_RE =
 const PROJECTION_MARKER_RE =
   /(guard-chatwoot-safe-read|projectInbox|projectAgentBot|projectAllowlist|jq\s+[-a-zA-Z]*\s*['"][^'"]*\{|jq\s+[-a-zA-Z]*\s*['"]\s*\.[A-Za-z_])/
 
-/** A line that is plainly commentary rather than an executable command. */
-const PROSE_RE = /^\s*(?:[*>#]|\/\/|--\s)/
+/**
+ * The response body is discarded rather than projected.
+ *
+ * For a write (`PUT`, `POST`, `DELETE`) whose response fields nobody needs,
+ * throwing the body away is stronger than projecting it: there is no field list
+ * to drift. `curl -o /dev/null -w '%{http_code}'` still proves the call
+ * succeeded, which is the only thing the runbook actually reads.
+ */
+const BODY_SUPPRESSED_RE =
+  /((?:-o|--output)\s+(?:\/dev\/null|NUL)\b|>\s*\/dev\/null|\|\s*Out-Null)/i
+
+/**
+ * A line that is plainly commentary rather than an executable instruction.
+ *
+ * All three markdown bullet characters are here. They used to disagree: `*` was
+ * prose and `-` was not, so the same sentence was flagged or exempt depending on
+ * which bullet the author typed. Security coverage must not turn on punctuation.
+ *
+ * Being marked as prose is necessary but NOT sufficient — see `isProse`.
+ */
+const PROSE_MARKER_RE = /^\s*(?:[*\-+>#]|\/\/|--\s)/
+
+/** An HTTP client invocation: the line runs something. */
+const HTTP_CLIENT_RE =
+  /(\b(?:curl|wget|Invoke-RestMethod|Invoke-WebRequest|irm|iwr|http|xh)\b|\bfetch\s*\()/i
+
+/** An HTTP method, uppercase only — so the English word "get" is not a verb here. */
+const HTTP_METHOD_RE = /\b(?:GET|POST|PUT|PATCH|DELETE|HEAD)\b/
+
+/**
+ * A fenced or inline code span. In a runbook this is how an instruction to RUN
+ * something is written, as opposed to a sentence describing what happened.
+ */
+const CODE_SPAN_RE = /`[^`]+`/
+
+/**
+ * Strip the decoration a runbook puts in front of an instruction — the bullet
+ * or comment marker, a bold lead-in like `**Mutation:**`, an opening quote or
+ * backtick — so the first meaningful token can be examined.
+ */
+function withoutLeadingMarkers(line: string): string {
+  return line
+    .trim()
+    .replace(/^(?:[*\-+>#]+|\/\/|--)\s*/, '')
+    .replace(/^\*\*[^*]*\*\*:?\s*/, '')
+    .replace(/^[`'"(\[]+/, '')
+    .trim()
+}
+
+/**
+ * The line opens with a bare HTTP method against a path: `GET /api/v1/…`,
+ * `GET …/webhooks`. That is an instruction, not a description.
+ */
+const BARE_METHOD_PATH_RE = /^(?:GET|POST|PUT|PATCH|DELETE|HEAD)\s+\S*(?:\/|…|\.\.\.)/
+
+/**
+ * The line opens by telling the reader to perform the request.
+ *
+ * Anchored to the START of the instruction, after markers are stripped, and
+ * that anchoring is the whole point: "call" is an imperative in "Call the
+ * webhook endpoint" and a noun in "a call to GET /api/… returned
+ * provider_config". Matching the word anywhere would turn every narrative
+ * sentence about the incident into a finding.
+ */
+const IMPERATIVE_RE =
+  /^(?:run|call|execute|send|issue|fetch|query|inspect|verify\s+using|capture\s+using|read)\b/i
+
+/**
+ * Whether a line carries operational content — something a reader could run, or
+ * that a machine would execute — rather than description.
+ *
+ * This is what stops the prose exemption from becoming a hole. A bullet holding
+ * a runnable command, an output sink or a credential-field selection is scanned
+ * no matter which bullet character introduced it; a sentence that merely
+ * discusses an endpoint stays exempt, so defect write-ups and execution plans
+ * remain writable.
+ *
+ * A method or endpoint counts as operational when it appears inside a CODE SPAN
+ * — `GET /api/v1/accounts/5/webhooks` is an instruction; "a call to GET
+ * /api/v1/accounts/5/inboxes/46 returned provider_config" is a narration of one
+ * that already happened.
+ */
+export function isCommandLike(line: string): boolean {
+  if (HTTP_CLIENT_RE.test(line)) return true
+  if (OUTPUT_SINK_RE.test(line)) return true
+  if (FORBIDDEN_FIELDS.some((field) => forbiddenSelectorRe(field).test(line))) return true
+  if (CODE_SPAN_RE.test(line) && (HTTP_METHOD_RE.test(line) || mentionsChatwootEndpoint(line))) {
+    return true
+  }
+  const opening = withoutLeadingMarkers(line)
+  if (BARE_METHOD_PATH_RE.test(opening)) return true
+  if (IMPERATIVE_RE.test(opening)) return true
+  return false
+}
+
+/**
+ * Descriptive text — narration rather than instruction.
+ *
+ * Nothing operational is ever prose. Beyond that the bar depends on the file:
+ * in MARKDOWN an unmarked line is a paragraph, so plain narrative prose is
+ * exempt whether or not it carries a bullet; in a SCRIPT an unmarked line is
+ * code, so only a comment can be prose. Same rule in both: the exemption
+ * describes what the line IS, never how it is punctuated.
+ */
+export function isProse(raw: string, file = 'x.md'): boolean {
+  if (isCommandLike(raw.trim())) return false
+  return /\.md$/i.test(file) || PROSE_MARKER_RE.test(raw)
+}
 
 /**
  * Anything that puts a value in front of a human, a log or a file.
@@ -262,7 +388,7 @@ export function findPrintedCredential(line: string): string | null {
  * Selecting a forbidden field disqualifies the line no matter how it is spelt.
  */
 export function isProjectionMarker(line: string): boolean {
-  if (!PROJECTION_MARKER_RE.test(line)) return false
+  if (!PROJECTION_MARKER_RE.test(line) && !BODY_SUPPRESSED_RE.test(line)) return false
   return !FORBIDDEN_FIELDS.some((field) => forbiddenSelectorRe(field).test(line))
 }
 
@@ -323,10 +449,11 @@ export function findUnsafeChatwootReads(file: string, contents: string): Finding
       return // one finding per line is enough
     }
 
-    // RULE 2 — a credential-bearing endpoint is read with nothing projecting
-    // the response. Prose describing the endpoint is exempt so Port records and
-    // defect write-ups stay writable.
-    if (SENSITIVE_ENDPOINT_RE.test(line) && !PROSE_RE.test(raw) && !isProjectionMarker(line)) {
+    // RULE 2 — a credential-bearing endpoint is read or written with nothing
+    // projecting the response. Descriptive prose is exempt so Port records and
+    // execution plans stay writable; a bullet holding a runnable command is not
+    // prose, whichever bullet character introduced it.
+    if (mentionsChatwootEndpoint(line) && !isProse(raw, file) && !isProjectionMarker(line)) {
       findings.push({
         file,
         line: index + 1,
@@ -369,25 +496,46 @@ export const GUARD_OWN_FILES: readonly string[] = [
 /**
  * The exact path strings that count as this guard's own files.
  *
- * `git ls-files` is relative to the cwd it runs in, and this guard is invoked
- * both from the repository root and from `scripts/` (pnpm --filter), so each
- * file is registered in both spellings — and ONLY those two. An earlier version
- * matched any path ENDING in the same filename, which quietly excluded
- * `anything/src/guard-chatwoot-safe-read.ts` from the scan. The exclusion now
- * names complete paths, so it cannot be widened by where a file happens to sit.
+ * One spelling each, repository-root-relative, because file discovery is now
+ * anchored to the repository root regardless of cwd — so no other spelling can
+ * ever be produced. Two earlier forms were both wrong: matching any path ENDING
+ * in the same filename quietly excluded `anything/src/guard-chatwoot-safe-read.ts`
+ * from the scan, and carrying a package-relative alias only existed to paper
+ * over the cwd bug that `repositoryRoot` has now removed.
  */
-const GUARD_OWN_FILE_FORMS: ReadonlySet<string> = new Set(
-  GUARD_OWN_FILES.flatMap((own) => [own, own.replace(/^scripts\//, '')]),
-)
+const GUARD_OWN_FILE_FORMS: ReadonlySet<string> = new Set(GUARD_OWN_FILES)
 
 export function isGuardOwnFixtureFile(file: string): boolean {
   const normalised = file.split(path.sep).join('/').replace(/^\.\//, '')
   return GUARD_OWN_FILE_FORMS.has(normalised)
 }
 
-function repositoryFiles(cwd: string): string[] {
+/**
+ * The repository root, resolved from wherever the guard was invoked.
+ *
+ * This is the difference between a repository guard and a package guard.
+ * `git ls-files` is relative to its cwd, and `pnpm --filter` runs a package
+ * script from that package's directory — so anchoring on the cwd meant the
+ * documented `pnpm --filter @workspace/scripts guard-chatwoot-safe-read`
+ * enumerated ONLY `scripts/`, reported "clean", and never once looked at
+ * `docs/`, where the runbooks actually live. The guard reported a clean
+ * repository while four unprojected reads sat in an execution plan.
+ */
+export function repositoryRoot(cwd: string): string {
+  return execFileSync('git', ['rev-parse', '--show-toplevel'], {
+    cwd,
+    encoding: 'utf8',
+  }).trim()
+}
+
+/**
+ * Every tracked and non-ignored untracked file, as paths relative to the
+ * repository root — never to the caller's cwd. Findings are therefore identical
+ * whichever directory the guard is invoked from.
+ */
+function repositoryFiles(root: string): string[] {
   const run = (args: readonly string[]): string[] =>
-    execFileSync('git', [...args], { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+    execFileSync('git', [...args], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
       .split('\n')
       .map((f) => f.trim())
       .filter((f) => f !== '')
@@ -416,12 +564,13 @@ export function formatHuman(findings: readonly Finding[]): string {
 }
 
 export function main(argv: readonly string[] = process.argv.slice(2)): number {
-  const cwd = process.cwd()
   const json = argv.includes('--json')
 
+  let root: string
   let files: string[]
   try {
-    files = repositoryFiles(cwd).filter((f) => isScannableFile(f) && !isGuardOwnFixtureFile(f))
+    root = repositoryRoot(process.cwd())
+    files = repositoryFiles(root).filter((f) => isScannableFile(f) && !isGuardOwnFixtureFile(f))
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     process.stderr.write(`guard-chatwoot-safe-read: could not list repository files: ${message}\n`)
@@ -432,7 +581,7 @@ export function main(argv: readonly string[] = process.argv.slice(2)): number {
   for (const file of files) {
     let contents: string
     try {
-      contents = readFileSync(path.join(cwd, file), 'utf8')
+      contents = readFileSync(path.join(root, file), 'utf8')
     } catch {
       continue // unreadable or vanished between listing and reading; not this guard's business
     }
