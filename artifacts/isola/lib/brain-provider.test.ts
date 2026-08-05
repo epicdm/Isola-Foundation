@@ -122,8 +122,41 @@ describe('generateReply — claim-guard integration (Clawith path, mocked bridge
     expect(result.text).not.toMatch(/425/);
     expect(result.needsHandoff).toBe(true);
     expect(auditMock).toHaveBeenCalledWith(
-      expect.objectContaining({ tenantId: SALES_TENANT, action: 'claim_guard.blocked', meta: { rule: 'unratified_price' } }),
+      expect.objectContaining({
+        tenantId: SALES_TENANT,
+        action: 'claim_guard.blocked',
+        meta: expect.objectContaining({ rule: 'unratified_price' }),
+      }),
     );
+  });
+
+  it('a claim-guard block audits forensic diagnostics (length + sha256 + correlation id), never the raw blocked text', async () => {
+    const rawReply = 'That package is EC$425/mo, a great deal!';
+    mockBridgeReply({ reply: rawReply, needs_handoff: false });
+
+    await generateReply({
+      ...baseParams,
+      agent: baseAgent(),
+      tenantId: SALES_TENANT,
+      clawithBinding: clawithBindingFor(SALES_TENANT),
+      escalationCorrelationId: 'corr-forensics-test-1',
+    });
+
+    expect(auditMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'claim_guard.blocked',
+        requestId: 'corr-forensics-test-1',
+        meta: expect.objectContaining({
+          originalResponseLength: rawReply.length,
+          originalResponseSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+          replacementDecision: 'deflected_to_generic_fallback',
+          needsHandoff: true,
+        }),
+      }),
+    );
+    // The raw blocked reply text must never appear anywhere in the audited meta.
+    const call = auditMock.mock.calls.find((c) => c[0]?.action === 'claim_guard.blocked');
+    expect(JSON.stringify(call?.[0]?.meta)).not.toContain(rawReply);
   });
 
   it('a clean, ratified-price reply from the (mocked) bridge passes through unchanged for a sales tenant', async () => {
