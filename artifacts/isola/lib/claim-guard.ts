@@ -240,6 +240,16 @@ const IVR_CAUSATIVE_PATTERN = new RegExp(
  *  the auxiliary path above, so "We can provide you with a custom call menu" (a promise) blocks
  *  while "We provide documentation: an IVR overview and setup guide" (existing material) does not. */
 const PROVISION_VERB_WORDS: ReadonlySet<string> = new Set(['provide', 'provides', 'providing']);
+/**
+ * A gap token inside the passive pattern's two bounded windows. Negation words are excluded so a
+ * gap can never swallow one: without this, "Your IVR is NOT configured by our assistant" and
+ * "Your IVR is NO LONGER configured by our assistant" read as ordinary modifiers and honest
+ * denials were deflected, and "configured NOT by our assistant, but by a qualified telecom
+ * specialist" — an explicit human attribution — was read as an AI claim. A gap is for adverbs and
+ * adjuncts ("fully", "for your small business"), never for the word that reverses the sentence.
+ */
+const NON_NEGATED_GAP_TOKEN = `(?!not\\b|never\\b|no\\b|nor\\b|n't\\b)[\\w'-]+`;
+
 const IVR_PASSIVE_PATTERN = new RegExp(
   // Two bounded gaps, both of which real passive sales copy uses:
   //   copula → participle  ("will be FULLY configured")      — max 2 tokens
@@ -248,7 +258,7 @@ const IVR_PASSIVE_PATTERN = new RegExp(
   // ordinary modifier and "Your IVR is not configured by our assistant" — an honest denial —
   // would be deflected, which is precisely the over-blocking this defect exists to remove.
   // Both gaps are short enough that neither can bridge a clause.
-  `\\b${IVR_OBJECT}\\b[\\s\\S]*?\\b${IVR_BE_PHRASE}(?:\\s+(?!not\\b|never\\b|n't\\b)[\\w'-]+){0,2}?\\s+${IVR_PARTICIPLES}(?:\\s*(?:,|and)\\s*${IVR_PARTICIPLES})*(?:\\s+[\\w'-]+){0,3}?\\s+by\\s+${IVR_PASSIVE_AGENT}\\b`,
+  `\\b${IVR_OBJECT}\\b[\\s\\S]*?\\b${IVR_BE_PHRASE}(?:\\s+${NON_NEGATED_GAP_TOKEN}){0,2}?\\s+${IVR_PARTICIPLES}(?:\\s*(?:,|and)\\s*${IVR_PARTICIPLES})*(?:[\\s,]+${NON_NEGATED_GAP_TOKEN}){0,6}?[\\s,]+by\\s+${IVR_PASSIVE_AGENT}\\b`,
   'i',
 );
 

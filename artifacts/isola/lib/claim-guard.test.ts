@@ -1062,3 +1062,42 @@ describe('guardReply — passive negation is not a modifier', () => {
     expect(guardReply('Your IVR is configured by our assistant.', SALES_TENANT).blocked).toBe(true);
   });
 });
+
+// ─── Correction round 2, Codex follow-up at 8982727 ──────────────────────────
+
+describe('guardReply — passive agent phrase across longer adjuncts and punctuation', () => {
+  const BLOCKED: { label: string; text: string }[] = [
+    { label: 'four-token adjunct before the agent', text: 'Your IVR will be configured for your small business by our assistant.' },
+    { label: 'comma before the agent', text: 'Your IVR will be configured for you, by our assistant.' },
+    { label: 'short adjunct before the agent', text: 'Your IVR will be configured for you by our assistant.' },
+    { label: 'single-token adjunct', text: 'A custom IVR would be designed today by our AI.' },
+  ];
+  for (const { label, text } of BLOCKED) {
+    it(`blocks: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe('complex_ivr_passive');
+    });
+  }
+});
+
+describe('guardReply — a passive gap never swallows a negation', () => {
+  // The two bounded gaps exist for adverbs and adjuncts. If either can absorb a negation word,
+  // an honest denial or an explicit human attribution reads as an AI claim.
+  const PASSES: { label: string; text: string }[] = [
+    { label: 'contrastive "not by ... but by <human>"', text: 'Your IVR is configured not by our assistant, but by a qualified telecom specialist.' },
+    { label: '"no longer" before the participle', text: 'Your IVR is no longer configured by our assistant.' },
+    { label: '"not" before the participle', text: 'Your IVR is not configured by our assistant.' },
+    { label: '"not" before the copula', text: 'Your IVR will not be configured by our assistant.' },
+    { label: 'human agent across an adjunct', text: 'A custom IVR can be built for you by a qualified telecom specialist.' },
+  ];
+  for (const { label, text } of PASSES) {
+    it(`passes: ${label}`, () => {
+      expect(guardReply(text, SALES_TENANT).blocked).toBe(false);
+    });
+  }
+
+  it('still blocks the affirmative form the negations mirror', () => {
+    expect(guardReply('Your IVR is configured by our assistant.', SALES_TENANT).blocked).toBe(true);
+  });
+});
