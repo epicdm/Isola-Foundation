@@ -30,6 +30,7 @@ const fs = require('fs');
 const path = require('path');
 const T = require('./lib/isola-topology.js');
 const S = require('./lib/isola-state.js');
+const M = require('./lib/meta-graph-policy.js');
 
 const STATE_DIR = path.join(__dirname, '..', 'state');
 const LOG = path.join(STATE_DIR, 'guard.log');
@@ -53,18 +54,32 @@ function log(line) {
   }
 }
 
+/**
+ * Session ledger writes are redacted too. The transcript is not the only place a
+ * credential can land: `.claude/state/sessions/<id>/commands-run.log` persists to
+ * disk and outlives the session. Adversarial review 2026-08-05 found a literal
+ * token reaching that file via the unconditional command record below.
+ */
 function record(file, line) {
-  S.append(SESSION_ID, file, line);
+  S.append(SESSION_ID, file, M.redactSensitive(line));
 }
 
+/**
+ * Everything written here lands in the transcript, so it is redacted first. A
+ * deny reason often quotes the offending command, and the whole point of the
+ * credential rules is that a credential must never be echoed — including by the
+ * guard that just refused it.
+ */
 function deny(ruleId, reason, remedy) {
   log('DENY rule=' + ruleId);
   process.stderr.write(
-    'BLOCKED by isola-guard [' + ruleId + ']\n' +
-      reason +
-      '\n\nDo this instead: ' +
-      remedy +
-      '\n(policy: .claude/hooks/isola-guard.js — see /isola-production-safety)\n'
+    M.redactSensitive(
+      'BLOCKED by isola-guard [' + ruleId + ']\n' +
+        reason +
+        '\n\nDo this instead: ' +
+        remedy +
+        '\n(policy: .claude/hooks/isola-guard.js — see /isola-production-safety)\n'
+    )
   );
   process.exit(2);
 }
@@ -245,15 +260,20 @@ function evaluate(inp) {
     );
   }
 
-  // 5. Meta Graph mutations are owner-only.
-  if (T.META_HOST_RE.test(cmd) && T.META_MUTATION_INDICATOR_RE.test(cmd)) {
-    deny(
-      'meta-asset-mutation',
-      'This mutates Meta/WhatsApp asset configuration (webhook, subscription or number registration).\n' +
-        'Webhook ownership defects have twice caused live incidents (WABA-level 2026-07-10, phone-level 9043).',
-      'prepare the exact Graph call AND its reversal, hand both to the owner for authorization, and execute only after ' +
-        'explicit approval. Read-only GETs against Graph are permitted.'
-    );
+  // 5. Meta Graph — default-deny, with a named metadata-read allowlist.
+  //
+  //    The previous rule treated any curl data flag as proof of mutation. That
+  //    blocked `-G --data-urlencode` (a GET, and the SAFER way to pass
+  //    parameters) while permitting credential-minting GETs such as
+  //    /oauth/access_token, which return a live token into the transcript.
+  //    Method classification, endpoint allowlisting and credential-source
+  //    validation are now separate, tested concerns in lib/meta-graph-policy.js.
+  if (M.isMetaGraphCommand(cmd)) {
+    const verdict = M.evaluateMetaGraph(cmd);
+    if (verdict.decision === 'deny') {
+      deny(verdict.ruleId, verdict.reason, verdict.remedy);
+    }
+    record('commands-run.log', 'META-GRAPH-READ ' + verdict.method + ' ' + M.redactSensitive(cmd).slice(0, 200));
   }
 
   // 6. Protected production numbers + a mutating verb.

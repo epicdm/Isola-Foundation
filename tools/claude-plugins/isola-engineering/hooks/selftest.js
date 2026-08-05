@@ -46,6 +46,18 @@ function run(script, payload) {
 
 const SID = 'selftest-' + process.pid;
 
+/** Graph asset ids under test (real EPIC assets; see lib/isola-topology.js). */
+const WABA = '272252189309178';
+const PNID_3742 = '975632242309171';
+const PNID_6737 = '278390858690809';
+const GRAPH = 'https://graph.facebook.com/v23.0/';
+
+/**
+ * A structurally valid, meaningless Meta token, assembled rather than written
+ * literally so this file does not itself look like a committed credential.
+ */
+const FAKE_TOKEN = t('EA', 'A', 'b3xY7qLm2Nv9Kd4Rt6Wz8Ps1Hj5Gf0Cx', 'Qa7Ue2Ir');
+
 const cases = [
   // --- THE R5A RULE -------------------------------------------------------
   {
@@ -188,6 +200,10 @@ const cases = [
   },
 
   // --- META / PROTECTED ASSETS -------------------------------------------
+  // Policy lives in lib/meta-graph-policy.js and has its own pure-predicate
+  // suite (meta-graph-policy.test.js, `node --test`). These cases prove the
+  // policy is actually WIRED INTO the hook — same JSON-on-stdin path Claude
+  // Code uses — not merely correct in isolation.
   {
     name: 'Meta webhook mutation is BLOCKED',
     expect: BLOCK,
@@ -195,16 +211,210 @@ const cases = [
     payload: {
       session_id: SID,
       tool_name: 'Bash',
-      tool_input: { command: 'curl -X POST "https://graph.facebook.com/v23.0/975632242309171/subscribed_apps"' },
+      tool_input: { command: 'curl -X POST "' + GRAPH + PNID_3742 + '/subscribed_apps"' },
     },
   },
   {
-    name: 'read-only Graph GET is ALLOWED',
+    name: 'implicit Meta write (body flag, no -X) is BLOCKED',
+    expect: BLOCK,
+    contains: 'meta-asset-mutation',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: 'curl "' + GRAPH + PNID_3742 + '/subscribed_apps" --data "subscribed_fields=messages"',
+      },
+    },
+  },
+  {
+    // THE REGRESSION. Before 2026-08-05 this exact shape was denied as a
+    // mutation because --data-urlencode was treated as a write indicator, which
+    // pushed engineers toward hand-built query strings to prove webhook
+    // ownership. -G means GET.
+    name: 'curl -G --data-urlencode metadata read is ALLOWED',
     expect: PASS,
     payload: {
       session_id: SID,
       tool_name: 'Bash',
-      tool_input: { command: 'curl -s "https://graph.facebook.com/v23.0/272252189309178/subscribed_apps?fields=x"' },
+      tool_input: {
+        command:
+          'curl -sG --data-urlencode "fields=webhook_configuration" ' +
+          '--data-urlencode "access_token=$META_GRAPH_TOKEN" ' + GRAPH + PNID_6737,
+      },
+    },
+  },
+  {
+    name: 'allowlisted subscribed_apps GET is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s "' + GRAPH + WABA + '/subscribed_apps?access_token=$META_GRAPH_TOKEN"' },
+    },
+  },
+  {
+    name: 'allowlisted WABA phone-number enumeration GET is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s "' + GRAPH + WABA + '/phone_numbers?access_token=$META_GRAPH_TOKEN"' },
+    },
+  },
+  {
+    name: 'metadata-only debug_token GET is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command:
+          'curl -sG --data-urlencode "input_token=$SUBJECT_TOKEN" ' +
+          '--data-urlencode "access_token=$APP_TOKEN" ' + GRAPH + 'debug_token',
+      },
+    },
+  },
+  {
+    name: 'long-lived token exchange GET is BLOCKED',
+    expect: BLOCK,
+    contains: 'token-exchange',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command:
+          'curl -sG -d "grant_type=fb_exchange_token" -d "client_id=$APP_ID" ' +
+          '-d "client_secret=$APP_SECRET" -d "fb_exchange_token=$SHORT_TOKEN" ' + GRAPH + 'oauth/access_token',
+      },
+    },
+  },
+  {
+    name: 'page-token minting edge (/me/accounts) is BLOCKED',
+    expect: BLOCK,
+    contains: 'token-minting',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s "' + GRAPH + 'me/accounts?access_token=$META_GRAPH_TOKEN"' },
+    },
+  },
+  {
+    // Two assertions in one: the literal is refused, AND the refusal message
+    // does not reprint it. A guard that leaks the credential while blocking it
+    // has not protected anything.
+    name: 'literal Meta credential in argv is BLOCKED and not echoed back',
+    expect: BLOCK,
+    contains: 'credential-literal',
+    notContains: FAKE_TOKEN,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s "' + GRAPH + WABA + '/subscribed_apps?access_token=' + FAKE_TOKEN + '"' },
+    },
+  },
+  {
+    name: 'side-effecting GET (request_code) is BLOCKED',
+    expect: BLOCK,
+    contains: 'side-effecting-get',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s "' + GRAPH + PNID_3742 + '/request_code?code_method=SMS"' },
+    },
+  },
+  {
+    name: 'requesting credential fields on an approved object is BLOCKED',
+    expect: BLOCK,
+    contains: 'credential-field',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s "' + GRAPH + PNID_3742 + '?fields=access_token"' },
+    },
+  },
+  {
+    name: 'unapproved Graph edge is BLOCKED',
+    expect: BLOCK,
+    contains: 'unapproved-edge',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s "' + GRAPH + WABA + '/message_templates"' },
+    },
+  },
+  {
+    name: 'approved object with an unapproved field is BLOCKED',
+    expect: BLOCK,
+    contains: 'unapproved-field',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s "' + GRAPH + PNID_3742 + '?fields=messages"' },
+    },
+  },
+  {
+    name: 'non-Graph POST is unaffected by Meta policy',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -X POST https://example.com/webhook -d "a=1"' },
+    },
+  },
+  {
+    // Adversarial review 2026-08-05, finding 1 (critical). A malformed percent
+    // escape threw URIError inside the policy; the guard fails open on any
+    // internal error, so the POST was allowed. This case is the end-to-end
+    // proof that the fail-open path is no longer reachable this way.
+    name: 'malformed percent escape does NOT fail the guard open',
+    expect: BLOCK,
+    contains: 'meta-asset-mutation',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: 'curl -X POST "' + GRAPH + PNID_3742 + '/subscribed_apps?bad%ZZ=1&access_token=$META_GRAPH_TOKEN"',
+      },
+    },
+  },
+  {
+    // Adversarial review 2026-08-05, finding 2 (high).
+    name: 'curl --next second transfer cannot POST behind a leading -G',
+    expect: BLOCK,
+    contains: 'meta-asset-mutation',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command:
+          'curl -G "' + GRAPH + WABA + '?fields=name" --next -d "subscribed_fields=messages" "' +
+          GRAPH + PNID_3742 + '/subscribed_apps"',
+      },
+    },
+  },
+  {
+    // Adversarial review 2026-08-05, finding 4 (high). A shell-assembled host
+    // left every token-minting endpoint reachable.
+    name: 'shell-assembled Graph host is refused, not waved through',
+    expect: BLOCK,
+    contains: 'unclassifiable-graph-request',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command:
+          'HOST=graph.facebook.com; curl "https://$HOST/v23.0/oauth/access_token?grant_type=fb_exchange_token' +
+          '&client_id=$APP_ID&client_secret=$APP_SECRET"',
+      },
+    },
+  },
+  {
+    name: 'prose mentioning the Graph host is still not gated',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'grep -rn graph.facebook.com artifacts/isola/lib' },
     },
   },
 
@@ -293,7 +503,10 @@ for (const c of cases) {
   const r = run(GUARD, c.payload);
   const okVerdict = r.verdict === c.expect;
   const okContains = !c.contains || r.stderr.includes(c.contains) || r.stdout.includes(c.contains);
-  const ok = okVerdict && okContains;
+  // notContains proves the guard did not echo something it must never print —
+  // a credential leaked inside a deny message is still a leaked credential.
+  const okNotContains = !c.notContains || (!r.stderr.includes(c.notContains) && !r.stdout.includes(c.notContains));
+  const ok = okVerdict && okContains && okNotContains;
   if (!ok) failed++;
   console.log(
     (ok ? '  PASS  ' : '  FAIL  ') +
@@ -302,6 +515,7 @@ for (const c of cases) {
         ? ''
         : '\n          expected=' + c.expect + ' got=' + r.verdict +
           (c.contains ? ' wanted-rule=' + c.contains : '') +
+          (!okNotContains ? ' LEAKED-FORBIDDEN-STRING' : '') +
           (r.stderr ? '\n          stderr: ' + r.stderr.split('\n').slice(0, 2).join(' | ') : ''))
   );
 }

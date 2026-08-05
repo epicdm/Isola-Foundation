@@ -208,14 +208,21 @@ const PROTECTED_NUMBERS = [
 const SHARED_WABA_ID = '272252189309178';
 
 /**
- * Meta Graph API. Reads are not only allowed but REQUIRED — proving webhook
- * ownership means calling GET /{phone_number_id}?fields=webhook_configuration
- * and GET /{waba}/subscribed_apps. Only MUTATIONS are owner-gated, so the host
- * match and the mutation indicator are deliberately separate tests.
+ * Meta Graph API. Certain reads are not only allowed but REQUIRED — proving
+ * webhook ownership means calling GET /{phone_number_id}?fields=webhook_configuration
+ * and GET /{waba}/subscribed_apps.
+ *
+ * The host match lives here; the request POLICY lives in lib/meta-graph-policy.js.
+ *
+ * REMOVED 2026-08-05 — META_MUTATION_INDICATOR_RE. It classified any curl data
+ * flag (`--data`, `--data-urlencode`, ` -d `) as a mutation, which is wrong in
+ * both directions: it blocked `curl -G --data-urlencode` (a GET, and the safer
+ * way to pass parameters) while permitting credential-minting GETs such as
+ * /oauth/access_token. Method classification is now derived from the actual curl
+ * option grammar, and endpoint access is default-deny against a named allowlist.
+ * See defect-isola-guard-meta-graph-read-classification-and-token-minting-gap-2026-08-05.
  */
 const META_HOST_RE = /graph\.facebook\.com/i;
-const META_MUTATION_INDICATOR_RE =
-  /(-X\s*(POST|PUT|DELETE|PATCH)|--request\s+(POST|PUT|DELETE|PATCH)|--data\b|--data-urlencode\b|\s-d\s|\.post\(|\.delete\(|method:\s*['"](POST|PUT|DELETE|PATCH)['"])/i;
 
 /**
  * Legacy stack references that must not re-enter application code.
@@ -363,7 +370,6 @@ module.exports = {
   DESTRUCTIVE_RULES,
   PROTECTED_NUMBERS,
   META_HOST_RE,
-  META_MUTATION_INDICATOR_RE,
   LEGACY_REFERENCE_RE,
   SECRET_FILE_RE,
   SECRET_DUMP_RE,
