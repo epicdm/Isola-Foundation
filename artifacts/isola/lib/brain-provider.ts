@@ -511,13 +511,24 @@ export async function generateReply(params: {
     const guarded = guardReply(result.text, tenantId);
     if (guarded.blocked) {
       console.warn(`[brain-provider] claim-guard blocked a reply (rule=${guarded.rule}) for tenant ${tenantId}`);
+      // Forensic diagnostics only — never the raw blocked text itself (see
+      // GuardResult.forensics in lib/claim-guard.ts). correlationId mirrors the
+      // same fallback the B2 exposure gate above uses, so a denied-exposure turn
+      // and a claim-guard-blocked turn for the same conversation share one id.
       await audit({
         tenantId,
         actorId: `agent:${agent.id}`,
         action: 'claim_guard.blocked',
         entity: 'conversation',
         entityId: sessionId,
-        meta: { rule: guarded.rule },
+        requestId: escalationCorrelationId ?? `corr-${sessionId}`,
+        meta: {
+          rule: guarded.rule,
+          originalResponseLength: guarded.forensics?.originalLength ?? null,
+          originalResponseSha256: guarded.forensics?.originalSha256 ?? null,
+          replacementDecision: 'deflected_to_generic_fallback',
+          needsHandoff: true,
+        },
       });
       return { ...result, text: guarded.text, needsHandoff: true };
     }

@@ -16,6 +16,8 @@
  * would incorrectly block their own real prices.
  */
 
+import { createHash } from 'node:crypto';
+
 export const SALES_TENANT_IDS: ReadonlySet<string> = new Set([
   'ema_sales_tenant',
   '43b006e4-33e0-42a8-bec7-4422ba290d79',
@@ -40,6 +42,15 @@ export interface GuardResult {
   blocked: boolean;
   /** Rule id, for audit logging only — never included in the customer-facing text. */
   rule?: string;
+  /** Forensic diagnostics for a blocked reply only — deliberately never the raw
+   *  original text itself (a blocked/unvetted reply must never be persisted
+   *  verbatim into logs or the AuditLog). Lets an investigation confirm what
+   *  was blocked (length + hash, comparable against anything captured
+   *  elsewhere) without ever storing the unvetted content. */
+  forensics?: {
+    originalLength: number;
+    originalSha256: string;
+  };
 }
 
 // Exported so brain-provider.ts can reuse the exact same claim-safe text on
@@ -48,6 +59,10 @@ export interface GuardResult {
 // a rule hit or an unexpected error evaluating the rules.
 export const DEFLECTION =
   "I don't have a confirmed answer for that — let me get you accurate details from our team. I'll flag this conversation for a person to follow up.";
+
+function forensicsFor(text: string): GuardResult['forensics'] {
+  return { originalLength: text.length, originalSha256: createHash('sha256').update(text).digest('hex') };
+}
 
 // Hard-never deny-list — heuristic regexes, first pass. Expect tuning as the
 // regression suite and live traffic surface false positives/negatives.
@@ -80,7 +95,27 @@ const HARD_NEVERS: { id: string; pattern: RegExp; requiresPositiveClaim?: boolea
   { id: 'unlimited_autonomy', pattern: /\bunlimited autonomy\b|\bfully autonomous\b|\bno human (oversight|involvement|needed)\b/i },
   { id: 'guaranteed_accuracy', pattern: /\bguarantee[sd]?\b[^.?!]{0,40}\b(sales|accuracy|results|conversion)s?\b/i, requiresPositiveClaim: true },
   { id: 'missed_call_recovery', pattern: /\bmissed[\s-]call recovery\b|\brecovers?\s+(every|all)\s+missed calls?\b/i },
-  { id: 'complex_ivr', pattern: /\bIVR\b|\bmulti-?level (phone )?menu\b/i, requiresPositiveClaim: true },
+  // complex_ivr — narrowed 2026-08-05 (defect-foundation-claim-guard-complex-ivr-overbroad-post-generation-filter-2026-08-05):
+  // the original bare-keyword form (/\bIVR\b|.../) blocked ANY mention of "IVR"/"multi-level
+  // menu", including an honest description of a real, ratified call-routing feature or a
+  // recommendation that the customer consider one — a live customer asking for a service
+  // recommendation got deflected even though nothing was fabricated. Subject-anchored now
+  // (mirrors ai_places_call/voice_ai above): only fires when I/we/our-AI/assistant/bot/system
+  // claims to itself build/configure/design/create/deploy/set-up/implement a custom IVR or
+  // multi-level menu — the actual fabrication this rule exists to catch (an unsupported
+  // autonomous-build promise), not a neutral mention. [^.?!]{0,40} bounds the verb→object gap
+  // to the same sentence (same idiom as guaranteed_accuracy above), so a "we" earlier in a
+  // reply can never latch onto an unrelated IVR mention in a different sentence/clause, and a
+  // third-party subject ("a specialist would need to design...") never matches at all since it
+  // isn't I/we/our-AI to begin with. Passive-voice claims ("a custom IVR will be built by our
+  // AI") aren't covered by this narrow pass — first-pass, tune from the audit log as this file's
+  // header already documents.
+  {
+    id: 'complex_ivr',
+    pattern:
+      /\b(?:I|we|our\s+(?:AI|assistant|bot|system))\b(?:'ll| will| can| could| would| also)*\s+(?:build|builds|built|building|configure|configures|configured|configuring|design|designs|designed|designing|creat(?:e|es|ed|ing)|deploy|deploys|deployed|deploying|set\s?up|sets\s?up|setting\s?up|implement|implements|implemented|implementing)\b[^.?!]{0,40}\b(?:IVR|multi-?level (?:phone )?menu)\b/i,
+    requiresPositiveClaim: true,
+  },
   { id: 'instant_self_service', pattern: /\binstant self-?service\b|\b14-?day free\b|\bself-?serve sign-?up\b/i },
   { id: 'automated_refunds', pattern: /\bautomat(ed|ic) refunds?\b/i, requiresPositiveClaim: true },
   { id: 'every_intl_route', pattern: /\bevery international (route|destination)\b|\ball countries\b/i, requiresPositiveClaim: true },
@@ -132,17 +167,17 @@ export function guardReply(text: string, tenantId: string): GuardResult {
 
   for (const { id, pattern, requiresPositiveClaim } of HARD_NEVERS) {
     const hit = requiresPositiveClaim ? hasPositiveClaim(text, pattern) : pattern.test(text);
-    if (hit) return { text: DEFLECTION, blocked: true, rule: id };
+    if (hit) return { text: DEFLECTION, blocked: true, rule: id, forensics: forensicsFor(text) };
   }
 
   for (const m of text.matchAll(PRICE)) {
     const currency = m[1].toUpperCase();
     const amount = Number(m[2].replace(/,/g, ''));
     if (currency !== 'EC$') {
-      return { text: DEFLECTION, blocked: true, rule: 'non_ec_price' };
+      return { text: DEFLECTION, blocked: true, rule: 'non_ec_price', forensics: forensicsFor(text) };
     }
     if (!RATIFIED_EC_AMOUNTS.has(amount) && amount !== RATIFIED_PER_MIN_RATE) {
-      return { text: DEFLECTION, blocked: true, rule: 'unratified_price' };
+      return { text: DEFLECTION, blocked: true, rule: 'unratified_price', forensics: forensicsFor(text) };
     }
   }
 

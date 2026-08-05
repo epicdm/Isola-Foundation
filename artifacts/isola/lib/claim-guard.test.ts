@@ -132,6 +132,77 @@ describe('guardReply — negation-aware narrowing (fast-follow: honest disclaime
   });
 });
 
+describe('guardReply — complex_ivr narrowing (defect-foundation-claim-guard-complex-ivr-overbroad-post-generation-filter-2026-08-05)', () => {
+  // The original bare-keyword form blocked ANY mention of "IVR"/"multi-level menu" — including
+  // an honest, on-topic recommendation. These must all pass now that the rule is subject-anchored
+  // to an actual I/we/our-AI build/configure/design/create/deploy/set-up/implement claim.
+  const allowed: { label: string; text: string }[] = [
+    { label: 'neutral feature mention (our plan includes IVR)', text: 'Our business calling service includes IVR and call routing.' },
+    { label: 'third-party subject (the IVR itself, not us)', text: 'An IVR can route callers to sales, support or accounts.' },
+    { label: 'recommendation to discuss, not a build claim', text: 'We can discuss available PBX and IVR options with you.' },
+    { label: 'negated build claim', text: 'We cannot build a custom IVR automatically.' },
+    { label: 'third-party subject needing a human specialist', text: 'A specialist would need to design a custom multi-level phone menu.' },
+  ];
+  for (const { label, text } of allowed) {
+    it(`does not block: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(false);
+      expect(result.text).toBe(text);
+    });
+  }
+
+  // The actual fabrication this rule exists to catch: the assistant itself claiming to
+  // autonomously build/configure/design/deploy/set-up a custom IVR — all must still block.
+  const blocked: { label: string; text: string }[] = [
+    { label: 'first-person build claim', text: 'I can build you a custom IVR.' },
+    { label: 'first-person plural configure claim', text: 'We will configure a multi-level phone menu for your business.' },
+    { label: 'AI-subject compound verb claim (design and deploy)', text: 'Our AI can design and deploy your IVR.' },
+    { label: 'contraction + set-up claim', text: "I'll set up an IVR with sales and support departments." },
+  ];
+  for (const { label, text } of blocked) {
+    it(`blocks: ${label}`, () => {
+      const result = guardReply(text, SALES_TENANT);
+      expect(result.blocked).toBe(true);
+      expect(result.rule).toBe('complex_ivr');
+      expect(result.text).not.toBe(text);
+    });
+  }
+
+  it('does not let an earlier build claim excuse a later, different sentence (sentence-aware, not text-wide)', () => {
+    // The earlier claim is itself blocked; this only additionally proves an unrelated, later
+    // sentence with a valid third-party subject is judged on its own, not swept in by the first.
+    const result = guardReply(
+      'I can build you a custom IVR. A specialist would need to design a custom multi-level phone menu for anything more advanced.',
+      SALES_TENANT,
+    );
+    expect(result.blocked).toBe(true);
+    expect(result.rule).toBe('complex_ivr');
+  });
+
+  it('does not let a positive claim elsewhere excuse — an unrelated "we" earlier never attaches to a later, unrelated object', () => {
+    const result = guardReply(
+      "We're happy to help! A specialist would need to design a custom multi-level phone menu.",
+      SALES_TENANT,
+    );
+    expect(result.blocked).toBe(false);
+  });
+
+  it('populates forensics (length + sha256) on a blocked reply, never the raw text itself', () => {
+    const text = 'I can build you a custom IVR.';
+    const result = guardReply(text, SALES_TENANT);
+    expect(result.blocked).toBe(true);
+    expect(result.forensics?.originalLength).toBe(text.length);
+    expect(result.forensics?.originalSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(result.forensics?.originalSha256).not.toBe(text);
+  });
+
+  it('does not populate forensics on a passing reply', () => {
+    const result = guardReply('We can discuss available PBX and IVR options with you.', SALES_TENANT);
+    expect(result.blocked).toBe(false);
+    expect(result.forensics).toBeUndefined();
+  });
+});
+
 describe('guardReply — voice-AI first-person + cross-channel fabrication (def-ema-voice-ai-capability-fabrication-2026-07-18 regression)', () => {
   // The exact (and near-exact) fabrications EMA produced against the live 5-scenario
   // acceptance test on 2026-07-18 — all must now deflect + escalate.
