@@ -1,0 +1,17 @@
+{
+  "name": "epic-internal",
+  "owner": {
+    "name": "EPIC Communications Inc"
+  },
+  "metadata": {
+    "description": "Internal EPIC plugin marketplace. Local path only — never published publicly."
+  },
+  "plugins": [
+    {
+      "name": "isola-engineering",
+      "source": "./isola-engineering",
+      "description": "Isola production-safety hooks, Port-aware skills and least-privilege review subagents.",
+      "version": "1.0.0"
+    }
+  ]
+}
