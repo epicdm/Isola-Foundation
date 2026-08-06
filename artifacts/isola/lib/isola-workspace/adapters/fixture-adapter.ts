@@ -312,14 +312,21 @@ export function createFixturePorts(
           const req = (n as Record<string, unknown>).requiresEntitlement as string | undefined
           return !req || entitlements.has(req)
         })
-        .map((n) => ({
-          severity: n.severity as 'err' | 'warn' | 'block',
-          title: n.title,
-          body: n.body,
-          meta: n.meta,
-          actionLabel: n.action,
-          primary: Boolean((n as Record<string, unknown>).primary),
-        }))
+        .map((n) => {
+          const row = n as Record<string, unknown>
+          return {
+            severity: n.severity as 'err' | 'warn' | 'block',
+            title: n.title,
+            body: n.body,
+            // Not every fixture row carries `meta`. Coerce to '' rather than widening
+            // AttentionItem.meta to optional: the design requires every attention row to
+            // name its owner and age, so an absent value is a fixture gap to notice, not a
+            // shape the type should start permitting.
+            meta: String(row.meta ?? ''),
+            actionLabel: n.action,
+            primary: Boolean(row.primary),
+          }
+        })
 
       const summary: TodaySummary = {
         date: t.date,

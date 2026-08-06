@@ -78,7 +78,8 @@ const work: ModuleDescriptor = {
       id: 'work.retry',
       label: 'Try the failed change again',
       consequence:
-        'We attempt the same change once more. This creates a new attempt; the failure is kept.',
+        'We attempt the same change once more. This creates a new attempt and the earlier ' +
+        'failure is kept on the record. Nothing is sent to the customer.',
       requiresApproval: true,
       owningSystem: 'salesRecords',
       readback: 'We read the record back and quote what it now holds.',
