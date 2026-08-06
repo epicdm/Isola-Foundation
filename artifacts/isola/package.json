@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "postinstall": "prisma generate",
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "node ./scripts/generate-build-info.mjs && next dev",
+    "build": "node ./scripts/generate-build-info.mjs --require-identity && next build",
     "start": "next start",
     "start:prod": "prisma migrate deploy && next start",
     "db:push": "tsx ../../scripts/src/guard-not-prod-db.ts && prisma db push",

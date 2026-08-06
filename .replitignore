@@ -3,3 +3,32 @@
 
 # No need to store the pnpm store twice.
 .local
+
+# --- generated build output (added 2026-08-06, CB-0 release provenance) ---
+#
+# `.gitignore` is NOT deployment-snapshot containment. Replit publishes the
+# workspace FILESYSTEM, so a gitignored path still ships. Everything below is
+# gitignored AND was being uploaded, then rebuilt from scratch by the deployment's
+# own build step — so the uploaded copy was never used, only capable of confusing
+# a future release about which output it was looking at.
+#
+# Each path is rebuilt by a build command declared in artifact configuration:
+#   artifacts/isola/.next          <- `pnpm --filter @workspace/isola run build`
+#                                     (artifacts/isola/.replit-artifact/artifact.toml)
+#   artifacts/api-server/dist      <- `pnpm --filter @workspace/api-server run build`
+#                                     (artifacts/api-server/.replit-artifact/artifact.toml),
+#                                     which runs before `node artifacts/api-server/dist/index.mjs`;
+#                                     scripts/run-replit-preview.sh also rebuilds it when absent.
+#   artifacts/isola/.next-preview  <- `next dev` under the Preview workflow only
+#                                     (NEXT_DIST_DIR in scripts/run-replit-preview.sh;
+#                                     next.config.ts falls back to .next when unset,
+#                                     so build/start/deployment are unchanged).
+#
+# This is a reproducibility fix, not the CB-0 root-cause fix. Source, Prisma
+# schema and migrations, manifests, the lockfile, .replit-artifact/artifact.toml
+# and source-controlled public assets are all deliberately still uploaded;
+# artifacts/isola/lib/release/replitignore.test.ts asserts exactly that against
+# this file.
+artifacts/isola/.next
+artifacts/isola/.next-preview
+artifacts/api-server/dist
