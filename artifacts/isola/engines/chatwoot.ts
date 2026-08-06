@@ -39,6 +39,19 @@
  *     conversation status toggling, inbox management, team management,
  *     webhook registration, agent-bot attach, conversation custom
  *     attributes. See the source file if you need those later.
+ *
+ * READ ADDITIONS (Lane 1 revenue-MCP milestone, 2026-08-06)
+ *   getConversationRaw() / listMessagesRaw() / getContactRaw() — added so
+ *   lib/revenue-mcp/context-read.ts never has to open its own fetch() against
+ *   Chatwoot. Named `*Raw` deliberately: these return whatever Chatwoot sends,
+ *   unprojected. NOTHING may print or return a `*Raw` result directly —
+ *   lib/revenue-mcp/context-read.ts is the one caller, and it projects every
+ *   field it hands back through an explicit allowlist, the same discipline
+ *   scripts/src/guard-chatwoot-safe-read.ts enforces for inbox/agent_bot
+ *   reads. inboxes, webhooks and agent_bots are NOT read from this module by
+ *   design — those are exactly the endpoints that leaked credentials
+ *   (see guard-chatwoot-safe-read.ts's header) and this feature never needs
+ *   them.
  */
 
 export interface ChatwootConfig {
@@ -226,5 +239,75 @@ export async function addPrivateNote(
       signal: AbortSignal.timeout(10000),
     },
   ).catch(() => null)
+}
+
+// ── Read-only additions — unprojected. See the module header. ─────────────────
+
+/**
+ * `GET /conversations/{id}`. Returns `null` on 404 (not "this account's
+ * conversation" is a caller-side distinction, not this function's) and
+ * throws on any other non-2xx or network failure, matching the rest of this
+ * module's `createConversation`/`addMessage` error style.
+ */
+export async function getConversationRaw(
+  config: ChatwootConfig,
+  chatwootConversationId: number,
+): Promise<Record<string, unknown> | null> {
+  const res = await fetch(`${base(config)}/conversations/${chatwootConversationId}`, {
+    headers: headers(config),
+    signal: AbortSignal.timeout(10000),
+  })
+  if (res.status === 404) return null
+  if (!res.ok) {
+    const err = await res.text().catch(() => '')
+    throw new Error(`getConversation failed (${res.status}): ${err}`)
+  }
+  return res.json()
+}
+
+/**
+ * `GET /conversations/{id}/messages`. Chatwoot has no server-side `limit`
+ * query param on this endpoint (it paginates by `before`), so `limit` is
+ * enforced HERE, client-side, by slicing to the most recent N after the
+ * fetch — the point is that no caller of this function can accidentally pull
+ * "full message history", which lib/revenue-mcp/context-read.ts's contract
+ * forbids returning.
+ */
+export async function listMessagesRaw(
+  config: ChatwootConfig,
+  chatwootConversationId: number,
+  limit: number,
+): Promise<Record<string, unknown>[]> {
+  const res = await fetch(
+    `${base(config)}/conversations/${chatwootConversationId}/messages`,
+    { headers: headers(config), signal: AbortSignal.timeout(10000) },
+  )
+  if (res.status === 404) return []
+  if (!res.ok) {
+    const err = await res.text().catch(() => '')
+    throw new Error(`listMessages failed (${res.status}): ${err}`)
+  }
+  const data = await res.json()
+  const all: Record<string, unknown>[] = Array.isArray(data?.payload) ? data.payload : []
+  // Chatwoot returns oldest-first within a page; take the most RECENT `limit`.
+  return all.slice(Math.max(0, all.length - limit))
+}
+
+/** `GET /contacts/{id}`. Returns `null` on 404. */
+export async function getContactRaw(
+  config: ChatwootConfig,
+  chatwootContactId: number,
+): Promise<Record<string, unknown> | null> {
+  const res = await fetch(`${base(config)}/contacts/${chatwootContactId}`, {
+    headers: headers(config),
+    signal: AbortSignal.timeout(10000),
+  })
+  if (res.status === 404) return null
+  if (!res.ok) {
+    const err = await res.text().catch(() => '')
+    throw new Error(`getContact failed (${res.status}): ${err}`)
+  }
+  const data = await res.json()
+  return (data?.payload ?? data) as Record<string, unknown>
 }
 
