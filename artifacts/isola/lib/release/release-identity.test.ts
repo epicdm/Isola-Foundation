@@ -188,6 +188,34 @@ describe('evaluateRelease', () => {
     expect(r.lines.join('\n')).toContain('isola-foundation.replit.app')
   })
 
+  // A host that fails WITHOUT reporting a tree contributes nothing to the
+  // divergence set, so `divergentTrees` cannot catch it — only the requirement
+  // that every host be `ok` can. Asserted separately for each shape, because a
+  // gate that tolerates "five of six" is how a half-routed deployment gets
+  // called a release.
+  it.each([
+    ['a transport failure', { kind: 'transport_error', detail: 'getaddrinfo ENOTFOUND' } as HostProbe],
+    ['an unhealthy 503', { kind: 'response', status: 503, bodyText: '{"status":"error","build":{"schema":1}}' } as HostProbe],
+    ['a missing build block', { kind: 'response', status: 200, bodyText: '{"status":"ok"}' } as HostProbe],
+    ['a non-JSON body', { kind: 'response', status: 200, bodyText: '<html>gateway</html>' } as HostProbe],
+  ])('fails when a single host answers with %s, even though the rest agree', (_label, probe) => {
+    const verdicts = [...hostsOk.slice(0, 5), evaluateHost('isola-foundation.replit.app', probe, expected)]
+    const r = evaluateRelease(verdicts, expected)
+    expect(r.pass).toBe(false)
+    // Nothing to diverge from: the failing host reported no tree at all.
+    expect(r.divergentTrees).toEqual([])
+    expect(r.lines.at(-1)).toBe('RELEASE_IDENTITY=FAIL')
+    expect(r.lines.join('\n')).toContain('isola-foundation.replit.app')
+  })
+
+  it('fails when a single host reports a DIRTY build, even though the rest agree', () => {
+    const verdicts = [...hostsOk.slice(0, 5), evaluateHost('ema.epic.dm', ok({ source_dirty: true }), expected)]
+    const r = evaluateRelease(verdicts, expected)
+    expect(r.pass).toBe(false)
+    expect(r.divergentTrees).toEqual([])
+    expect(r.lines.join('\n')).toContain('ema.epic.dm')
+  })
+
   it('fails when every host agrees on the WRONG identity — agreement is not correctness', () => {
     const verdicts = FOUNDATION_ROUTED_HOSTS.map((h) => evaluateHost(h, ok({ source_tree: OTHER_TREE }), expected))
     const r = evaluateRelease(verdicts, expected)
