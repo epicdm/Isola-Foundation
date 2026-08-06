@@ -284,6 +284,56 @@ describe('approveRevenueFollowup', () => {
     })
     expect(result).toEqual({ ok: false, code: 'expired', detail: expect.any(String) })
   })
+
+  it('correction 2: refuses when expectedTool does not match the row\'s own tool', async () => {
+    const scope = baseScope({ idempotencyKey: 'idem-wrong-expected-tool' })
+    const pending = await mintPendingApproval(scope, NOW)
+    const result = await approveRevenueFollowup({
+      pendingApprovalId: pending.auditId,
+      approverActorId: 'user-eric',
+      now: NOW,
+      expectedTool: 'voice.route.set', // the row is actually revenue.followup.set
+    })
+    expect(result).toEqual({ ok: false, code: 'wrong_scope', detail: expect.any(String) })
+  })
+
+  it('correction 2: refuses when expectedTenantId does not match the row\'s own tenant', async () => {
+    const scope = baseScope({ idempotencyKey: 'idem-wrong-expected-tenant', tenantId: 'tenant-real' })
+    const pending = await mintPendingApproval(scope, NOW)
+    const result = await approveRevenueFollowup({
+      pendingApprovalId: pending.auditId,
+      approverActorId: 'user-eric',
+      now: NOW,
+      expectedTenantId: 'tenant-someone-else',
+    })
+    expect(result).toEqual({ ok: false, code: 'wrong_scope', detail: expect.any(String) })
+  })
+
+  it('correction 2: refuses when expectedObjectId does not match the row\'s own opportunity', async () => {
+    const scope = baseScope({ idempotencyKey: 'idem-wrong-expected-object', objectId: '1642' })
+    const pending = await mintPendingApproval(scope, NOW)
+    const result = await approveRevenueFollowup({
+      pendingApprovalId: pending.auditId,
+      approverActorId: 'user-eric',
+      now: NOW,
+      expectedObjectId: '9999',
+    })
+    expect(result).toEqual({ ok: false, code: 'wrong_scope', detail: expect.any(String) })
+  })
+
+  it('succeeds when every expected* field genuinely matches', async () => {
+    const scope = baseScope({ idempotencyKey: 'idem-expected-match', tenantId: 'tenant-real', objectId: '1642' })
+    const pending = await mintPendingApproval(scope, NOW)
+    const result = await approveRevenueFollowup({
+      pendingApprovalId: pending.auditId,
+      approverActorId: 'user-eric',
+      now: NOW,
+      expectedTool: 'revenue.followup.set',
+      expectedTenantId: 'tenant-real',
+      expectedObjectId: '1642',
+    })
+    expect(result.ok).toBe(true)
+  })
 })
 
 describe('revokeRevenueFollowupApproval', () => {
@@ -294,6 +344,21 @@ describe('revokeRevenueFollowupApproval', () => {
       now: NOW,
     })
     expect(result.ok).toBe(false)
+  })
+
+  it('correction 2: refuses to revoke when expected* fields do not match the row', async () => {
+    const scope = baseScope({ idempotencyKey: 'idem-revoke-wrong-scope', tenantId: 'tenant-real' })
+    const pending = await mintPendingApproval(scope, NOW)
+    const approved = await approveRevenueFollowup({ pendingApprovalId: pending.auditId, approverActorId: 'user-eric', now: NOW })
+    if (!approved.ok) throw new Error('setup failed')
+
+    const result = await revokeRevenueFollowupApproval({
+      approvedAuditId: approved.auditId,
+      revokedByActorId: 'user-eric',
+      now: NOW,
+      expectedTenantId: 'tenant-someone-else',
+    })
+    expect(result).toEqual({ ok: false, code: 'wrong_scope', detail: expect.any(String) })
   })
 })
 

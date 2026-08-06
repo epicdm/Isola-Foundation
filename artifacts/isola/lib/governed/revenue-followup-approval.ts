@@ -258,7 +258,7 @@ export async function verdictForRevenueFollowup(
 
 export type ApproveRevenueFollowupResult =
   | { ok: true; auditId: string }
-  | { ok: false; code: 'not_found' | 'expired'; detail: string }
+  | { ok: false; code: 'not_found' | 'expired' | 'wrong_scope'; detail: string }
 
 /**
  * Approves a SPECIFIC pending request by its AuditLog id — never by
@@ -266,23 +266,46 @@ export type ApproveRevenueFollowupResult =
  * approver "approve" something that was never actually requested. The
  * approved row is a straight copy of the pending row's scope, so the
  * verdict's strict match is against exactly what was requested.
+ *
+ * `expected*` are defense-in-depth, per
+ * `dec-pr80-odoo-scope-idempotency-and-read-contract-2026-08-06` correction
+ * 2: an id lookup alone does not prove the row IS a `revenue.followup.set`
+ * request for the tenant/object the caller believes it is. When supplied,
+ * every one of them must match the row's OWN stored action-type/scope
+ * fields — an unrelated `.pending_approval` row (a different tool entirely,
+ * e.g. one of `checkGate()`'s own callers, or the same tool but a different
+ * tenant/opportunity) is refused rather than silently approved.
  */
 export async function approveRevenueFollowup(input: {
   pendingApprovalId: string
   approverActorId: string
   now: Date
   ttlMs?: number
+  expectedTool?: string
+  expectedTenantId?: string
+  expectedObjectId?: string
 }): Promise<ApproveRevenueFollowupResult> {
   const pending = await prisma.auditLog.findUnique({ where: { id: input.pendingApprovalId } })
   if (!pending || !pending.action.endsWith('.pending_approval') || !pending.tenant_id || !pending.request_id) {
     return { ok: false, code: 'not_found', detail: 'no matching pending approval request' }
   }
+
+  const tool = pending.action.replace(/\.pending_approval$/, '')
+  if (input.expectedTool !== undefined && tool !== input.expectedTool) {
+    return { ok: false, code: 'wrong_scope', detail: `this row is a ${tool} request, not ${input.expectedTool}` }
+  }
+  if (input.expectedTenantId !== undefined && pending.tenant_id !== input.expectedTenantId) {
+    return { ok: false, code: 'wrong_scope', detail: 'this row does not belong to the expected tenant' }
+  }
+  if (input.expectedObjectId !== undefined && (pending.entity_id ?? '') !== input.expectedObjectId) {
+    return { ok: false, code: 'wrong_scope', detail: 'this row does not target the expected opportunity' }
+  }
+
   const meta = metaOf(pending)
   if (!notExpired(meta, input.now)) {
     return { ok: false, code: 'expired', detail: 'the pending approval request has expired; ask the agent to resubmit' }
   }
 
-  const tool = pending.action.replace(/\.pending_approval$/, '')
   const ttlMs = input.ttlMs ?? DEFAULT_APPROVED_TTL_MS
   const approvedMeta = {
     ...(meta as Record<string, unknown>),
@@ -304,20 +327,34 @@ export async function approveRevenueFollowup(input: {
   return { ok: true, auditId: row.id }
 }
 
-export type RevokeRevenueFollowupResult = { ok: true; auditId: string } | { ok: false; detail: string }
+export type RevokeRevenueFollowupResult =
+  | { ok: true; auditId: string }
+  | { ok: false; code?: 'wrong_scope'; detail: string }
 
-/** Revokes a SPECIFIC approved record by its AuditLog id. */
+/** Revokes a SPECIFIC approved record by its AuditLog id. Same `expected*` defense-in-depth as `approveRevenueFollowup`. */
 export async function revokeRevenueFollowupApproval(input: {
   approvedAuditId: string
   revokedByActorId: string
   reason?: string
   now: Date
+  expectedTool?: string
+  expectedTenantId?: string
+  expectedObjectId?: string
 }): Promise<RevokeRevenueFollowupResult> {
   const approved = await prisma.auditLog.findUnique({ where: { id: input.approvedAuditId } })
   if (!approved || !approved.action.endsWith('.approved') || !approved.tenant_id || !approved.request_id) {
     return { ok: false, detail: 'no matching approved record' }
   }
   const tool = approved.action.replace(/\.approved$/, '')
+  if (input.expectedTool !== undefined && tool !== input.expectedTool) {
+    return { ok: false, code: 'wrong_scope', detail: `this row is a ${tool} record, not ${input.expectedTool}` }
+  }
+  if (input.expectedTenantId !== undefined && approved.tenant_id !== input.expectedTenantId) {
+    return { ok: false, code: 'wrong_scope', detail: 'this row does not belong to the expected tenant' }
+  }
+  if (input.expectedObjectId !== undefined && (approved.entity_id ?? '') !== input.expectedObjectId) {
+    return { ok: false, code: 'wrong_scope', detail: 'this row does not target the expected opportunity' }
+  }
   const row = await prisma.auditLog.create({
     data: {
       tenant_id: approved.tenant_id,

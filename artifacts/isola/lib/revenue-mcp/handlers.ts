@@ -23,7 +23,8 @@ import {
   type RevenueFollowupSetRequest,
   type RevenueFollowupSetResult,
 } from '@/lib/governed/revenue-mcp-actions'
-import { resolveOdooConfigForTenant } from '@/lib/engine-bindings'
+import { DEFAULT_ODOO_SCOPE_PORTS } from '@/lib/governed/revenue-odoo-scope'
+import { prismaLedgerStore } from '@/lib/operations/ledger'
 import { prisma } from '@/lib/prisma'
 
 import {
@@ -62,6 +63,8 @@ export async function isolaRevenueCustomerContextGet(
 
 export interface RevenueFollowupSetToolArgs {
   agentRef: string
+  /** See lib/governed/revenue-mcp-actions.ts's SUPPORTED_ACTOR_TYPES — fails closed if unrecognised. */
+  actorType: string
   leadId: string
   ownerRef?: string
   nextAction?: string
@@ -79,7 +82,7 @@ export async function isolaRevenueFollowupSet(
   args: RevenueFollowupSetToolArgs,
 ): Promise<RevenueFollowupSetResult> {
   const req: RevenueFollowupSetRequest = {
-    caller: { agentRef: args.agentRef },
+    caller: { agentRef: args.agentRef, actorType: args.actorType },
     leadId: args.leadId,
     payload: {
       ...(args.ownerRef !== undefined ? { ownerRef: args.ownerRef } : {}),
@@ -90,20 +93,16 @@ export async function isolaRevenueFollowupSet(
     correlationId: args.correlationId,
   }
 
-  // Resolve the tenant ONCE, here, so the SAME resolved tenant drives both
-  // the Odoo config lookup and the governed action's own (independent)
-  // caller-identity resolution — matching app/api/agent-tools/invoke/route.ts's
-  // "resolve the agent -> its REAL tenant" step, done once, before any write.
-  const tenantId = await defaultResolveTenantForAgent(args.agentRef)
-  if (!tenantId) {
-    return { ok: false, code: 'unauthenticated', detail: 'caller identity did not resolve to an active tenant' }
-  }
-
-  const config = await resolveOdooConfigForTenant(tenantId)
-  const rec = createOdooRecordSystem({ resolveConfig: async () => config })
-
+  // No tenant is resolved or Odoo config built here anymore — per
+  // dec-pr80-odoo-scope-idempotency-and-read-contract-2026-08-06, the ONE
+  // resolved OdooConfig must back the company-scope check, the write, and
+  // the readback, and that resolution (including the "no explicit binding ->
+  // fail closed" rule) now lives entirely inside runRevenueFollowupSet via
+  // `odooScope`/`buildRecordSystem` below.
   return runRevenueFollowupSet(req, {
-    rec,
+    odooScope: DEFAULT_ODOO_SCOPE_PORTS,
+    buildRecordSystem: (config) => createOdooRecordSystem({ resolveConfig: async () => config }),
+    ledger: prismaLedgerStore,
     now: () => new Date(),
     resolveTenantForAgent: defaultResolveTenantForAgent,
   })

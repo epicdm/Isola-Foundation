@@ -1,97 +1,100 @@
 /**
- * revenue-mcp-actions@1 — the runtime binding for `revenue.followup.set`, the
+ * revenue-mcp-actions@2 — the runtime binding for `revenue.followup.set`, the
  * write half of Lane 1's two-tool MCP milestone. Exposed to Clawith ("Atlas")
  * as `isola_revenue_followup_set` (see lib/revenue-mcp/handlers.ts).
+ *
+ * REVISION NOTE (2026-08-06, third pass — Port decision
+ * `dec-pr80-odoo-scope-idempotency-and-read-contract-2026-08-06`)
+ * -----------------------------------------------------------------
+ * An independent exact-head review of the second pass found six real
+ * defects, all fixed here:
+ *
+ *   1. NO GLOBAL ODOO FALLBACK, PROVEN COMPANY SCOPE. The second pass trusted
+ *      whatever `RecordSystem` the caller happened to construct and treated
+ *      "readLead returned a row" as proof of ownership. That is exactly the
+ *      "helper that returns yes whenever a record exists" the review
+ *      forbids. Company scope is now proven by `revenue-odoo-scope.ts`: an
+ *      explicit `OdooBinding` row is REQUIRED (no fallback to the platform
+ *      default `getOdooConfig()`), and the target `crm.lead`'s OWN
+ *      `company_id` is read directly from Odoo and compared against the
+ *      binding's bound company (itself read from `res.users`, never
+ *      assumed). The SAME resolved `OdooConfig` then builds the
+ *      `RecordSystem` used for execute AND readback — see `lazyRecordSystem`.
+ *   2. APPROVAL ROWS ARE ACTION-TYPED. Already true structurally
+ *      (`verdictForRevenueFollowup`'s query is scoped to
+ *      `${tool}.approved`/`.pending_approval` and `scopeMatches` checks
+ *      `stored.tool`) — `revenue-followup-approval.ts` now also accepts
+ *      `expected*` guards on `approveRevenueFollowup`/
+ *      `revokeRevenueFollowupApproval` so the admin route can defend against
+ *      an id belonging to an unrelated action, tenant, or opportunity.
+ *   3. CHANGED REQUEST UNDER THE SAME IDEMPOTENCY KEY IS REFUSED. The
+ *      canonical request fingerprint — tenant, agent, actor type, tool
+ *      version, opportunity, permitted fields/values, correlation id — is
+ *      now the ledger's `authorizedArguments`. `claimOperation`'s own
+ *      `judge()` refuses a same-key-different-fingerprint request as
+ *      `argument_conflict` BEFORE anything is proposed, executed, or
+ *      claimed as a replay.
+ *   4. REAL ATOMIC EXACTLY-ONCE. The prior AuditLog-`findFirst` idempotency
+ *      mechanism was a sequential read-then-write and was NOT atomic under a
+ *      real race. Idempotency is now `lib/operations/ledger.ts`'s
+ *      `claimOperation`/`completeOperation`/`failOperation` — the SAME
+ *      atomic, unique-index-backed mechanism `customer-actions.ts` and
+ *      `lib/customer-tools/operation.ts` already rely on, under a NEW,
+ *      deliberately vendor-neutral caller class, `'ai_agent'` (added to
+ *      `CALLER_CLASSES`, purely additive — `lib/operations/ledger.ts` has
+ *      its own "the ledger is neutral" test forbidding product/vendor names
+ *      even as string literals, which is why this is `'ai_agent'` and not
+ *      the Clawith-specific name used everywhere else in THIS file).
+ *   5. ACTOR TYPE FAILS CLOSED. `SUPPORTED_ACTOR_TYPES` is an explicit
+ *      allowlist; a missing, empty or unrecognised `caller.actorType` is
+ *      refused before anything else runs — never defaulted to "assume it's
+ *      an allowed caller."
+ *   6. Admin approve/revoke route hardened and tested — see
+ *      app/api/admin/approvals/revenue-followup/route.ts and its test file.
  *
  * WHY THIS IS NOT `customer-actions.ts` WITH A DIFFERENT NAME
  * ------------------------------------------------------------
  * `runCustomerAction` (customer-actions.ts) is deliberately kept as the
- * FOUNDATION-STAFF binding: `CALLER_CLASS = 'foundation_staff'`, idempotency
- * via the shared operation ledger, and approval permanently unwired (holds
- * forever — see that file's header). Reusing it here would mislabel an
- * AI-agent-initiated CRM mutation as ordinary staff self-service in the audit
- * trail, and would give it no way to ever actually get approved. This file:
- *
- *   - CALLER_CLASS = 'clawith_agent', OBJECT_TYPE = 'crm_lead' (not the
- *     overloaded 'customer' object type customer-actions.ts uses) —
- *     objectId is the Odoo crm.lead id.
- *   - idempotency via `runGovernedAction`'s own `findPriorResult`, backed by
- *     a REAL lookup against the existing AuditLog table (see
- *     "IDEMPOTENCY — WHY AuditLog AND NOT A NEW TABLE" below) — not the
- *     shared operation ledger.
- *   - approval REAL, wired, and STRICTLY BOUND — via
- *     lib/governed/revenue-followup-approval.ts, NOT `checkGate()`. Per the
- *     ratified Port decision `dec-pr41-delivery-and-revenue-mcp-write-approval-2026-08-06`,
- *     `checkGate()`'s `(tenantId, action, requestId)` key is not sufficient
- *     for an autonomous agent write: it grants on an id matching alone, with
- *     no binding to which agent proposed it, which object, which fields, or
- *     which VALUES were actually approved, no expiry, and no revocation. See
- *     revenue-followup-approval.ts's header for the eight bound dimensions.
- *     Approval is unconditionally required for this action type (a real
- *     Odoo CRM write, performed autonomously by an AI agent) — never
- *     risk-conditional the way ACTIONS_REQUIRING_APPROVAL is for staff
- *     actions in resolve-context.ts.
+ * FOUNDATION-STAFF binding: `CALLER_CLASS = 'foundation_staff'`, and approval
+ * permanently unwired (holds forever — see that file's header). This file
+ * uses `CALLER_CLASS = 'ai_agent'` (the ledger's caller-class dimension —
+ * see the note above on why it isn't the Clawith-specific name),
+ * `ACTION_OBJECT_TYPE = 'crm_lead'` (not the overloaded `'customer'` object
+ * type), and a REAL, STRICTLY BOUND
+ * approval mechanism (`revenue-followup-approval.ts`, not `checkGate()` —
+ * see that file's header for why).
  *
  * ONE ACTION, TWO ODOO EFFECTS, ONE externalId
  * ---------------------------------------------
  * `revenue.followup.set` can move an owner (`rec.updateLead`) AND schedule a
- * follow-up activity (`rec.scheduleFollowup`) in the SAME governed pass — one
- * idempotency key, one approval decision, one audit row, one result. But
+ * follow-up activity (`rec.scheduleFollowup`) in the SAME governed pass. But
  * `ActionExecutor.execute()` can only return ONE `{ externalId }`.
- *
- * DECISION: externalId = the crm.lead id (`proposal.objectId`) — the object
- * this whole action is ABOUT. The follow-up activity's own id is threaded
- * through a closure-local variable (`lastFollowupExternalId`, reset at the
- * top of every `execute()` call) rather than extending `RecordSystem`'s
- * public interface — extending the shared interface for one caller's
- * bookkeeping need would leak this file's plumbing into
- * executors/index.ts and odoo-record-system.ts, which the task explicitly
- * asks not to modify. `readback()` re-reads BOTH effects for real: the lead
- * via `rec.readLead(externalId)` (proving the owner landed) and the
- * follow-up via `rec.readFollowup(lastFollowupExternalId)` (proving the
- * next-action/due-date landed) — never trusting the create response alone.
- * This is safe ACROSS CONCURRENT CALLS because a fresh executor (and a fresh
- * closure variable) is built per call by `buildRevenueFollowupExecutor()`,
- * exactly like `buildExecutors(rec)` is called fresh per request elsewhere
- * in this codebase (see app/api/v1/customers/[customerId]/actions/route.ts).
- *
- * IDEMPOTENCY — WHY AuditLog AND NOT A NEW TABLE
- * -------------------------------------------------
- * CLAUDE.md law 4 forbids `prisma db push` and this task forbids a new
- * migration without a separate owner gate. AuditLog already carries
- * `tenant_id` + `action` + `request_id` + `meta` (Json), which is exactly the
- * shape a durable idempotency lookup needs: `findPriorRevenueActionResult`
- * looks up the most recent row with `action = 'revenue.followup.set'`,
- * `request_id = idempotencyKey`, `tenant_id = <resolved tenant>`, and an
- * `outcome: 'EXECUTED'` in `meta`, then reconstructs a real `ActionResult`
- * from it. This is real, durable, cross-process persistence proven by a test
- * that writes through `writeAudit` and reads back through
- * `findPriorRevenueActionResult` against a Prisma mock backed by an in-memory
- * row array — not an in-process-only stub. It is NOT atomic the way the
- * shared ledger's unique index is (a true race between two concurrent first
- * attempts could both pass this check) — acceptable here because approval is
- * unconditionally required first, which serializes practice traffic through
- * a human decision point before execution is ever reached.
- *
- * ONLY non-EXECUTED outcomes are never replayed. A prior APPROVAL_REQUIRED
- * row must NOT cause every later call with the same key to replay
- * APPROVAL_REQUIRED forever once a human approves — it must re-run and pick
- * up the now-granted verdict. Only `EXECUTED` is a terminal fact worth
- * protecting from a second write.
+ * DECISION (unchanged from the second pass): externalId = the crm.lead id.
+ * The follow-up activity's own id is threaded through a closure-local
+ * variable (`lastFollowupExternalId`, reset at the top of every `execute()`
+ * call) rather than extending `RecordSystem`'s public interface.
+ * `readback()` re-reads BOTH effects for real via the SAME lazily-resolved
+ * `RecordSystem` — never trusting the create response alone.
  */
 
-import type { Prisma } from '@prisma/client'
-
 import { prisma } from '@/lib/prisma'
+import {
+  claimOperation,
+  completeOperation,
+  failOperation,
+  type LedgerStore,
+  type OperationEnvelope,
+  type OperationIdentity,
+} from '@/lib/operations/ledger'
 
 import {
+  DependencyUnavailable,
   GOVERNED_ACTION_VERSION,
   runGovernedAction,
   type ActionExecutor,
   type ActionPorts,
   type ActionProposal,
   type ActionResult,
-  type RiskLevel,
 } from './action'
 import type { RecordSystem } from './executors'
 import {
@@ -100,16 +103,40 @@ import {
   verdictForRevenueFollowup,
   type RevenueApprovalScope,
 } from './revenue-followup-approval'
+import { DEFAULT_ODOO_SCOPE_PORTS, type OdooScope, type OdooScopePorts } from './revenue-odoo-scope'
+import type { OdooConfig } from '@/engines/odoo'
 
-export const REVENUE_MCP_ACTIONS_VERSION = 'revenue-mcp-actions@1' as const
+export const REVENUE_MCP_ACTIONS_VERSION = 'revenue-mcp-actions@2' as const
 
-/** The AI-agent caller class. Never conflated with Foundation staff. */
-export const CALLER_CLASS = 'clawith_agent' as const
+/**
+ * The AI-agent ledger caller class. Never conflated with Foundation staff.
+ * Deliberately `'ai_agent'`, not the Clawith-specific name used elsewhere in
+ * this file — this value is written into `lib/operations/ledger.ts`'s
+ * `OperationIdentity.callerClass`, and that shared, vendor-neutral module has
+ * its own test forbidding product/vendor names, even as string literals.
+ */
+export const CALLER_CLASS = 'ai_agent' as const
 
 /** Not `'customer'` — customer-actions.ts's object type is deliberately not reused. */
 export const ACTION_OBJECT_TYPE = 'crm_lead' as const
 
 export const REVENUE_FOLLOWUP_SET_ACTION = 'revenue.followup.set' as const
+
+/** Participates in the request fingerprint — a future field/behavior change bumps this, not silently reuses old approvals. */
+export const REVENUE_FOLLOWUP_SET_TOOL_VERSION = 'revenue.followup.set@1' as const
+
+/**
+ * Actor types this write path accepts. FAILS CLOSED: a missing, empty or
+ * unrecognised value is refused — never defaulted to "assume it's allowed."
+ * Exactly one member today; the type exists so a future actor class (e.g. a
+ * Foundation service account) is an explicit addition, not a silent widening.
+ */
+export const SUPPORTED_ACTOR_TYPES = ['clawith_agent'] as const
+export type SupportedActorType = (typeof SUPPORTED_ACTOR_TYPES)[number]
+
+export function isSupportedActorType(v: unknown): v is SupportedActorType {
+  return typeof v === 'string' && (SUPPORTED_ACTOR_TYPES as readonly string[]).includes(v)
+}
 
 /** The ONLY three keys this action ever reads from a payload. See file header. */
 const REVENUE_FOLLOWUP_FIELDS = ['ownerRef', 'nextAction', 'dueDate'] as const
@@ -118,9 +145,10 @@ const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '')
 
 /**
  * The single source of truth for the write-surface allowlist. Used by
- * `validate`/`execute`/`readback` AND by the approval scope computation, so
- * "what fields can this action touch" and "what fields is an approval bound
- * to" can never drift from each other.
+ * `validate`/`execute`/`readback` AND by the approval scope computation AND
+ * the request fingerprint, so "what fields can this action touch", "what
+ * fields is an approval bound to" and "what fields identify this request"
+ * can never drift from each other.
  */
 export function pickedRevenueFields(payload: Record<string, unknown>): Record<string, string> {
   const out: Record<string, string> = {}
@@ -248,83 +276,46 @@ export function buildRevenueFollowupExecutor(rec: RecordSystem): ActionExecutor 
   }
 }
 
-// ── idempotency, backed by AuditLog — see the file header ──────────────────
-
-interface StoredActionMeta {
-  outcome?: string
-  riskLevel?: RiskLevel
-  detail?: string
-  readback?: Record<string, unknown> | null
-  correlationId?: string
-  approvalId?: string | null
-}
-
-export async function findPriorRevenueActionResult(
-  tenantId: string,
-  idempotencyKey: string,
-): Promise<ActionResult | null> {
-  const row = await prisma.auditLog.findFirst({
-    where: {
-      tenant_id: tenantId,
-      action: REVENUE_FOLLOWUP_SET_ACTION,
-      request_id: idempotencyKey,
-    },
-    orderBy: { created_at: 'desc' },
-  })
-  if (!row) return null
-
-  const meta = (row.meta ?? {}) as StoredActionMeta
-  // Only an EXECUTED write is a fact worth protecting from a second attempt —
-  // see the file header ("ONLY non-EXECUTED outcomes are never replayed").
-  if (meta.outcome !== 'EXECUTED') return null
-
+/**
+ * A `RecordSystem` that resolves its real backing config LAZILY, from
+ * `getScope()`, and caches it — so execute() and readback() are GUARANTEED to
+ * use the exact same `OdooConfig` that `objectCompanyId`'s company-scope
+ * check already proved was correct, never a second, independently-resolved
+ * config. If `getScope()` ever returns `null` here (should be unreachable —
+ * `objectCompanyId` runs first and would already have refused), the write is
+ * refused as `DependencyUnavailable` rather than silently proceeding on an
+ * unproven binding.
+ */
+function lazyRecordSystem(
+  getScope: () => Promise<OdooScope | null>,
+  buildRecordSystem: (config: OdooConfig) => RecordSystem,
+): RecordSystem {
+  let cached: RecordSystem | null = null
+  async function resolved(): Promise<RecordSystem> {
+    if (cached) return cached
+    const scope = await getScope()
+    if (!scope) {
+      throw new DependencyUnavailable(
+        'odoo-binding',
+        'no explicit, provable tenant Odoo company scope; refusing to write',
+      )
+    }
+    cached = buildRecordSystem(scope.config)
+    return cached
+  }
   return {
-    version: GOVERNED_ACTION_VERSION,
-    outcome: 'EXECUTED',
-    actionType: REVENUE_FOLLOWUP_SET_ACTION,
-    idempotencyKey,
-    correlationId: meta.correlationId ?? '',
-    riskLevel: meta.riskLevel ?? 'high',
-    readback: meta.readback ?? null,
-    auditId: row.id,
-    detail: meta.detail ?? 'executed',
-    ...(meta.approvalId ? { approvalId: meta.approvalId } : {}),
+    createNote: async (i) => (await resolved()).createNote(i),
+    readNote: async (id) => (await resolved()).readNote(id),
+    createTask: async (i) => (await resolved()).createTask(i),
+    readTask: async (id) => (await resolved()).readTask(id),
+    scheduleActivity: async (i) => (await resolved()).scheduleActivity(i),
+    readActivity: async (id) => (await resolved()).readActivity(id),
+    createLead: async (i) => (await resolved()).createLead(i),
+    readLead: async (id) => (await resolved()).readLead(id),
+    updateLead: async (i) => (await resolved()).updateLead(i),
+    scheduleFollowup: async (i) => (await resolved()).scheduleFollowup(i),
+    readFollowup: async (id) => (await resolved()).readFollowup(id),
   }
-}
-
-async function writeRevenueAuditRow(
-  tenantId: string,
-  actorRef: string,
-  entry: {
-    proposal: ActionProposal
-    outcome: string
-    riskLevel: RiskLevel
-    detail: string
-    readback: Record<string, unknown> | null
-  },
-  approvalId: string | null,
-): Promise<string> {
-  const meta: StoredActionMeta & Record<string, unknown> = {
-    outcome: entry.outcome,
-    riskLevel: entry.riskLevel,
-    detail: entry.detail,
-    readback: entry.readback,
-    correlationId: entry.proposal.correlationId,
-    approvalId,
-    payload: entry.proposal.payload,
-  }
-  const row = await prisma.auditLog.create({
-    data: {
-      tenant_id: tenantId,
-      actor_id: actorRef,
-      action: entry.proposal.actionType,
-      entity: ACTION_OBJECT_TYPE,
-      entity_id: entry.proposal.objectId,
-      request_id: entry.proposal.idempotencyKey,
-      meta: JSON.parse(JSON.stringify(meta)) as Prisma.InputJsonValue,
-    },
-  })
-  return row.id
 }
 
 // ── caller identity resolution — never trust a bare tenant id ──────────────
@@ -332,14 +323,12 @@ async function writeRevenueAuditRow(
 export interface RevenueMcpPorts {
   /** Resolves the CALLER's identity to a Foundation tenant. Never the reverse. */
   resolveTenantForAgent(agentRef: string): Promise<string | null>
-  /**
-   * A RecordSystem already scoped to the RESOLVED tenant's own Odoo binding
-   * (built by the caller of this module, e.g. via
-   * `createOdooRecordSystem({ resolveConfig: () => resolveOdooConfigForTenant(tenantId) })`).
-   * Reused for BOTH the write effects and the company-scoping read below —
-   * see `objectCompanyId`.
-   */
-  rec: RecordSystem
+  /** Explicit-binding, proven-company-scope resolution. See revenue-odoo-scope.ts. */
+  odooScope: OdooScopePorts
+  /** Builds a RecordSystem from a resolved OdooConfig — e.g. `createOdooRecordSystem`. */
+  buildRecordSystem(config: OdooConfig): RecordSystem
+  /** The SAME atomic ledger customer-actions.ts and lib/customer-tools/operation.ts use. */
+  ledger: LedgerStore
   now(): Date
 }
 
@@ -351,9 +340,8 @@ async function defaultResolveTenantForAgent(agentRef: string): Promise<string | 
 /**
  * Derives the approval scope from the RESOLVED tenant and the proposal's OWN
  * fields — never from anything a caller could pass as an "approval token".
- * `p.actorPrincipalId` is the Clawith agent reference (see the file header's
- * 8-dimension list) — the SAME value the caller supplied as `caller.agentRef`,
- * already resolved to `tenantId` above.
+ * `p.actorPrincipalId` is the Clawith agent reference — the SAME value the
+ * caller supplied as `caller.agentRef`, already resolved to `tenantId` above.
  */
 function buildApprovalScope(tenantId: string, p: ActionProposal): RevenueApprovalScope {
   return computeApprovalScope({
@@ -368,7 +356,7 @@ function buildApprovalScope(tenantId: string, p: ActionProposal): RevenueApprova
 }
 
 export interface RevenueFollowupSetRequest {
-  caller: { agentRef: string }
+  caller: { agentRef: string; actorType: string }
   /** The Odoo crm.lead id this follow-up targets. */
   leadId: string
   payload: { ownerRef?: string; nextAction?: string; dueDate?: string }
@@ -376,15 +364,44 @@ export interface RevenueFollowupSetRequest {
   correlationId: string
 }
 
+export type RevenueFollowupSetDenyCode = 'unauthenticated' | 'in_progress' | 'conflict' | 'unavailable'
+
 export type RevenueFollowupSetResult =
   | { ok: true; result: ActionResult }
-  | { ok: false; code: 'unauthenticated'; detail: string }
+  | { ok: false; code: RevenueFollowupSetDenyCode; detail: string }
+
+function actionResultShaped(
+  outcome: ActionResult['outcome'],
+  idempotencyKey: string,
+  correlationId: string,
+  auditId: string,
+  detail: string,
+  readback: Record<string, unknown> | null = null,
+): ActionResult {
+  return {
+    version: GOVERNED_ACTION_VERSION,
+    outcome,
+    actionType: REVENUE_FOLLOWUP_SET_ACTION,
+    idempotencyKey,
+    correlationId,
+    riskLevel: 'high',
+    readback,
+    auditId,
+    detail,
+  }
+}
 
 export async function runRevenueFollowupSet(
   req: RevenueFollowupSetRequest,
   ports: Omit<RevenueMcpPorts, 'resolveTenantForAgent'> &
     Partial<Pick<RevenueMcpPorts, 'resolveTenantForAgent'>>,
 ): Promise<RevenueFollowupSetResult> {
+  // ── Actor type fails closed — BEFORE any identity resolution. ─────────────
+  const actorType = req.caller?.actorType
+  if (!isSupportedActorType(actorType)) {
+    return { ok: false, code: 'unauthenticated', detail: 'unknown or unsupported actor type' }
+  }
+
   const resolveTenantForAgent = ports.resolveTenantForAgent ?? defaultResolveTenantForAgent
 
   const agentRef = str(req.caller?.agentRef)
@@ -398,6 +415,96 @@ export async function runRevenueFollowupSet(
   const leadId = str(req.leadId)
   const idempotencyKey = str(req.idempotencyKey)
   const correlationId = str(req.correlationId)
+  const pickedFields = pickedRevenueFields(req.payload ?? {})
+
+  // ── The request fingerprint — correction 3. Every dimension the review
+  // named participates: tenant, agent, actor type, tool+version, opportunity,
+  // permitted fields/values, correlation id. `claimOperation`'s own `judge()`
+  // refuses a same-idempotency-key request whose fingerprint HASH differs —
+  // see lib/operations/ledger.ts's `argument_conflict` branch.
+  const fingerprint = {
+    tenantId,
+    agentRef,
+    actorType,
+    tool: REVENUE_FOLLOWUP_SET_TOOL_VERSION,
+    leadId,
+    fields: pickedFields,
+    correlationId,
+  }
+
+  const identity: OperationIdentity = {
+    callerClass: CALLER_CLASS,
+    tenantId,
+    companyId: tenantId,
+    actionType: REVENUE_FOLLOWUP_SET_ACTION,
+    objectType: ACTION_OBJECT_TYPE,
+    // objectId participates in the operation id — a different leadId under
+    // the SAME idempotencyKey is a DIFFERENT operation, never a replay of
+    // this one. See correction 3's "changed opportunity" requirement.
+    objectId: leadId,
+    idempotencyKey,
+  }
+
+  let claim
+  try {
+    claim = await claimOperation(
+      {
+        identity,
+        authorizedArguments: fingerprint,
+        correlationId,
+        actorRef: agentRef,
+        contextRef: null,
+        auditRef: null,
+        retryFailed: true,
+      },
+      ports.ledger,
+    )
+  } catch {
+    return { ok: false, code: 'unavailable', detail: 'the operation ledger could not be reached' }
+  }
+
+  switch (claim.status) {
+    case 'already_completed': {
+      const readback = claim.record.envelope?.readback ?? null
+      return {
+        ok: true,
+        result: actionResultShaped(
+          'IDEMPOTENT_REPLAY',
+          idempotencyKey,
+          correlationId,
+          claim.operationId,
+          'replayed prior result',
+          readback,
+        ),
+      }
+    }
+    case 'in_flight':
+      return { ok: false, code: 'in_progress', detail: 'another attempt at this exact operation is already running' }
+    case 'argument_conflict':
+      return { ok: false, code: 'conflict', detail: claim.detail }
+    case 'previously_failed':
+      // Unreachable in practice: retryFailed is always true above. Handled
+      // explicitly rather than falling through silently.
+      return { ok: false, code: 'conflict', detail: 'operation previously failed and retry was not permitted' }
+    case 'claimed':
+    case 'retry_after_failure':
+      break // proceed to run the governed lifecycle below
+  }
+
+  const recordId = claim.recordId
+
+  const envelope: OperationEnvelope = {
+    version: 'operations.ledger@1',
+    callerClass: CALLER_CLASS,
+    companyId: tenantId,
+    actionType: REVENUE_FOLLOWUP_SET_ACTION,
+    objectType: ACTION_OBJECT_TYPE,
+    objectId: leadId,
+    actorRef: agentRef,
+    auditRef: claim.operationId,
+    readback: null,
+    result: null,
+  }
 
   const proposal: ActionProposal = {
     actionType: REVENUE_FOLLOWUP_SET_ACTION,
@@ -406,22 +513,24 @@ export async function runRevenueFollowupSet(
     companyId: tenantId,
     objectType: ACTION_OBJECT_TYPE,
     objectId: leadId,
-    payload: {
-      ...(req.payload?.ownerRef !== undefined ? { ownerRef: req.payload.ownerRef } : {}),
-      ...(req.payload?.nextAction !== undefined ? { nextAction: req.payload.nextAction } : {}),
-      ...(req.payload?.dueDate !== undefined ? { dueDate: req.payload.dueDate } : {}),
-    },
+    payload: pickedFields,
     idempotencyKey,
     correlationId,
   }
 
-  const actorRef = `clawith_agent:${agentRef}`
-  // Captured across ports so `writeAudit` can persist the approvalId even
-  // though `ActionPorts.writeAudit`'s entry does not itself carry one.
-  let lastApprovalId: string | null = null
+  // ── Company scope — correction 1. Resolved ONCE, cached, and the SAME
+  // resolved config backs both this check and the RecordSystem below.
+  let cachedScope: OdooScope | null | undefined
+  const boundTenantId: string = tenantId
+  const getScope = async (): Promise<OdooScope | null> => {
+    if (cachedScope === undefined) cachedScope = await ports.odooScope.resolveOdooScope(boundTenantId)
+    return cachedScope
+  }
+
+  const rec = lazyRecordSystem(getScope, ports.buildRecordSystem)
 
   const actionPorts: ActionPorts = {
-    executors: [buildRevenueFollowupExecutor(ports.rec)],
+    executors: [buildRevenueFollowupExecutor(rec)],
 
     // Always required — a real Odoo CRM write performed autonomously by an
     // AI agent, never conditional on a risk-level table the way staff
@@ -430,41 +539,48 @@ export async function runRevenueFollowupSet(
 
     approvalVerdict: async (p) => {
       const scope = buildApprovalScope(tenantId, p)
-      const verdict = await verdictForRevenueFollowup(scope, ports.now())
-      lastApprovalId = verdict.approvalId
-      return verdict
+      return verdictForRevenueFollowup(scope, ports.now())
     },
 
-    // Redundant-but-harmless: approvalVerdict above always returns an
-    // approvalId (minting a pending row itself when none strictly matches),
-    // so runGovernedAction's `verdict?.approvalId || recordApprovalRequest(...)`
-    // never actually reaches this branch. Implemented anyway because
-    // ActionPorts requires it, and it is safe if it ever does run: it mints
-    // through the exact same strict-scope path.
+    // Redundant-but-harmless fallback — see revenue-mcp-actions.test.ts.
     recordApprovalRequest: async (p) => {
-      if (lastApprovalId) return lastApprovalId
       const scope = buildApprovalScope(tenantId, p)
       const minted = await mintPendingApproval(scope, ports.now())
-      lastApprovalId = minted.auditId
       return minted.auditId
     },
 
-    // Company scoping: read the lead through the CALLER's own resolved
-    // tenant Odoo binding (`ports.rec`, already scoped by its constructor —
-    // see RevenueMcpPorts's doc comment). If it is not visible there, it is
-    // either nonexistent or belongs to a different tenant's Odoo instance;
-    // both collapse into ONE refusal (see action.ts's own comment on this).
-    // This is a REAL dependency call, not a tautology: a fake RecordSystem
-    // scoped to a different tenant's fixture data genuinely returns null.
+    // Company scoping — correction 1, THE authoritative check. Reads the
+    // lead's OWN company_id directly from Odoo (never assumed from "a record
+    // with this id exists") and compares it to the tenant's bound company
+    // (itself read from res.users for the binding's own login — never
+    // assumed either). No explicit binding, no provable bound company, lead
+    // not found, or a company mismatch: all collapse into ONE refusal (see
+    // action.ts's own comment on why "not found" and "belongs to someone
+    // else" must not be distinguishable to the caller).
     objectCompanyId: async (p) => {
-      const row = await ports.rec.readLead(p.objectId)
-      return row ? p.companyId : null
+      const scope = await getScope()
+      if (!scope) return null
+      const leadCompanyId = await ports.odooScope.readLeadCompanyId(scope.config, p.objectId)
+      if (leadCompanyId === null) return null
+      return leadCompanyId === scope.boundCompanyId ? p.companyId : null
     },
 
-    findPriorResult: (idempotencyKeyArg) => findPriorRevenueActionResult(tenantId, idempotencyKeyArg),
+    // The LEDGER already decided replay above, before this proposal was ever
+    // built — see customer-actions.ts's identical convention and rationale.
+    findPriorResult: async () => null,
 
-    writeAudit: async (entry) =>
-      writeRevenueAuditRow(tenantId, actorRef, entry, lastApprovalId),
+    writeAudit: async (entry) => {
+      if (entry.outcome === 'EXECUTED') {
+        await completeOperation(
+          recordId,
+          { envelope, readback: entry.readback, result: null, auditRef: claim.operationId },
+          ports.ledger,
+        )
+      } else {
+        await failOperation(recordId, { failureClass: entry.outcome, detail: entry.detail }, ports.ledger)
+      }
+      return claim.operationId
+    },
   }
 
   const result = await runGovernedAction(proposal, actionPorts)
