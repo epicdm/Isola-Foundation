@@ -690,6 +690,43 @@ describe('classifySnapshotPath — every path lands in exactly one class', () =>
 })
 
 describe('build-consumed environment files are never exemptable', () => {
+  it('the list is pinned to the files Next.js actually loads', () => {
+    // Pinned as a LITERAL, not derived from the constant under test. Every other
+    // assertion here iterates BUILD_CONSUMED_ENV_FILES, so deleting an entry
+    // would otherwise delete its own coverage and pass — a negative control
+    // caught exactly that. Next.js loads `.env.${mode}.local`, `.env.local`,
+    // `.env.${mode}` and `.env` (packages/next-env), for mode in
+    // development | production | test.
+    expect([...BUILD_CONSUMED_ENV_FILES].sort()).toEqual(
+      [
+        '.env',
+        '.env.local',
+        '.env.development',
+        '.env.development.local',
+        '.env.production',
+        '.env.production.local',
+        '.env.test',
+        '.env.test.local',
+      ].sort(),
+    )
+  })
+
+  it('the probe covers the repository root and every workspace package', () => {
+    expect([...ENV_PROBE_DIRECTORIES].sort()).toEqual(
+      [
+        '',
+        'artifacts/api-server',
+        'artifacts/isola',
+        'artifacts/mockup-sandbox',
+        'lib/api-client-react',
+        'lib/api-spec',
+        'lib/api-zod',
+        'lib/db',
+        'scripts',
+      ].sort(),
+    )
+  })
+
   it('every filename the framework loads at build time is dirt, at any location', () => {
     for (const name of BUILD_CONSUMED_ENV_FILES) {
       for (const dir of ['', 'artifacts/isola/', 'lib/db/', 'deeply/nested/']) {
