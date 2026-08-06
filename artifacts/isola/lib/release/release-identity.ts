@@ -40,8 +40,12 @@ import { BUILD_INFO_SCHEMA, FULL_SHA, ISO_INSTANT } from '@/lib/build-info/contr
  * Every hostname currently routed to the single Foundation Autoscale deployment.
  * All six are inside CB-0 containment scope: deployment equivalence does not
  * excuse an unsafe or unidentified response on any of them.
+ *
+ * This is the CANONICAL set, and a release PASS requires exact coverage of it —
+ * see `evaluateCoverage`. Checking only the hosts someone happened to supply
+ * proves that those hosts are fine; it proves nothing about the release.
  */
-export const FOUNDATION_ROUTED_HOSTS: readonly string[] = [
+export const CANONICAL_RELEASE_HOSTS: readonly string[] = [
   'test.epic.dm',
   'app.isola.epic.dm',
   'isola.epic.dm',
@@ -50,7 +54,99 @@ export const FOUNDATION_ROUTED_HOSTS: readonly string[] = [
   'isola-foundation.replit.app',
 ]
 
+/** The same set, used as the redirect allowlist. */
+export const FOUNDATION_ROUTED_HOSTS = CANONICAL_RELEASE_HOSTS
+
 export const HEALTH_PATH = '/api/health'
+
+/**
+ * Reduce a hostname to one canonical ASCII spelling, or refuse it.
+ *
+ * A hostname is a hostname: not a URL, not a host:port, not a path. Every one of
+ * those forms is refused rather than repaired, because repairing them is how a
+ * value that is not the host you think it is ends up compared against the
+ * allowlist and matching.
+ *
+ * Normalisation performed, and nothing else:
+ *   - surrounding whitespace removed
+ *   - ASCII case folded (DNS is case-insensitive)
+ *   - ONE trailing dot removed (`isola.epic.dm.` is the same DNS name, fully
+ *     qualified; two trailing dots are not a name at all)
+ *
+ * The final shape check is a strict LDH pattern, so a Unicode or confusable
+ * hostname cannot reach the comparison in a form that looks like a routed host.
+ * A punycode `xn--` label is well-formed ASCII and survives the pattern — and
+ * then fails canonical-set membership, which is the correct place to reject it.
+ */
+export function normalizeHostname(raw: unknown): { ok: true; host: string } | { ok: false; why: string } {
+  if (typeof raw !== 'string') return { ok: false, why: 'hostname is not a string' }
+  const trimmed = raw.trim()
+  if (trimmed === '') return { ok: false, why: 'empty hostname' }
+  if (trimmed.includes('://')) return { ok: false, why: 'a scheme is not part of a hostname' }
+  if (trimmed.includes('/')) return { ok: false, why: 'a path is not part of a hostname' }
+  if (trimmed.includes('@')) return { ok: false, why: 'userinfo is not part of a hostname' }
+  if (trimmed.includes(':')) return { ok: false, why: 'a port is not part of a hostname' }
+  if (trimmed.includes('?') || trimmed.includes('#')) return { ok: false, why: 'a query or fragment is not part of a hostname' }
+  let host = trimmed.toLowerCase()
+  if (host.endsWith('.')) host = host.slice(0, -1)
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(host)) {
+    return { ok: false, why: 'not a canonical ASCII DNS hostname' }
+  }
+  return { ok: true, host }
+}
+
+export interface CoverageResult {
+  ok: boolean
+  /** Canonical hosts no verdict covers. */
+  missing: string[]
+  /** Canonical hosts covered more than once — padding, not coverage. */
+  duplicates: string[]
+  /** Well-formed hostnames that are not in the canonical set. */
+  unexpected: string[]
+  /** Verdict hosts that are not usable hostnames at all. */
+  invalid: { host: string; why: string }[]
+}
+
+/**
+ * Does this set of verdicts cover the canonical release host set, exactly once
+ * each?
+ *
+ * The defect this closes: judging only whether every SUPPLIED verdict is
+ * acceptable makes omission indistinguishable from success. At head `a896651`
+ * five canonical hosts passed with the sixth simply absent, a single host passed
+ * on its own, and duplicate verdicts padded the count — every one of them
+ * printing `RELEASE_IDENTITY=PASS`.
+ * `dec-pr81-ignored-snapshot-and-six-host-coverage-must-fail-closed-2026-08-06`.
+ *
+ * Extras do not substitute for a missing canonical host, and are refused
+ * outright: release verification asserts an exact set, so an unexpected host is
+ * either a mistake worth seeing or an attempt to pad, and neither should pass.
+ */
+export function evaluateCoverage(verdicts: readonly { host: string }[]): CoverageResult {
+  const invalid: { host: string; why: string }[] = []
+  const seen = new Map<string, number>()
+
+  for (const v of verdicts) {
+    const n = normalizeHostname(v.host)
+    if (!n.ok) {
+      invalid.push({ host: String(v.host), why: n.why })
+      continue
+    }
+    seen.set(n.host, (seen.get(n.host) ?? 0) + 1)
+  }
+
+  const missing = CANONICAL_RELEASE_HOSTS.filter((h) => !seen.has(h))
+  const duplicates = CANONICAL_RELEASE_HOSTS.filter((h) => (seen.get(h) ?? 0) > 1)
+  const unexpected = [...seen.keys()].filter((h) => !CANONICAL_RELEASE_HOSTS.includes(h))
+
+  return {
+    ok: missing.length === 0 && duplicates.length === 0 && unexpected.length === 0 && invalid.length === 0,
+    missing,
+    duplicates,
+    unexpected,
+    invalid,
+  }
+}
 
 /** What the runner observed. Deliberately not a Response — no headers cross here. */
 export type HostProbe =
@@ -86,8 +182,12 @@ export interface ExpectedIdentity {
   sourceTree: string
   /** Optional. Omit when the publish is expected to carry a deploy-marker HEAD. */
   sourceSha?: string
-  /** A release must never be published from a dirty worktree. */
-  allowDirty?: boolean
+  // There is deliberately no `allowDirty`. A release-verification tool must not
+  // carry a switch that turns a dirty artifact into PASS: the whole point of the
+  // check is that the serving artifact's tree identity describes what was
+  // compiled, and a dirty build is precisely the case where it does not. The
+  // undocumented flag that used to live here was removed by
+  // `dec-pr81-ignored-snapshot-and-six-host-coverage-must-fail-closed-2026-08-06`.
 }
 
 /**
@@ -204,7 +304,9 @@ export function evaluateHost(host: string, probe: HostProbe, expected: ExpectedI
       ...observed,
     }
   }
-  if (bi.source_dirty === true && expected.allowDirty !== true) {
+  // Unconditional. No flag, no environment variable, no diagnostic mode makes a
+  // dirty artifact acceptable.
+  if (bi.source_dirty === true) {
     return {
       host,
       kind: 'identity_mismatch',
@@ -221,6 +323,7 @@ export interface ReleaseIdentityResult {
   verdicts: HostVerdict[]
   /** Distinct source_tree values observed across hosts, when more than one. */
   divergentTrees: string[]
+  coverage: CoverageResult
   lines: string[]
 }
 
@@ -238,19 +341,35 @@ export function evaluateRelease(verdicts: HostVerdict[], expected: ExpectedIdent
   const divergentTrees = trees.length > 1 ? trees : []
 
   const expectedIsFullSha = FULL_SHA.test(expected.sourceTree)
+  const coverage = evaluateCoverage(verdicts)
   const allOk = verdicts.length > 0 && verdicts.every((v) => v.kind === 'ok')
-  const pass = expectedIsFullSha && allOk && divergentTrees.length === 0
+  const pass = expectedIsFullSha && coverage.ok && allOk && divergentTrees.length === 0
 
   const lines: string[] = [
     '── Foundation release identity ───────────────────────────',
     `authorised tree   ${expected.sourceTree}${expectedIsFullSha ? '' : '  (NOT A FULL 40-CHAR TREE SHA)'}`,
     `authorised sha    ${expected.sourceSha ?? '(not asserted — deploy-marker HEAD expected)'}`,
+    `canonical hosts   ${CANONICAL_RELEASE_HOSTS.length} required`,
     `hosts checked     ${verdicts.length}`,
   ]
   for (const v of verdicts) {
     const id = v.sourceTree ? ` tree=${v.sourceTree.slice(0, 12)} sha=${(v.sourceSha ?? '').slice(0, 12)}` : ''
     const via = v.redirectedTo ? ` via=${v.redirectedTo}` : ''
     lines.push(`  ${v.kind === 'ok' ? 'ok  ' : 'FAIL'} ${v.host}${id}${via} — ${v.detail}`)
+  }
+  // Coverage is reported before the per-host results are believed: five healthy
+  // hosts and a missing sixth is not five-sixths of a release.
+  if (coverage.missing.length > 0) {
+    lines.push(`  FAIL required hostname(s) never checked: ${coverage.missing.join(', ')}`)
+  }
+  if (coverage.duplicates.length > 0) {
+    lines.push(`  FAIL duplicate hostname(s) cannot stand in for coverage: ${coverage.duplicates.join(', ')}`)
+  }
+  if (coverage.unexpected.length > 0) {
+    lines.push(`  FAIL hostname(s) outside the canonical release set: ${coverage.unexpected.join(', ')}`)
+  }
+  for (const bad of coverage.invalid) {
+    lines.push(`  FAIL unusable hostname ${JSON.stringify(bad.host)} — ${bad.why}`)
   }
   if (divergentTrees.length > 0) {
     lines.push(`  FAIL deployment divergence: hosts report ${divergentTrees.length} different source trees`)
@@ -260,5 +379,5 @@ export function evaluateRelease(verdicts: HostVerdict[], expected: ExpectedIdent
   }
   lines.push(`RELEASE_IDENTITY=${pass ? 'PASS' : 'FAIL'}`)
 
-  return { pass, verdicts, divergentTrees, lines }
+  return { pass, verdicts, divergentTrees, coverage, lines }
 }

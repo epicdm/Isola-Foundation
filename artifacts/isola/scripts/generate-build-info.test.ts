@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -7,16 +7,24 @@ import { describe, expect, it } from 'vitest'
 
 import { evaluateBuildIdentity } from '@/lib/build-info/contract'
 import {
+  BUILD_CONSUMED_ENV_FILES,
+  DEPENDENCY_TREE_PATHS,
   DEVELOPMENT_BUILD_INFO,
   DIRT_EXEMPT_PATHS,
+  ENV_PROBE_DIRECTORIES,
   GENERATED_PATH,
+  PATH_CLASS,
+  SNAPSHOT_EXCLUDED_PREFIXES,
+  classifySnapshotPath,
   deriveBuildInfo,
   dirtyPaths,
   isDirtExempt,
   isGeneratedIdentityStale,
+  normalizeSnapshotPath,
   parseArgs,
   parseBuildInfoModule,
   parsePorcelainZ,
+  probeEnvFiles,
   renderBuildInfoModule,
   unquotePath,
 } from './generate-build-info.mjs'
@@ -353,13 +361,14 @@ function git(cwd: string, args: string[]): void {
 }
 
 /** A real git repository laid out like the monorepo, with one committed source file. */
-function makeRepo(): string {
+function makeRepo(gitignore?: string): string {
   const dir = mkdtempSync(join(tmpdir(), 'isola-chain-'))
   mkdirSync(join(dir, 'artifacts', 'isola', 'scripts'), { recursive: true })
   mkdirSync(dirname(join(dir, GENERATED_PATH)), { recursive: true })
   writeFileSync(join(dir, 'artifacts', 'isola', 'scripts', 'generate-build-info.mjs'), readFileSync(SCRIPT, 'utf8'))
   writeFileSync(join(dir, GENERATED_PATH), 'export const BUILD_INFO = "placeholder"\n')
   writeFileSync(join(dir, 'artifacts', 'isola', 'source.ts'), 'export const answer = 42\n')
+  if (gitignore !== undefined) writeFileSync(join(dir, '.gitignore'), gitignore)
   git(dir, ['init', '-q', '.'])
   git(dir, ['config', 'user.email', 'release@epic.dm'])
   git(dir, ['config', 'user.name', 'release'])
@@ -553,6 +562,344 @@ describe('production build chain: dirty source never reaches next build', () => 
         expect(r.code, `${flag} must not relax the gate`).not.toBe(0)
         expect(`${r.stdout}${r.stderr}`).toContain('source_snapshot_dirty')
       }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+})
+
+// ── The snapshot contract ───────────────────────────────────────────────────
+//
+// `.gitignore` describes what this repository TRACKS. Replit uploads the
+// workspace FILESYSTEM. Treating the first as the second is what let an
+// unreviewed `/dist` route compile into the artifact at head a896651 with
+// source_dirty=false and the reviewed tree.
+// dec-pr81-ignored-snapshot-and-six-host-coverage-must-fail-closed-2026-08-06.
+
+/** The repository's real ignore rules, so these tests cannot drift from it. */
+const REAL_GITIGNORE = readFileSync(fileURLToPath(new URL('../../../.gitignore', import.meta.url)), 'utf8')
+
+describe('normalizeSnapshotPath — exactly one spelling may reach a comparison', () => {
+  it('accepts a plain repository-relative path unchanged', () => {
+    expect(normalizeSnapshotPath('artifacts/isola/app/page.tsx')).toBe('artifacts/isola/app/page.tsx')
+  })
+
+  it('strips the ONE trailing slash git puts on a collapsed ignored directory', () => {
+    expect(normalizeSnapshotPath('node_modules/')).toBe('node_modules')
+    expect(normalizeSnapshotPath('artifacts/isola/.next/')).toBe('artifacts/isola/.next')
+  })
+
+  it('refuses every spelling that did not come from git, rather than repairing it', () => {
+    for (const bad of [
+      '',
+      '/',
+      '//',
+      '/artifacts/isola',
+      'artifacts//isola',
+      'artifacts\\isola\\app',
+      './artifacts/isola',
+      'artifacts/./isola',
+      'artifacts/../artifacts/isola',
+      '..',
+      'C:/artifacts/isola',
+    ]) {
+      expect({ bad, got: normalizeSnapshotPath(bad) }).toEqual({ bad, got: null })
+    }
+    expect(normalizeSnapshotPath(undefined as unknown as string)).toBeNull()
+    expect(normalizeSnapshotPath(42 as unknown as string)).toBeNull()
+  })
+
+  it('an unnormalisable path is DIRT, never quietly dropped', () => {
+    const c = classifySnapshotPath('artifacts\\isola\\app\\page.tsx')
+    expect(c.class).toBe(PATH_CLASS.dirty)
+    expect(c.reason).toContain('unnormalisable')
+  })
+})
+
+describe('classifySnapshotPath — every path lands in exactly one class', () => {
+  it('class 2: the generator output, at its exact path only', () => {
+    expect(classifySnapshotPath(GENERATED_PATH).class).toBe(PATH_CLASS.generatedExempt)
+    expect(classifySnapshotPath(`${GENERATED_PATH}.bak`).class).toBe(PATH_CLASS.dirty)
+    expect(classifySnapshotPath('artifacts/isola/lib/build-info').class).toBe(PATH_CLASS.dirty)
+    expect(classifySnapshotPath('artifacts/isola/lib/build-info/other.ts').class).toBe(PATH_CLASS.dirty)
+  })
+
+  it('class 3: paths .replitignore keeps out of the snapshot', () => {
+    for (const prefix of SNAPSHOT_EXCLUDED_PREFIXES) {
+      expect(classifySnapshotPath(prefix).class).toBe(PATH_CLASS.snapshotExcluded)
+      expect(classifySnapshotPath(`${prefix}/`).class).toBe(PATH_CLASS.snapshotExcluded)
+      expect(classifySnapshotPath(`${prefix}/deep/inside.js`).class).toBe(PATH_CLASS.snapshotExcluded)
+    }
+  })
+
+  it('class 3 matches whole segments only — a lookalike neighbour is dirt', () => {
+    expect(classifySnapshotPath('artifacts/isola/.next-evil/page.js').class).toBe(PATH_CLASS.dirty)
+    expect(classifySnapshotPath('artifacts/isola/.nextfoo').class).toBe(PATH_CLASS.dirty)
+    expect(classifySnapshotPath('evil/artifacts/isola/.next/x').class).toBe(PATH_CLASS.dirty)
+    expect(classifySnapshotPath('artifacts/api-server/dist-evil').class).toBe(PATH_CLASS.dirty)
+  })
+
+  it('class 4: dependency trees at exact workspace locations, and NOWHERE else', () => {
+    for (const p of DEPENDENCY_TREE_PATHS) {
+      expect(classifySnapshotPath(`${p}/`).class).toBe(PATH_CLASS.dependencyTree)
+      expect(classifySnapshotPath(`${p}/next/dist/index.js`).class).toBe(PATH_CLASS.dependencyTree)
+    }
+    // A node_modules the workspace does not declare is a review event, not an
+    // exemption — the class is a list of exact locations, not a directory name.
+    expect(classifySnapshotPath('artifacts/isola/app/node_modules/evil.ts').class).toBe(PATH_CLASS.dirty)
+    expect(classifySnapshotPath('packages/new-thing/node_modules').class).toBe(PATH_CLASS.dirty)
+    expect(classifySnapshotPath('node_modules_evil').class).toBe(PATH_CLASS.dirty)
+  })
+
+  it('the class-4 list is exactly one entry per pnpm workspace package, plus the root', () => {
+    // Pinned against the real workspace so a new package cannot silently inherit
+    // an exemption, and a removed one cannot leave a stale prefix behind.
+    const root = fileURLToPath(new URL('../../../', import.meta.url))
+    const manifests = [
+      '',
+      'artifacts/api-server',
+      'artifacts/isola',
+      'artifacts/mockup-sandbox',
+      'lib/api-client-react',
+      'lib/api-spec',
+      'lib/api-zod',
+      'lib/db',
+      'scripts',
+    ]
+    for (const dir of manifests) {
+      expect({ dir, hasManifest: existsSync(join(root, dir, 'package.json')) }).toEqual({ dir, hasManifest: true })
+    }
+    expect([...DEPENDENCY_TREE_PATHS].sort()).toEqual(
+      manifests.map((d) => (d === '' ? 'node_modules' : `${d}/node_modules`)).sort(),
+    )
+  })
+
+  it('class 5: anything the contract does not name', () => {
+    expect(classifySnapshotPath('artifacts/isola/app/dist/page.tsx').class).toBe(PATH_CLASS.dirty)
+    expect(classifySnapshotPath('artifacts/isola/app/build/page.tsx').class).toBe(PATH_CLASS.dirty)
+    expect(classifySnapshotPath('some/thing/nobody/thought/about').class).toBe(PATH_CLASS.dirty)
+  })
+
+  it('tsbuildinfo is forgiven at the two exact paths .replitignore names, and nowhere else', () => {
+    expect(classifySnapshotPath('artifacts/isola/tsconfig.tsbuildinfo').class).toBe(PATH_CLASS.snapshotExcluded)
+    expect(classifySnapshotPath('scripts/tsconfig.tsbuildinfo').class).toBe(PATH_CLASS.snapshotExcluded)
+    // A glob would have forgiven these too. Exact paths do not.
+    expect(classifySnapshotPath('lib/db/tsconfig.tsbuildinfo').class).toBe(PATH_CLASS.dirty)
+    expect(classifySnapshotPath('artifacts/isola/app/tsconfig.tsbuildinfo').class).toBe(PATH_CLASS.dirty)
+  })
+})
+
+describe('build-consumed environment files are never exemptable', () => {
+  it('every filename the framework loads at build time is dirt, at any location', () => {
+    for (const name of BUILD_CONSUMED_ENV_FILES) {
+      for (const dir of ['', 'artifacts/isola/', 'lib/db/', 'deeply/nested/']) {
+        const p = `${dir}${name}`
+        const c = classifySnapshotPath(p)
+        expect({ p, class: c.class }).toEqual({ p, class: PATH_CLASS.dirty })
+        expect(c.reason).toContain('environment file')
+      }
+    }
+  })
+
+  it('the environment test runs BEFORE any exemption, so no prefix can shelter one', () => {
+    // Inside a class-3 prefix and inside a class-4 prefix: still dirt.
+    expect(classifySnapshotPath(`${SNAPSHOT_EXCLUDED_PREFIXES[0]}/${BUILD_CONSUMED_ENV_FILES[0]}`).class).toBe(
+      PATH_CLASS.dirty,
+    )
+    expect(classifySnapshotPath(`node_modules/${BUILD_CONSUMED_ENV_FILES[1]}`).class).toBe(PATH_CLASS.dirty)
+  })
+
+  it('the example template is not treated as a build-consumed environment file', () => {
+    // It is TRACKED (`.gitignore` negates it), so git never reports it and it is
+    // never classified at all. What matters is that it is not on the list: if it
+    // ever did show up it would be ordinary unaccounted-for dirt, not a special
+    // "environment file" refusal naming a file the framework does not even read.
+    expect(BUILD_CONSUMED_ENV_FILES).not.toContain('.env.example')
+    expect(classifySnapshotPath('.env.example').reason).not.toContain('environment file')
+  })
+
+  it('probeEnvFiles reports paths and never opens a file', () => {
+    const seen: string[] = []
+    const target = join('artifacts', 'isola', BUILD_CONSUMED_ENV_FILES[1])
+    const found = probeEnvFiles('/repo', (p: string) => {
+      seen.push(p)
+      return p.endsWith(target)
+    })
+    expect(found).toEqual([`artifacts/isola/${BUILD_CONSUMED_ENV_FILES[1]}`])
+    expect(seen.length).toBe(ENV_PROBE_DIRECTORIES.length * BUILD_CONSUMED_ENV_FILES.length)
+  })
+
+  it('a probed environment file makes the identity dirty even if git never mentions it', () => {
+    const probed = BUILD_CONSUMED_ENV_FILES[5]
+    const d = deriveBuildInfo({ head: SHA, tree: TREE, porcelainZ: '', builtAt: AT, envFiles: [probed] })
+    expect(d.ok).toBe(true)
+    expect(d.info!.source_dirty).toBe(true)
+    expect(d.dirty!).toContain(probed)
+  })
+
+  it('does not double-report a file git already named', () => {
+    const probed = BUILD_CONSUMED_ENV_FILES[1]
+    const d = deriveBuildInfo({
+      head: SHA,
+      tree: TREE,
+      porcelainZ: z(`!! ${probed}`),
+      builtAt: AT,
+      envFiles: [probed],
+    })
+    expect(d.dirty!.filter((p: string) => p === probed)).toHaveLength(1)
+  })
+})
+
+describe('ignored entries reach the identity decision at all', () => {
+  it('the generator asks git for ignored entries', () => {
+    const source = readFileSync(SCRIPT, 'utf8')
+    expect(source).toContain("'--ignored=matching'")
+    expect(source).toContain("'--untracked-files=all'")
+    expect(source).toContain("'-z'")
+  })
+
+  it('an ignored record is parsed and classified like any other', () => {
+    expect(parsePorcelainZ(z('!! artifacts/isola/app/dist/'))).toEqual(['artifacts/isola/app/dist/'])
+    expect(dirtyPaths(z('!! artifacts/isola/app/dist/'))).toEqual(['artifacts/isola/app/dist'])
+  })
+
+  it('the accounted-for classes do not make the snapshot dirty', () => {
+    const d = deriveBuildInfo({
+      head: SHA,
+      tree: TREE,
+      builtAt: AT,
+      porcelainZ: z(
+        `!! ${SNAPSHOT_EXCLUDED_PREFIXES[0]}/`,
+        '!! node_modules/',
+        '!! artifacts/isola/node_modules/',
+        ` M ${GENERATED_PATH}`,
+      ),
+    })
+    expect(d.info!.source_dirty).toBe(false)
+    expect(d.dirty!).toEqual([])
+  })
+})
+
+describe('production build chain: IGNORED build inputs never reach next build', () => {
+  const cases: Array<[string, string, string]> = [
+    ['ignored application source under a bare `dist` rule', 'artifacts/isola/app/dist/page.tsx', 'dist'],
+    ['ignored application source under a bare `build` rule', 'artifacts/isola/app/build/page.tsx', 'build'],
+    ['ignored nested application source', 'artifacts/isola/lib/tmp/deep/helper.ts', 'tmp'],
+    ['ignored route/page source', 'artifacts/isola/app/dist/api/route.ts', 'dist'],
+    ['ignored path containing spaces', 'artifacts/isola/dist/a new file.ts', 'dist'],
+    ['ignored non-ASCII path', 'artifacts/isola/dist/café-ñ.ts', 'dist'],
+    ['ignored generated output NOT excluded by .replitignore', 'artifacts/isola/out-tsc/thing.js', 'out-tsc'],
+  ]
+
+  for (const [name, path, rule] of cases) {
+    it(`${name} stops the build before next build`, () => {
+      const dir = makeRepo(`${rule}\n`)
+      try {
+        const full = join(dir, ...path.split('/'))
+        mkdirSync(dirname(full), { recursive: true })
+        writeFileSync(full, 'export const value = 1\n')
+        // The file really is invisible to the OLD check — that is the whole point.
+        const oldView = execFileSync('git', ['-C', dir, 'status', '--porcelain', '-z', '--untracked-files=all'], {
+          encoding: 'utf8',
+        })
+        expect(oldView).not.toContain(path.split('/').pop())
+
+        const r = runChain(dir)
+        expect(r.code).not.toBe(0)
+        expect(r.output).toContain('BUILD_IDENTITY=FAIL')
+        expect(r.nextBuildRuns).toBe(0)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 60_000)
+  }
+
+  for (const name of BUILD_CONSUMED_ENV_FILES) {
+    for (const [label, dir] of [['at the repository root', ''], ['nested in the application', 'artifacts/isola/']]) {
+      it(`an ignored ${name} ${label} stops the build`, () => {
+        const repo = makeRepo('.env*\n')
+        try {
+          const rel = `${dir}${name}`
+          const full = join(repo, ...rel.split('/'))
+          mkdirSync(dirname(full), { recursive: true })
+          writeFileSync(full, 'NEXT_PUBLIC_API=https://attacker.example\n')
+          const r = runChain(repo)
+          expect(r.code).not.toBe(0)
+          expect(r.output).toContain('workspace_environment_file_present')
+          expect(r.output).toContain(rel)
+          // Paths only. The VALUE must never reach a build log.
+          expect(r.output).not.toContain('attacker.example')
+          expect(r.nextBuildRuns).toBe(0)
+        } finally {
+          rmSync(repo, { recursive: true, force: true })
+        }
+      }, 60_000)
+    }
+  }
+
+  it('ignored generated output that IS excluded by .replitignore still builds', () => {
+    const dir = makeRepo('artifacts/isola/.next/\n')
+    try {
+      mkdirSync(join(dir, 'artifacts', 'isola', '.next'), { recursive: true })
+      writeFileSync(join(dir, 'artifacts', 'isola', '.next', 'BUILD_ID'), 'previous\n')
+      const r = runChain(dir)
+      expect(r.output).toContain('BUILD_IDENTITY=OK')
+      expect(r.output).toContain('source_dirty=false')
+      expect(r.nextBuildRuns).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  it('an ignored dependency tree at a declared location still builds', () => {
+    const dir = makeRepo('node_modules\n')
+    try {
+      mkdirSync(join(dir, 'node_modules', 'next'), { recursive: true })
+      writeFileSync(join(dir, 'node_modules', 'next', 'index.js'), 'module.exports = {}\n')
+      const r = runChain(dir)
+      expect(r.output).toContain('BUILD_IDENTITY=OK')
+      expect(r.nextBuildRuns).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  it('the generated file plus an IGNORED source file stops the build', () => {
+    const dir = makeRepo('dist\n')
+    try {
+      writeFileSync(join(dir, GENERATED_PATH), 'export const BUILD_INFO = "regenerated"\n')
+      mkdirSync(join(dir, 'artifacts', 'isola', 'dist'), { recursive: true })
+      writeFileSync(join(dir, 'artifacts', 'isola', 'dist', 'page.tsx'), 'export default () => null\n')
+      const r = runChain(dir)
+      expect(r.code).not.toBe(0)
+      expect(r.output).toContain('artifacts/isola/dist')
+      expect(r.nextBuildRuns).toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  it('clean tracked source still reaches next build exactly once under the REAL ignore rules', () => {
+    const dir = makeRepo(REAL_GITIGNORE)
+    try {
+      const r = runChain(dir)
+      expect(r.output).toContain('BUILD_IDENTITY=OK')
+      expect(r.output).toContain('source_dirty=false')
+      expect(r.nextBuildRuns).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  it("the reviewer's exact bypass — app/dist/page.tsx under the REAL .gitignore — is closed", () => {
+    const dir = makeRepo(REAL_GITIGNORE)
+    try {
+      mkdirSync(join(dir, 'artifacts', 'isola', 'app', 'dist'), { recursive: true })
+      writeFileSync(join(dir, 'artifacts', 'isola', 'app', 'dist', 'page.tsx'), 'export default () => null\n')
+      const r = runChain(dir)
+      expect(r.code).not.toBe(0)
+      expect(r.output).toContain('artifacts/isola/app/dist')
+      expect(r.nextBuildRuns).toBe(0)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

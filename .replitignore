@@ -29,6 +29,18 @@
 # and source-controlled public assets are all deliberately still uploaded;
 # artifacts/isola/lib/release/replitignore.test.ts asserts exactly that against
 # this file.
+#   *.tsbuildinfo                  <- TypeScript incremental state, written by
+#                                     `tsc --build` (root `typecheck:libs`) and by
+#                                     `tsc --noEmit` under "incremental": true.
+#                                     It is not a build INPUT the release needs,
+#                                     but `next build` type-checks, so a stale one
+#                                     uploaded into the snapshot can change which
+#                                     errors are re-checked. Exact paths, not a
+#                                     glob: a tsbuildinfo appearing anywhere else
+#                                     should stop the build for review rather than
+#                                     be silently excluded.
 artifacts/isola/.next
 artifacts/isola/.next-preview
 artifacts/api-server/dist
+artifacts/isola/tsconfig.tsbuildinfo
+scripts/tsconfig.tsbuildinfo

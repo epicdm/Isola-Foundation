@@ -6,14 +6,28 @@
  * acceptance claim, against the tree the owner authorised:
  *
  *   npx tsx scripts/verify-release-identity.ts \
- *     --expect-tree <FULL_TREE_SHA> [--expect-sha <FULL_SHA>] [--host <name> ...]
+ *     --expect-tree <FULL_TREE_SHA> [--expect-sha <FULL_SHA>]
  *
  * The authorised tree comes from the reviewed merge commit:
  *   git rev-parse <REVIEWED_SHA>^{tree}
  *
- * With no --host flags it checks all six routed Foundation hostnames. Exit 0 only
- * when every checked host serves the authorised source identity and no two hosts
- * disagree.
+ * The release check ALWAYS covers the complete canonical routed host set. There
+ * is no way to narrow it, because narrowing it was a bypass: `--host` used to
+ * let a one-host spot check exit 0 while five routed hosts went unverified, and
+ * `--allow-dirty` used to let six dirty hosts pass.
+ * `dec-pr81-ignored-snapshot-and-six-host-coverage-must-fail-closed-2026-08-06`
+ * removed both. Unknown arguments are refused rather than ignored, so an old
+ * command line fails loudly instead of quietly doing less than it says.
+ *
+ * For investigating ONE host there is `--diagnostic-host <name>`, which is not a
+ * release check and cannot be mistaken for one: it never prints
+ * RELEASE_IDENTITY=PASS and always exits non-zero.
+ *
+ * Exit codes:
+ *   0  release PASS — every canonical host serves the authorised identity
+ *   1  release FAIL
+ *   2  usage error
+ *   3  diagnostic run — no release claim was made, and none can be
  *
  * This gate makes NO claim about authentication. It reads one unauthenticated
  * public endpoint. `defect-foundation-custom-domain-oidc-callback-2026-08-06` is
@@ -26,7 +40,7 @@
  */
 
 import {
-  FOUNDATION_ROUTED_HOSTS,
+  CANONICAL_RELEASE_HOSTS,
   HEALTH_PATH,
   evaluateHost,
   evaluateRelease,
@@ -34,22 +48,50 @@ import {
   type HostProbe,
 } from '@/lib/release/release-identity'
 
-interface Args {
+export interface Args {
   expectTree: string
   expectSha: string
-  hosts: string[]
-  allowDirty: boolean
+  /** Non-empty only in diagnostic mode, which can never produce a release PASS. */
+  diagnosticHosts: string[]
+  errors: string[]
 }
 
+/**
+ * Strict. An argument this does not recognise is an ERROR, not something to skip.
+ *
+ * `--host` and `--allow-dirty` are named explicitly so an operator or a script
+ * still carrying them is told what happened and why, rather than seeing a
+ * generic parse failure and reaching for a workaround.
+ */
 export function parseArgs(argv: string[]): Args {
-  const a: Args = { expectTree: '', expectSha: '', hosts: [], allowDirty: false }
+  const a: Args = { expectTree: '', expectSha: '', diagnosticHosts: [], errors: [] }
+  const needsValue = (flag: string, value: string | undefined): string => {
+    if (value === undefined || value.trim() === '' || value.startsWith('--')) {
+      a.errors.push(`${flag} requires a value`)
+      return ''
+    }
+    return value.trim()
+  }
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i]
-    const value = argv[i + 1] ?? ''
-    if (flag === '--expect-tree') { a.expectTree = value.trim(); i += 1 }
-    else if (flag === '--expect-sha') { a.expectSha = value.trim(); i += 1 }
-    else if (flag === '--host') { if (value.trim()) a.hosts.push(value.trim()); i += 1 }
-    else if (flag === '--allow-dirty') { a.allowDirty = true }
+    switch (flag) {
+      case '--expect-tree': a.expectTree = needsValue(flag, argv[i + 1]); i += 1; break
+      case '--expect-sha': a.expectSha = needsValue(flag, argv[i + 1]); i += 1; break
+      case '--diagnostic-host': {
+        const v = needsValue(flag, argv[i + 1]); i += 1
+        if (v) a.diagnosticHosts.push(v)
+        break
+      }
+      case '--host':
+        a.errors.push('--host was removed: it allowed a partial check to exit successfully while routed hosts went unverified. The release gate always covers the full canonical set; use --diagnostic-host to investigate one host (it can never report PASS).')
+        i += 1
+        break
+      case '--allow-dirty':
+        a.errors.push('--allow-dirty was removed: a release verifier must not be able to turn a dirty artifact into a PASS.')
+        break
+      default:
+        a.errors.push(`unknown argument ${JSON.stringify(flag)}`)
+    }
   }
   return a
 }
@@ -79,17 +121,21 @@ async function probe(host: string, depth = 0): Promise<HostProbe> {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
+  if (args.errors.length > 0) {
+    process.stderr.write(`${args.errors.map((e) => `  ${e}`).join('\n')}\nRELEASE_IDENTITY=FAIL\n`)
+    process.exit(2)
+  }
   if (!args.expectTree) {
     process.stderr.write('--expect-tree <FULL_TREE_SHA> is required (git rev-parse <SHA>^{tree})\nRELEASE_IDENTITY=FAIL\n')
     process.exit(2)
   }
 
-  const hosts = args.hosts.length > 0 ? args.hosts : [...FOUNDATION_ROUTED_HOSTS]
   const expected = {
     sourceTree: args.expectTree,
     ...(args.expectSha ? { sourceSha: args.expectSha } : {}),
-    allowDirty: args.allowDirty,
   }
+  const diagnostic = args.diagnosticHosts.length > 0
+  const hosts = diagnostic ? args.diagnosticHosts : [...CANONICAL_RELEASE_HOSTS]
 
   const verdicts = []
   for (const host of hosts) {
@@ -97,6 +143,26 @@ async function main(): Promise<void> {
   }
 
   const result = evaluateRelease(verdicts, expected)
+
+  // A diagnostic run reports what it saw and stops there. It does not print the
+  // release verdict line at all — not even FAIL — because the only thing worth
+  // saying about a partial check is that it was not a release check.
+  if (diagnostic) {
+    const seen = result.lines.filter((l) => !l.startsWith('RELEASE_IDENTITY='))
+    process.stdout.write(
+      [
+        ...seen,
+        '',
+        'RELEASE_IDENTITY=NOT_EVALUATED',
+        `DIAGNOSTIC ONLY — ${hosts.length} host(s) probed by hand. Canonical release coverage`,
+        `was NOT performed and no release claim is made. Run without --diagnostic-host to`,
+        `check all ${CANONICAL_RELEASE_HOSTS.length} required hostnames.`,
+        '',
+      ].join('\n'),
+    )
+    process.exit(3)
+  }
+
   process.stdout.write(`${result.lines.join('\n')}\n`)
   process.exit(result.pass ? 0 : 1)
 }

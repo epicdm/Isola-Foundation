@@ -3,6 +3,12 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 import {
+  DEPENDENCY_TREE_PATHS,
+  GENERATED_PATH,
+  SNAPSHOT_EXCLUDED_PREFIXES,
+} from '@/scripts/generate-build-info.mjs'
+
+import {
   REQUIRED_GENERATED_EXCLUSIONS,
   REQUIRED_SNAPSHOT_PATHS,
   isExcluded,
@@ -145,5 +151,93 @@ describe('the excluded paths really are rebuilt', () => {
       scripts: Record<string, string>
     }
     expect(pkg.scripts.build).toBe('node ./scripts/generate-build-info.mjs --require-identity && next build')
+  })
+})
+
+// ── One snapshot contract, two files, pinned to each other ──────────────────
+//
+// `generate-build-info.mjs` refuses to build when the workspace holds anything
+// the reviewed tree does not describe. The ONLY reason it may forgive a path is
+// that `.replitignore` keeps that path out of the snapshot entirely. If the two
+// lists ever drift apart, the generator is forgiving something that does ship —
+// which is the exact shape of the bypass this contract exists to close.
+// dec-pr81-ignored-snapshot-and-six-host-coverage-must-fail-closed-2026-08-06.
+
+describe('the generator and .replitignore agree on what leaves the snapshot', () => {
+  it('every path the generator treats as snapshot-excluded really is excluded', () => {
+    for (const prefix of SNAPSHOT_EXCLUDED_PREFIXES) {
+      expect({ prefix, excluded: isExcluded(prefix, rules) }).toEqual({ prefix, excluded: true })
+      expect({ prefix, childExcluded: isExcluded(`${prefix}/anything/at/all`, rules) }).toEqual({
+        prefix,
+        childExcluded: true,
+      })
+    }
+  })
+
+  it('every generated output .replitignore excludes is one the generator knows about', () => {
+    for (const p of REQUIRED_GENERATED_EXCLUSIONS) {
+      expect({ p, known: SNAPSHOT_EXCLUDED_PREFIXES.includes(p) }).toEqual({ p, known: true })
+    }
+  })
+
+  it('the generator does NOT forgive anything that still ships', () => {
+    // A path that .replitignore does not exclude must never appear in the
+    // generator's exemption list, no matter how harmless it looks.
+    for (const shipped of [
+      'artifacts/isola/app',
+      'artifacts/isola/lib',
+      'artifacts/isola/prisma/schema.prisma',
+      'pnpm-lock.yaml',
+      '.replit',
+      'artifacts/isola/app/dist',
+      'artifacts/isola/app/build',
+      'artifacts/isola/out-tsc',
+    ]) {
+      expect({ shipped, excluded: isExcluded(shipped, rules) }).toEqual({ shipped, excluded: false })
+      expect({ shipped, exempt: SNAPSHOT_EXCLUDED_PREFIXES.includes(shipped) }).toEqual({ shipped, exempt: false })
+    }
+  })
+
+  it('dependency trees are a DIFFERENT class and are not claimed to be excluded', () => {
+    // They are not in .replitignore, and the generator does not pretend they are.
+    // Whether Replit uploads them is an open owner question recorded in Port; the
+    // exemption is explicit and bounded rather than dressed up as proven.
+    for (const p of DEPENDENCY_TREE_PATHS) {
+      expect({ p, excluded: isExcluded(p, rules) }).toEqual({ p, excluded: false })
+      expect({ p, inExcludedList: SNAPSHOT_EXCLUDED_PREFIXES.includes(p) }).toEqual({ p, inExcludedList: false })
+    }
+  })
+
+  it('no exemption prefix overlaps another — each path has exactly one class', () => {
+    const all = [...SNAPSHOT_EXCLUDED_PREFIXES, ...DEPENDENCY_TREE_PATHS, GENERATED_PATH]
+    for (const a of all) {
+      for (const b of all) {
+        if (a === b) continue
+        expect({ a, b, overlaps: a === b || a.startsWith(`${b}/`) }).toEqual({ a, b, overlaps: false })
+      }
+    }
+  })
+
+  it('required source is still uploaded — narrowing the snapshot must not lose the build', () => {
+    for (const p of REQUIRED_SNAPSHOT_PATHS) {
+      expect({ p, excluded: isExcluded(p, rules) }).toEqual({ p, excluded: false })
+    }
+  })
+
+  it('broad .gitignore patterns are NOT inherited as deployment exclusions', () => {
+    // `.gitignore` says what this repository tracks. It is not the snapshot
+    // boundary, and copying it here is how a source directory called `dist`
+    // becomes invisible instead of blocking.
+    const gitignore = readFileSync(`${REPO_ROOT}.gitignore`, 'utf8')
+    const broad = ['dist', 'tmp', 'out-tsc', 'node_modules', '.env*', '*.bundle']
+    for (const pattern of broad) {
+      expect({ pattern, inGitignore: gitignore.includes(pattern) }).toEqual({ pattern, inGitignore: true })
+      const replitignore = readFileSync(REPLITIGNORE, 'utf8')
+      const asOwnRule = replitignore
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0 && !l.startsWith('#'))
+      expect({ pattern, adoptedWholesale: asOwnRule.includes(pattern) }).toEqual({ pattern, adoptedWholesale: false })
+    }
   })
 })
