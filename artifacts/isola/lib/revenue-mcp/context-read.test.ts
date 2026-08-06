@@ -2,11 +2,9 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   REVENUE_CONTEXT_ALLOWED_KEYS,
-  REVENUE_CONTEXT_VERSION,
   runRevenueCustomerContextGet,
   type ChatwootBindingRow,
   type ChatwootReadClient,
-  type OpportunitySnapshot,
   type RevenueContextData,
   type RevenueContextPorts,
 } from './context-read'
@@ -18,12 +16,21 @@ import {
  * (getConversation/listMessages/getContact) — it has no write method of any
  * kind, which is itself the proof that this tool cannot perform a write; see
  * the "zero side effects" test.
+ *
+ * Fixture values below match the redacted LIVE fixture captured 2026-08-06
+ * for account 5 / inbox 46 / conversation 131 in
+ * docs/isola/CHATWOOT-REVENUE-CONTEXT-CONTRACT.md §7: team=escalations,
+ * priority=high, assignee=Eric Giraud, labels=["human-takeover"],
+ * handoff_state=null, correlation_id=null (both null is correct per that
+ * doc — Lane 3's correlation id currently lives in private-note text, not a
+ * Chatwoot custom attribute; an honest gap on that lane's side).
  */
 
 const TENANT = '43b006e4-33e0-42a8-bec7-4422ba290d79' // EPIC Communications Inc
 const ACCOUNT_ID = '5'
 const INBOX_ID = '46'
 const CONVERSATION_ID = '131'
+const DISPLAY_ID = 130
 const CONTACT_ID = 188
 
 const BINDING: ChatwootBindingRow = {
@@ -41,22 +48,63 @@ function fakeChatwoot(overrides: Partial<ChatwootReadClient> = {}): ChatwootRead
       if (conversationId !== Number(CONVERSATION_ID)) return null
       return {
         id: conversationId,
+        display_id: DISPLAY_ID,
         status: 'open',
+        priority: 'high',
         inbox_id: Number(INBOX_ID),
-        created_at: 1785000000,
-        timestamp: 1785003600,
-        labels: ['intent_sales', 'new_customer'],
+        labels: ['human-takeover'],
+        custom_attributes: {}, // handoff_state / correlation_id both absent -> null, per the real fixture
         meta: {
           sender: { id: CONTACT_ID, name: 'Eric Isola Test', phone_number: '+17672956737', email: 'eric@example.com' },
           assignee: { id: 1, name: 'Eric Giraud', email: 'eric@epic.dm' },
+          team: { id: 7, name: 'escalations' },
         },
       }
     }),
     listMessages: vi.fn(async () => [
-      { id: 1, message_type: 0, content: 'Hi, I need help with internet and calling setup for my business.', created_at: 1785001000, private: false },
-      { id: 2, message_type: 1, content: 'Sure — let me pull up your account.', created_at: 1785001200, private: false },
-      { id: 3, message_type: 2, content: 'assigned conversation', created_at: 1785001300, private: false }, // system activity, must be excluded
-      { id: 4, message_type: 1, content: 'internal note: check billing before calling back', created_at: 1785001400, private: true }, // private, must be excluded
+      {
+        id: 1,
+        message_type: 0,
+        sender_type: 'Contact',
+        content: 'Hi, I need help with internet and calling setup for my business.',
+        created_at: 1785001000,
+        private: false,
+      },
+      {
+        id: 2,
+        message_type: 1,
+        sender_type: 'User',
+        sender: { name: 'Eric Giraud' },
+        content: 'Sure — let me pull up your account and call you back.',
+        created_at: 1785001200,
+        private: false,
+      },
+      {
+        id: 3,
+        message_type: 2,
+        sender_type: 'User',
+        content: 'assigned conversation',
+        created_at: 1785001300,
+        private: false,
+      }, // system activity — never counts as a human response
+      {
+        id: 4,
+        message_type: 1,
+        sender_type: 'AgentBot',
+        sender: { name: 'Isola AI' },
+        content: 'Automated acknowledgement',
+        created_at: 1785001250,
+        private: false,
+      }, // bot-authored — never counts as a human response
+      {
+        id: 5,
+        message_type: 1,
+        sender_type: 'User',
+        sender: { name: 'Eric Giraud' },
+        content: 'internal note: check billing before calling back',
+        created_at: 1785001400,
+        private: true,
+      }, // private — excluded entirely
     ]),
     getContact: vi.fn(async (_config, contactId) => {
       if (contactId !== CONTACT_ID) return null
@@ -70,7 +118,6 @@ function fakePorts(input: {
   chatwoot?: ChatwootReadClient
   tenantForAgent?: Record<string, string | null>
   bindings?: ChatwootBindingRow[]
-  opportunity?: OpportunitySnapshot | null
 }): RevenueContextPorts {
   const tenantForAgent = input.tenantForAgent ?? { 'agent-atlas': TENANT }
   const bindings = input.bindings ?? [BINDING]
@@ -78,75 +125,106 @@ function fakePorts(input: {
     resolveTenantForAgent: async (agentRef) => tenantForAgent[agentRef] ?? null,
     findChatwootBindingsForTenant: async (tenantId) => bindings.filter((b) => b.tenant_id === tenantId),
     chatwoot: input.chatwoot ?? fakeChatwoot(),
-    resolveLinkedOpportunity: async () => input.opportunity ?? null,
     now: () => new Date('2026-08-06T12:00:00.000Z'),
   }
 }
 
 const HAPPY_HINTS = { accountId: ACCOUNT_ID, inboxId: INBOX_ID, conversationId: CONVERSATION_ID }
 
-// ── 1. correct EPIC case resolves ───────────────────────────────────────────
+// ── 1. correct EPIC case resolves, against the REAL contract shape ─────────
 
-describe('runRevenueCustomerContextGet — happy path', () => {
-  it('resolves the controlled EPIC Communications case', async () => {
-    const opportunity: OpportunitySnapshot = {
-      leadId: '1642',
-      stage: 'qualified',
-      ownerRef: '7',
-      ownerName: 'Eric Giraud',
-      nextAction: 'Call back re: internet/calling/support recommendation',
-      dueDate: '2026-08-07',
-    }
+describe('runRevenueCustomerContextGet — happy path (real contract shape)', () => {
+  it('resolves the controlled EPIC Communications case with the exact §5 shape', async () => {
     const result = await runRevenueCustomerContextGet(
       { caller: { agentRef: 'agent-atlas' }, hints: HAPPY_HINTS },
-      fakePorts({ opportunity }),
+      fakePorts({}),
     )
 
     expect(result.ok).toBe(true)
     if (!result.ok) throw new Error('unreachable')
     const { data } = result
 
-    expect(data.version).toBe(REVENUE_CONTEXT_VERSION)
-    expect(data.tenantId).toBe(TENANT)
     expect(data.conversation.id).toBe(Number(CONVERSATION_ID))
-    expect(data.conversation.accountId).toBe(ACCOUNT_ID)
-    expect(data.conversation.inboxId).toBe(Number(INBOX_ID))
+    expect(data.conversation.display_id).toBe(DISPLAY_ID)
     expect(data.conversation.status).toBe('open')
-    expect(data.conversation.labels).toEqual(['intent_sales', 'new_customer'])
-    expect(data.conversation.assignee).toEqual({ id: 1, name: 'Eric Giraud' })
-    expect(data.contact).toEqual({ id: CONTACT_ID, name: 'Eric Isola Test' })
-    expect(data.opportunity).toEqual(opportunity)
-    expect(data.chatwootDeepLink).toBe(`https://inbox.epic.dm/app/accounts/${ACCOUNT_ID}/conversations/${CONVERSATION_ID}`)
+    expect(data.conversation.priority).toBe('high')
+    expect(data.conversation.labels).toEqual(['human-takeover'])
+    expect(data.conversation.team).toEqual({ name: 'escalations' })
+    expect(data.conversation.assignee).toEqual({ name: 'Eric Giraud' })
+    expect(data.conversation.handoff_state).toBeNull()
+    expect(data.conversation.correlation_id).toBeNull()
+    expect(data.conversation.deep_link).toBe(`https://inbox.epic.dm/app/accounts/${ACCOUNT_ID}/conversations/${CONVERSATION_ID}`)
+
+    expect(data.contact).toEqual({ name: 'Eric Isola Test' })
+
+    expect(data.latest_enquiry).toEqual({
+      summary: 'Hi, I need help with internet and calling setup for my business.',
+      at: new Date(1785001000 * 1000).toISOString(),
+    })
+
+    expect(data.latest_human_response).toEqual({
+      responded: true,
+      by: 'Eric Giraud',
+      at: new Date(1785001200 * 1000).toISOString(),
+    })
   })
 
-  it('never returns phone or email, even though the fake Chatwoot data carries them', async () => {
-    const result = await runRevenueCustomerContextGet(
-      { caller: { agentRef: 'agent-atlas' }, hints: HAPPY_HINTS },
-      fakePorts({}),
-    )
-    expect(result.ok).toBe(true)
-    const serialized = JSON.stringify(result)
-    expect(serialized).not.toContain('+17672956737')
-    expect(serialized).not.toContain('eric@example.com')
-    expect(serialized).not.toContain('eric@epic.dm')
-  })
-
-  it('summarizes messages, excludes private notes and system activity, and never reproduces full content verbatim beyond a short preview', async () => {
+  it('never returns account_id, inbox_id, phone, email, message content, or any id field the contract marks INTERNAL_ONLY', async () => {
     const result = await runRevenueCustomerContextGet(
       { caller: { agentRef: 'agent-atlas' }, hints: HAPPY_HINTS },
       fakePorts({}),
     )
     expect(result.ok).toBe(true)
     if (!result.ok) throw new Error('unreachable')
-    expect(result.data.messages).toHaveLength(2) // the activity + the private note are excluded
-    expect(result.data.messages[0].direction).toBe('incoming')
-    expect(result.data.messages[1].direction).toBe('outgoing')
-    for (const m of result.data.messages) {
-      expect(m).not.toHaveProperty('content')
-      expect(typeof m.preview).toBe('string')
-    }
-    // The private note's text must never appear anywhere in the output.
-    expect(JSON.stringify(result)).not.toContain('check billing before calling back')
+
+    expect(result.data).not.toHaveProperty('version')
+    expect(result.data).not.toHaveProperty('tenantId')
+    expect(result.data.conversation).not.toHaveProperty('accountId')
+    expect(result.data.conversation).not.toHaveProperty('inboxId')
+    expect(result.data.conversation.assignee).not.toHaveProperty('id')
+    expect(result.data.contact).not.toHaveProperty('id')
+    expect(result.data).not.toHaveProperty('messages')
+    expect(result.data).not.toHaveProperty('opportunity')
+
+    const serialized = JSON.stringify(result)
+    expect(serialized).not.toContain('+17672956737')
+    expect(serialized).not.toContain('eric@example.com')
+    expect(serialized).not.toContain('eric@epic.dm')
+    expect(serialized).not.toContain(String(CONTACT_ID))
+    // the private note's and the human response's own CONTENT must never appear
+    expect(serialized).not.toContain('check billing before calling back')
+    expect(serialized).not.toContain('Sure — let me pull up your account and call you back.')
+  })
+
+  it('excludes bot-authored and system-activity messages from latest_human_response', async () => {
+    // The fixture's most recent outgoing message chronologically is the
+    // AgentBot one (id 4, 1785001250) — it must be skipped in favor of the
+    // human one (id 2, 1785001200) that precedes it, and the private human
+    // message (id 5, 1785001400, latest of all) must also be skipped.
+    const result = await runRevenueCustomerContextGet(
+      { caller: { agentRef: 'agent-atlas' }, hints: HAPPY_HINTS },
+      fakePorts({}),
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('unreachable')
+    expect(result.data.latest_human_response.responded).toBe(true)
+    expect(result.data.latest_human_response.by).toBe('Eric Giraud')
+    expect(result.data.latest_human_response.at).toBe(new Date(1785001200 * 1000).toISOString())
+  })
+
+  it('reports responded:false with by/at both null when no human has replied yet', async () => {
+    const chatwoot = fakeChatwoot({
+      listMessages: vi.fn(async () => [
+        { id: 1, message_type: 0, sender_type: 'Contact', content: 'Hello?', created_at: 1785001000, private: false },
+      ]),
+    })
+    const result = await runRevenueCustomerContextGet(
+      { caller: { agentRef: 'agent-atlas' }, hints: HAPPY_HINTS },
+      fakePorts({ chatwoot }),
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('unreachable')
+    expect(result.data.latest_human_response).toEqual({ responded: false, by: null, at: null })
   })
 })
 
@@ -239,26 +317,18 @@ describe('zero side effects', () => {
   })
 })
 
-// ── 11. allowlist enforcement ────────────────────────────────────────────────
+// ── 11. allowlist enforcement — the REAL §5 shape, nothing else ────────────
 
 function keysOf(obj: unknown): string[] {
   if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) return []
   return Object.keys(obj)
 }
 
-describe('allowlist enforcement (contract §5 shape)', () => {
-  it('the response is JSON-serializable and contains only allowlisted keys at every level', async () => {
-    const opportunity: OpportunitySnapshot = {
-      leadId: '1642',
-      stage: 'qualified',
-      ownerRef: '7',
-      ownerName: 'Eric Giraud',
-      nextAction: 'Call back',
-      dueDate: '2026-08-07',
-    }
+describe('allowlist enforcement (contract §5 shape — verbatim)', () => {
+  it('the response is JSON-serializable and contains only allowlisted keys at every level, and no more', async () => {
     const result = await runRevenueCustomerContextGet(
       { caller: { agentRef: 'agent-atlas' }, hints: HAPPY_HINTS },
-      fakePorts({ opportunity }),
+      fakePorts({}),
     )
     expect(result.ok).toBe(true)
     if (!result.ok) throw new Error('unreachable')
@@ -268,25 +338,38 @@ describe('allowlist enforcement (contract §5 shape)', () => {
 
     expect(keysOf(roundTripped).sort()).toEqual([...REVENUE_CONTEXT_ALLOWED_KEYS.root].sort())
     expect(keysOf(roundTripped.conversation).sort()).toEqual([...REVENUE_CONTEXT_ALLOWED_KEYS.conversation].sort())
+    if (roundTripped.conversation.team) {
+      expect(keysOf(roundTripped.conversation.team).sort()).toEqual([...REVENUE_CONTEXT_ALLOWED_KEYS.team].sort())
+    }
     if (roundTripped.conversation.assignee) {
       expect(keysOf(roundTripped.conversation.assignee).sort()).toEqual([...REVENUE_CONTEXT_ALLOWED_KEYS.assignee].sort())
     }
     if (roundTripped.contact) {
       expect(keysOf(roundTripped.contact).sort()).toEqual([...REVENUE_CONTEXT_ALLOWED_KEYS.contact].sort())
     }
-    for (const m of roundTripped.messages) {
-      expect(keysOf(m).sort()).toEqual([...REVENUE_CONTEXT_ALLOWED_KEYS.message].sort())
+    if (roundTripped.latest_enquiry) {
+      expect(keysOf(roundTripped.latest_enquiry).sort()).toEqual([...REVENUE_CONTEXT_ALLOWED_KEYS.latest_enquiry].sort())
     }
-    if (roundTripped.opportunity) {
-      expect(keysOf(roundTripped.opportunity).sort()).toEqual([...REVENUE_CONTEXT_ALLOWED_KEYS.opportunity].sort())
-    }
+    expect(keysOf(roundTripped.latest_human_response).sort()).toEqual(
+      [...REVENUE_CONTEXT_ALLOWED_KEYS.latest_human_response].sort(),
+    )
+  })
+
+  it('has exactly 4 root keys and no messages/opportunity/version/tenantId field', async () => {
+    const result = await runRevenueCustomerContextGet(
+      { caller: { agentRef: 'agent-atlas' }, hints: HAPPY_HINTS },
+      fakePorts({}),
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('unreachable')
+    expect(Object.keys(result.data).sort()).toEqual(['contact', 'conversation', 'latest_enquiry', 'latest_human_response'])
   })
 })
 
 // ── 12. secret scan ──────────────────────────────────────────────────────────
 
 describe('secret scan', () => {
-  const SECRET_SHAPED = /(api[_-]?key|access[_-]?token|client[_-]?secret|hmac|webhook[_-]?verify|cw-agent-token)/i
+  const SECRET_SHAPED = /(api[_-]?key|access[_-]?token|client[_-]?secret|hmac|webhook[_-]?verify)/i
 
   it('the output never contains the Chatwoot API token or anything secret-shaped', async () => {
     const result = await runRevenueCustomerContextGet(

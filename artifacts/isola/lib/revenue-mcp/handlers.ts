@@ -48,7 +48,6 @@ export interface RevenueMcpToolArgs {
   accountId: string
   inboxId: string
   conversationId: string
-  messageLimit?: number
 }
 
 export async function isolaRevenueCustomerContextGet(
@@ -57,7 +56,6 @@ export async function isolaRevenueCustomerContextGet(
   const req: RevenueContextRequest = {
     caller: { agentRef: args.agentRef },
     hints: { accountId: args.accountId, inboxId: args.inboxId, conversationId: args.conversationId },
-    messageLimit: args.messageLimit,
   }
   return runRevenueCustomerContextGet(req, DEFAULT_REVENUE_CONTEXT_PORTS)
 }
