@@ -9,6 +9,13 @@
 @import "../styles/presets/soft-pop.css";
 @import "../styles/presets/brutalist.css";
 
+/* Isola Workspace design tokens (the --iso-* set).
+   A closed, semantic token layer for the ONE embedded operator application. Deliberately
+   NOT promoted into `@theme inline` as Tailwind colour utilities: exposing `bg-iso-*` would
+   invite this vocabulary into the rest of the app and create the second design system the
+   handoff forbids. Everything in it is scoped under `.iso-root`. */
+@import "../styles/isola-workspace.css";
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {

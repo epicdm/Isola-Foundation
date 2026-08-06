@@ -1,0 +1,170 @@
+{
+  "$meta": {
+    "name": "Isola Workspace design tokens",
+    "version": "2.0.0",
+    "status": "approved",
+    "themeAttribute": "data-iso-theme",
+    "note": "Dark is a value swap on identical token names. Components never branch on theme."
+  },
+  "font": {
+    "sans": "\"IBM Plex Sans\", ui-sans-serif, system-ui, sans-serif",
+    "mono": "\"IBM Plex Mono\", ui-monospace, Menlo, monospace"
+  },
+  "color": {
+    "light": {
+      "bg": "#F5F5F8",
+      "surface": "#FFFFFF",
+      "surface2": "#FAFAFC",
+      "surface3": "#F0F0F5",
+      "border": "#E3E3EB",
+      "borderStrong": "#CFCFDB",
+      "fg": "#15151C",
+      "fg2": "#54545F",
+      "fg3": "#83838F",
+      "accent": "#6F3DF4",
+      "accentHover": "#5928D6",
+      "accentSoft": "#F2EDFF",
+      "accentRing": "#8B6BFA",
+      "accentFg": "#5525CE",
+      "onAccent": "#FFFFFF",
+      "ok": "#0B7A4B", "okSoft": "#E6F5EE", "okBorder": "#A9DCC5",
+      "warn": "#8A5300", "warnSoft": "#FCF2E2", "warnBorder": "#EFCB93",
+      "err": "#B0251D", "errSoft": "#FDEBE9", "errBorder": "#F0B3AE",
+      "info": "#1A5EA8", "infoSoft": "#E9F1FB", "infoBorder": "#A8CAEC",
+      "block": "#414A63", "blockSoft": "#EDEFF4", "blockBorder": "#C3C9D6",
+      "rail": "#1E2430", "railFg": "#C6CBD6", "railActive": "#2C3648",
+      "skeleton": "linear-gradient(90deg,#EDEDF3 25%,#F6F6FA 37%,#EDEDF3 63%)"
+    },
+    "dark": {
+      "bg": "#0D0D12",
+      "surface": "#16161D",
+      "surface2": "#1B1B24",
+      "surface3": "#22222D",
+      "border": "#2B2B37",
+      "borderStrong": "#3C3C4B",
+      "fg": "#ECECF2",
+      "fg2": "#A6A6B5",
+      "fg3": "#7B7B8B",
+      "accent": "#9575FB",
+      "accentHover": "#AD94FF",
+      "accentSoft": "#241D42",
+      "accentRing": "#A98CFF",
+      "accentFg": "#BCA6FF",
+      "onAccent": "#120A28",
+      "ok": "#5BD69C", "okSoft": "#0F2620", "okBorder": "#245043",
+      "warn": "#F0B45E", "warnSoft": "#2A1E0B", "warnBorder": "#523B15",
+      "err": "#FF9086", "errSoft": "#2B1412", "errBorder": "#57251F",
+      "info": "#7FBAF6", "infoSoft": "#101F30", "infoBorder": "#20456B",
+      "block": "#A9B2C6", "blockSoft": "#1B1F29", "blockBorder": "#333B4C",
+      "rail": "#08080C", "railFg": "#9AA0AE", "railActive": "#1D2330",
+      "skeleton": "linear-gradient(90deg,#1E1E28 25%,#26262F 37%,#1E1E28 63%)"
+    }
+  },
+  "semantics": {
+    "ok": {
+      "means": "Done and confirmed",
+      "rule": "ONLY after the owning system has read the change back. Never for 'request accepted'.",
+      "usedBy": ["StatusBadge:done", "ReadbackResult", "VerificationChecklist:passed", "OnboardingStage:proved"]
+    },
+    "warn": {
+      "means": "Needs attention",
+      "rule": "Awaiting approval, due soon, stale data, configured-but-never-tested.",
+      "usedBy": ["StatusBadge:awaitingApproval", "Alert:stale", "OnboardingStage:setup", "DueDate:soon"]
+    },
+    "err": {
+      "means": "Failed or overdue",
+      "rule": "Something did not happen and a customer may be affected. Always says whether the customer is affected.",
+      "usedBy": ["StatusBadge:failed", "ActionCard:failed", "VerificationChecklist:failed", "OnboardingStage:failed"]
+    },
+    "info": {
+      "means": "In progress",
+      "rule": "Running right now, outcome unknown. Pairs with a pulsing dot.",
+      "usedBy": ["StatusBadge:running", "ActionCard:executing"]
+    },
+    "block": {
+      "means": "Blocked or degraded",
+      "rule": "Deliberately stopped: no permission, or a service is not answering. Distinct from failure.",
+      "usedBy": ["StatusBadge:blocked", "DegradedState", "UnauthorizedState", "OnboardingStage:blocked"]
+    },
+    "neutralDashed": {
+      "means": "Not confirmed",
+      "rule": "Accepted by a downstream system but not confirmed. Rendered with border-style:dashed on surface-3.",
+      "usedBy": ["StatusBadge:unconfirmed", "ActionCard:unconfirmed"]
+    }
+  },
+  "radius": { "sm": "4px", "md": "6px", "lg": "8px", "xl": "12px", "pill": "999px" },
+  "shadow": {
+    "light": {
+      "1": "0 1px 2px rgba(18,18,32,.06)",
+      "2": "0 2px 8px rgba(18,18,32,.09)",
+      "3": "0 12px 32px rgba(18,18,32,.16)"
+    },
+    "dark": {
+      "1": "0 1px 2px rgba(0,0,0,.5)",
+      "2": "0 2px 8px rgba(0,0,0,.55)",
+      "3": "0 12px 32px rgba(0,0,0,.6)"
+    },
+    "usage": { "1": "card", "2": "panel / frame", "3": "overlay, sheet, toast" }
+  },
+  "space": { "1": 2, "2": 4, "3": 6, "4": 8, "5": 11, "6": 14, "7": 20, "8": 26 },
+  "type": {
+    "display": { "size": "24px", "weight": 600, "tracking": "-0.025em" },
+    "title":   { "size": "18px", "weight": 600, "tracking": "-0.02em" },
+    "section": { "size": "14px", "weight": 600 },
+    "cardTitle": { "size": "12.5px", "weight": 600 },
+    "body":    { "size": "12.5px", "weight": 400, "lineHeight": 1.45 },
+    "meta":    { "size": "11px", "weight": 400, "color": "fg3" },
+    "label":   { "size": "10px", "weight": 600, "transform": "uppercase", "tracking": "0.07em", "color": "fg3" },
+    "badge":   { "size": "10px", "weight": 600 },
+    "mono":    { "size": "11px", "family": "mono", "usage": "identifiers inside Technical details only" },
+    "panelTabs": { "size": "12px", "weight": 500 },
+    "minimumInterfaceSize": "10px"
+  },
+  "breakpoints": {
+    "panel":   { "max": 420,  "meaning": "Chatwoot side panel only; Isola is the whole viewport" },
+    "mobile":  { "max": 420,  "meaning": "Same as panel, plus a back-to-conversation bar" },
+    "laptop":  { "min": 850,  "meaning": "Rail + thread + Isola panel; conversation list hidden" },
+    "desktop": { "min": 1090, "meaning": "Rail + list + thread + Isola panel" },
+    "note": "The design switches on available width for the workspace frame, not on device. Below 1090px the conversation list is dropped first; below 850px only the Isola panel remains."
+  },
+  "layout": {
+    "panelWidth": 384,
+    "panelMinWidth": 340,
+    "conversationListWidth": 274,
+    "threadMinWidth": 380,
+    "chatwootRailWidth": 52,
+    "frameMinWidth": { "desktop": 1090, "laptop": 850, "panel": 400, "mobile": 390 }
+  },
+  "motion": {
+    "rise": "iso-rise .2s–.25s ease — newly appeared results (readback, AI suggestion, toast)",
+    "pulse": "iso-pulse 1s–1.1s infinite — running indicator dot and progress bar",
+    "spin": "iso-spin 1s linear infinite — loading spinner",
+    "shimmer": "iso-shimmer 1.3s infinite linear — skeleton",
+    "rule": "No decorative motion. Every animation communicates 'running' or 'this is new'. All must honour prefers-reduced-motion."
+  },
+  "tenantBranding": {
+    "mayReplace": ["accent", "accentHover", "accentSoft", "accentRing", "accentFg", "onAccent", "logo", "businessName"],
+    "mustNeverReplace": ["ok", "warn", "err", "info", "block", "focus ring contrast", "border", "fg", "fg2", "fg3"],
+    "derivation": {
+      "note": "Given a single brand hex A, derive the rest so contrast holds in both themes.",
+      "accentHover": "color-mix(in oklab, A, black 18%) — light; white 18% — dark",
+      "accentRing": "color-mix(in oklab, A, white 28%)",
+      "accentFg": "color-mix(in oklab, A, black 22%) — light; white 32% — dark",
+      "accentSoft": "color-mix(in oklab, A, white 90%) — light; #0D0D12 82% — dark"
+    },
+    "guardrails": [
+      "Reject or auto-correct a brand accent that fails 4.5:1 against --iso-surface for accentFg.",
+      "A brand accent must never be applied to a status badge, alert, or checklist mark.",
+      "The accent carries no meaning by itself: it marks the active module, the single primary action, links and selection. Nothing else."
+    ]
+  },
+  "accessibility": {
+    "contrastTarget": "WCAG 2.1 AA — 4.5:1 body text, 3:1 large text and UI boundaries",
+    "focus": "2px solid var(--iso-accent-ring), offset 2px, on every interactive element",
+    "statusNeverColorAlone": "Every status carries a text label; colour is redundant reinforcement",
+    "liveRegions": "role=\"status\" on alerts, degraded/stale banners and toasts; aria-busy on loading containers",
+    "tabs": "role=tablist / role=tab / aria-selected on module navigation",
+    "disclosure": "aria-expanded on every expandable header button",
+    "hitTarget": "≥44px in the narrow/mobile panel"
+  }
+}

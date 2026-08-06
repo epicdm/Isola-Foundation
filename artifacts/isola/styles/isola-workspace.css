@@ -1,0 +1,278 @@
+/* Isola Workspace — design tokens.
+ *
+ * Source of truth: the approved design handoff bundle (design_handoff_isola_workspace
+ * v2.0.0, tokens/isola-tokens.css). Values are copied, not re-derived.
+ *
+ * TWO DELIBERATE DIVERGENCES FROM THE BUNDLE, both to avoid a competing design system:
+ *
+ * 1. Dark mode rides this repository's EXISTING theme mechanism. globals.css declares
+ *    `@custom-variant dark (&:is(.dark *))` and the theme boot script toggles `.dark` on
+ *    <html>. The bundle proposed a second attribute, `[data-iso-theme="dark"]`. Shipping
+ *    that as the primary switch would mean two independent theme mechanisms that could
+ *    disagree. `.dark` is therefore primary; `[data-iso-theme="dark"]` is retained ONLY so
+ *    the embedded panel can be forced to a theme by its host without a whole-app class,
+ *    which is a real need for a Chatwoot iframe that cannot see the host's theme.
+ *
+ * 2. These live in their own file rather than in globals.css `@theme inline`. The `--iso-*`
+ *    scale is intentionally NOT exposed as Tailwind colour utilities: it is a closed,
+ *    semantic set for one embedded application, and promoting it to `bg-iso-*` utilities
+ *    would invite it into the rest of the app, which is exactly the "second design system"
+ *    the handoff forbids. Consume it with arbitrary properties, e.g.
+ *    `[background:var(--iso-surface)]`, or the small helper classes at the foot of this file.
+ *
+ * The repository's OWN tokens (--primary, --background, …) remain untouched and continue to
+ * govern every surface outside Isola Workspace.
+ */
+
+:root {
+  /* Type families. The bundle specifies IBM Plex; we do not bundle a webfont in this
+     increment (that is a network/licensing decision, not a design one), so the stack
+     degrades to the repository's existing system stack. Recorded as an open question. */
+  --iso-font: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --iso-font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+
+  /* Surfaces */
+  --iso-bg: #f5f5f8;
+  --iso-surface: #ffffff;
+  --iso-surface-2: #fafafc;
+  --iso-surface-3: #f0f0f5;
+
+  /* Lines */
+  --iso-border: #e3e3eb;
+  --iso-border-strong: #cfcfdb;
+
+  /* Text */
+  --iso-fg: #15151c;
+  --iso-fg-2: #54545f;
+  --iso-fg-3: #83838f;
+
+  /* Accent — the ONLY tenant-brandable family. See setTenantAccent() in tenant-branding.ts. */
+  --iso-accent: #6f3df4;
+  --iso-accent-hover: #5928d6;
+  --iso-accent-soft: #f2edff;
+  --iso-accent-ring: #8b6bfa;
+  --iso-accent-fg: #5525ce;
+  --iso-on-accent: #ffffff;
+
+  /* Semantic status — NEVER brandable. A tenant accent may not reach these. */
+  --iso-ok: #0b7a4b;
+  --iso-ok-soft: #e6f5ee;
+  --iso-ok-border: #a9dcc5;
+  --iso-warn: #8a5300;
+  --iso-warn-soft: #fcf2e2;
+  --iso-warn-border: #efcb93;
+  --iso-err: #b0251d;
+  --iso-err-soft: #fdebe9;
+  --iso-err-border: #f0b3ae;
+  --iso-info: #1a5ea8;
+  --iso-info-soft: #e9f1fb;
+  --iso-info-border: #a8caec;
+  --iso-block: #414a63;
+  --iso-block-soft: #edeff4;
+  --iso-block-border: #c3c9d6;
+
+  /* Radii */
+  --iso-radius-sm: 4px;
+  --iso-radius-md: 6px;
+  --iso-radius-lg: 8px;
+  --iso-radius-xl: 12px;
+  --iso-radius-pill: 999px;
+
+  /* Elevation */
+  --iso-shadow-1: 0 1px 2px rgba(18, 18, 32, 0.06);
+  --iso-shadow-2: 0 2px 8px rgba(18, 18, 32, 0.09);
+  --iso-shadow-3: 0 12px 32px rgba(18, 18, 32, 0.16);
+
+  /* Host chrome */
+  --iso-rail: #1e2430;
+  --iso-rail-fg: #c6cbd6;
+  --iso-rail-active: #2c3648;
+
+  /* Loading skeleton fill (functional, not decorative) */
+  --iso-skeleton: linear-gradient(90deg, #ededf3 25%, #f6f6fa 37%, #ededf3 63%);
+
+  /* Spacing scale */
+  --iso-space-1: 2px;
+  --iso-space-2: 4px;
+  --iso-space-3: 6px;
+  --iso-space-4: 8px;
+  --iso-space-5: 11px;
+  --iso-space-6: 14px;
+  --iso-space-7: 20px;
+  --iso-space-8: 26px;
+
+  /* Type scale */
+  --iso-text-display: 24px;
+  --iso-text-title: 18px;
+  --iso-text-section: 14px;
+  --iso-text-card: 12.5px;
+  --iso-text-body: 12.5px;
+  --iso-text-meta: 11px;
+  --iso-text-label: 10px;
+  --iso-text-badge: 10px;
+  --iso-text-mono: 11px;
+  --iso-line: 1.45;
+
+  /* Layout */
+  --iso-panel-width: 384px;
+  --iso-panel-min-width: 340px;
+  --iso-topbar: 46px;
+}
+
+/* Dark is a VALUE SWAP on the same token names. No component may branch on theme.
+   Both selectors carry identical bodies: `.dark` is the repository's mechanism, the
+   attribute is the escape hatch for a host-forced embed. */
+.dark,
+[data-iso-theme="dark"] {
+  --iso-bg: #0d0d12;
+  --iso-surface: #16161d;
+  --iso-surface-2: #1b1b24;
+  --iso-surface-3: #22222d;
+  --iso-border: #2b2b37;
+  --iso-border-strong: #3c3c4b;
+  --iso-fg: #ececf2;
+  --iso-fg-2: #a6a6b5;
+  --iso-fg-3: #7b7b8b;
+
+  --iso-accent: #9575fb;
+  --iso-accent-hover: #ad94ff;
+  --iso-accent-soft: #241d42;
+  --iso-accent-ring: #a98cff;
+  --iso-accent-fg: #bca6ff;
+  --iso-on-accent: #120a28;
+
+  --iso-ok: #5bd69c;
+  --iso-ok-soft: #0f2620;
+  --iso-ok-border: #245043;
+  --iso-warn: #f0b45e;
+  --iso-warn-soft: #2a1e0b;
+  --iso-warn-border: #523b15;
+  --iso-err: #ff9086;
+  --iso-err-soft: #2b1412;
+  --iso-err-border: #57251f;
+  --iso-info: #7fbaf6;
+  --iso-info-soft: #101f30;
+  --iso-info-border: #20456b;
+  --iso-block: #a9b2c6;
+  --iso-block-soft: #1b1f29;
+  --iso-block-border: #333b4c;
+
+  --iso-rail: #08080c;
+  --iso-rail-fg: #9aa0ae;
+  --iso-rail-active: #1d2330;
+
+  --iso-skeleton: linear-gradient(90deg, #1e1e28 25%, #26262f 37%, #1e1e28 63%);
+
+  --iso-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --iso-shadow-2: 0 2px 8px rgba(0, 0, 0, 0.55);
+  --iso-shadow-3: 0 12px 32px rgba(0, 0, 0, 0.6);
+}
+
+/* ── Scoped base ────────────────────────────────────────────────────────────────
+   Everything below is scoped under .iso-root. The bundle's base rules targeted bare
+   `body`/`button`/`a`, which would leak Isola styling into the whole Foundation app.
+   Scoping is the difference between a design layer and a hostile global stylesheet. */
+
+.iso-root {
+  font-family: var(--iso-font);
+  font-size: 13px;
+  line-height: var(--iso-line);
+  color: var(--iso-fg);
+  background: var(--iso-bg);
+  -webkit-font-smoothing: antialiased;
+  text-wrap: pretty;
+}
+
+.iso-root *,
+.iso-root *::before,
+.iso-root *::after {
+  box-sizing: border-box;
+}
+
+.iso-root button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.iso-root a {
+  color: var(--iso-accent);
+  text-decoration: none;
+}
+
+.iso-root a:hover {
+  color: var(--iso-accent-hover);
+  text-decoration: underline;
+}
+
+/* Required: every interactive element shows this ring. Do not remove.
+   `:focus-visible` only — a mouse click must not paint a ring. */
+.iso-root :focus-visible {
+  outline: 2px solid var(--iso-accent-ring);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@keyframes iso-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+@keyframes iso-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes iso-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+@keyframes iso-rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.iso-shimmer {
+  background: var(--iso-skeleton);
+  background-size: 200% 100%;
+  animation: iso-shimmer 1.3s infinite linear;
+  border-radius: 4px;
+}
+
+.iso-pulse {
+  animation: iso-pulse 1s infinite;
+}
+
+.iso-rise {
+  animation: iso-rise 0.25s ease-out;
+}
+
+/* The running-action pulse and the skeleton shimmer are the two motions in the design.
+   Both must degrade to a static fill, not merely slow down. */
+@media (prefers-reduced-motion: reduce) {
+  .iso-root *,
+  .iso-root *::before,
+  .iso-root *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+  .iso-shimmer {
+    animation: none;
+    background: var(--iso-surface-3);
+  }
+  .iso-pulse {
+    animation: none;
+  }
+}
