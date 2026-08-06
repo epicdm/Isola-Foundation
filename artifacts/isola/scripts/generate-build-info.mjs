@@ -74,14 +74,23 @@ export const FAILURE_REASONS = {
   timestampMalformed: 'built_at_malformed',
 }
 
-/** `git status --porcelain --untracked-files=no` → the tracked paths it names. */
+/**
+ * `git status --porcelain --untracked-files=no` → the tracked paths it names.
+ *
+ * The status field is matched and stripped rather than sliced at a fixed offset.
+ * A fixed `slice(3)` is correct only for raw porcelain, and it silently loses the
+ * first character of the path the moment anything has trimmed the leading space
+ * off the first line — which is exactly what a generic `.trim()` on command
+ * output does. Caught on 2026-08-06 by a build that reported `source_dirty: true`
+ * with only the exempt path modified; the gate would have rejected every release.
+ */
 export function dirtyTrackedPaths(porcelain) {
   return porcelain
     .split('\n')
     .map((line) => line.replace(/\s+$/, ''))
     .filter((line) => line.length > 0)
     .map((line) => {
-      let path = line.slice(3)
+      let path = line.replace(/^\s*[ MADRCU?!]{1,2}\s+/, '')
       const arrow = path.indexOf(' -> ')
       if (arrow !== -1) path = path.slice(arrow + 4)
       return path
@@ -211,12 +220,14 @@ export function parseArgs(argv) {
 
 // ── Impure edge ─────────────────────────────────────────────────────────────
 
-function gitOrNull(repoRoot, args) {
+function gitOrNull(repoRoot, args, { trim = true } = {}) {
   try {
-    return execFileSync('git', ['-C', repoRoot, ...args], {
+    const out = execFileSync('git', ['-C', repoRoot, ...args], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim()
+    })
+    // Porcelain is column-significant: its leading space IS the index status.
+    return trim ? out.trim() : out.replace(/\n$/, '')
   } catch {
     return null
   }
@@ -230,7 +241,7 @@ function main(argv) {
 
   const head = gitOrNull(repoRoot, ['rev-parse', 'HEAD'])
   const tree = gitOrNull(repoRoot, ['rev-parse', 'HEAD^{tree}'])
-  const porcelain = gitOrNull(repoRoot, ['status', '--porcelain', '--untracked-files=no']) ?? ''
+  const porcelain = gitOrNull(repoRoot, ['status', '--porcelain', '--untracked-files=no'], { trim: false }) ?? ''
   const builtAt = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
 
   const derived = deriveBuildInfo({ head, tree, porcelain, builtAt })

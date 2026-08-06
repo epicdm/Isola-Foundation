@@ -115,6 +115,25 @@ describe('dirtyTrackedPaths', () => {
   it('reduces a rename to the path that will exist in the published filesystem', () => {
     expect(dirtyTrackedPaths('R  old/path.ts -> new/path.ts')).toEqual(['new/path.ts'])
   })
+
+  it('reads the path correctly whether or not the leading status space survived', () => {
+    // Regression, 2026-08-06: a generic .trim() on git output strips the leading
+    // space of the FIRST line, and a fixed slice(3) then loses the first
+    // character of the path — so the exempt path stopped matching and every
+    // build reported source_dirty: true, which the release gate rejects.
+    expect(dirtyTrackedPaths(` M ${GENERATED_PATH}`)).toEqual([])
+    expect(dirtyTrackedPaths(`M ${GENERATED_PATH}`)).toEqual([])
+    expect(dirtyTrackedPaths(` M ${GENERATED_PATH}`.trim())).toEqual([])
+    expect(dirtyTrackedPaths(`M  ${GENERATED_PATH}`)).toEqual([])
+  })
+
+  it('reads a path correctly from a trimmed first line and an untrimmed second', () => {
+    const porcelain = `M artifacts/isola/lib/session.ts\n M artifacts/isola/lib/consumer-session.ts`
+    expect(dirtyTrackedPaths(porcelain)).toEqual([
+      'artifacts/isola/lib/session.ts',
+      'artifacts/isola/lib/consumer-session.ts',
+    ])
+  })
 })
 
 describe('parseBuildInfoModule / staleness', () => {
