@@ -12,11 +12,14 @@ import {
   DEVELOPMENT_BUILD_INFO,
   DIRT_EXEMPT_PATHS,
   ENV_PROBE_DIRECTORIES,
+  PACKAGE_MANAGER_INPUTS,
   GENERATED_PATH,
   PATH_CLASS,
   SNAPSHOT_EXCLUDED_PREFIXES,
   classifySnapshotPath,
   deriveBuildInfo,
+  evaluatePackageManagerPin,
+  evaluatePreflight,
   dirtyPaths,
   isDirtExempt,
   isGeneratedIdentityStale,
@@ -251,10 +254,11 @@ describe('parseBuildInfoModule / staleness', () => {
 })
 
 describe('parseArgs', () => {
-  it('reads the flags and defaults to neither', () => {
-    expect(parseArgs([])).toEqual({ requireIdentity: false, verify: false })
-    expect(parseArgs(['--require-identity'])).toEqual({ requireIdentity: true, verify: false })
-    expect(parseArgs(['--verify'])).toEqual({ requireIdentity: false, verify: true })
+  it('reads the flags and defaults to none of them', () => {
+    expect(parseArgs([])).toEqual({ requireIdentity: false, verify: false, preflight: false })
+    expect(parseArgs(['--require-identity'])).toEqual({ requireIdentity: true, verify: false, preflight: false })
+    expect(parseArgs(['--verify'])).toEqual({ requireIdentity: false, verify: true, preflight: false })
+    expect(parseArgs(['--preflight'])).toEqual({ requireIdentity: false, verify: false, preflight: true })
   })
 })
 
@@ -368,6 +372,12 @@ function makeRepo(gitignore?: string): string {
   writeFileSync(join(dir, 'artifacts', 'isola', 'scripts', 'generate-build-info.mjs'), readFileSync(SCRIPT, 'utf8'))
   writeFileSync(join(dir, GENERATED_PATH), 'export const BUILD_INFO = "placeholder"\n')
   writeFileSync(join(dir, 'artifacts', 'isola', 'source.ts'), 'export const answer = 42\n')
+  // The preflight reads the reviewed package-manager pin from the root manifest,
+  // so a fixture repository needs one to be a faithful stand-in for the release.
+  writeFileSync(
+    join(dir, 'package.json'),
+    `${JSON.stringify({ name: 'fixture', private: true, packageManager: 'pnpm@10.28.0' }, null, 2)}\n`,
+  )
   if (gitignore !== undefined) writeFileSync(join(dir, '.gitignore'), gitignore)
   git(dir, ['init', '-q', '.'])
   git(dir, ['config', 'user.email', 'release@epic.dm'])
@@ -941,4 +951,315 @@ describe('production build chain: IGNORED build inputs never reach next build', 
       rmSync(dir, { recursive: true, force: true })
     }
   }, 60_000)
+})
+
+// ── The deterministic dependency chain ──────────────────────────────────────
+//
+// Replit describes a publish as "a snapshot of your app's files AND
+// DEPENDENCIES", so an installed tree ships unless excluded — and a shipped tree
+// is unreviewed code that next build compiles against. The reviewed lockfile
+// describes what SHOULD be installed, not what IS.
+// dec-pr81-node-modules-excluded-and-lockfile-reinstalled-2026-08-06 keeps the
+// tree out of the snapshot and rebuilds it from reviewed inputs, frozen:
+//
+//   preflight -> pnpm install --frozen-lockfile -> generate-build-info -> next build
+
+describe('evaluatePackageManagerPin', () => {
+  it('accepts the reviewed pin when the running major matches', () => {
+    expect(evaluatePackageManagerPin('pnpm@10.28.0', '10.28.0').ok).toBe(true)
+    // Minor/patch drift installs the same tree from a frozen lockfile, so the
+    // gate must not depend on the deployment image's exact pnpm build.
+    expect(evaluatePackageManagerPin('pnpm@10.28.0', '10.4.1').ok).toBe(true)
+  })
+
+  it('refuses a MAJOR mismatch — that is what changes lockfile semantics', () => {
+    const r = evaluatePackageManagerPin('pnpm@10.28.0', '9.15.0')
+    expect(r.ok).toBe(false)
+    expect(r.reason).toContain('pinned pnpm 10.x')
+  })
+
+  it('refuses a missing, malformed or foreign pin, and an unknown running version', () => {
+    expect(evaluatePackageManagerPin(null, '10.28.0').ok).toBe(false)
+    expect(evaluatePackageManagerPin('', '10.28.0').ok).toBe(false)
+    expect(evaluatePackageManagerPin('pnpm', '10.28.0').ok).toBe(false)
+    expect(evaluatePackageManagerPin('pnpm@latest', '10.28.0').ok).toBe(false)
+    expect(evaluatePackageManagerPin('yarn@4.0.0', '10.28.0').ok).toBe(false)
+    expect(evaluatePackageManagerPin('pnpm@10.28.0', null).ok).toBe(false)
+    expect(evaluatePackageManagerPin('pnpm@10.28.0', 'not-a-version').ok).toBe(false)
+  })
+
+  it('the repository really does declare the pin the chain asserts', () => {
+    const root = JSON.parse(
+      readFileSync(fileURLToPath(new URL('../../../package.json', import.meta.url)), 'utf8'),
+    ) as { packageManager?: string }
+    expect(root.packageManager).toMatch(/^pnpm@\d+\.\d+\.\d+$/)
+  })
+})
+
+describe('evaluatePreflight — what may run before pnpm install', () => {
+  it('a clean snapshot passes', () => {
+    expect(evaluatePreflight('').ok).toBe(true)
+  })
+
+  it('dependency trees are QUARANTINE, not dirt — they are excluded and about to be rebuilt', () => {
+    const r = evaluatePreflight(z('!! node_modules/', '!! artifacts/isola/node_modules/'))
+    expect(r.ok).toBe(true)
+    expect(r.quarantine.map((e: { path: string }) => e.path)).toEqual(['node_modules', 'artifacts/isola/node_modules'])
+    expect(r.blocking).toEqual([])
+  })
+
+  it('a malicious file inside a workspace dependency tree is quarantine, never a build input', () => {
+    // It cannot reach the artifact: the tree is excluded from the snapshot and
+    // the frozen install replaces it before anything is compiled.
+    const r = evaluatePreflight(z('!! node_modules/', '!! artifacts/isola/node_modules/'))
+    expect(r.ok).toBe(true)
+  })
+
+  it('a dependency tree at an UNDECLARED location blocks', () => {
+    const r = evaluatePreflight(z('!! artifacts/isola/app/node_modules/'))
+    expect(r.ok).toBe(false)
+    expect(r.blocking.map((e: { path: string }) => e.path)).toEqual(['artifacts/isola/app/node_modules'])
+  })
+
+  it.each([
+    ['untracked .npmrc in a package', '?? artifacts/isola/.npmrc'],
+    ['ignored .npmrc', '!! .npmrc'],
+    ['modified root .npmrc', ' M .npmrc'],
+    ['modified lockfile', ' M pnpm-lock.yaml'],
+    ['modified workspace definition', ' M pnpm-workspace.yaml'],
+    ['modified root manifest', ' M package.json'],
+    ['modified application manifest', ' M artifacts/isola/package.json'],
+    ['untracked .pnpmfile.cjs', '?? .pnpmfile.cjs'],
+    ['untracked pnpmfile.js in a package', '?? lib/db/pnpmfile.js'],
+    ['untracked .yarnrc.yml', '?? .yarnrc.yml'],
+  ])('%s blocks, and is named as a package-manager input', (_label, record) => {
+    const r = evaluatePreflight(z(record))
+    expect(r.ok).toBe(false)
+    expect(r.packageConfig.length).toBeGreaterThan(0)
+  })
+
+  it('the package-manager input list is exactly the tracked configuration', () => {
+    const root = fileURLToPath(new URL('../../../', import.meta.url))
+    for (const p of PACKAGE_MANAGER_INPUTS) {
+      expect({ p, exists: existsSync(join(root, p)) }).toEqual({ p, exists: true })
+    }
+  })
+
+  it('ignored source still blocks the install, not just the build', () => {
+    const r = evaluatePreflight(z('!! artifacts/isola/app/dist/'))
+    expect(r.ok).toBe(false)
+  })
+
+  it('a build-consumed environment file blocks before install', () => {
+    expect(evaluatePreflight('', [BUILD_CONSUMED_ENV_FILES[1]]).ok).toBe(false)
+    expect(evaluatePreflight(z(`!! ${BUILD_CONSUMED_ENV_FILES[0]}`)).ok).toBe(false)
+  })
+
+  it('the generated build-info file alone does not block installation', () => {
+    expect(evaluatePreflight(z(` M ${GENERATED_PATH}`)).ok).toBe(true)
+  })
+})
+
+describe('the canonical production build chain', () => {
+  const pkg = (rel: string) =>
+    JSON.parse(readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')) as {
+      scripts: Record<string, string>
+    }
+
+  it('isola: preflight, then frozen install, then generator, then next build — in that order', () => {
+    const build = pkg('../package.json').scripts.build
+    const order = ['--preflight', 'pnpm install --frozen-lockfile', '--require-identity', 'next build']
+    let at = -1
+    for (const step of order) {
+      const i = build.indexOf(step)
+      expect({ step, found: i >= 0 }).toEqual({ step, found: true })
+      expect({ step, afterPrevious: i > at }).toEqual({ step, afterPrevious: true })
+      at = i
+    }
+    // `&&` throughout: no stage may run after an earlier one failed. Strip the
+    // legitimate `&&` first, then no shell separator may remain — `;` would run
+    // the next stage regardless, and a single `&` would background it.
+    expect(build.replace(/&&/g, '')).not.toMatch(/[;&|]/)
+  })
+
+  it('api-server: the other artifact build also preflights and installs frozen', () => {
+    const build = pkg('../../api-server/package.json').scripts.build
+    expect(build).toContain('--preflight')
+    expect(build).toContain('pnpm install --frozen-lockfile')
+    expect(build.indexOf('--preflight')).toBeLessThan(build.indexOf('pnpm install'))
+    expect(build.indexOf('pnpm install')).toBeLessThan(build.indexOf('build.mjs'))
+  })
+
+  it('the install is frozen everywhere it appears — never a lockfile-updating install', () => {
+    for (const rel of ['../package.json', '../../api-server/package.json']) {
+      const scripts = pkg(rel).scripts
+      for (const [name, body] of Object.entries(scripts)) {
+        if (!body.includes('pnpm install')) continue
+        expect({ rel, name, frozen: body.includes('pnpm install --frozen-lockfile') }).toEqual({
+          rel,
+          name,
+          frozen: true,
+        })
+        expect(body).not.toContain('--no-frozen-lockfile')
+        expect(body).not.toContain('--fix-lockfile')
+        expect(body).not.toContain('--lockfile-only')
+      }
+    }
+  })
+
+  it('no artifact declares a build command that reaches a compiler another way', () => {
+    // artifact.toml is the deployment build. If it ever called anything other
+    // than the package script above, the whole chain would be bypassable.
+    const root = fileURLToPath(new URL('../../../', import.meta.url))
+    const isola = readFileSync(join(root, 'artifacts/isola/.replit-artifact/artifact.toml'), 'utf8')
+    const api = readFileSync(join(root, 'artifacts/api-server/.replit-artifact/artifact.toml'), 'utf8')
+    expect(isola).toContain('"pnpm", "--filter", "@workspace/isola", "run", "build"')
+    expect(api).toContain('"pnpm", "--filter", "@workspace/api-server", "run", "build"')
+    expect(isola).not.toContain('next build')
+    expect(api).not.toContain('next build')
+  })
+})
+
+/**
+ * Run the real four-stage chain with observable stand-ins for install and build.
+ *
+ * The stand-ins live OUTSIDE the repository under test — writing them inside
+ * would dirty the snapshot by the act of measuring it, which the gate duly
+ * catches.
+ */
+function runDependencyChain(
+  dir: string,
+  opts: { installFails?: boolean } = {},
+): { code: number; preflightRuns: number; installRuns: number; generatorRuns: number; buildRuns: number; output: string } {
+  const harness = mkdtempSync(join(tmpdir(), 'isola-dep-harness-'))
+  const log = join(harness, 'stages.log')
+  const stage = (name: string, exitCode = 0) => {
+    const p = join(harness, `${name}.mjs`)
+    writeFileSync(
+      p,
+      `import { appendFileSync } from 'node:fs'\nappendFileSync(${JSON.stringify(log)}, '${name}\\n')\nprocess.exit(${exitCode})\n`,
+    )
+    return p
+  }
+  const fakeInstall = stage('install', opts.installFails ? 1 : 0)
+  const fakeBuild = stage('build')
+  const generator = join(dir, 'artifacts', 'isola', 'scripts', 'generate-build-info.mjs')
+  const node = process.execPath
+  writeFileSync(log, '')
+  const cmd = [
+    `"${node}" "${generator}" --preflight`,
+    `"${node}" "${fakeInstall}"`,
+    `"${node}" "${generator}" --require-identity`,
+    `"${node}" "${fakeBuild}"`,
+  ].join(' && ')
+  const result = spawnSync(cmd, { cwd: dir, shell: true, encoding: 'utf8' })
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
+  const lines = readFileSync(log, 'utf8').split('\n').filter(Boolean)
+  rmSync(harness, { recursive: true, force: true })
+  return {
+    code: result.status ?? 1,
+    preflightRuns: (output.match(/BUILD_PREFLIGHT=/g) ?? []).length,
+    installRuns: lines.filter((l) => l === 'install').length,
+    generatorRuns: (output.match(/BUILD_IDENTITY=/g) ?? []).length,
+    buildRuns: lines.filter((l) => l === 'build').length,
+    output,
+  }
+}
+
+describe('dependency chain: invocation counts', () => {
+  it('a clean snapshot installs once, generates once, builds once', () => {
+    const dir = makeRepo(REAL_GITIGNORE)
+    try {
+      const r = runDependencyChain(dir)
+      expect({ install: r.installRuns, generator: r.generatorRuns, build: r.buildRuns }).toEqual({
+        install: 1,
+        generator: 1,
+        build: 1,
+      })
+      expect(r.code).toBe(0)
+      expect(r.output).toContain('BUILD_PREFLIGHT=OK')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 90_000)
+
+  it('a quarantined dependency tree does not stop the chain — it is rebuilt', () => {
+    const dir = makeRepo('node_modules\n')
+    try {
+      mkdirSync(join(dir, 'node_modules', 'evil-pkg'), { recursive: true })
+      writeFileSync(join(dir, 'node_modules', 'evil-pkg', 'index.js'), 'module.exports = "MALICIOUS"\n')
+      mkdirSync(join(dir, 'node_modules', '.bin'), { recursive: true })
+      writeFileSync(join(dir, 'node_modules', '.bin', 'next'), '#!/bin/sh\necho STALE_BIN\n')
+      const r = runDependencyChain(dir)
+      expect(r.output).toContain('BUILD_PREFLIGHT=OK')
+      expect({ install: r.installRuns, build: r.buildRuns }).toEqual({ install: 1, build: 1 })
+      // Nothing about the malicious content reaches the identity or the log.
+      expect(r.output).not.toContain('MALICIOUS')
+      expect(r.output).not.toContain('STALE_BIN')
+      expect(r.output).toContain('source_dirty=false')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 90_000)
+
+  it('an install FAILURE stops the chain: generator zero, build zero', () => {
+    const dir = makeRepo(REAL_GITIGNORE)
+    try {
+      const r = runDependencyChain(dir, { installFails: true })
+      expect({ install: r.installRuns, generator: r.generatorRuns, build: r.buildRuns }).toEqual({
+        install: 1,
+        generator: 0,
+        build: 0,
+      })
+      expect(r.code).not.toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 90_000)
+
+  it.each([
+    ['an untracked .npmrc', '.npmrc', 'registry=https://attacker.example\n'],
+    ['an untracked .pnpmfile.cjs', '.pnpmfile.cjs', 'module.exports = {}\n'],
+    ['ignored application source', 'artifacts/isola/app/dist/page.tsx', 'export default () => null\n'],
+  ])('%s stops the chain BEFORE install: install zero, generator zero, build zero', (_label, rel, body) => {
+    const dir = makeRepo(REAL_GITIGNORE)
+    try {
+      const full = join(dir, ...rel.split('/'))
+      mkdirSync(dirname(full), { recursive: true })
+      writeFileSync(full, body)
+      const r = runDependencyChain(dir)
+      expect({ install: r.installRuns, generator: r.generatorRuns, build: r.buildRuns }).toEqual({
+        install: 0,
+        generator: 0,
+        build: 0,
+      })
+      expect(r.output).toContain('BUILD_PREFLIGHT=FAIL')
+      expect(r.output).not.toContain('attacker.example')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 90_000)
+
+  it('a build-consumed environment file stops the chain before install', () => {
+    const dir = makeRepo('.env*\n')
+    try {
+      writeFileSync(join(dir, BUILD_CONSUMED_ENV_FILES[0]), 'NEXT_PUBLIC_API=https://attacker.example\n')
+      const r = runDependencyChain(dir)
+      expect({ install: r.installRuns, build: r.buildRuns }).toEqual({ install: 0, build: 0 })
+      expect(r.output).not.toContain('attacker.example')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 90_000)
+
+  it('a generator failure after a successful install still yields build zero', () => {
+    const dir = makeRepo(REAL_GITIGNORE)
+    try {
+      rmSync(join(dir, '.git'), { recursive: true, force: true })
+      const r = runDependencyChain(dir)
+      expect(r.buildRuns).toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 90_000)
 })

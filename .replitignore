@@ -44,3 +44,31 @@ artifacts/isola/.next-preview
 artifacts/api-server/dist
 artifacts/isola/tsconfig.tsbuildinfo
 scripts/tsconfig.tsbuildinfo
+
+# --- dependency trees (added 2026-08-06) ---
+#
+# Replit's own description of a publish is "a snapshot of your app's files AND
+# DEPENDENCIES", so an installed tree ships unless it is excluded here. A tree
+# that ships is unreviewed code that `next build` compiles against, and the
+# reviewed lockfile describes what SHOULD be installed, not what IS.
+# `dec-pr81-node-modules-excluded-and-lockfile-reinstalled-2026-08-06` resolves
+# that by keeping the tree out of the snapshot entirely and having the deployment
+# build reconstruct it from the reviewed manifests with a frozen lockfile:
+#
+#   preflight -> pnpm install --frozen-lockfile -> generate-build-info -> next build
+#
+# One EXACT path per pnpm workspace package (`pnpm-workspace.yaml`: artifacts/*,
+# lib/*, lib/integrations/*, scripts) plus the root. Not `**/node_modules`: a
+# directory called `node_modules` somewhere that is not a declared package should
+# stop the build for review, not be silently dropped from the snapshot.
+# `replitignore.test.ts` pins this list against the real manifest topology, so
+# adding a workspace package fails the suite until its rule is considered.
+node_modules
+artifacts/api-server/node_modules
+artifacts/isola/node_modules
+artifacts/mockup-sandbox/node_modules
+lib/api-client-react/node_modules
+lib/api-spec/node_modules
+lib/api-zod/node_modules
+lib/db/node_modules
+scripts/node_modules

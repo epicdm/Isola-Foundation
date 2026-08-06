@@ -147,30 +147,30 @@ export const SNAPSHOT_EXCLUDED_PREFIXES = Object.freeze([
 /**
  * CLASS 4 — package-manager dependency trees, at exact workspace locations.
  *
- * ── What is proven, and what is NOT ────────────────────────────────────────
+ * ── Why this is now proven rather than assumed ─────────────────────────────
  *
- * NOT PROVEN: whether the Replit deployment snapshot carries workspace
- * `node_modules` or installs a fresh tree. Replit's published description of a
- * deployment ("a snapshot of your app's files and dependencies") and this
- * repository's own `.replitignore` comment on `.local` ("No need to store the
- * pnpm store twice") both point at the tree being uploaded, but neither is
- * proof, and the deployment build log is not exposed through any read-only
- * interface available here. Determining it requires an owner-authorised publish
- * experiment, which this packet is not authorised to run.
+ * The previous revision left this class explicit but UNPROVEN: nothing
+ * established whether Replit uploads a workspace tree or installs its own, and
+ * the deployment build log is not reachable from any read-only interface. Replit
+ * describes a publish as "a snapshot of your app's files AND DEPENDENCIES", so
+ * the safe reading was always that the tree ships — and a shipped tree is
+ * unreviewed code that `next build` compiles against, which the reviewed
+ * lockfile describes only by intention.
  *
- * So this class is NOT a claim that dependency trees cannot influence the build.
- * It is a bounded, named, test-pinned statement that dependency-tree integrity
- * is asserted by the TRACKED `pnpm-lock.yaml` and `package.json` manifests —
- * both of which are class 1, so tampering with either stops the build — and that
- * verifying the installed tree itself is deliberately out of this packet's
- * scope. `dec-pr81-ignored-snapshot-and-six-host-coverage-must-fail-closed-2026-08-06`
- * requires that this be explicit rather than silent. It is recorded as an open
- * owner decision in `xp-meta-cb0-guard-install-2026-08-06`.
+ * `dec-pr81-node-modules-excluded-and-lockfile-reinstalled-2026-08-06` closes it
+ * without needing a publish to find out: every path below is excluded from the
+ * deployment snapshot by `.replitignore`, and the production build reconstructs
+ * the tree inside the build environment from the reviewed manifests under a
+ * FROZEN lockfile before anything is compiled. So the class no longer rests on
+ * "a lockfile exists"; it rests on the tree not being in the snapshot at all and
+ * being rebuilt from reviewed inputs. `replitignore.test.ts` asserts the
+ * exclusion against the real file with the real matcher, in both directions.
  *
  * The locations are exact and exhaustive: one per pnpm workspace package plus
  * the root. A `node_modules` anywhere else is class 5 and stops the build, so a
  * new package cannot quietly widen the exemption — adding one is a review event.
- * `generate-build-info.test.ts` pins this list against `pnpm-workspace.yaml`.
+ * `generate-build-info.test.ts` pins this list against the real manifest
+ * topology.
  */
 export const DEPENDENCY_TREE_PATHS = Object.freeze([
   'node_modules',
@@ -209,6 +209,47 @@ export const BUILD_CONSUMED_ENV_FILES = Object.freeze([
   '.env.production.local',
   '.env.test',
   '.env.test.local',
+])
+
+/**
+ * Every file that can change what `pnpm install` produces.
+ *
+ * All of these are TRACKED, so a modification is already class 1 dirt and an
+ * untracked or ignored copy is already class 5 dirt — the preflight adds no new
+ * detection. What it adds is TIMING and a name: these are named explicitly so
+ * that when one of them is dirty the failure says "a package-manager input is
+ * unreviewed" before `pnpm install` runs, rather than reporting a generic dirty
+ * path after an unreviewed `.npmrc` has already steered the resolver.
+ * `dec-pr81-node-modules-excluded-and-lockfile-reinstalled-2026-08-06`.
+ */
+export const PACKAGE_MANAGER_INPUTS = Object.freeze([
+  '.npmrc',
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
+  'package.json',
+  'artifacts/api-server/package.json',
+  'artifacts/isola/package.json',
+  'artifacts/mockup-sandbox/package.json',
+  'lib/api-client-react/package.json',
+  'lib/api-spec/package.json',
+  'lib/api-zod/package.json',
+  'lib/db/package.json',
+  'scripts/package.json',
+])
+
+/**
+ * Filenames that configure the package manager wherever they appear.
+ *
+ * A `.npmrc` beside any manifest is read by pnpm. Only the tracked root copy is
+ * reviewed, so any other one — untracked, ignored, or in a subdirectory — must
+ * stop the build. Matched by exact basename because that is how pnpm finds them.
+ */
+export const PACKAGE_MANAGER_CONFIG_NAMES = Object.freeze([
+  '.npmrc',
+  '.pnpmfile.cjs',
+  'pnpmfile.js',
+  '.yarnrc',
+  '.yarnrc.yml',
 ])
 
 /** Repository-relative directories a build-consumed env file is looked for in. */
@@ -544,7 +585,71 @@ export function parseArgs(argv) {
   return {
     requireIdentity: argv.includes('--require-identity'),
     verify: argv.includes('--verify'),
+    preflight: argv.includes('--preflight'),
   }
+}
+
+/**
+ * Decide whether dependency installation may proceed.
+ *
+ * Runs BEFORE `pnpm install`, because installation is itself steerable: an
+ * unreviewed `.npmrc` changes the registry and the resolver, an unreviewed
+ * `.pnpmfile.cjs` rewrites every manifest as it is read, and an unreviewed
+ * lockfile changes what is fetched. Detecting any of that afterwards is
+ * detecting it too late — the tree `next build` compiles against already exists.
+ *
+ * The one difference from the post-install gate: workspace dependency
+ * directories are QUARANTINE rather than dirt. They are excluded from the
+ * deployment snapshot and about to be rebuilt from the frozen lockfile, so their
+ * contents at this moment cannot reach the artifact. Everything else the
+ * snapshot contract does not account for still stops the build, including
+ * build-consumed environment files.
+ */
+export function evaluatePreflight(porcelainZ, envFiles = /** @type {string[]} */ ([])) {
+  const entries = parsePorcelainZ(porcelainZ ?? '').map(classifySnapshotPath)
+  for (const p of Array.isArray(envFiles) ? envFiles : []) {
+    const e = classifySnapshotPath(p)
+    if (!entries.some((x) => x.path === e.path)) entries.push(e)
+  }
+
+  const quarantine = entries.filter((e) => e.class === PATH_CLASS.dependencyTree)
+  const blocking = entries.filter((e) => e.class === PATH_CLASS.dirty)
+
+  // Name the package-manager inputs separately. Same detection, louder failure.
+  const packageConfig = blocking.filter(
+    (e) =>
+      PACKAGE_MANAGER_INPUTS.includes(e.path) || PACKAGE_MANAGER_CONFIG_NAMES.includes(baseName(e.path)),
+  )
+
+  return { ok: blocking.length === 0, blocking, packageConfig, quarantine }
+}
+
+/**
+ * Is the package manager about to run the version the repository pinned?
+ *
+ * `packageManager` in the root manifest is the reviewed pin. A MAJOR mismatch is
+ * a real determinism risk — it is what changes lockfile semantics and resolution
+ * — so it fails. Minor and patch drift is allowed: a frozen lockfile of a given
+ * version installs the same tree across them, and refusing would make the gate
+ * depend on the deployment image's exact pnpm build rather than on anything that
+ * affects the artifact.
+ */
+export function evaluatePackageManagerPin(declared, running) {
+  if (typeof declared !== 'string' || declared.trim() === '') {
+    return { ok: false, reason: 'no packageManager declared in the root manifest' }
+  }
+  const m = /^([a-z]+)@(\d+)\.(\d+)\.(\d+)/.exec(declared.trim())
+  if (!m) return { ok: false, reason: `packageManager "${declared}" is not <name>@<major.minor.patch>` }
+  const [, name, major] = m
+  if (name !== 'pnpm') return { ok: false, reason: `packageManager names ${name}; this build chain uses pnpm` }
+  if (typeof running !== 'string' || !/^\d+\./.test(running.trim())) {
+    return { ok: false, reason: 'could not determine the running pnpm version' }
+  }
+  const runningMajor = running.trim().split('.')[0]
+  if (runningMajor !== major) {
+    return { ok: false, reason: `pinned pnpm ${major}.x but pnpm ${running.trim()} is running` }
+  }
+  return { ok: true, pinned: declared.trim(), running: running.trim() }
 }
 
 // ── Impure edge ─────────────────────────────────────────────────────────────
@@ -583,6 +688,24 @@ export function probeEnvFiles(repoRoot, exists) {
   return found
 }
 
+/** The reviewed package-manager pin, or null when the manifest cannot be read. */
+function readPackageManagerPin(repoRoot) {
+  try {
+    return JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')).packageManager ?? null
+  } catch {
+    return null
+  }
+}
+
+/** Run a command for its stdout, or null. Used only for `pnpm --version`. */
+function gitFreeCommand(cmd, args) {
+  try {
+    return execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], shell: process.platform === 'win32' }).trim()
+  } catch {
+    return null
+  }
+}
+
 function main(argv) {
   const args = parseArgs(argv)
   const here = dirname(fileURLToPath(import.meta.url))
@@ -597,6 +720,54 @@ function main(argv) {
     }) ?? ''
   const envFiles = probeEnvFiles(repoRoot, existsSync)
   const builtAt = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
+
+  // ── Preflight: may dependency installation proceed? ───────────────────────
+  //
+  // Deliberately BEFORE the identity checks. It has a different job and a
+  // different moment: identity describes what will be compiled, preflight
+  // decides whether the package manager may be trusted to run at all.
+  if (args.preflight) {
+    if (head === null || tree === null) {
+      process.stderr.write(`BUILD_PREFLIGHT=FAIL reason=${FAILURE_REASONS.gitUnavailable}\n`)
+      return 1
+    }
+    const pin = evaluatePackageManagerPin(
+      readPackageManagerPin(repoRoot),
+      gitFreeCommand('pnpm', ['--version']),
+    )
+    const pre = evaluatePreflight(porcelainZ, envFiles)
+    if (!pin.ok || !pre.ok) {
+      const shown = pre.blocking.slice(0, DIRTY_PATHS_SHOWN)
+      const rest = pre.blocking.length - shown.length
+      process.stderr.write(
+        [
+          `BUILD_PREFLIGHT=FAIL reason=${!pin.ok ? 'package_manager_pin' : pre.packageConfig.length > 0 ? 'package_manager_input_unreviewed' : 'snapshot_dirty'}`,
+          '',
+          ...(!pin.ok ? [`package manager: ${pin.reason}`, ''] : []),
+          ...(pre.packageConfig.length > 0
+            ? [
+                'A package-manager input is not the reviewed one. Installation is steerable —',
+                'an unreviewed .npmrc changes the registry and the resolver, a .pnpmfile.cjs',
+                'rewrites manifests as they are read — so this stops BEFORE pnpm install, not',
+                'after the tree it would have produced already exists.',
+                '',
+              ]
+            : []),
+          // Paths only. Nothing here has opened any of these files.
+          ...shown.map((e) => `  ${e.path}${e.reason ? `  — ${e.reason}` : ''}`),
+          ...(rest > 0 ? [`  … and ${rest} more`] : []),
+          '',
+          'See dec-pr81-node-modules-excluded-and-lockfile-reinstalled-2026-08-06.',
+          '',
+        ].join('\n'),
+      )
+      return 1
+    }
+    process.stdout.write(
+      `BUILD_PREFLIGHT=OK package_manager=${pin.pinned} running=${pin.running} quarantined_dependency_trees=${pre.quarantine.length}\n`,
+    )
+    return 0
+  }
 
   const derived = deriveBuildInfo({ head, tree, porcelainZ, builtAt, envFiles })
 

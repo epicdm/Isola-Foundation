@@ -103,10 +103,13 @@ describe('the real .replitignore', () => {
     expect(isExcluded('artifacts/isola/public/images/hero.png', rules)).toBe(false)
   })
 
-  it('adds no exclusion beyond the pnpm store and the three proven generated outputs', () => {
+  it('adds no exclusion beyond the pnpm store, the generated outputs and the dependency trees', () => {
     // A broad rule that quietly dropped source or migrations would be the worst
     // possible outcome of a "hygiene" change, so the rule list itself is pinned.
-    expect(rules.map((r) => r.pattern)).toEqual(['.local', ...REQUIRED_GENERATED_EXCLUSIONS])
+    // The dependency-tree half is pinned against the real workspace topology in
+    // "workspace dependency trees are excluded from the deployment snapshot".
+    const generated = rules.map((r) => r.pattern).filter((p) => !p.endsWith('node_modules'))
+    expect(generated).toEqual(['.local', ...REQUIRED_GENERATED_EXCLUSIONS])
     expect(rules.every((r) => !r.negated)).toBe(true)
   })
 })
@@ -146,11 +149,13 @@ describe('the excluded paths really are rebuilt', () => {
     expect(pkg.scripts['start:prod']).toBe('prisma migrate deploy && next start')
   })
 
-  it('the build refuses to run without proven source identity', () => {
+  it('the build refuses to run without proven source identity, on a reconstructed dependency tree', () => {
     const pkg = JSON.parse(readFileSync(`${REPO_ROOT}artifacts/isola/package.json`, 'utf8')) as {
       scripts: Record<string, string>
     }
-    expect(pkg.scripts.build).toBe('node ./scripts/generate-build-info.mjs --require-identity && next build')
+    expect(pkg.scripts.build).toBe(
+      'node ./scripts/generate-build-info.mjs --preflight && pnpm install --frozen-lockfile && node ./scripts/generate-build-info.mjs --require-identity && next build',
+    )
   })
 })
 
@@ -198,13 +203,16 @@ describe('the generator and .replitignore agree on what leaves the snapshot', ()
     }
   })
 
-  it('dependency trees are a DIFFERENT class and are not claimed to be excluded', () => {
-    // They are not in .replitignore, and the generator does not pretend they are.
-    // Whether Replit uploads them is an open owner question recorded in Port; the
-    // exemption is explicit and bounded rather than dressed up as proven.
+  it('dependency trees are their own class, and that class IS now snapshot-excluded', () => {
+    // Superseded by dec-pr81-node-modules-excluded-and-lockfile-reinstalled-2026-08-06.
+    // The previous revision left them forgiven-but-unproven; they are now kept out
+    // of the snapshot outright and rebuilt from the frozen lockfile, so the class
+    // stays separate (it has its own justification and its own build stage) while
+    // its exclusion is real rather than assumed.
     for (const p of DEPENDENCY_TREE_PATHS) {
-      expect({ p, excluded: isExcluded(p, rules) }).toEqual({ p, excluded: false })
-      expect({ p, inExcludedList: SNAPSHOT_EXCLUDED_PREFIXES.includes(p) }).toEqual({ p, inExcludedList: false })
+      expect({ p, excluded: isExcluded(p, rules) }).toEqual({ p, excluded: true })
+      // Still not in the generated-output list: a dependency tree is not build output.
+      expect({ p, inGeneratedList: SNAPSHOT_EXCLUDED_PREFIXES.includes(p) }).toEqual({ p, inGeneratedList: false })
     }
   })
 
@@ -229,7 +237,10 @@ describe('the generator and .replitignore agree on what leaves the snapshot', ()
     // boundary, and copying it here is how a source directory called `dist`
     // becomes invisible instead of blocking.
     const gitignore = readFileSync(`${REPO_ROOT}.gitignore`, 'utf8')
-    const broad = ['dist', 'tmp', 'out-tsc', 'node_modules', '.env*', '*.bundle']
+    // `node_modules` is deliberately absent from this list: it IS a deployment
+    // exclusion now, but as exact per-package paths pinned to the workspace
+    // topology, not as the bare recursive pattern `.gitignore` uses.
+    const broad = ['dist', 'tmp', 'out-tsc', '.env*', '*.bundle']
     for (const pattern of broad) {
       expect({ pattern, inGitignore: gitignore.includes(pattern) }).toEqual({ pattern, inGitignore: true })
       const replitignore = readFileSync(REPLITIGNORE, 'utf8')
@@ -239,5 +250,115 @@ describe('the generator and .replitignore agree on what leaves the snapshot', ()
         .filter((l) => l.length > 0 && !l.startsWith('#'))
       expect({ pattern, adoptedWholesale: asOwnRule.includes(pattern) }).toEqual({ pattern, adoptedWholesale: false })
     }
+  })
+})
+
+// ── Dependency trees leave the snapshot ─────────────────────────────────────
+//
+// Replit snapshots "files AND dependencies", so an installed tree ships unless
+// it is excluded here — and a shipped tree is unreviewed code that `next build`
+// compiles against. These assertions run the REAL dockerignore matcher over the
+// REAL file; they are not "the string appears in .replitignore".
+// dec-pr81-node-modules-excluded-and-lockfile-reinstalled-2026-08-06.
+
+describe('workspace dependency trees are excluded from the deployment snapshot', () => {
+  const REPO = fileURLToPath(new URL('../../../../', import.meta.url))
+
+  /** Every directory that owns a tracked manifest, i.e. can hold a node_modules. */
+  const manifestDirs = readFileSync(`${REPO}pnpm-lock.yaml`, 'utf8')
+    ? [
+        '',
+        'artifacts/api-server',
+        'artifacts/isola',
+        'artifacts/mockup-sandbox',
+        'lib/api-client-react',
+        'lib/api-spec',
+        'lib/api-zod',
+        'lib/db',
+        'scripts',
+      ]
+    : []
+
+  it('the workspace topology is what these rules were written against', () => {
+    // Fails when a package is added or removed, so its dependency-directory
+    // policy has to be considered rather than silently inherited.
+    for (const dir of manifestDirs) {
+      expect({ dir, hasManifest: existsSync(`${REPO}${dir === '' ? '' : `${dir}/`}package.json`) }).toEqual({
+        dir,
+        hasManifest: true,
+      })
+    }
+    const declared = readFileSync(`${REPO}pnpm-workspace.yaml`, 'utf8')
+    for (const glob of ['artifacts/*', 'lib/*', 'scripts']) {
+      expect({ glob, declared: declared.includes(glob) }).toEqual({ glob, declared: true })
+    }
+  })
+
+  it('every workspace dependency directory is excluded, contents and all', () => {
+    for (const dir of manifestDirs) {
+      const nm = dir === '' ? 'node_modules' : `${dir}/node_modules`
+      expect({ nm, excluded: isExcluded(nm, rules) }).toEqual({ nm, excluded: true })
+      // The thing that actually matters: a file INSIDE the tree never ships.
+      for (const inside of [
+        `${nm}/next/dist/server/next-server.js`,
+        `${nm}/.bin/next`,
+        `${nm}/.pnpm/lock.yaml`,
+        `${nm}/evil-package/index.js`,
+        `${nm}/@scope/pkg/malicious.mjs`,
+      ]) {
+        expect({ inside, excluded: isExcluded(inside, rules) }).toEqual({ inside, excluded: true })
+      }
+    }
+  })
+
+  it('the generator and .replitignore name the SAME dependency directories', () => {
+    expect([...DEPENDENCY_TREE_PATHS].sort()).toEqual(
+      manifestDirs.map((d) => (d === '' ? 'node_modules' : `${d}/node_modules`)).sort(),
+    )
+    for (const p of DEPENDENCY_TREE_PATHS) {
+      expect({ p, excluded: isExcluded(p, rules) }).toEqual({ p, excluded: true })
+    }
+  })
+
+  it('a similarly named directory that is NOT a declared package tree still ships', () => {
+    // If these were excluded, real source would silently vanish from the build.
+    for (const p of [
+      'artifacts/isola/app/node_modules/page.tsx',
+      'artifacts/isola/lib/node_modules_helper.ts',
+      'node_modules_backup/x.js',
+      'docs/node_modules.md',
+      'artifacts/isola/components/node_modules-explainer.tsx',
+    ]) {
+      expect({ p, excluded: isExcluded(p, rules) }).toEqual({ p, excluded: false })
+    }
+  })
+
+  it('excluding the trees does not exclude anything the install needs', () => {
+    // The build reconstructs dependencies from these, so losing one would turn a
+    // provenance fix into an outage.
+    for (const p of [
+      'package.json',
+      'pnpm-lock.yaml',
+      'pnpm-workspace.yaml',
+      '.npmrc',
+      'artifacts/isola/package.json',
+      'artifacts/api-server/package.json',
+      'lib/db/package.json',
+      'scripts/package.json',
+      'artifacts/isola/scripts/generate-build-info.mjs',
+      'artifacts/api-server/build.mjs',
+    ]) {
+      expect({ p, excluded: isExcluded(p, rules) }).toEqual({ p, excluded: false })
+    }
+  })
+
+  it('the rule list is still exactly the pnpm store, the generated outputs and the dependency trees', () => {
+    const dependencyRules = manifestDirs.map((d) => (d === '' ? 'node_modules' : `${d}/node_modules`))
+    expect(rules.map((r) => r.pattern)).toEqual([
+      '.local',
+      ...REQUIRED_GENERATED_EXCLUSIONS,
+      ...dependencyRules,
+    ])
+    expect(rules.every((r) => !r.negated)).toBe(true)
   })
 })
