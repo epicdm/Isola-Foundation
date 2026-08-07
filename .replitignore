@@ -45,6 +45,26 @@ artifacts/api-server/dist
 artifacts/isola/tsconfig.tsbuildinfo
 scripts/tsconfig.tsbuildinfo
 
+# --- platform-created caches (added 2026-08-07, PR #83 real-build follow-up) ---
+#
+# Not build output — created by Replit's OWN platform steps ("Installing
+# packages", "Running Security Scan") that run in the build container BEFORE the
+# artifact's own build script (and therefore its preflight) ever executes. Two
+# consecutive real Replit publish attempts on 2026-08-07 (builds d79ea11f and
+# 51cc3feb) both failed with `BUILD_PREFLIGHT=FAIL reason=snapshot_dirty`, both
+# citing exactly these two paths, regardless of what the uploaded workspace
+# snapshot itself contained — proving they are recreated fresh inside the build
+# container on every publish, not carried over from the uploaded snapshot.
+#   .cache  <- pnpm's local content-addressable store cache, written during the
+#              platform's own `pnpm install` step (visible in the build log
+#              before the artifact's build script runs).
+#   .upm    <- Replit's Universal Package Manager cache, written by the
+#              platform's own package-installation step.
+# Neither is a build INPUT the release needs; both are always reconstructed by
+# the platform itself. `replitignore.test.ts` pins this against the real file.
+.cache
+.upm
+
 # --- dependency trees (added 2026-08-06) ---
 #
 # Replit's own description of a publish is "a snapshot of your app's files AND

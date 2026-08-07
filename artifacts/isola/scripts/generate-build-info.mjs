@@ -134,6 +134,13 @@ export const PATH_CLASS = Object.freeze({
  * Exact repository-relative directory prefixes. Not globs, not basenames, not
  * substrings — `dist` as a bare name is precisely the mistake that produced the
  * bypass this file now closes.
+ *
+ * `.cache` and `.upm` are not build output — they are created by Replit's own
+ * platform steps in the build container before this artifact's build script (and
+ * this preflight) ever runs. Two consecutive real publish failures on
+ * 2026-08-07 (builds d79ea11f, 51cc3feb) both hit `reason=snapshot_dirty` citing
+ * exactly these two paths regardless of the uploaded snapshot's content,
+ * confirming they are recreated fresh on every publish, not carried over.
  */
 export const SNAPSHOT_EXCLUDED_PREFIXES = Object.freeze([
   '.local',
@@ -142,6 +149,8 @@ export const SNAPSHOT_EXCLUDED_PREFIXES = Object.freeze([
   'artifacts/isola/.next-preview',
   'artifacts/isola/tsconfig.tsbuildinfo',
   'scripts/tsconfig.tsbuildinfo',
+  '.cache',
+  '.upm',
 ])
 
 /**
