@@ -124,10 +124,17 @@ describe('the excluded paths really are rebuilt', () => {
     expect(pkg.scripts.build).toContain('next build')
   })
 
-  it('the api-server artifact builds dist before running it', () => {
+  it('the api-server artifact builds dist, then runs from the staged .deploy copy', () => {
     const toml = readFileSync(`${REPO_ROOT}artifacts/api-server/.replit-artifact/artifact.toml`, 'utf8')
     expect(toml).toContain('"@workspace/api-server", "run", "build"')
-    expect(toml).toContain('artifacts/api-server/dist/index.mjs')
+    // Not artifacts/api-server/dist/index.mjs directly: real Replit Autoscale
+    // builds lost that path between the build phase completing and the
+    // runtime container starting (builds 5867f18a, 464d486f/c8331dd1) despite
+    // esbuild's own log confirming it had just been created. build.mjs stages
+    // an explicit copy at .deploy/api-server/ and asserts it exists before
+    // the build is allowed to succeed; the run command points there instead.
+    expect(toml).toContain('.deploy/api-server/index.mjs')
+    expect(toml).not.toContain('artifacts/api-server/dist/index.mjs')
     const pkg = JSON.parse(readFileSync(`${REPO_ROOT}artifacts/api-server/package.json`, 'utf8')) as {
       scripts: Record<string, string>
     }
@@ -142,20 +149,34 @@ describe('the excluded paths really are rebuilt', () => {
     expect(config).toContain("process.env.NEXT_DIST_DIR || '.next'")
   })
 
-  it('the production start command is unchanged and starts from newly produced output', () => {
+  it('the production start command runs from the staged standalone server, not next start directly', () => {
     const pkg = JSON.parse(readFileSync(`${REPO_ROOT}artifacts/isola/package.json`, 'utf8')) as {
       scripts: Record<string, string>
     }
-    expect(pkg.scripts['start:prod']).toBe('prisma migrate deploy && next start')
+    // Not `next start`: plain `next build` output still needs the full
+    // workspace node_modules at runtime, and real Replit Autoscale builds
+    // lost `.next` between the build phase completing and the runtime
+    // container starting at least once (isola's port never opened in the
+    // same incidents that took down api-server's dist/index.mjs). Standalone
+    // output is staged into .deploy/isola/ (generate-deploy-staging.mjs) and
+    // the start command points at that staged server.js instead.
+    expect(pkg.scripts['start:prod']).toBe(
+      'prisma migrate deploy && node ../../.deploy/isola/artifacts/isola/server.js',
+    )
   })
 
-  it('the build refuses to run without proven source identity, on a reconstructed dependency tree', () => {
+  it('the build refuses to run without proven source identity, then stages a self-contained runtime copy', () => {
     const pkg = JSON.parse(readFileSync(`${REPO_ROOT}artifacts/isola/package.json`, 'utf8')) as {
       scripts: Record<string, string>
     }
     expect(pkg.scripts.build).toBe(
-      'node ./scripts/generate-build-info.mjs --preflight && pnpm install --frozen-lockfile && node ./scripts/generate-build-info.mjs --require-identity && next build',
+      'node ./scripts/generate-build-info.mjs --preflight && pnpm install --frozen-lockfile && node ./scripts/generate-build-info.mjs --require-identity && next build && node ./scripts/generate-deploy-staging.mjs',
     )
+  })
+
+  it('Next.js standalone output is enabled, so the staged copy is self-contained', () => {
+    const config = readFileSync(`${REPO_ROOT}artifacts/isola/next.config.ts`, 'utf8')
+    expect(config).toContain("output: 'standalone'")
   })
 })
 
