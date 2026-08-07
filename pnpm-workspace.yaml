@@ -27,6 +27,19 @@
 # ============================================================================
 minimumReleaseAge: 1440
 
+# Replit's platform-level pre-build `pnpm install` otherwise tries to reconcile
+# the root `packageManager` pin itself (`pnpm add pnpm@10.28.0`), which loops
+# and aborts before any user build command runs. Replit's bootstrap pnpm major
+# is not observable from this repo, so both the pre-11 and 11+ forms of this
+# suppression are set: `pmOnFail` here for pnpm >=11 (`managePackageManagerVersions`
+# was removed in pnpm 11.0 in favor of this key -- https://pnpm.io/settings#pmonfail),
+# and the pre-11 form in .npmrc, because pnpm 10.0.x does not read
+# `managePackageManagerVersions` from this file, only from .npmrc. Neither
+# setting touches the pin or its own gate (evaluatePackageManagerPin), which
+# still independently enforces pnpm major 10 regardless of what a bootstrap
+# pnpm did or didn't self-manage.
+pmOnFail: ignore
+
 minimumReleaseAgeExclude:
   # Exclude @replit scoped packages from the minimum release age check.
   # These are published by Replit and trusted — the supply-chain attack vector
