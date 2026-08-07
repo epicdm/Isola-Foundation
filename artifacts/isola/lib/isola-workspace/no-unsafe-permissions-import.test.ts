@@ -24,8 +24,9 @@
  *     accepted only `'` and `"`, so a static backtick specifier slipped through. See
  *     `TEMPLATE_SPECIFIER_PATTERN`.
  *   - `defect-pr82-unsafe-permissions-guard-transitive-barrel-gap-2026-08-07` — the guard read
- *     only the Workspace file itself, so a shared barrel re-exporting `can()` was invisible. See
- *     `exposesUnsafePermissions`.
+ *     only the Workspace file itself, so a shared barrel re-exporting `can()` was invisible, and
+ *     its first correction still compared only export-clause SPELLINGS, so renaming the binding on
+ *     the way in laundered it. See `unsafeExportsOf` / `taintedLocalBindings`.
  *
  * Still no module is ever `import`ed or `require`d by this guard: only reading and resolving
  * path strings. Actually importing every file under test would pull in Prisma/next/headers
@@ -162,7 +163,7 @@ function importsUnsafePermissions(fromFileAbs: string, rawContent: string): bool
   return false
 }
 
-// ── Transitive re-export reachability ───────────────────────────────────────
+// ── Transitive exposure of the unsafe surface ───────────────────────────────
 //
 // Closes `defect-pr82-unsafe-permissions-guard-transitive-barrel-gap-2026-08-07`. An independent
 // reviewer proved the bypass: a module OUTSIDE `lib/isola-workspace` doing
@@ -174,8 +175,31 @@ function importsUnsafePermissions(fromFileAbs: string, rawContent: string): bool
 // is entitled to use `lib/permissions` internally — `lib/workspace/authz.ts` legitimately imports
 // `getMembershipRole` from it, and Workspace legitimately imports `resolveWorkspaceAuthz` from
 // that. What is forbidden is a module handing the UNSAFE SURFACE (`can`, `isAdmin`, `isOwner`)
-// onward to Workspace. So the graph follows RE-EXPORT edges, not every import edge: "does this
-// module make an unsafe name importable from it?", asked transitively and cycle-safely.
+// onward to Workspace: "does this module make an unsafe binding importable from it?", asked
+// transitively and cycle-safely.
+//
+// WHY THE FIRST VERSION OF THAT RULE WAS NOT ENOUGH
+// -------------------------------------------------
+// It compared only the SOURCE-SIDE NAME in an export clause against the unsafe list, so exposure
+// was invisible the moment the binding was renamed on the way IN rather than on the way out. The
+// second independent review reproduced three compile-valid bypasses that left this guard, the
+// typechecker and the whole focused suite green while handing Workspace the identical `can`
+// function object:
+//
+//   import { can as internalName } from '@/lib/permissions'; export { internalName as safeName }
+//   import { can } from '@/lib/permissions'; export default can
+//   import { can } from '@/lib/permissions'; export const allow = can
+//
+// So the analysis is now about BINDINGS, not spellings. A local identifier is TAINTED when it is
+// bound to an unsafe export — under any name, through any number of barrels — and a module
+// exposes the unsafe surface when it exports a tainted binding, however that export is written.
+// Renaming is therefore free: it never launders anything.
+//
+// The line this must NOT cross is a NEW function. `export function authorized(ctx, p) { return
+// can(ctx, p) }` declares its own binding; it is a bounded API whose author owns its signature,
+// and it is exactly the shape `lib/workspace/authz.ts` uses. Forwarding an existing binding is
+// the hazard; calling it inside a new one is the sanctioned pattern. Only identifier-to-identifier
+// bindings propagate taint — no expression is ever evaluated or interpreted.
 
 /** The names whose exposure to Isola Workspace is the actual hazard. */
 const UNSAFE_EXPORT_NAMES = ['can', 'isAdmin', 'isOwner']
@@ -212,100 +236,225 @@ function resolveToLocalFile(specifier: string, fromFileAbs: string): string | nu
 const REEXPORT_FROM_PATTERN =
   /export\s+(\*(?:\s+as\s+\w+)?|\{[^}]*\})\s*from\s*(['"`])([^'"`]+)\2/g
 
-/** `export { a, b as c }` with NO `from` — re-exporting something imported earlier in the file. */
+/** `export { a, b as c }` with NO `from` — re-exporting something bound earlier in the file. */
 const LOCAL_EXPORT_LIST_PATTERN = /export\s*\{([^}]*)\}\s*(?!\s*from)/g
 
-/** The SOURCE-side names in an export clause (`{ can as authorize }` -> `can`). */
-function clauseSourceNames(clause: string): string[] {
-  return clause
-    .replace(/^\{|\}$/g, '')
-    .split(',')
-    .map((part) => part.trim().split(/\s+as\s+/)[0].trim().replace(/^type\s+/, ''))
-    .filter(Boolean)
+/** `import <clause> from 'X'`. The clause cannot contain a quote or a `;`, which bounds it. */
+const IMPORT_STATEMENT_PATTERN = /import\s+([^;'"`]*?)\s+from\s*(['"`])([^'"`]+)\2/g
+
+/**
+ * `export default X` and `export const/let/var Y = X` where the right-hand side is a BARE
+ * IDENTIFIER — the two ways to forward an existing binding without an export clause. An optional
+ * `as SomeType` is tolerated because a cast changes the type, never the value. Anything else on
+ * the right — a call, an arrow function, a member access, an object literal — is a NEW binding and
+ * is deliberately not matched: this guard does not interpret expressions.
+ */
+const TRAILING_CAST = String.raw`\s*(?:as\s+[\w$.<>\[\]|\s]+?)?\s*(?:;|$)`
+const EXPORT_DEFAULT_IDENTIFIER_PATTERN = new RegExp(
+  String.raw`export\s+default\s+([A-Za-z_$][\w$]*)` + TRAILING_CAST,
+  'gm',
+)
+const EXPORT_ASSIGNED_IDENTIFIER_PATTERN = new RegExp(
+  String.raw`export\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)(?:\s*:[^=]+?)?\s*=\s*([A-Za-z_$][\w$]*)` +
+    TRAILING_CAST,
+  'gm',
+)
+/** A purely local rename: `const Y = X`. The one edge taint propagates along inside a file. */
+const LOCAL_ALIAS_PATTERN = new RegExp(
+  String.raw`(?:^|[\s;{}])(?:const|let|var)\s+([A-Za-z_$][\w$]*)(?:\s*:[^=]+?)?\s*=\s*([A-Za-z_$][\w$]*)` +
+    TRAILING_CAST,
+  'gm',
+)
+
+interface ClauseSpecifier {
+  /** The name on the SOURCE side (`{ can as authorize }` -> `can`). */
+  source: string
+  /** The name it is visible as afterwards (`{ can as authorize }` -> `authorize`). */
+  exported: string
 }
 
 /**
- * Does importing `fileAbs` make any unsafe permissions name reachable?
- *
- * `seen` makes this cycle-safe: a module already being evaluated higher in the stack returns
- * `false` rather than recursing forever, so `A -> B -> A` terminates. Results are memoised in
- * `cache` so the sweep stays linear in the number of local modules.
+ * Split an import/export clause body into its specifiers. `type`-only specifiers are dropped: a
+ * type can never carry the runtime `can` function, so treating one as exposure would be a false
+ * accusation.
  */
-function exposesUnsafePermissions(
-  fileAbs: string,
-  seen: Set<string> = new Set(),
-  cache: Map<string, boolean> = EXPOSURE_CACHE,
-): boolean {
-  if (stripResolutionSuffix(fileAbs) === UNSAFE_PERMISSIONS_PATH) return true
+function parseClause(inner: string): ClauseSpecifier[] {
+  return inner
+    .replace(/^\{|\}$/g, '')
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0 && !/^type\s/.test(part))
+    .map((part) => {
+      const [source, alias] = part.split(/\s+as\s+/)
+      return { source: source.trim(), exported: (alias ?? source).trim() }
+    })
+}
 
-  const cached = cache.get(fileAbs)
-  if (cached !== undefined) return cached
-  if (seen.has(fileAbs)) return false // cycle — already being evaluated above us
-  seen.add(fileAbs)
+interface ImportBindings {
+  named: ClauseSpecifier[]
+  defaultLocal: string | null
+  namespaceLocal: string | null
+}
 
-  let content: string
-  try {
-    content = readFileSync(fileAbs, 'utf8')
-  } catch {
-    return false
+function parseImportClause(clause: string): ImportBindings {
+  const bindings: ImportBindings = { named: [], defaultLocal: null, namespaceLocal: null }
+  let rest = clause.trim()
+  if (/^type\b/.test(rest)) return bindings // `import type { … }` binds no value
+
+  const braced = rest.match(/\{([^}]*)\}/)
+  if (braced) {
+    bindings.named = parseClause(braced[1])
+    rest = rest.replace(/\{[^}]*\}/, '')
   }
-  const code = stripComments(content)
+  const namespace = rest.match(/\*\s+as\s+([A-Za-z_$][\w$]*)/)
+  if (namespace) {
+    bindings.namespaceLocal = namespace[1]
+    rest = rest.replace(/\*\s+as\s+[A-Za-z_$][\w$]*/, '')
+  }
+  const defaultBinding = rest.replace(/,/g, ' ').trim().match(/^([A-Za-z_$][\w$]*)$/)
+  if (defaultBinding) bindings.defaultLocal = defaultBinding[1]
+  return bindings
+}
 
-  let exposes = false
+const EXPOSURE_CACHE = new Map<string, Set<string>>()
+const IN_PROGRESS = new Set<string>()
+/**
+ * Bumped every time recursion is cut short by a cycle. A result computed while that happened is
+ * only valid for the traversal order that produced it, so it is returned but never memoised —
+ * which keeps the analysis deterministic regardless of which file the sweep reaches first.
+ */
+let CYCLE_CUTS = 0
 
-  // 1. Explicit re-export edges: `export ... from 'X'`.
-  for (const match of code.matchAll(REEXPORT_FROM_PATTERN)) {
+function resetExposureAnalysis(): void {
+  EXPOSURE_CACHE.clear()
+  IN_PROGRESS.clear()
+  CYCLE_CUTS = 0
+}
+
+/**
+ * The local identifiers in `code` that are bound to an unsafe export — directly, or through any
+ * chain of barrels and renames.
+ */
+function taintedLocalBindings(code: string, fileAbs: string): Set<string> {
+  const tainted = new Set<string>()
+
+  for (const match of code.matchAll(IMPORT_STATEMENT_PATTERN)) {
     const [, clause, , specifier] = match
     if (INTERPOLATION.test(specifier)) continue
     const target = resolveToLocalFile(specifier, fileAbs)
     if (!target) continue
+    const unsafe = unsafeExportsOf(target)
+    if (unsafe.size === 0) continue
 
-    const forwardsEverything = clause.trim().startsWith('*')
-    const forwardsUnsafeName =
-      !forwardsEverything &&
-      clauseSourceNames(clause).some((n) => UNSAFE_EXPORT_NAMES.includes(n))
-
-    if (!forwardsEverything && !forwardsUnsafeName) continue
-    if (exposesUnsafePermissions(target, seen, cache)) {
-      exposes = true
-      break
+    const bindings = parseImportClause(clause)
+    for (const named of bindings.named) {
+      if (unsafe.has(named.source)) tainted.add(named.exported)
     }
+    if (bindings.defaultLocal && unsafe.has('default')) tainted.add(bindings.defaultLocal)
+    // A namespace import hands over whatever the module exposes, under one name.
+    if (bindings.namespaceLocal) tainted.add(bindings.namespaceLocal)
   }
 
-  // 2. `import { can } from 'X'` followed by a bare `export { can }` — the same forwarding,
-  //    written in two statements instead of one.
-  if (!exposes) {
-    const locallyExported = new Set(
-      [...code.matchAll(LOCAL_EXPORT_LIST_PATTERN)].flatMap((m) => clauseSourceNames(m[1])),
-    )
-    if (UNSAFE_EXPORT_NAMES.some((n) => locallyExported.has(n))) {
-      for (const specifier of staticSpecifiers(code)) {
-        const target = resolveToLocalFile(specifier, fileAbs)
-        if (target && exposesUnsafePermissions(target, seen, cache)) {
-          exposes = true
-          break
-        }
+  // `const Y = X` chains, iterated to a fixpoint so no number of trivial renames launders the
+  // binding. Only identifier-to-identifier edges — see LOCAL_ALIAS_PATTERN.
+  const aliasEdges = [...code.matchAll(LOCAL_ALIAS_PATTERN)].map((m) => [m[1], m[2]] as const)
+  for (let grew = true; grew; ) {
+    grew = false
+    for (const [alias, source] of aliasEdges) {
+      if (tainted.has(source) && !tainted.has(alias)) {
+        tainted.add(alias)
+        grew = true
       }
     }
   }
 
-  seen.delete(fileAbs)
-  cache.set(fileAbs, exposes)
-  return exposes
+  return tainted
 }
 
-const EXPOSURE_CACHE = new Map<string, boolean>()
+/**
+ * Which of `fileAbs`'s own exported names hand out the unsafe surface. `'default'` appears in the
+ * set when the module's default export is a forwarded unsafe binding. An empty set means importing
+ * this module cannot yield `can`/`isAdmin`/`isOwner`, whatever it does internally.
+ */
+function unsafeExportsOf(fileAbs: string): Set<string> {
+  if (stripResolutionSuffix(fileAbs) === UNSAFE_PERMISSIONS_PATH) {
+    return new Set(UNSAFE_EXPORT_NAMES)
+  }
+
+  const cached = EXPOSURE_CACHE.get(fileAbs)
+  if (cached) return cached
+  if (IN_PROGRESS.has(fileAbs)) {
+    CYCLE_CUTS += 1
+    return new Set() // already being evaluated above us — A -> B -> A terminates here
+  }
+  IN_PROGRESS.add(fileAbs)
+  const cutsBefore = CYCLE_CUTS
+
+  const exposed = new Set<string>()
+  try {
+    const code = stripComments(readFileSync(fileAbs, 'utf8'))
+    const tainted = taintedLocalBindings(code, fileAbs)
+
+    // 1. `export … from 'X'` — forwarded without ever binding locally.
+    for (const match of code.matchAll(REEXPORT_FROM_PATTERN)) {
+      const [, clause, , specifier] = match
+      if (INTERPOLATION.test(specifier)) continue
+      const target = resolveToLocalFile(specifier, fileAbs)
+      if (!target) continue
+      const unsafe = unsafeExportsOf(target)
+      if (unsafe.size === 0) continue
+
+      const trimmed = clause.trim()
+      if (trimmed.startsWith('*')) {
+        const alias = trimmed.match(/^\*\s+as\s+([A-Za-z_$][\w$]*)/)
+        if (alias) {
+          exposed.add(alias[1]) // the whole surface, under one name
+        } else {
+          // `export * from 'X'` forwards every NAMED export, never the default.
+          for (const name of unsafe) if (name !== 'default') exposed.add(name)
+        }
+        continue
+      }
+      for (const spec of parseClause(trimmed)) {
+        if (unsafe.has(spec.source)) exposed.add(spec.exported)
+      }
+    }
+
+    // 2. `export { X }` / `export { X as Y }` — forwarding a tainted local binding.
+    for (const match of code.matchAll(LOCAL_EXPORT_LIST_PATTERN)) {
+      for (const spec of parseClause(match[1])) {
+        if (tainted.has(spec.source)) exposed.add(spec.exported)
+      }
+    }
+
+    // 3. `export default X`.
+    for (const match of code.matchAll(EXPORT_DEFAULT_IDENTIFIER_PATTERN)) {
+      if (tainted.has(match[1])) exposed.add('default')
+    }
+
+    // 4. `export const Y = X`.
+    for (const match of code.matchAll(EXPORT_ASSIGNED_IDENTIFIER_PATTERN)) {
+      if (tainted.has(match[2])) exposed.add(match[1])
+    }
+  } catch {
+    // Unreadable — expose nothing rather than guess.
+  }
+
+  IN_PROGRESS.delete(fileAbs)
+  if (CYCLE_CUTS === cutsBefore) EXPOSURE_CACHE.set(fileAbs, exposed)
+  return exposed
+}
 
 /**
  * The transitive check applied to one guarded Workspace file: does anything it imports hand it
- * the unsafe surface, however many barrels deep?
+ * the unsafe surface, however many barrels and renames deep?
  */
 function reachesUnsafeViaReExport(fromFileAbs: string, rawContent: string): string | null {
   for (const specifier of staticSpecifiers(rawContent)) {
     const target = resolveToLocalFile(specifier, fromFileAbs)
     if (!target) continue
     if (stripResolutionSuffix(target) === UNSAFE_PERMISSIONS_PATH) continue // direct check owns it
-    if (exposesUnsafePermissions(target, new Set(), EXPOSURE_CACHE)) return specifier
+    if (unsafeExportsOf(target).size > 0) return specifier
   }
   return null
 }
@@ -339,7 +488,7 @@ function violations(path: string, content: string): string[] {
   if (indirect) {
     found.push(
       `reaches the unsafe lib/permissions.ts surface transitively through "${indirect}" ` +
-        '(a re-export chain — see exposesUnsafePermissions)',
+        '(a re-export or local-rename chain — see unsafeExportsOf)',
     )
   }
   for (const specifier of interpolatedSpecifiers(content)) {
@@ -520,135 +669,263 @@ describe('the guard itself detects a reintroduction (negative control, inline)',
 // guard has to go and read — a synthetic string cannot express it. Every file is removed again in
 // `finally`, and each test uses its own filenames so a failure cannot leak into the next.
 
-describe('the guard follows re-export chains out of the Workspace tree', () => {
-  const SHARED_DIR = join(ROOT, 'lib', 'workspace')
-  const WS_DIR = join(ROOT, 'lib', 'isola-workspace')
+const SHARED_DIR = join(ROOT, 'lib', 'workspace')
+const WS_DIR = join(ROOT, 'lib', 'isola-workspace')
 
-  function withTempModules(
-    files: Record<string, string>,
-    assert: () => void,
-  ): void {
-    const written: string[] = []
-    try {
-      for (const [abs, content] of Object.entries(files)) {
-        mkdirSync(dirname(abs), { recursive: true })
-        writeFileSync(abs, content)
-        written.push(abs)
-      }
-      EXPOSURE_CACHE.clear()
-      assert()
-    } finally {
-      for (const abs of written) rmSync(abs, { force: true })
-      EXPOSURE_CACHE.clear()
+function withTempModules(files: Record<string, string>, assert: () => void): void {
+  const written: string[] = []
+  try {
+    for (const [abs, content] of Object.entries(files)) {
+      mkdirSync(dirname(abs), { recursive: true })
+      writeFileSync(abs, content)
+      written.push(abs)
     }
+    resetExposureAnalysis()
+    assert()
+  } finally {
+    for (const abs of written) rmSync(abs, { force: true })
+    resetExposureAnalysis()
   }
+}
 
-  it('flags a ONE-HOP barrel: Workspace -> shared barrel -> lib/permissions', () => {
-    const barrel = join(SHARED_DIR, 'zz-guard-barrel-a.ts')
-    const consumer = join(WS_DIR, 'zz-guard-consumer.ts')
-    withTempModules(
-      {
-        [barrel]: `export { can } from '@/lib/permissions'\n`,
-        [consumer]: `import { can } from '@/lib/workspace/zz-guard-barrel-a'\nexport const x = can\n`,
-      },
-      () => {
-        const found = violations(consumer, readFileSync(consumer, 'utf8'))
-        expect(found.length).toBeGreaterThan(0)
+/**
+ * One exposure scenario: some shared modules outside the Workspace tree, plus the Workspace file
+ * that imports them. `shared` is keyed by bare module name within `lib/workspace/`.
+ */
+interface ExposureCase {
+  name: string
+  shared: Record<string, string>
+  /** What the Workspace production file imports, e.g. `{ can }` or `theDefault`. */
+  imports: string
+  /** Which shared module it imports it from. */
+  entry: string
+  caught: boolean
+}
+
+const EXPOSURE_CASES: readonly ExposureCase[] = [
+  // ── Forwarding, in every shape that hands over an EXISTING binding ──────────
+  {
+    name: '1. direct `export { can } from` the unsafe module',
+    shared: { 'zz-c1-a': `export { can } from '@/lib/permissions'\n` },
+    imports: '{ can }',
+    entry: 'zz-c1-a',
+    caught: true,
+  },
+  {
+    name: '2. direct `export { can as renamed } from` the unsafe module',
+    shared: { 'zz-c2-a': `export { can as renamed } from '@/lib/permissions'\n` },
+    imports: '{ renamed }',
+    entry: 'zz-c2-a',
+    caught: true,
+  },
+  {
+    name: '3. `export *` from the unsafe module',
+    shared: { 'zz-c3-a': `export * from '@/lib/permissions'\n` },
+    imports: '{ can }',
+    entry: 'zz-c3-a',
+    caught: true,
+  },
+  {
+    name: '4. `import { can }` then a bare `export { can }`',
+    shared: { 'zz-c4-a': `import { can } from '@/lib/permissions'\nexport { can }\n` },
+    imports: '{ can }',
+    entry: 'zz-c4-a',
+    caught: true,
+  },
+  {
+    // The reviewer's control B, in its simplest form: renamed on the way IN.
+    name: '5. `import { can as X }` then `export { X }`',
+    shared: { 'zz-c5-a': `import { can as X } from '@/lib/permissions'\nexport { X }\n` },
+    imports: '{ X }',
+    entry: 'zz-c5-a',
+    caught: true,
+  },
+  {
+    // The reviewer's control B exactly: renamed on the way in AND on the way out.
+    name: '6. `import { can as X }` then `export { X as safeLookingName }`',
+    shared: {
+      'zz-c6-a': `import { can as internalName } from '@/lib/permissions'\nexport { internalName as safeLookingName }\n`,
+    },
+    imports: '{ safeLookingName }',
+    entry: 'zz-c6-a',
+    caught: true,
+  },
+  {
+    // The reviewer's control D.
+    name: '7. `import { can }` then `export default can`',
+    shared: { 'zz-c7-a': `import { can } from '@/lib/permissions'\nexport default can\n` },
+    imports: 'theDefault',
+    entry: 'zz-c7-a',
+    caught: true,
+  },
+  {
+    name: '8. `import { can as X }` then `export default X`',
+    shared: { 'zz-c8-a': `import { can as X } from '@/lib/permissions'\nexport default X\n` },
+    imports: 'theDefault',
+    entry: 'zz-c8-a',
+    caught: true,
+  },
+  {
+    // The reviewer's control E.
+    name: '9. `import { can }` then `export const allow = can`',
+    shared: { 'zz-c9-a': `import { can } from '@/lib/permissions'\nexport const allow = can\n` },
+    imports: '{ allow }',
+    entry: 'zz-c9-a',
+    caught: true,
+  },
+  {
+    name: '10. `import { can as X }` then `export const allow = X`',
+    shared: { 'zz-c10-a': `import { can as X } from '@/lib/permissions'\nexport const allow = X\n` },
+    imports: '{ allow }',
+    entry: 'zz-c10-a',
+    caught: true,
+  },
+  {
+    name: '11. an intermediate local rename: `const Y = X; export { Y }`',
+    shared: {
+      'zz-c11-a': `import { can as X } from '@/lib/permissions'\nconst Y = X\nexport { Y }\n`,
+    },
+    imports: '{ Y }',
+    entry: 'zz-c11-a',
+    caught: true,
+  },
+  {
+    name: '12. a TWO-HOP renamed chain',
+    shared: {
+      'zz-c12-b': `import { can as inner } from '@/lib/permissions'\nexport { inner as hop1 }\n`,
+      'zz-c12-a': `import { hop1 } from './zz-c12-b'\nexport const hop2 = hop1\n`,
+    },
+    imports: '{ hop2 }',
+    entry: 'zz-c12-a',
+    caught: true,
+  },
+  {
+    name: '13. a THREE-HOP renamed chain',
+    shared: {
+      'zz-c13-c': `import { can as inner } from '@/lib/permissions'\nexport default inner\n`,
+      'zz-c13-b': `import theDefault from './zz-c13-c'\nexport { theDefault as hop2 }\n`,
+      'zz-c13-a': `import { hop2 } from './zz-c13-b'\nconst hop3 = hop2\nexport { hop3 }\n`,
+    },
+    imports: '{ hop3 }',
+    entry: 'zz-c13-a',
+    caught: true,
+  },
+  {
+    name: '14. `export *` from a barrel that itself renamed the forward',
+    shared: {
+      'zz-c14-b': `export { can as renamedCan } from '@/lib/permissions'\n`,
+      'zz-c14-a': `export * from './zz-c14-b'\n`,
+    },
+    imports: '{ renamedCan }',
+    entry: 'zz-c14-a',
+    caught: true,
+  },
+  {
+    name: '15. the same laundering applied to `isOwner`, not `can`',
+    shared: {
+      'zz-c15-a': `import { isOwner as flag } from '@/lib/permissions'\nexport const ownerCheck = flag\n`,
+    },
+    imports: '{ ownerCheck }',
+    entry: 'zz-c15-a',
+    caught: true,
+  },
+
+  // ── What must stay ALLOWED ──────────────────────────────────────────────────
+  {
+    // Exactly `lib/workspace/authz.ts`'s shape: uses the shared machinery, exposes its own API.
+    name: '16. a shared module that USES can() internally and exports a new function',
+    shared: {
+      'zz-c16-a': `import { can } from '@/lib/permissions'\nexport async function mayApprove(ctx: never): Promise<boolean> { return can(ctx, 'approval.decide' as never) }\n`,
+    },
+    imports: '{ mayApprove }',
+    entry: 'zz-c16-a',
+    caught: false,
+  },
+  {
+    name: '17. a shared module with no unsafe dependency at all',
+    shared: {
+      'zz-c17-a': `export function formatTenantLabel(name: string): string { return name.trim() }\n`,
+    },
+    imports: '{ formatTenantLabel }',
+    entry: 'zz-c17-a',
+    caught: false,
+  },
+  {
+    name: '18. a safe one-hop barrel',
+    shared: {
+      'zz-c18-b': `export function formatTenantLabel(name: string): string { return name.trim() }\n`,
+      'zz-c18-a': `export * from './zz-c18-b'\n`,
+    },
+    imports: '{ formatTenantLabel }',
+    entry: 'zz-c18-a',
+    caught: false,
+  },
+  {
+    name: '19. cyclic SAFE barrels terminate with no violation',
+    shared: {
+      'zz-c19-a': `export * from './zz-c19-b'\nexport const alpha = 1\n`,
+      'zz-c19-b': `export * from './zz-c19-a'\nexport const beta = 2\n`,
+    },
+    imports: '{ alpha }',
+    entry: 'zz-c19-a',
+    caught: false,
+  },
+  {
+    name: '20. a locally-defined wrapper assigned to a const arrow function',
+    shared: {
+      'zz-c20-a': `import { can } from '@/lib/permissions'\nexport const mayApprove = async (ctx: never) => can(ctx, 'approval.decide' as never)\n`,
+    },
+    imports: '{ mayApprove }',
+    entry: 'zz-c20-a',
+    caught: false,
+  },
+  {
+    name: '21. an unrelated local identifier that merely happens to be named `can`',
+    shared: {
+      'zz-c21-a': `function can(x: string): string { return x }\nexport { can }\n`,
+    },
+    imports: '{ can }',
+    entry: 'zz-c21-a',
+    caught: false,
+  },
+]
+
+describe('the guard follows re-export chains and local renames out of the Workspace tree', () => {
+  // Written as REAL temporary modules, because the bypass by definition lives in a second file
+  // the guard has to go and read — a synthetic string cannot express it. Each case uses its own
+  // filenames, and every file is removed again in `finally`.
+  it.each(EXPOSURE_CASES.map((c) => [c.name, c] as const))('%s', (_label, testCase) => {
+    const consumer = join(WS_DIR, `${testCase.entry}-consumer.ts`)
+    const files: Record<string, string> = {
+      [consumer]: `import ${testCase.imports} from '@/lib/workspace/${testCase.entry}'\nexport const probe = ${
+        testCase.imports.replace(/[{}]/g, '').trim().split(/\s*,\s*/)[0]
+      }\n`,
+    }
+    for (const [name, content] of Object.entries(testCase.shared)) {
+      files[join(SHARED_DIR, `${name}.ts`)] = content
+    }
+
+    withTempModules(files, () => {
+      const found = violations(consumer, readFileSync(consumer, 'utf8'))
+      if (testCase.caught) {
+        expect(found.length, `expected a violation, got none`).toBeGreaterThan(0)
         expect(found.join(' ')).toContain('transitively')
-      },
-    )
+      } else {
+        expect(found, `expected no violation, got ${found.join(' | ')}`).toEqual([])
+      }
+    })
   })
 
-  it('flags a TWO-HOP chain: Workspace -> barrel A -> barrel B -> lib/permissions', () => {
-    const barrelB = join(SHARED_DIR, 'zz-guard-barrel-b2.ts')
-    const barrelA = join(SHARED_DIR, 'zz-guard-barrel-a2.ts')
-    const consumer = join(WS_DIR, 'zz-guard-consumer2.ts')
-    withTempModules(
-      {
-        [barrelB]: `export { can } from '@/lib/permissions'\n`,
-        [barrelA]: `export { can } from './zz-guard-barrel-b2'\n`,
-        [consumer]: `import { can } from '@/lib/workspace/zz-guard-barrel-a2'\nexport const x = can\n`,
-      },
-      () => {
-        expect(violations(consumer, readFileSync(consumer, 'utf8')).length).toBeGreaterThan(0)
-      },
-    )
-  })
+  it('the real lib/workspace/authz.ts is not flagged, and is genuinely on the Workspace path', () => {
+    // The sanctioned route — Workspace -> authz -> lib/permissions — must survive. If this ever
+    // fails, the rule has drifted from EXPOSURE back to bare reachability.
+    resetExposureAnalysis()
+    const authz = resolveToLocalFile('@/lib/workspace/authz', join(WS_DIR, 'x.ts'))
+    expect(authz).not.toBeNull()
+    expect([...unsafeExportsOf(authz as string)]).toEqual([])
 
-  it('flags `export * from` forwarding, which names nothing explicitly', () => {
-    const barrel = join(SHARED_DIR, 'zz-guard-star.ts')
-    const consumer = join(WS_DIR, 'zz-guard-consumer3.ts')
-    withTempModules(
-      {
-        [barrel]: `export * from '@/lib/permissions'\n`,
-        [consumer]: `import { can } from '@/lib/workspace/zz-guard-star'\nexport const x = can\n`,
-      },
-      () => {
-        expect(violations(consumer, readFileSync(consumer, 'utf8')).length).toBeGreaterThan(0)
-      },
-    )
-  })
-
-  it('flags the two-statement form: `import { can }` then a bare `export { can }`', () => {
-    const barrel = join(SHARED_DIR, 'zz-guard-twostep.ts')
-    const consumer = join(WS_DIR, 'zz-guard-consumer4.ts')
-    withTempModules(
-      {
-        [barrel]: `import { can } from '@/lib/permissions'\nexport { can }\n`,
-        [consumer]: `import { can } from '@/lib/workspace/zz-guard-twostep'\nexport const x = can\n`,
-      },
-      () => {
-        expect(violations(consumer, readFileSync(consumer, 'utf8')).length).toBeGreaterThan(0)
-      },
-    )
-  })
-
-  it('terminates safely on a cycle (A -> B -> A) instead of recursing forever', () => {
-    const a = join(SHARED_DIR, 'zz-guard-cycle-a.ts')
-    const b = join(SHARED_DIR, 'zz-guard-cycle-b.ts')
-    const consumer = join(WS_DIR, 'zz-guard-consumer5.ts')
-    withTempModules(
-      {
-        [a]: `export * from './zz-guard-cycle-b'\nexport const alpha = 1\n`,
-        [b]: `export * from './zz-guard-cycle-a'\nexport const beta = 2\n`,
-        [consumer]: `import { alpha } from '@/lib/workspace/zz-guard-cycle-a'\nexport const x = alpha\n`,
-      },
-      () => {
-        // The assertion that matters is that this RETURNS AT ALL; the cycle is safe, so no
-        // violation either.
-        expect(violations(consumer, readFileSync(consumer, 'utf8'))).toEqual([])
-      },
-    )
-  })
-
-  it('still allows a legitimate shared module that has no unsafe dependency', () => {
-    const shared = join(SHARED_DIR, 'zz-guard-safe-shared.ts')
-    const consumer = join(WS_DIR, 'zz-guard-consumer6.ts')
-    withTempModules(
-      {
-        [shared]: `export function formatTenantLabel(name: string): string { return name.trim() }\n`,
-        [consumer]: `import { formatTenantLabel } from '@/lib/workspace/zz-guard-safe-shared'\nexport const x = formatTenantLabel\n`,
-      },
-      () => {
-        expect(violations(consumer, readFileSync(consumer, 'utf8'))).toEqual([])
-      },
-    )
-  })
-
-  it('still allows a shared module that USES lib/permissions internally without re-exporting it', () => {
-    // This is exactly `lib/workspace/authz.ts`: it imports `getMembershipRole` from the unsafe
-    // module and exposes only its own governed API. Flagging this would make the guard
-    // unusable — Workspace's real authorization path goes through such a module.
-    const shared = join(SHARED_DIR, 'zz-guard-wrapper.ts')
-    const consumer = join(WS_DIR, 'zz-guard-consumer7.ts')
-    withTempModules(
-      {
-        [shared]: `import { can } from '@/lib/permissions'\nexport async function mayApprove(ctx: never): Promise<boolean> { return can(ctx, 'approval.decide' as never) }\n`,
-        [consumer]: `import { mayApprove } from '@/lib/workspace/zz-guard-wrapper'\nexport const x = mayApprove\n`,
-      },
-      () => {
-        expect(violations(consumer, readFileSync(consumer, 'utf8'))).toEqual([])
-      },
-    )
+    const page = join(ROOT, 'app', 'isola-workspace', 'preview', 'page.tsx')
+    expect(readFileSync(page, 'utf8')).toContain("from '@/lib/workspace/authz'")
+    expect(violations(page, readFileSync(page, 'utf8'))).toEqual([])
   })
 })

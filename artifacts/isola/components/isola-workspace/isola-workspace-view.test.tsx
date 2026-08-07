@@ -2,6 +2,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
 import { createFixturePorts, fixtureTenant } from '@/lib/isola-workspace/adapters/fixture-adapter'
+import type { CustomerIdentity } from '@/lib/isola-workspace/adapters/ports'
+import { CustomerSummary } from './modules/customer/customer-module-view'
 import type { ModuleContext, ShellState, WorkspaceContext, WorkspaceRole } from '@/lib/isola-workspace/contracts'
 import { fixtureEntitlements } from '@/lib/isola-workspace/entitlements'
 import { defaultRegistry } from '@/lib/isola-workspace/modules'
@@ -511,5 +513,75 @@ describe('a customer with no assigned owner reads truthfully', () => {
     const html = await render({ module: 'customer' })
     expect(html).not.toContain('·  looks after them')
     expect(html).not.toMatch(/·\s*looks after them/)
+  })
+})
+
+/**
+ * The same subfinding, driven through the REAL component with a degenerate owner.
+ *
+ * WHY THE TWO CASES ABOVE ARE NOT ENOUGH
+ * --------------------------------------
+ * Both render the fixture, whose owner is a valid name, so they only ever exercise the happy
+ * branch of the attribution line. The second independent review proved the consequence: reverting
+ * `customer-module-view.tsx` back to `{statusLabel} · {ownerName} looks after them` left the whole
+ * focused suite GREEN, and was caught only after the FIXTURE was also mutated to a degenerate
+ * owner. A regression test that needs a second, hand-applied mutation to fire is not a regression
+ * test.
+ *
+ * `customer-copy.test.ts` covers the pure function exhaustively; what was missing was proof that
+ * the component still CALLS it. So these render `CustomerSummary` directly with the degenerate
+ * identities an adapter can really produce, which binds the call site itself.
+ */
+describe('the customer summary renders a degenerate owner truthfully', () => {
+  const BASE = {
+    id: 'cust-degenerate-1',
+    name: 'Joss Boutique',
+    initials: 'JB',
+    statusLabel: 'Active customer',
+  }
+
+  function summaryText(ownerName: CustomerIdentity['ownerName']): string {
+    const html = renderToStaticMarkup(
+      <CustomerSummary customer={{ ...BASE, ownerName }} />,
+    )
+    // Tag-free, so the whitespace assertions below cannot be satisfied — or defeated — by class
+    // attributes.
+    return html.replace(/<[^>]*>/g, '')
+  }
+
+  const ABSENT: readonly (readonly [string, CustomerIdentity['ownerName']])[] = [
+    ['an empty string', ''],
+    ['whitespace only', '   '],
+    ['tabs and newlines only', '\t\n  '],
+    // Typed `string`, but an adapter reaching an untyped boundary really does produce these —
+    // which is the case `customer-copy.ts` was written for. The cast reproduces that, and nothing
+    // else in this file depends on it.
+    ['null through an untyped boundary', null as unknown as string],
+    ['undefined through an untyped boundary', undefined as unknown as string],
+  ]
+
+  it.each(ABSENT.map(([label, value]) => [label, value] as const))(
+    'states the absence for %s, and invents nobody',
+    (_label, ownerName) => {
+      const text = summaryText(ownerName)
+
+      expect(text).toContain('Active customer · Nobody is assigned to them yet')
+      expect(text).not.toContain('looks after them')
+      expect(text).not.toContain('·  looks after them')
+      // No dangling separator, and no doubled space anywhere in the rendered copy.
+      expect(text).not.toMatch(/·\s*$/)
+      expect(text).not.toMatch(/\S\s{2,}\S/)
+      for (const invented of ['Unassigned', 'the team', 'Unknown', 'N/A', 'Agent']) {
+        expect(text).not.toContain(invented)
+      }
+    },
+  )
+
+  it('still names a real owner, and trims a padded one', () => {
+    expect(summaryText('Eric Giraud')).toContain('Active customer · Eric Giraud looks after them')
+    expect(summaryText('  Eric Giraud  ')).toContain(
+      'Active customer · Eric Giraud looks after them',
+    )
+    expect(summaryText('  Eric Giraud  ')).not.toMatch(/\S\s{2,}\S/)
   })
 })
