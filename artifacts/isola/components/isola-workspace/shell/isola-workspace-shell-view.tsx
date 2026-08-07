@@ -40,6 +40,7 @@ import type { NavigationLayout } from '@/lib/isola-workspace/registry'
 import { cn } from '@/lib/utils'
 
 import { ModuleNavigationView } from './module-navigation-view'
+import { ModuleSheetView } from './module-sheet-view'
 import { ShellStateBody, stateReplacesModuleBody } from './state-renderers'
 
 // ── Tenant accent ───────────────────────────────────────────────────────────
@@ -182,6 +183,18 @@ export function IsolaWorkspaceShellView(props: {
   children: ReactNode
   /** Narrow layouts show a back-to-conversation bar with this label. */
   backToConversationLabel?: string
+  /**
+   * When supplied, every tab and every "More" sheet row renders as a real `<a href>` built by
+   * this function, so navigation works with zero client JS — the same convention `role`,
+   * `context` and `state` already use on this route. `MORE_TAB_ID` (from
+   * `./module-navigation-view`) is a valid argument: the caller decides what "open the sheet"
+   * means (e.g. an added `sheet=1` query parameter), not this view.
+   */
+  onSelectModuleHref?: (moduleId: string) => string
+  /** Whether the "All modules" sheet is currently open. Server-decided, e.g. from the URL. */
+  sheetOpen?: boolean
+  /** Href for the sheet's backdrop and Close control. Omit to leave them JS-only no-ops. */
+  closeSheetHref?: string
   className?: string
 }): JSX.Element {
   const {
@@ -195,6 +208,9 @@ export function IsolaWorkspaceShellView(props: {
     secondaryAction,
     children,
     backToConversationLabel,
+    onSelectModuleHref,
+    sheetOpen,
+    closeSheetHref,
     className,
   } = props
 
@@ -292,6 +308,7 @@ export function IsolaWorkspaceShellView(props: {
           layout={layout}
           activeModuleId={activeModuleId}
           counts={counts}
+          onSelectHref={onSelectModuleHref}
         />
       </header>
 
@@ -336,6 +353,17 @@ export function IsolaWorkspaceShellView(props: {
           </div>
         ) : null}
       </footer>
+
+      <ModuleSheetView
+        // `NavigationLayout` (unlike `ResolvedNavigation`) has no `.all` — `pinned` and
+        // `overflow` are a strict partition of it (`registry.ts` `buildNavigationLayout`), so
+        // this is exactly the full entitled+annotated module list, same as `.all` would be.
+        modules={[...layout.pinned, ...layout.overflow]}
+        activeModuleId={activeModuleId}
+        open={sheetOpen ?? false}
+        onSelectHref={onSelectModuleHref}
+        closeHref={closeSheetHref}
+      />
     </aside>
   )
 }

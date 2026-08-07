@@ -106,20 +106,34 @@ export function ModuleSheetView(props: {
   activeModuleId: string | null
   open: boolean
   onSelectHref?: (moduleId: string) => string
+  /** When supplied, backdrop and Close render as a real link (no client JS required). */
+  closeHref?: string
 }): JSX.Element | null {
-  const { modules, activeModuleId, open, onSelectHref } = props
+  const { modules, activeModuleId, open, onSelectHref, closeHref } = props
 
   if (!open) return null
 
   return (
     <div className="absolute inset-0 z-50 flex flex-col justify-end">
       {/* Backdrop. Token-derived, never a hardcoded colour, so it dims correctly in both
-          themes without any component branching on theme. */}
-      <div
-        aria-hidden="true"
-        data-iso-sheet-backdrop=""
-        className="absolute inset-0 bg-[var(--iso-rail)] opacity-50"
-      />
+          themes without any component branching on theme. A real link when `closeHref` is
+          supplied, so the sheet is dismissible with zero client JS; `aria-hidden` either way —
+          `Close` below is the accessible dismissal control. */}
+      {closeHref ? (
+        <a
+          aria-hidden="true"
+          tabIndex={-1}
+          data-iso-sheet-backdrop=""
+          href={closeHref}
+          className="absolute inset-0 bg-[var(--iso-rail)] opacity-50"
+        />
+      ) : (
+        <div
+          aria-hidden="true"
+          data-iso-sheet-backdrop=""
+          className="absolute inset-0 bg-[var(--iso-rail)] opacity-50"
+        />
+      )}
 
       <div
         role="dialog"
@@ -138,18 +152,33 @@ export function ModuleSheetView(props: {
               Everything installed for this business, and why you can see it.
             </p>
           </div>
-          <button
-            type="button"
-            data-iso-sheet-close=""
-            aria-label="Close"
-            className={cn(
-              'flex-none rounded-[var(--iso-radius-md)] border border-[color:var(--iso-border)]',
-              'bg-[var(--iso-surface-2)] px-[8px] py-[5px] text-[11px] font-semibold',
-              'text-[var(--iso-fg-2)]',
-            )}
-          >
-            Close
-          </button>
+          {closeHref ? (
+            <a
+              data-iso-sheet-close=""
+              aria-label="Close"
+              href={closeHref}
+              className={cn(
+                'flex-none rounded-[var(--iso-radius-md)] border border-[color:var(--iso-border)]',
+                'bg-[var(--iso-surface-2)] px-[8px] py-[5px] text-[11px] font-semibold',
+                'text-[var(--iso-fg-2)]',
+              )}
+            >
+              Close
+            </a>
+          ) : (
+            <button
+              type="button"
+              data-iso-sheet-close=""
+              aria-label="Close"
+              className={cn(
+                'flex-none rounded-[var(--iso-radius-md)] border border-[color:var(--iso-border)]',
+                'bg-[var(--iso-surface-2)] px-[8px] py-[5px] text-[11px] font-semibold',
+                'text-[var(--iso-fg-2)]',
+              )}
+            >
+              Close
+            </button>
+          )}
         </div>
 
         <div className="min-h-0 flex-1 overflow-auto px-[11px] pb-[13px]">

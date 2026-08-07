@@ -21,7 +21,13 @@
  * closed P1.
  *
  * This module is PURE so it is testable under vitest's `node` environment.
- * `resolveWorkspacePermissions` in `permissions.server.ts` is the only I/O-touching entry.
+ *
+ * NOT YET WRITTEN: an I/O-touching entry point that resolves a real actor's permissions from
+ * their Foundation session (`getSession` -> `resolveWorkspaceAuthz` -> `toWorkspaceRole` ->
+ * `permissionsForRole`, below). Only `app/isola-workspace/preview/page.tsx` calls this module
+ * today, and it already does exactly that chain directly — there is no live gap, just no
+ * separately-named file yet. Do not cite a `permissions.server.ts` file as existing until it
+ * does.
  */
 
 import type { Permission, WorkspaceRole } from './contracts'

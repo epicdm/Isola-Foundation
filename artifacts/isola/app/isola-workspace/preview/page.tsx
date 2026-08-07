@@ -1,10 +1,16 @@
 import { redirect } from 'next/navigation'
 
 import { IsolaWorkspaceView, type WorkspaceData } from '@/components/isola-workspace/isola-workspace-view'
-import { createFixturePorts, fixtureTenant, type FixtureTenantId } from '@/lib/isola-workspace/adapters/fixture-adapter'
+import { createFixturePorts, fixtureTenant } from '@/lib/isola-workspace/adapters/fixture-adapter'
 import { fixtureEntitlements } from '@/lib/isola-workspace/entitlements'
 import { defaultRegistry } from '@/lib/isola-workspace/modules'
-import { permissionsForRole } from '@/lib/isola-workspace/permissions'
+import { permissionsForRole, toWorkspaceRole } from '@/lib/isola-workspace/permissions'
+import {
+  extractSingleQueryValue,
+  narrowPreviewRole,
+  resolvePreviewFixtureScenario,
+} from '@/lib/isola-workspace/preview-authorization'
+import { MORE_TAB_ID } from '@/components/isola-workspace/shell'
 import { resolveNavigation } from '@/lib/isola-workspace/registry'
 import type {
   ModuleContext,
@@ -13,6 +19,7 @@ import type {
   WorkspaceRole,
 } from '@/lib/isola-workspace/contracts'
 import { getSession } from '@/lib/session'
+import { resolveWorkspaceAuthz } from '@/lib/workspace/authz'
 
 /**
  * Isola Workspace — the fixture state gallery.
@@ -29,10 +36,16 @@ import { getSession } from '@/lib/session'
  * It is not the product. Every byte it renders comes from `sample-data.json`, which is
  * invented. It performs no Chatwoot call, reads no tenant record, and can perform no write.
  *
- * IT IS STILL SESSION-GATED. Not because the fixture data is sensitive — it is not — but
- * because an unauthenticated page on a deployed Foundation host is a surface, and a surface
- * that renders a convincing operator console is one a stranger should not be able to browse
- * and screenshot. Cheap to gate, and the habit is the point.
+ * IT IS STILL SESSION-GATED, AND ROLE-AUTHORIZED. Not because the fixture data is sensitive —
+ * it is not — but because an unauthenticated (or unauthorized) page on a deployed Foundation
+ * host is a surface, and a surface that renders a convincing operator console is one a
+ * stranger — or a signed-in employee with no real workspace access — should not be able to
+ * browse and screenshot. The actor's REAL workspace role is resolved server-side via
+ * `resolveWorkspaceAuthz`/`toWorkspaceRole` before anything fixture-related is touched; a
+ * `?role=` query parameter may only NARROW that real role for a QA preview, never widen or
+ * replace it (`lib/isola-workspace/preview-authorization.ts`). `?scenario=` (and the
+ * deprecated `?tenant=` alias) select which invented fixture dataset renders and carry no
+ * authorization weight at all.
  */
 
 export const dynamic = 'force-dynamic'
@@ -43,6 +56,24 @@ function one(v: string | string[] | undefined): string | undefined {
   return Array.isArray(v) ? v[0] : v
 }
 
+/**
+ * Build a link back to this same preview page with `overrides` applied on top of `base`.
+ * A key set to `undefined` in `overrides` removes it; anything falsy in the merged result is
+ * dropped entirely so the URL never grows stray empty parameters.
+ */
+function buildPreviewHref(
+  base: Record<string, string | undefined>,
+  overrides: Record<string, string | undefined>,
+): string {
+  const merged = { ...base, ...overrides }
+  const qs = new URLSearchParams()
+  for (const [key, value] of Object.entries(merged)) {
+    if (value) qs.set(key, value)
+  }
+  const query = qs.toString()
+  return query ? `/isola-workspace/preview?${query}` : '/isola-workspace/preview'
+}
+
 export default async function IsolaWorkspacePreviewPage({
   searchParams,
 }: {
@@ -51,14 +82,51 @@ export default async function IsolaWorkspacePreviewPage({
   const session = await getSession()
   if (!session) redirect('/')
 
+  // The actor's REAL workspace role, resolved server-side from Foundation membership —
+  // never from anything the browser sent. A `?role=` query value is consulted only below,
+  // and only to NARROW this, never to replace it.
+  const authz = await resolveWorkspaceAuthz(session)
+  const authoritativeRole = toWorkspaceRole(authz.level)
+
   const params = await searchParams
-  const tenantId = (one(params.tenant) === 'marche' ? 'marche' : 'epic') as FixtureTenantId
-  const role = normaliseRole(one(params.role))
+
+  // Denied (no membership, or Membership.role === 'staff') never reaches the fixture
+  // machinery at all: no module list, no tenant name — fixture or real — no permission
+  // names, nothing. `?role=` cannot rescue a denied actor; narrowPreviewRole(null, ...) is
+  // always `null` by construction.
+  if (!authoritativeRole) {
+    return <UnauthorizedPreview />
+  }
+
+  const role = narrowPreviewRole(authoritativeRole, extractSingleQueryValue(params.role))
+  const scenario = resolvePreviewFixtureScenario(
+    extractSingleQueryValue(params.scenario),
+    extractSingleQueryValue(params.tenant),
+  )
   const context = normaliseContext(one(params.context))
   const state = normaliseState(one(params.state))
+  const sheetOpen = one(params.sheet) === '1'
 
-  const fixture = fixtureTenant(tenantId)
-  const ports = createFixturePorts(tenantId, {
+  // The whole route is query-param-driven with zero client JS (matching `role`/`context`/
+  // `state` above), so "click a tab" and "open/close the More sheet" are just links back to
+  // this same page with one parameter changed. `MORE_TAB_ID` opens the sheet rather than
+  // selecting a module — it is documented as "never a real module id" precisely so a
+  // consumer can special-case it like this.
+  const hrefBase: Record<string, string | undefined> = {
+    role: extractSingleQueryValue(params.role) ?? undefined,
+    scenario,
+    context: one(params.context),
+    state: one(params.state),
+    module: one(params.module),
+  }
+  function buildModuleHref(moduleId: string): string {
+    if (moduleId === MORE_TAB_ID) return buildPreviewHref(hrefBase, { sheet: '1' })
+    return buildPreviewHref(hrefBase, { module: moduleId, sheet: undefined })
+  }
+  const closeSheetHref = buildPreviewHref(hrefBase, { sheet: undefined })
+
+  const fixture = fixtureTenant(scenario)
+  const ports = createFixturePorts(scenario, {
     // Drive the degraded and stale reads straight from the URL so every one of them can be
     // reached deliberately rather than only when something upstream happens to break.
     //
@@ -112,7 +180,13 @@ export default async function IsolaWorkspacePreviewPage({
 
   return (
     <main className="min-h-dvh bg-[var(--iso-bg)] p-[20px]">
-      <PreviewNotice tenantName={fixture.name} role={role} context={context} state={state} />
+      <PreviewNotice
+        scenarioName={fixture.name}
+        authoritativeRole={authoritativeRole}
+        role={role}
+        context={context}
+        state={state}
+      />
       <div
         className={
           context === 'conversation-panel'
@@ -127,6 +201,9 @@ export default async function IsolaWorkspacePreviewPage({
           state={state}
           navigation={navigation}
           data={data}
+          buildModuleHref={buildModuleHref}
+          sheetOpen={sheetOpen}
+          closeSheetHref={closeSheetHref}
         />
       </div>
     </main>
@@ -139,27 +216,55 @@ export default async function IsolaWorkspacePreviewPage({
  * nobody mistakes fixture output for live customer data.
  */
 function PreviewNotice(props: {
-  tenantName: string
+  scenarioName: string
+  authoritativeRole: WorkspaceRole
   role: WorkspaceRole
   context: ModuleContext
   state: ShellState
 }) {
+  const narrowed = props.role !== props.authoritativeRole
   return (
     <div className="rounded-md border border-warning bg-warning/10 p-3 text-sm">
       <strong>Fixture preview — not live data.</strong> Every value below is invented sample
       data. No external system is contacted and no action can be performed.
       <div className="mt-1 text-xs opacity-80">
-        tenant <code>{props.tenantName}</code> · role <code>{props.role}</code> · context{' '}
+        fixture scenario <code>{props.scenarioName}</code> · role <code>{props.role}</code>
+        {narrowed ? (
+          <>
+            {' '}(narrowed from your real role <code>{props.authoritativeRole}</code>)
+          </>
+        ) : null}
+        {' · context '}
         <code>{props.context}</code> · state <code>{props.state}</code>
         {' — change with '}
-        <code>?tenant=epic|marche&amp;role=operator|manager|admin&amp;context=conversation-panel|workspace&amp;state=ready|loading|unavailable|stale|unauthorized|empty|offline&amp;module=customer|work|ai-team|today|phone|billing</code>
+        <code>?scenario=epic|marche&amp;role=operator|manager|admin&amp;context=conversation-panel|workspace&amp;state=ready|loading|unavailable|stale|unauthorized|empty|offline&amp;module=customer|work|ai-team|today|phone|billing</code>
+        {' — '}
+        <code>role</code> can only narrow your real workspace role, never widen it.
       </div>
     </div>
   )
 }
 
-function normaliseRole(v: string | undefined): WorkspaceRole {
-  return v === 'operator' || v === 'manager' || v === 'admin' ? v : 'manager'
+/**
+ * What a signed-in-but-not-a-member (or `Membership.role === 'staff'`) actor sees: enough to
+ * know why, nothing about what exists behind the gate. No tenant name — real or fixture — no
+ * module list, no permission name, no fixture data of any kind.
+ */
+function UnauthorizedPreview() {
+  return (
+    <main className="flex min-h-dvh items-center justify-center bg-[var(--iso-bg)] p-[20px]">
+      <div
+        role="alert"
+        className="max-w-[420px] rounded-md border border-warning bg-warning/10 p-4 text-sm"
+      >
+        <strong>You do not have access to this preview.</strong>
+        <p className="mt-1 text-[var(--iso-fg-2)]">
+          This tool previews the Isola Workspace design for people with a workspace role. Ask
+          your workspace owner or manager if you believe this is wrong.
+        </p>
+      </div>
+    </main>
+  )
 }
 
 function normaliseContext(v: string | undefined): ModuleContext {

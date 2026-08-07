@@ -15,7 +15,9 @@ import type {
   TodaySummary,
 } from '@/lib/isola-workspace/adapters/ports'
 import type { GovernedActionInstance } from '@/lib/isola-workspace/action-lifecycle'
+import { holdsAll, permissionsForRole } from '@/lib/isola-workspace/permissions'
 
+import { EmptyState } from './primitives'
 import { IsolaWorkspaceShellView, ShellStateBody, stateReplacesModuleBody } from './shell'
 import {
   AiTeamModuleView,
@@ -65,12 +67,27 @@ export interface IsolaWorkspaceViewProps {
   data: WorkspaceData
   /** Set only in narrow layouts; drives the back-to-conversation bar. */
   backToConversationLabel?: string
+  /** See `IsolaWorkspaceShellView` — enables zero-JS tab and "More" sheet navigation. */
+  buildModuleHref?: (moduleId: string) => string
+  sheetOpen?: boolean
+  closeSheetHref?: string
   className?: string
 }
 
 export function IsolaWorkspaceView(props: IsolaWorkspaceViewProps): JSX.Element {
-  const { tenant, role, context, state, navigation, data, backToConversationLabel, className } =
-    props
+  const {
+    tenant,
+    role,
+    context,
+    state,
+    navigation,
+    data,
+    backToConversationLabel,
+    buildModuleHref,
+    sheetOpen,
+    closeSheetHref,
+    className,
+  } = props
 
   const active = navigation.all.find((m) => m.descriptor.id === navigation.activeModuleId)
 
@@ -90,6 +107,9 @@ export function IsolaWorkspaceView(props: IsolaWorkspaceViewProps): JSX.Element 
       counts={counts}
       primaryAction={primaryActionFor(navigation.activeModuleId, active?.authorized ?? false)}
       backToConversationLabel={backToConversationLabel}
+      onSelectModuleHref={buildModuleHref}
+      sheetOpen={sheetOpen}
+      closeSheetHref={closeSheetHref}
       className={className}
     >
       {stateReplacesModuleBody(state) ? (
@@ -110,7 +130,24 @@ function ModuleBody(props: {
   const { role, context, navigation, data } = props
   const active = navigation.all.find((m) => m.descriptor.id === navigation.activeModuleId)
 
-  if (!active) return null
+  // No module survived entitlement filtering for this tenant/context (e.g. a suspended or
+  // not-yet-provisioned tenant) — `navigation.activeModuleId` is `null` and there is nothing
+  // to dispatch on. This must still say something: a literal blank panel here reads as a
+  // failure, when the honest fact is "this business's plan does not reach this view yet."
+  // No module survived entitlement filtering for this tenant/context (e.g. a suspended or
+  // not-yet-provisioned tenant) — `navigation.activeModuleId` is `null` and there is nothing
+  // to dispatch on. This must still say something: a literal blank panel here reads as a
+  // failure, when the honest fact is "this business's plan does not reach this view yet."
+  if (!active) {
+    return (
+      <EmptyState
+        variant="no-data-in-plan"
+        title="Nothing is available here for this business"
+        body="This business's plan does not include any of the sections that would normally appear here."
+        reassurance="Nothing is wrong with your access — there is genuinely nothing configured yet."
+      />
+    )
+  }
 
   // PERMISSION DENIAL RENDERS, IT DOES NOT REDIRECT. The module stays selected and explains
   // itself in role terms, which is what lets the operator escalate rather than be stuck
@@ -150,9 +187,12 @@ function ModuleBody(props: {
       return data.today ? (
         <TodayModuleView
           summary={data.today}
-          // Team workload and service problems are a MANAGER view. The data is omitted
-          // server-side for an operator; this flag only decides whether to ask for it.
-          canSeeTeam={role !== 'operator'}
+          // Team workload and service problems are gated on the DECLARED permission, not on
+          // a raw role-string comparison — `role !== 'operator'` duplicated the grant table
+          // in a component and would silently drift the moment PERMISSIONS_BY_ROLE changes.
+          // The data is meant to be omitted server-side for anyone lacking the permission;
+          // this flag only decides whether to ask for it.
+          canSeeTeam={holdsAll(permissionsForRole(role), ['today.read.team'])}
           context={context === 'onboarding' ? 'workspace' : context}
         />
       ) : null

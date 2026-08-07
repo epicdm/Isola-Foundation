@@ -5,7 +5,7 @@ import { createFixturePorts, fixtureTenant } from '@/lib/isola-workspace/adapter
 import type { ModuleContext, ShellState, WorkspaceContext, WorkspaceRole } from '@/lib/isola-workspace/contracts'
 import { fixtureEntitlements } from '@/lib/isola-workspace/entitlements'
 import { defaultRegistry } from '@/lib/isola-workspace/modules'
-import { permissionsForRole } from '@/lib/isola-workspace/permissions'
+import { holdsAll, permissionsForRole } from '@/lib/isola-workspace/permissions'
 import { resolveNavigation } from '@/lib/isola-workspace/registry'
 
 import { IsolaWorkspaceView, type WorkspaceData } from './isola-workspace-view'
@@ -28,6 +28,9 @@ async function render(options: {
   state?: ShellState
   module?: string
   customerHealth?: 'ok' | 'stale' | 'degraded'
+  buildModuleHref?: (moduleId: string) => string
+  sheetOpen?: boolean
+  closeSheetHref?: string
 } = {}) {
   const tenantId = options.tenant ?? 'epic'
   const role = options.role ?? 'manager'
@@ -73,6 +76,9 @@ async function render(options: {
       state={options.state ?? 'ready'}
       navigation={navigation}
       data={data}
+      buildModuleHref={options.buildModuleHref}
+      sheetOpen={options.sheetOpen}
+      closeSheetHref={options.closeSheetHref}
     />,
   )
 }
@@ -230,6 +236,16 @@ describe('manager-only content is absent, not hidden', () => {
     expect(operator).not.toContain('Who is carrying what')
     expect(manager.length).toBeGreaterThan(0)
   })
+
+  it('the gate follows the declared today.read.team permission, not a role-string shortcut', () => {
+    // operator lacks today.read.team; manager and admin both hold it
+    // (lib/isola-workspace/permissions.ts PERMISSIONS_BY_ROLE) — asserted directly against
+    // the same functions the component now calls, so this fails if that table's shape for
+    // this one permission ever changes without the component being revisited.
+    expect(holdsAll(permissionsForRole('operator'), ['today.read.team'])).toBe(false)
+    expect(holdsAll(permissionsForRole('manager'), ['today.read.team'])).toBe(true)
+    expect(holdsAll(permissionsForRole('admin'), ['today.read.team'])).toBe(true)
+  })
 })
 
 // ── Identifiers stay behind disclosure ──────────────────────────────────────
@@ -279,5 +295,83 @@ describe('no state renders an unexplained blank panel', () => {
       const html = await render({ state })
       expect(html).toContain('EPIC Communications')
     }
+  })
+})
+
+// ── Zero available modules is a stated fact, not a blank panel ──────────────
+//
+// Reported by the PR #82 independent review: when entitlement + context filtering leaves
+// zero modules available (e.g. `context: 'onboarding'`, which no module descriptor declares
+// support for), `navigation.activeModuleId` was `null` and the body rendered nothing at all —
+// contradicting the design's own "no state renders an unexplained blank panel" rule.
+
+describe('zero available modules renders a stated empty state, never a blank panel', () => {
+  it('says nothing is available rather than rendering nothing', async () => {
+    const html = await render({ context: 'onboarding', state: 'ready' })
+    expect(html).toContain('Nothing is available here for this business')
+    // The shell chrome must still be present — same rule as every other state.
+    expect(html).toContain('Isola Workspace')
+    expect(html).toContain('EPIC Communications')
+  })
+})
+
+// ── Phone and Billing are reachable, not just present in code ───────────────
+//
+// Reported by the PR #82 independent review: `ModuleSheetView` was built and tested in
+// isolation but never mounted by the shell, and every tab was a handler-less `<button>` with
+// no `href` and no client JS to make it do anything — so Phone and Billing were unreachable by
+// pointer or keyboard, only visible via a `?module=` URL edit. These assertions fail if that
+// wiring regresses.
+
+describe('every tab and every More-sheet row is a real, reachable link', () => {
+  function hrefFor(id: string) {
+    return `/preview-test?module=${id}`
+  }
+
+  it('pinned tabs render as <a href> when a link builder is supplied, not inert buttons', async () => {
+    const html = await render({ context: 'workspace', module: 'work', buildModuleHref: hrefFor })
+    expect(html).toContain('href="/preview-test?module=work" data-iso-module-id="work"')
+    // Without a link builder, tabs must still render — just as non-navigating buttons — so a
+    // caller with no href strategy (e.g. today's plain vitest render) doesn't crash or drop
+    // navigation entirely.
+    const withoutHrefs = await render({ context: 'workspace', module: 'work' })
+    expect(withoutHrefs).toContain('<button type="button" role="tab"')
+  })
+
+  it('the More tab links to opening the sheet, not to a module id', async () => {
+    const html = await render({
+      context: 'workspace',
+      module: 'work',
+      buildModuleHref: (id) => (id === 'more' ? '/preview-test?sheet=1' : hrefFor(id)),
+    })
+    expect(html).toContain('href="/preview-test?sheet=1" data-iso-module-id="more"')
+  })
+
+  it('Phone and Billing appear in the open sheet as real links, reachable without a pinned tab', async () => {
+    const html = await render({
+      context: 'conversation-panel',
+      role: 'admin',
+      sheetOpen: true,
+      buildModuleHref: hrefFor,
+    })
+    expect(html).toContain('role="dialog"')
+    expect(html).toContain('href="/preview-test?module=phone" data-iso-module-id="phone"')
+    expect(html).toContain('href="/preview-test?module=billing" data-iso-module-id="billing"')
+  })
+
+  it('the sheet stays closed (absent from the DOM) when sheetOpen is not set', async () => {
+    const html = await render({ context: 'conversation-panel', buildModuleHref: hrefFor })
+    expect(html).not.toContain('role="dialog"')
+  })
+
+  it('backdrop and Close are real links when a close href is supplied', async () => {
+    const html = await render({
+      context: 'conversation-panel',
+      sheetOpen: true,
+      buildModuleHref: hrefFor,
+      closeSheetHref: '/preview-test',
+    })
+    expect(html).toMatch(/data-iso-sheet-backdrop=""[^>]*href="\/preview-test"/)
+    expect(html).toMatch(/data-iso-sheet-close=""[^>]*href="\/preview-test"[^>]*>Close</)
   })
 })

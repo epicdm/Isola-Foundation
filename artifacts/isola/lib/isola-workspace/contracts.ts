@@ -190,8 +190,9 @@ export const PINNED_SLOT_COUNT = PINNED_MODULE_IDS.length
  *   2. Might what I am seeing be out of date?
  *   3. What can I do next?
  *   4. Is customer-facing work affected?
- * A state that cannot answer all four is not finished. `states.test.ts` asserts this over
- * the rendered copy rather than trusting the claim.
+ * A state that cannot answer all four is not finished. `isola-workspace-view.test.tsx`
+ * ("no state renders an unexplained blank panel") asserts this over the rendered copy rather
+ * than trusting the claim.
  */
 export type ModuleState =
   | 'ready'

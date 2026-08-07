@@ -28,9 +28,11 @@
  * point of isolating it here.
  *
  * This module is PURE — no Prisma import, no I/O — so it is testable under this app's
- * vitest `node` environment. `readTenantEntitlementFacts` in `entitlements.server.ts` is the
- * only thing that touches the database, following the repository's established
- * pure-predicate + thin-entry-point pattern (see `scripts/src/guard-not-prod-db.ts`).
+ * vitest `node` environment. The DB-touching read (`readTenantEntitlementFacts`, following
+ * the repository's established pure-predicate + thin-entry-point pattern — see
+ * `scripts/src/guard-not-prod-db.ts`) has not been written yet; this file is currently
+ * exercised only through `fixtureEntitlements`, below, from the fixture preview route. Do not
+ * cite an `entitlements.server.ts` file as existing until it does.
  */
 
 import type { Entitlement } from './contracts'
@@ -128,9 +130,12 @@ export function deriveEntitlements(facts: TenantEntitlementFacts): KnownEntitlem
  * The fixture-mode equivalent: an explicit entitlement list, validated.
  *
  * Used by the design scaffold and by tests so a tenant's entitlements can be stated
- * directly rather than reverse-engineered from synthetic facts. This is the ONLY way to
- * supply entitlements without real tenant state, and it is never reachable from a request
- * path — `entitlements.server.ts` does not import it.
+ * directly rather than reverse-engineered from synthetic facts. This IS reachable from a
+ * request path today — the fixture preview route (`app/isola-workspace/preview/page.tsx`)
+ * calls it directly — but that route is fixture-only, session-gated, and role-authorized
+ * (`lib/isola-workspace/preview-authorization.ts`), and there is no other caller. When a real
+ * `entitlements.server.ts` lands, it must derive entitlements from `deriveEntitlements`
+ * (above) for any real tenant; this function must never be reachable from a non-fixture path.
  */
 export function fixtureEntitlements(list: readonly string[]): KnownEntitlement[] {
   assertKnownEntitlements(list)
