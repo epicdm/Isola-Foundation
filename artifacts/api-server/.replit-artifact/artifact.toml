@@ -32,8 +32,17 @@ NODE_ENV = "production"
 # created. build.mjs stages an explicit copy at build time and asserts it
 # exists before the build is allowed to succeed.
 # `inc-isola-replit-postbuild-pnpm-store-prune-2026-08-07`.
+#
+# The path is `../../`-prefixed because this artifact starts with a bare
+# `node` invocation (no `pnpm --filter` to re-anchor cwd first), and Replit
+# runs it with cwd = this artifact's own directory (confirmed from the real
+# runtime log: `artifact=artifacts/api-server`). An unprefixed
+# `.deploy/api-server/index.mjs` silently resolved under
+# `artifacts/api-server/.deploy/...` instead of the repo-root staged payload,
+# producing `MODULE_NOT_FOUND` at container start (build 2026-08-07T21:53Z) —
+# a PR87 regression `decision-authorize-artifact-cwd-path-fix-if-reproduced-2026-08-07`.
 [services.production.run]
-args = ["node", "--enable-source-maps", ".deploy/api-server/index.mjs"]
+args = ["node", "--enable-source-maps", "../../.deploy/api-server/index.mjs"]
 
 [services.production.run.env]
 PORT = "8080"
