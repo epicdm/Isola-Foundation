@@ -5,9 +5,20 @@ router = "application"
 deploymentTarget = "autoscale"
 ignoreDatabaseMigrations = true
 
-[deployment.postBuild]
-args = ["pnpm", "store", "prune"]
-env = { "CI" = "true" }
+# No deployment postBuild hook here. The scaffold-generated `pnpm store prune`
+# postBuild hook (present since the initial commit, authored by the Replit
+# Agent scaffold, never a deliberate product decision) ran in the same
+# ephemeral, single-shot build container as the install it was "cleaning up"
+# after — with nothing else on that filesystem to have made any store content
+# orphaned yet. In the real Replit build (2026-08-07, first attempt to ever
+# reach this phase, since prior builds always failed earlier at pnpm-recursion
+# or snapshot_dirty), it removed ~711 of the ~729 just-installed packages
+# immediately before the image was packaged. Both artifacts still need
+# `node_modules` at runtime — api-server's esbuild bundle intentionally
+# externalizes `@google-cloud/*` (build.mjs) and Isola's `next start` does not
+# use standalone output (next.config.ts) — so both crashed resolving runtime
+# dependencies and never opened their ports. See
+# `inc-isola-replit-postbuild-pnpm-store-prune-2026-08-07`.
 
 [workflows]
 runButton = "Project"
