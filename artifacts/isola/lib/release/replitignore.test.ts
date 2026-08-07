@@ -1,4 +1,6 @@
+import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
+import { resolve as resolvePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
@@ -133,7 +135,15 @@ describe('the excluded paths really are rebuilt', () => {
     // esbuild's own log confirming it had just been created. build.mjs stages
     // an explicit copy at .deploy/api-server/ and asserts it exists before
     // the build is allowed to succeed; the run command points there instead.
-    expect(toml).toContain('.deploy/api-server/index.mjs')
+    //
+    // Exact string, not a substring: this artifact starts with a bare `node`
+    // (no `pnpm --filter` to re-anchor cwd), and Replit runs it with
+    // cwd = artifacts/api-server. An unprefixed `.deploy/api-server/index.mjs`
+    // still contains this substring while resolving to the WRONG path
+    // (artifacts/api-server/.deploy/...) — that gap is exactly what let a
+    // cwd-relative-path regression ship in PR87 undetected by this test.
+    // `decision-authorize-artifact-cwd-path-fix-if-reproduced-2026-08-07`.
+    expect(toml).toContain('args = ["node", "--enable-source-maps", "../../.deploy/api-server/index.mjs"]')
     expect(toml).not.toContain('artifacts/api-server/dist/index.mjs')
     const pkg = JSON.parse(readFileSync(`${REPO_ROOT}artifacts/api-server/package.json`, 'utf8')) as {
       scripts: Record<string, string>
@@ -178,6 +188,81 @@ describe('the excluded paths really are rebuilt', () => {
     const config = readFileSync(`${REPO_ROOT}artifacts/isola/next.config.ts`, 'utf8')
     expect(config).toContain("output: 'standalone'")
   })
+})
+
+// ── Production run commands must resolve from the artifact's OWN cwd ────────
+//
+// Replit starts each artifact process with cwd = that artifact's own directory
+// (confirmed from the real runtime log: `artifact=artifacts/api-server`,
+// `artifact=artifacts/isola`), not repo root. A run command's relative path is
+// interpreted against THAT cwd, not against where a developer's shell happens
+// to sit. Every earlier version of the two tests above read the config files
+// from repo root and asserted on a substring of the path — which is exactly
+// why they passed on `.deploy/api-server/index.mjs` even when it resolved to
+// the wrong file, and missed a real Replit promotion failure (MODULE_NOT_FOUND,
+// build 2026-08-07T21:53Z). These tests instead resolve the path exactly as
+// Replit does, and — when the artifact has actually been built — spawn the
+// literal production command from the literal production cwd.
+// `decision-authorize-artifact-cwd-path-fix-if-reproduced-2026-08-07`.
+describe('production run commands resolve to the repo-root staged payload from the exact cwd Replit uses', () => {
+  const API_SERVER_DIR = `${REPO_ROOT}artifacts/api-server`
+  const ISOLA_DIR = `${REPO_ROOT}artifacts/isola`
+  const API_SERVER_ENTRYPOINT = `${REPO_ROOT}.deploy/api-server/index.mjs`
+  const ISOLA_ENTRYPOINT = `${REPO_ROOT}.deploy/isola/artifacts/isola/server.js`
+
+  function extractApiServerRunArg(): string {
+    const toml = readFileSync(`${API_SERVER_DIR}/.replit-artifact/artifact.toml`, 'utf8')
+    const match = toml.match(/args = \["node", "--enable-source-maps", "([^"]+)"\]/)
+    if (!match) throw new Error('could not find the api-server production run args in artifact.toml')
+    return match[1]
+  }
+
+  function extractIsolaRunArg(): string {
+    const pkg = JSON.parse(readFileSync(`${ISOLA_DIR}/package.json`, 'utf8')) as { scripts: Record<string, string> }
+    const match = pkg.scripts['start:prod'].match(/node (\S+)$/)
+    if (!match) throw new Error('could not find the isola start:prod node entrypoint')
+    return match[1]
+  }
+
+  it('the api-server run path resolves to the repo-root staged entrypoint from cwd=artifacts/api-server', () => {
+    expect(resolvePath(API_SERVER_DIR, extractApiServerRunArg())).toBe(API_SERVER_ENTRYPOINT)
+  })
+
+  it('the isola start:prod path resolves to the repo-root staged entrypoint from cwd=artifacts/isola', () => {
+    expect(resolvePath(ISOLA_DIR, extractIsolaRunArg())).toBe(ISOLA_ENTRYPOINT)
+  })
+
+  // Gated on the artifact actually having been built (`pnpm --filter ... run build`
+  // first) — these are child-process integration tests, not unit tests, and skip
+  // cleanly rather than false-failing on a checkout where the build hasn't run.
+  it.skipIf(!existsSync(API_SERVER_ENTRYPOINT))(
+    'spawning the literal api-server production command from cwd=artifacts/api-server resolves the module',
+    () => {
+      const result = spawnSync(process.execPath, ['--enable-source-maps', extractApiServerRunArg()], {
+        cwd: API_SERVER_DIR,
+        timeout: 5000,
+        encoding: 'utf8',
+      })
+      // Deliberately no DATABASE_URL is set — the app is expected to fail past
+      // module resolution (e.g. on its own env validation). Only module
+      // resolution failure is the regression this test guards against.
+      expect(result.stderr).not.toContain('MODULE_NOT_FOUND')
+      expect(result.stderr).not.toContain('Cannot find module')
+    },
+  )
+
+  it.skipIf(!existsSync(ISOLA_ENTRYPOINT))(
+    'spawning the literal isola staged server.js from cwd=artifacts/isola resolves the module',
+    () => {
+      const result = spawnSync(process.execPath, [extractIsolaRunArg()], {
+        cwd: ISOLA_DIR,
+        timeout: 5000,
+        encoding: 'utf8',
+      })
+      expect(result.stderr).not.toContain('MODULE_NOT_FOUND')
+      expect(result.stderr).not.toContain('Cannot find module')
+    },
+  )
 })
 
 // ── One snapshot contract, two files, pinned to each other ──────────────────
