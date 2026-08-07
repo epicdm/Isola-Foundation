@@ -25,8 +25,15 @@ args = ["pnpm", "--filter", "@workspace/api-server", "run", "build"]
 [services.production.build.env]
 NODE_ENV = "production"
 
+# Points at the staged deploy payload (.deploy/api-server/), not dist/
+# directly — real Replit Autoscale builds lost dist/index.mjs between the
+# build phase completing and the runtime container starting at least once
+# (build 5867f18a) despite esbuild's own log confirming it had just been
+# created. build.mjs stages an explicit copy at build time and asserts it
+# exists before the build is allowed to succeed.
+# `inc-isola-replit-postbuild-pnpm-store-prune-2026-08-07`.
 [services.production.run]
-args = ["node", "--enable-source-maps", "artifacts/api-server/dist/index.mjs"]
+args = ["node", "--enable-source-maps", ".deploy/api-server/index.mjs"]
 
 [services.production.run.env]
 PORT = "8080"
