@@ -8,8 +8,10 @@ import { permissionsForRole, toWorkspaceRole } from '@/lib/isola-workspace/permi
 import {
   customerResolutionOverrideFor,
   extractSingleQueryValue,
+  resolvePreviewContext,
   resolveWorkspacePreviewRequest,
   underlyingFixtureTenant,
+  type SupportedPreviewContext,
 } from '@/lib/isola-workspace/preview-authorization'
 import { MORE_TAB_ID } from '@/components/isola-workspace/shell'
 import { resolveNavigation } from '@/lib/isola-workspace/registry'
@@ -114,7 +116,18 @@ export default async function IsolaWorkspacePreviewPage({
   // guarantee `resolveWorkspacePreviewRequest`'s `{ authorized: false }` branch enforces at
   // runtime.
   const { authoritativeRole, role, scenario } = request
-  const context = normaliseContext(one(params.context))
+
+  // Presentation-only, and resolved strictly AFTER the authorization decision above so a denied
+  // actor can neither obtain fixture data through it nor learn which contexts exist. An
+  // unsupported context is reported as unsupported rather than normalised onto a real
+  // `ModuleContext` no module declares — which produced zero modules and, with them, the
+  // zero-module body's false claim about the tenant's plan
+  // (`defect-pr82-onboarding-context-false-plan-state-2026-08-07`).
+  const contextResolution = resolvePreviewContext(extractSingleQueryValue(params.context))
+  if (!contextResolution.supported) {
+    return <UnsupportedContextPreview requested={contextResolution.requested} />
+  }
+  const context = contextResolution.context
   const state = normaliseState(one(params.state))
   const sheetOpen = one(params.sheet) === '1'
 
@@ -126,7 +139,7 @@ export default async function IsolaWorkspacePreviewPage({
   const hrefBase: Record<string, string | undefined> = {
     role: extractSingleQueryValue(params.role) ?? undefined,
     scenario,
-    context: one(params.context),
+    context,
     state: one(params.state),
     module: one(params.module),
   }
@@ -235,7 +248,7 @@ function PreviewNotice(props: {
   scenarioName: string
   authoritativeRole: WorkspaceRole
   role: WorkspaceRole
-  context: ModuleContext
+  context: SupportedPreviewContext
   state: ShellState
 }) {
   const narrowed = props.role !== props.authoritativeRole
@@ -266,6 +279,36 @@ function PreviewNotice(props: {
  * know why, nothing about what exists behind the gate. No tenant name — real or fixture — no
  * module list, no permission name, no fixture data of any kind.
  */
+/**
+ * A context the module contract recognizes but this preview has no surface for.
+ *
+ * The copy names the real cause and says explicitly that it is NOT a plan limitation, because
+ * the state it replaces said the opposite. An operator who reads "your plan does not include
+ * this" may repeat it to a customer; an operator who reads "this view is not built yet" will
+ * not. It reveals nothing about entitlement, and it is only reachable by an already-authorized
+ * actor.
+ */
+function UnsupportedContextPreview(props: { requested: string }) {
+  return (
+    <main className="flex min-h-dvh items-center justify-center bg-[var(--iso-bg)] p-[20px]">
+      <div
+        role="alert"
+        className="max-w-[460px] rounded-md border border-warning bg-warning/10 p-4 text-sm"
+      >
+        <strong>This preview cannot show that view yet.</strong>
+        <p className="mt-1 text-[var(--iso-fg-2)]">
+          The <code>{props.requested}</code> view has been designed but is not wired to a page, so
+          there is nothing to render here. This is not a limit on any business&rsquo;s plan and
+          nothing is wrong with your access.
+        </p>
+        <p className="mt-2 text-[var(--iso-fg-2)]">
+          Try <code>context=conversation-panel</code> or <code>context=workspace</code>.
+        </p>
+      </div>
+    </main>
+  )
+}
+
 function UnauthorizedPreview() {
   return (
     <main className="flex min-h-dvh items-center justify-center bg-[var(--iso-bg)] p-[20px]">
@@ -283,9 +326,10 @@ function UnauthorizedPreview() {
   )
 }
 
-function normaliseContext(v: string | undefined): ModuleContext {
-  return v === 'workspace' || v === 'onboarding' ? v : 'conversation-panel'
-}
+/* `normaliseContext` is gone. It mapped `context=onboarding` onto a real `ModuleContext` that
+   no module declares and no route renders, producing zero modules and the zero-module body's
+   false plan-limitation copy. Context resolution now lives in `resolvePreviewContext`, which
+   reports an unsupported context as unsupported. */
 
 function normaliseState(v: string | undefined): ShellState {
   const allowed: ShellState[] = [

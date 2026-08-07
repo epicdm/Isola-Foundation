@@ -134,14 +134,15 @@ function ModuleBody(props: {
   const { role, context, navigation, data } = props
   const active = navigation.all.find((m) => m.descriptor.id === navigation.activeModuleId)
 
-  // No module survived entitlement filtering for this tenant/context (e.g. a suspended or
+  // No module survived ENTITLEMENT filtering for this tenant (e.g. a suspended or
   // not-yet-provisioned tenant) — `navigation.activeModuleId` is `null` and there is nothing
   // to dispatch on. This must still say something: a literal blank panel here reads as a
   // failure, when the honest fact is "this business's plan does not reach this view yet."
-  // No module survived entitlement filtering for this tenant/context (e.g. a suspended or
-  // not-yet-provisioned tenant) — `navigation.activeModuleId` is `null` and there is nothing
-  // to dispatch on. This must still say something: a literal blank panel here reads as a
-  // failure, when the honest fact is "this business's plan does not reach this view yet."
+  //
+  // PLAN LANGUAGE IS ONLY CORRECT FOR A REAL ENTITLEMENT ABSENCE. An unsupported CONTEXT also
+  // yields zero modules, and telling that operator their plan is limited would be false — the
+  // cause is a surface nobody wired. The preview route rejects an unsupported context before it
+  // can reach here (`defect-pr82-onboarding-context-false-plan-state-2026-08-07`).
   if (!active) {
     return (
       <EmptyState

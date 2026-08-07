@@ -88,7 +88,7 @@ function Row(props: { module: AvailableModule; active: boolean; href?: string })
 
   if (href) {
     return (
-      <a href={href} data-iso-module-id={m.descriptor.id} className={className}>
+      <a href={href} data-iso-nav="" data-iso-module-id={m.descriptor.id} className={className}>
         {inner}
       </a>
     )
@@ -123,6 +123,7 @@ export function ModuleSheetView(props: {
         <a
           aria-hidden="true"
           tabIndex={-1}
+          data-iso-nav=""
           data-iso-sheet-backdrop=""
           href={closeHref}
           className="absolute inset-0 bg-[var(--iso-rail)] opacity-50"
@@ -154,6 +155,7 @@ export function ModuleSheetView(props: {
           </div>
           {closeHref ? (
             <a
+              data-iso-nav=""
               data-iso-sheet-close=""
               aria-label="Close"
               href={closeHref}

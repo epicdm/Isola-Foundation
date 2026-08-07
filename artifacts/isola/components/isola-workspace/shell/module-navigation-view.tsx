@@ -50,7 +50,19 @@ const TAB_BASE =
   'min-h-[44px] px-[4px] py-[10px] border-b-2 ' +
   'text-[11.5px] font-semibold leading-none bg-[var(--iso-surface)]'
 
-const TAB_ACTIVE = 'border-b-[color:var(--iso-accent)] text-[var(--iso-accent-fg)]'
+/**
+ * Active is `--iso-fg`, NOT `--iso-accent-fg`.
+ *
+ * `tenantAccentStyle` overrides `--iso-accent-fg` with the tenant's raw brand colour, which is
+ * chosen to sit on a surface as a FILL, not as small text. In the dark rendering the reference
+ * tenant's `#6F3DF4` lands at 3.13:1 against the panel surface — below the 4.5:1 an 11.5px
+ * label needs. The foreground scale is theme-aware and tenant-independent, so it stays readable
+ * whatever accent a tenant picks.
+ *
+ * Active is therefore distinguished by THREE independent signals, none of them hue alone:
+ * a brighter foreground, the 2px accent underline, and `aria-selected`.
+ */
+const TAB_ACTIVE = 'border-b-[color:var(--iso-accent)] text-[var(--iso-fg)]'
 const TAB_INACTIVE = 'border-b-[color:transparent] text-[var(--iso-fg-2)]'
 
 /** A count of things needing attention on this tab. Warn family, never the tenant accent. */
@@ -130,6 +142,9 @@ function Tab(props: {
         aria-selected={active}
         aria-haspopup={hasPopup ? 'dialog' : undefined}
         href={href}
+        // Opts this link OUT of the panel's generic content-link colour so the tab's own
+        // active/inactive utility wins. See `.iso-root a:not([data-iso-nav])`.
+        data-iso-nav=""
         data-iso-module-id={id}
         className={className}
       >

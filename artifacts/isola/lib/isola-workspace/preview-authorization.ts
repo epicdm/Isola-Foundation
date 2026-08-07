@@ -171,6 +171,49 @@ export function extractSingleQueryValue(v: string | string[] | undefined): strin
 // ── The one route-decision seam ─────────────────────────────────────────────
 
 /** The raw, not-yet-collapsed searchParams values `resolveWorkspacePreviewRequest` reads. */
+// ── Supported preview contexts (presentation only, never authority) ─────────
+
+/**
+ * The contexts this preview route can actually render.
+ *
+ * `ModuleContext` also includes `'onboarding'`, because the module CONTRACT permits a module to
+ * declare it. No module does, and no route renders `IsolaOnboardingView`, so asking this preview
+ * for `context=onboarding` produces zero modules — which fell through to the zero-module body:
+ * "This business's plan does not include any of the sections that would normally appear here."
+ *
+ * That sentence is TRUE for a suspended or unprovisioned tenant and FALSE here, where the cause
+ * is a surface nobody has wired. Attributing a routing gap to a commercial plan is the kind of
+ * statement an operator repeats to a customer, so an unsupported context is now reported as
+ * unsupported rather than silently falling through to entitlement copy
+ * (`defect-pr82-onboarding-context-false-plan-state-2026-08-07`).
+ *
+ * PRESENTATION ONLY. This is a sibling of `narrowPreviewRole` and `resolvePreviewFixtureScenario`
+ * — a pure validator, not a second decision layer. `resolveWorkspacePreviewRequest` remains the
+ * single authorization seam, and it runs FIRST: a denied actor never reaches context resolution,
+ * so context input can neither yield fixture data nor reveal which contexts exist.
+ */
+export const SUPPORTED_PREVIEW_CONTEXTS = ['conversation-panel', 'workspace'] as const
+export type SupportedPreviewContext = (typeof SUPPORTED_PREVIEW_CONTEXTS)[number]
+
+export type PreviewContextResolution =
+  | { supported: true; context: SupportedPreviewContext }
+  | { supported: false; requested: string }
+
+/**
+ * An absent or unrecognized context is simply the default — a bookmark with a typo should not
+ * become an error page. Only a context the module contract recognizes but this preview genuinely
+ * cannot render is reported as unsupported, because that is the case where silently substituting
+ * something else would mislead.
+ */
+export function resolvePreviewContext(value: string | null): PreviewContextResolution {
+  if (value === null || value === '') return { supported: true, context: 'conversation-panel' }
+  if ((SUPPORTED_PREVIEW_CONTEXTS as readonly string[]).includes(value)) {
+    return { supported: true, context: value as SupportedPreviewContext }
+  }
+  if (value === 'onboarding') return { supported: false, requested: value }
+  return { supported: true, context: 'conversation-panel' }
+}
+
 export interface WorkspacePreviewRawQuery {
   role: string | string[] | undefined
   scenario: string | string[] | undefined

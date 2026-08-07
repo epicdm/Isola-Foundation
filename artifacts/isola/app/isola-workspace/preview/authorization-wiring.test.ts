@@ -95,3 +95,42 @@ describe('Today team visibility stays gated on the declared permission', () => {
     expect(view).toMatch(/canSeeTeam=\{holdsAll\(permissionsForRole\(role\),\s*\[['"]today\.read\.team['"]\]\)\}/)
   })
 })
+
+describe('the preview route no longer normalises an unsupported context into a real one', () => {
+  const page = readFileSync(PAGE_PATH, 'utf8')
+  const code = stripComments(page)
+
+  it('resolves context through resolvePreviewContext', () => {
+    expect(code).toMatch(/resolvePreviewContext\s*\(/)
+  })
+
+  it('has no normaliseContext helper left to map onboarding onto a real ModuleContext', () => {
+    // The exact shape of the defect: `v === 'workspace' || v === 'onboarding' ? v : ...`, which
+    // produced zero modules and the zero-module body's false plan-limitation copy
+    // (`defect-pr82-onboarding-context-false-plan-state-2026-08-07`).
+    expect(code).not.toMatch(/function\s+normaliseContext/)
+    expect(code).not.toMatch(/['"]onboarding['"]\s*\?\s*v/)
+  })
+
+  it('renders a dedicated unsupported-context state rather than falling through', () => {
+    expect(code).toMatch(/UnsupportedContextPreview/)
+    expect(code).toMatch(/contextResolution\.supported/)
+  })
+
+  it('resolves context AFTER the authorization decision, never before', () => {
+    const authIndex = code.indexOf('resolveWorkspacePreviewRequest(')
+    const denyIndex = code.indexOf('request.authorized')
+    const ctxIndex = code.indexOf('resolvePreviewContext(')
+
+    expect(authIndex).toBeGreaterThan(-1)
+    expect(denyIndex).toBeGreaterThan(authIndex)
+    expect(ctxIndex).toBeGreaterThan(denyIndex)
+  })
+
+  it('the unsupported-context copy denies being a plan limitation', () => {
+    // The state it replaces asserted the opposite. If this sentence is ever dropped, the page
+    // stops actively correcting the impression the old copy created.
+    expect(page).toMatch(/not a limit on any business/i)
+    expect(page).not.toMatch(/plan does not include any of the sections/)
+  })
+})

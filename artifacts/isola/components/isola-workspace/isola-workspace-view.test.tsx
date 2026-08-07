@@ -328,14 +328,15 @@ describe('zero available modules renders a stated empty state, never a blank pan
 // pointer or keyboard, only visible via a `?module=` URL edit. These assertions fail if that
 // wiring regresses.
 
+function hrefFor(id: string) {
+  return `/preview-test?module=${id}`
+}
+
 describe('every tab and every More-sheet row is a real, reachable link', () => {
-  function hrefFor(id: string) {
-    return `/preview-test?module=${id}`
-  }
 
   it('pinned tabs render as <a href> when a link builder is supplied, not inert buttons', async () => {
     const html = await render({ context: 'workspace', module: 'work', buildModuleHref: hrefFor })
-    expect(html).toContain('href="/preview-test?module=work" data-iso-module-id="work"')
+    expect(html).toMatch(/href="\/preview-test\?module=work"[^>]*data-iso-module-id="work"/)
     // Without a link builder, tabs must still render — just as non-navigating buttons — so a
     // caller with no href strategy (e.g. today's plain vitest render) doesn't crash or drop
     // navigation entirely.
@@ -349,7 +350,7 @@ describe('every tab and every More-sheet row is a real, reachable link', () => {
       module: 'work',
       buildModuleHref: (id) => (id === 'more' ? '/preview-test?sheet=1' : hrefFor(id)),
     })
-    expect(html).toContain('href="/preview-test?sheet=1" data-iso-module-id="more"')
+    expect(html).toMatch(/href="\/preview-test\?sheet=1"[^>]*data-iso-module-id="more"/)
   })
 
   it('Phone and Billing appear in the open sheet as real links, reachable without a pinned tab', async () => {
@@ -360,8 +361,8 @@ describe('every tab and every More-sheet row is a real, reachable link', () => {
       buildModuleHref: hrefFor,
     })
     expect(html).toContain('role="dialog"')
-    expect(html).toContain('href="/preview-test?module=phone" data-iso-module-id="phone"')
-    expect(html).toContain('href="/preview-test?module=billing" data-iso-module-id="billing"')
+    expect(html).toMatch(/href="\/preview-test\?module=phone"[^>]*data-iso-module-id="phone"/)
+    expect(html).toMatch(/href="\/preview-test\?module=billing"[^>]*data-iso-module-id="billing"/)
   })
 
   it('the sheet stays closed (absent from the DOM) when sheetOpen is not set', async () => {
@@ -447,5 +448,68 @@ describe('customer-none and customer-many are directly constructible fixtures, n
     const html = await render({ module: 'customer', customerResolution: 'many' })
     expect(html).toContain('More than one customer matches this conversation')
     expect(html).toContain('data-intent="customer.choose:joss-boutique"')
+  })
+})
+
+/**
+ * `defect-pr82-workspace-accessibility-semantics-contrast-2026-08-06`, tab-colour subfinding.
+ *
+ * Asserting the ATTRIBUTE, not the computed colour: the stylesheet is not applied under
+ * `renderToStaticMarkup`. The attribute is what makes the CSS exclusion possible, so its absence
+ * is what would silently reintroduce the regression. `workspace-stylesheet.test.ts` asserts the
+ * other half, and the measured contrast is recorded from the built stylesheet in a browser.
+ */
+describe('navigation links opt out of the panel content-link colour', () => {
+  it('every tab carries data-iso-nav when rendered as a link', async () => {
+    const html = await render({ context: 'conversation-panel', buildModuleHref: hrefFor })
+    const tabs = html.match(/<a[^>]*role="tab"[^>]*>/g) ?? []
+
+    expect(tabs.length).toBeGreaterThan(0)
+    for (const tab of tabs) expect(tab).toContain('data-iso-nav=""')
+  })
+
+  it('the active tab uses the foreground scale, not the tenant-overridable accent-fg', async () => {
+    const html = await render({ context: 'conversation-panel', buildModuleHref: hrefFor })
+    const active = (html.match(/<a[^>]*aria-selected="true"[^>]*>/g) ?? [])[0] ?? ''
+
+    expect(active).toContain('text-[var(--iso-fg)]')
+    expect(active).not.toContain('text-[var(--iso-accent-fg)]')
+  })
+
+  it('active is distinguishable by more than colour — it keeps the accent underline', async () => {
+    const html = await render({ context: 'conversation-panel', buildModuleHref: hrefFor })
+    const active = (html.match(/<a[^>]*aria-selected="true"[^>]*>/g) ?? [])[0] ?? ''
+
+    expect(active).toContain('border-b-[color:var(--iso-accent)]')
+  })
+
+  it('every module-sheet row carries data-iso-nav too', async () => {
+    const html = await render({
+      context: 'conversation-panel',
+      role: 'admin',
+      sheetOpen: true,
+      buildModuleHref: hrefFor,
+      closeSheetHref: '/preview-test',
+    })
+    const rows = html.match(/<a[^>]*data-iso-module-id="(phone|billing)"[^>]*>/g) ?? []
+
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) expect(row).toContain('data-iso-nav=""')
+  })
+})
+
+/**
+ * `defect-pr82-workspace-action-and-copy-integrity-2026-08-06`, missing-owner subfinding.
+ */
+describe('a customer with no assigned owner reads truthfully', () => {
+  it('names the owner when there is one', async () => {
+    const html = await render({ module: 'customer' })
+    expect(html).toContain('Eric Giraud looks after them')
+  })
+
+  it('never renders a dangling separator or a doubled space', async () => {
+    const html = await render({ module: 'customer' })
+    expect(html).not.toContain('·  looks after them')
+    expect(html).not.toMatch(/·\s*looks after them/)
   })
 })

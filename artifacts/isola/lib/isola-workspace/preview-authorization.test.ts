@@ -5,6 +5,7 @@ import {
   customerResolutionOverrideFor,
   extractSingleQueryValue,
   narrowPreviewRole,
+  resolvePreviewContext,
   resolvePreviewFixtureScenario,
   resolveWorkspacePreviewRequest,
   underlyingFixtureTenant,
@@ -309,5 +310,69 @@ describe('resolvePreviewFixtureScenario — customer-none/customer-many join the
 
   it('the deprecated tenant alias also accepts the two new scenario names', () => {
     expect(resolvePreviewFixtureScenario(null, 'customer-none')).toBe('customer-none')
+  })
+})
+
+/**
+ * `defect-pr82-onboarding-context-false-plan-state-2026-08-07`.
+ *
+ * `context` is PRESENTATION ONLY and is resolved strictly after `resolveWorkspacePreviewRequest`
+ * has already decided authorization, so nothing here can widen access. What it must get right is
+ * TRUTHFULNESS: an unsupported context previously normalised onto a real `ModuleContext` that no
+ * module declares, producing zero modules and, with them, the zero-module body's claim that the
+ * tenant's PLAN excludes the content. That is a statement an operator could repeat to a
+ * customer, and it was false.
+ */
+describe('an unsupported preview context is reported as unsupported, not as a plan limit', () => {
+  it('rejects context=onboarding, which no module declares and no route renders', () => {
+    expect(resolvePreviewContext('onboarding')).toEqual({
+      supported: false,
+      requested: 'onboarding',
+    })
+  })
+
+  it.each(['conversation-panel', 'workspace'] as const)('accepts the supported context %s', (c) => {
+    expect(resolvePreviewContext(c)).toEqual({ supported: true, context: c })
+  })
+
+  it('treats an absent context as the conversation panel', () => {
+    expect(resolvePreviewContext(null)).toEqual({ supported: true, context: 'conversation-panel' })
+    expect(resolvePreviewContext('')).toEqual({ supported: true, context: 'conversation-panel' })
+  })
+
+  it.each(['workspce', 'CONVERSATION-PANEL', 'nonsense', '../../etc'])(
+    'treats the unrecognized value %s as a default, not an error page',
+    (v) => {
+      // A bookmark with a typo should not become an error. Only a context the module contract
+      // recognizes but this preview cannot render earns the unsupported state.
+      expect(resolvePreviewContext(v)).toEqual({ supported: true, context: 'conversation-panel' })
+    },
+  )
+
+  it('never reports a supported context and a requested value at the same time', () => {
+    for (const v of [null, '', 'workspace', 'onboarding', 'nonsense']) {
+      const r = resolvePreviewContext(v)
+      expect(Object.keys(r).sort()).toEqual(r.supported ? ['context', 'supported'] : ['requested', 'supported'])
+    }
+  })
+
+  it('carries no scenario, role or entitlement information in either outcome', () => {
+    for (const v of ['onboarding', 'workspace', null]) {
+      expect(JSON.stringify(resolvePreviewContext(v))).not.toMatch(/role|scenario|plan|entitlement|epic|marche/i)
+    }
+  })
+
+  it('is independent of authorization — a denied actor is stopped before it is ever called', () => {
+    // The route calls resolveWorkspacePreviewRequest first and returns UnauthorizedPreview on
+    // {authorized:false}. This asserts the decision seam itself still yields nothing for denied,
+    // whatever context was asked for, so context input cannot be a probe.
+    for (const role of [null, 'staff' as never, 'nonsense' as never]) {
+      const r = resolveWorkspacePreviewRequest(role, {
+        role: 'admin',
+        scenario: 'customer-many',
+        tenant: 'marche',
+      })
+      expect(r).toEqual({ authorized: false })
+    }
   })
 })

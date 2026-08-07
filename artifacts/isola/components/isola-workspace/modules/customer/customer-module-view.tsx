@@ -27,6 +27,7 @@
  */
 
 import { cn } from '@/lib/utils'
+import { customerAttributionLine } from '@/lib/isola-workspace/customer-copy'
 import {
   Alert,
   EmptyState,
@@ -89,7 +90,9 @@ export function CustomerSummary(props: { customer: CustomerIdentity; className?:
           {customer.name}
         </span>
         <span className={cn(ONE_LINE, 'text-[11.5px] text-[var(--iso-fg-2)]')}>
-          {customer.statusLabel} · {customer.ownerName} looks after them
+          {/* Joined in one place so a missing owner cannot leave a dangling separator or a
+              sentence with no subject — see `lib/isola-workspace/customer-copy.ts`. */}
+          {customerAttributionLine(customer.statusLabel, customer.ownerName)}
         </span>
       </span>
     </div>

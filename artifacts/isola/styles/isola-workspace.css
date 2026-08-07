@@ -195,14 +195,31 @@
   cursor: pointer;
 }
 
-.iso-root a {
+/* Ordinary CONTENT links inside the panel — a source badge, a readback record, an
+   opportunity. These are accent-coloured because a link that leaves the panel should look
+   like one.
+
+   `:not([data-iso-nav])` is load-bearing, not tidiness. Module navigation and the module
+   sheet render as real `<a href>` so the panel works with zero client JS, and this element
+   selector (0,1,1) outranks the utility class (0,1,0) that carries a tab's own colour. Without
+   the exclusion, every tab — active and inactive alike — computes to the accent, which both
+   destroys the active/inactive distinction and drops all five labels to 3.13:1 against the
+   surface. Navigation owns its own colour; this rule must never reach it.
+
+   Scoped by attribute rather than by `!important` so the navigation utilities win normally. */
+.iso-root a:not([data-iso-nav]) {
   color: var(--iso-accent);
   text-decoration: none;
 }
 
-.iso-root a:hover {
+.iso-root a:not([data-iso-nav]):hover {
   color: var(--iso-accent-hover);
   text-decoration: underline;
+}
+
+/* Navigation links keep the surface's own foreground scale and never pick up link styling. */
+.iso-root a[data-iso-nav] {
+  text-decoration: none;
 }
 
 /* Required: every interactive element shows this ring. Do not remove.
