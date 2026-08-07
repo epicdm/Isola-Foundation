@@ -3,22 +3,25 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 /**
- * `preview/page.tsx` is a Next.js Server Component. This repository has no `page.tsx` test
- * anywhere (checked: zero `page.test.tsx` files exist), so this file is a SOURCE-BOUNDARY
- * check only: it proves the route calls the right functions and never reintroduces a known-bad
- * shape, but it cannot prove EXECUTION ORDER or that the unauthorized branch's body actually
- * returns — a later independent re-review demonstrated exactly that gap by negative control
- * (`defect-pr82-authorization-wiring-test-control-flow-gap-2026-08-06`): altering the
- * unauthorized branch while leaving its `if` line untouched left every test in the previous
- * version of this file green.
+ * `preview/page.tsx` is a Next.js Server Component, and this file is a SOURCE-BOUNDARY check
+ * only: it proves the route calls the right functions and never reintroduces a known-bad shape.
+ * It cannot prove execution order or that the unauthorized branch's body actually withholds
+ * anything — an independent re-review demonstrated exactly that gap by negative control
+ * (`defect-pr82-authorization-wiring-test-control-flow-gap-2026-08-06`): keeping the
+ * `if (!request.authorized)` line but changing its body to also render fixture tenant data left
+ * every test in the previous version of this file green.
  *
- * The real fix is `lib/isola-workspace/preview-authorization.ts`'s
- * `resolveWorkspacePreviewRequest` — a PURE function extracted out of the page specifically so
- * order, denied-branch output and no-fixture-on-denied can be proven BEHAVIORALLY, on the
- * function's return value, in `preview-authorization.test.ts`. This file is retained only to
- * prove `page.tsx` actually calls that seam rather than reimplementing the decision inline —
- * "do not rely on source text alone" means the behavioral coverage lives elsewhere, not that
- * this file is unnecessary.
+ * BEHAVIORAL coverage now lives in two places, and this file is the third, narrowest layer:
+ *
+ *   - `lib/isola-workspace/preview-authorization.test.ts` proves the DECISION on the returned
+ *     value of the pure `resolveWorkspacePreviewRequest`.
+ *   - `page.test.tsx` (this directory) renders the actual Server Component with `getSession`,
+ *     `resolveWorkspaceAuthz` and `next/navigation` mocked, and asserts on the HTML a denied
+ *     actor receives — closing the branch-body gap above. An earlier version of this comment
+ *     claimed no `page.test.tsx` could exist here; that was wrong, and the file next door is the
+ *     correction.
+ *   - THIS file proves `page.tsx` still routes its decision through the seam rather than
+ *     reimplementing it inline, which neither of the other two can see.
  */
 
 const PAGE_PATH = join(__dirname, 'page.tsx')
