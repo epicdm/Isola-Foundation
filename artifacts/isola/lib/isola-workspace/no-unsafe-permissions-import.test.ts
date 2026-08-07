@@ -198,8 +198,16 @@ function importsUnsafePermissions(fromFileAbs: string, rawContent: string): bool
 // The line this must NOT cross is a NEW function. `export function authorized(ctx, p) { return
 // can(ctx, p) }` declares its own binding; it is a bounded API whose author owns its signature,
 // and it is exactly the shape `lib/workspace/authz.ts` uses. Forwarding an existing binding is
-// the hazard; calling it inside a new one is the sanctioned pattern. Only identifier-to-identifier
-// bindings propagate taint — no expression is ever evaluated or interpreted.
+// the hazard; calling it inside a new one is the sanctioned pattern.
+//
+// A third review round then found that a CONTAINER laundered the binding just as well —
+// `export const api = { can }`, consumed as `api.can(...)` — because taint propagated only along
+// identifier-to-identifier edges. The owner ruled that this is exposure: `api.can` is the same
+// generic function object, and wrapping it in an object does not make it a bounded API. Taint
+// therefore also propagates through STATIC OBJECT AND ARRAY LITERALS, recursively through their
+// property values, so an extra literal layer restores nothing. See `literalContainedIdentifiers`.
+// Nothing beyond a literal's own property values is inspected, and no expression is ever
+// evaluated or interpreted.
 
 /** The names whose exposure to Isola Workspace is the actual hazard. */
 const UNSAFE_EXPORT_NAMES = ['can', 'isAdmin', 'isOwner']
@@ -245,26 +253,157 @@ const IMPORT_STATEMENT_PATTERN = /import\s+([^;'"`]*?)\s+from\s*(['"`])([^'"`]+)
 /**
  * `export default X` and `export const/let/var Y = X` where the right-hand side is a BARE
  * IDENTIFIER — the two ways to forward an existing binding without an export clause. An optional
- * `as SomeType` is tolerated because a cast changes the type, never the value. Anything else on
- * the right — a call, an arrow function, a member access, an object literal — is a NEW binding and
- * is deliberately not matched: this guard does not interpret expressions.
+ * `as SomeType` is tolerated because a cast changes the type, never the value. A call, an arrow
+ * function or a member access on the right is a NEW binding and is deliberately not matched: this
+ * guard does not interpret expressions. A STATIC OBJECT OR ARRAY LITERAL is handled separately,
+ * just below.
  */
 const TRAILING_CAST = String.raw`\s*(?:as\s+[\w$.<>\[\]|\s]+?)?\s*(?:;|$)`
 const EXPORT_DEFAULT_IDENTIFIER_PATTERN = new RegExp(
   String.raw`export\s+default\s+([A-Za-z_$][\w$]*)` + TRAILING_CAST,
   'gm',
 )
-const EXPORT_ASSIGNED_IDENTIFIER_PATTERN = new RegExp(
-  String.raw`export\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)(?:\s*:[^=]+?)?\s*=\s*([A-Za-z_$][\w$]*)` +
-    TRAILING_CAST,
-  'gm',
-)
-/** A purely local rename: `const Y = X`. The one edge taint propagates along inside a file. */
+/** Any `export const/let/var Y` — whatever the right-hand side. Taint decides, not the shape. */
+const EXPORT_DECLARED_NAME_PATTERN = /export\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)/gm
+/** A purely local rename: `const Y = X`. */
 const LOCAL_ALIAS_PATTERN = new RegExp(
   String.raw`(?:^|[\s;{}])(?:const|let|var)\s+([A-Za-z_$][\w$]*)(?:\s*:[^=]+?)?\s*=\s*([A-Za-z_$][\w$]*)` +
     TRAILING_CAST,
   'gm',
 )
+
+// ── Static literal containment ──────────────────────────────────────────────
+//
+// The owner ruled on the residual the previous increment disclosed:
+//
+//   import { can } from '@/lib/permissions'
+//   export const api = { can }          // consumed as api.can(...)
+//
+// `api.can` IS the generic `can` function object. Putting it in a container does not make it a
+// new bounded authorization function, so this is exposure and must fail. One extra literal layer
+// (`{ permissions: { can } }`) or an array (`[can]`) must not restore the bypass either.
+//
+// This stays bounded and is still NOT dataflow analysis: the walker descends only through OBJECT
+// AND ARRAY LITERAL PROPERTY VALUES. A value that is a call, a ternary, an arrow function, a
+// method shorthand or any other expression is left alone and never evaluated — which is exactly
+// what keeps `{ allowed: (ctx, p) => can(ctx, p) }` allowed, because that value is a new function.
+//
+// Deliberately OUT of scope, and recorded as such: property assignment after the fact
+// (`const api = {}; api.can = can`). Matching it would require tracking mutation, which is the
+// general dataflow the correction brief excludes. It is not reachable through any of the shapes
+// below, and the guard makes no claim about it.
+
+/** `const Y = {…}` / `export const Y = […]` — the position where a static container begins. */
+const DECLARATION_LITERAL_PATTERN =
+  /(?:^|[\s;{}])(?:const|let|var)\s+([A-Za-z_$][\w$]*)(?:\s*:[^=]+?)?\s*=\s*(?=[{[])/gm
+/** `export default {…}` / `export default […]`. */
+const EXPORT_DEFAULT_LITERAL_PATTERN = /export\s+default\s*(?=[{[])/gm
+
+const BARE_IDENTIFIER = /^[A-Za-z_$][\w$]*$/
+/** `key: value`, where the key may be an identifier, a string, or a simple computed key. */
+const PROPERTY_ENTRY = /^(?:[A-Za-z_$][\w$]*|'[^']*'|"[^"]*"|\[[^\]]*\])\s*:\s*([\s\S]+)$/
+
+/**
+ * The `{…}` or `[…]` beginning at `start`, balanced across nesting and ignoring bracket
+ * characters inside string and template literals. `null` if it does not balance, in which case
+ * the caller draws no conclusion rather than guessing.
+ */
+function extractBalancedLiteral(code: string, start: number): string | null {
+  const closing: Record<string, string> = { '{': '}', '[': ']', '(': ')' }
+  if (code[start] !== '{' && code[start] !== '[') return null
+  const stack: string[] = []
+  let quote: string | null = null
+
+  for (let i = start; i < code.length; i += 1) {
+    const ch = code[i]
+    if (quote) {
+      if (ch === '\\') i += 1
+      else if (ch === quote) quote = null
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch
+    } else if (ch === '{' || ch === '[' || ch === '(') {
+      stack.push(closing[ch])
+    } else if (ch === '}' || ch === ']' || ch === ')') {
+      if (stack.pop() !== ch) return null
+      if (stack.length === 0) return code.slice(start, i + 1)
+    }
+  }
+  return null
+}
+
+/** Split a literal body on its TOP-LEVEL commas only, ignoring nesting and strings. */
+function splitTopLevel(body: string): string[] {
+  const entries: string[] = []
+  let depth = 0
+  let quote: string | null = null
+  let current = ''
+
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i]
+    if (quote) {
+      current += ch
+      if (ch === '\\') current += body[i++ + 1] ?? ''
+      else if (ch === quote) quote = null
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') quote = ch
+    else if (ch === '{' || ch === '[' || ch === '(') depth += 1
+    else if (ch === '}' || ch === ']' || ch === ')') depth -= 1
+    else if (ch === ',' && depth === 0) {
+      entries.push(current)
+      current = ''
+      continue
+    }
+    current += ch
+  }
+  entries.push(current)
+  return entries.map((e) => e.trim()).filter(Boolean)
+}
+
+/**
+ * Every identifier sitting in a VALUE position of a static object/array literal, recursively.
+ *
+ * Shorthand (`{ can }`), renamed keys (`{ allow: can }`), spread of a binding (`{ ...perms }`),
+ * array elements (`[can]`) and nested literals all count. Anything that is not a bare identifier
+ * or a nested literal — a call, an arrow function, a method shorthand, a member access, a string —
+ * is ignored, because resolving it would mean interpreting the expression.
+ */
+function literalContainedIdentifiers(literal: string): string[] {
+  const found: string[] = []
+  for (const entry of splitTopLevel(literal.slice(1, -1))) {
+    const spread = entry.match(/^\.\.\.\s*([\s\S]+)$/)
+    const property = entry.match(PROPERTY_ENTRY)
+    const value = (spread?.[1] ?? property?.[1] ?? entry).trim()
+
+    if (BARE_IDENTIFIER.test(value)) {
+      found.push(value)
+    } else if (value.startsWith('{') || value.startsWith('[')) {
+      const nested = extractBalancedLiteral(value, 0)
+      if (nested) found.push(...literalContainedIdentifiers(nested))
+    }
+  }
+  return found
+}
+
+/** A binding is tainted if ANY of `sources` is. One edge per assignment site. */
+interface TaintEdge {
+  target: string
+  sources: string[]
+}
+
+function bindingEdges(code: string): TaintEdge[] {
+  const edges: TaintEdge[] = []
+  for (const match of code.matchAll(LOCAL_ALIAS_PATTERN)) {
+    edges.push({ target: match[1], sources: [match[2]] })
+  }
+  for (const match of code.matchAll(DECLARATION_LITERAL_PATTERN)) {
+    const literal = extractBalancedLiteral(code, (match.index ?? 0) + match[0].length)
+    if (literal) edges.push({ target: match[1], sources: literalContainedIdentifiers(literal) })
+  }
+  return edges
+}
 
 interface ClauseSpecifier {
   /** The name on the SOURCE side (`{ can as authorize }` -> `can`). */
@@ -355,14 +494,15 @@ function taintedLocalBindings(code: string, fileAbs: string): Set<string> {
     if (bindings.namespaceLocal) tainted.add(bindings.namespaceLocal)
   }
 
-  // `const Y = X` chains, iterated to a fixpoint so no number of trivial renames launders the
-  // binding. Only identifier-to-identifier edges — see LOCAL_ALIAS_PATTERN.
-  const aliasEdges = [...code.matchAll(LOCAL_ALIAS_PATTERN)].map((m) => [m[1], m[2]] as const)
+  // `const Y = X` renames and `const Y = { … }` static containers, iterated to a fixpoint so
+  // neither a chain of trivial renames nor an extra literal layer launders the binding.
+  const edges = bindingEdges(code)
   for (let grew = true; grew; ) {
     grew = false
-    for (const [alias, source] of aliasEdges) {
-      if (tainted.has(source) && !tainted.has(alias)) {
-        tainted.add(alias)
+    for (const edge of edges) {
+      if (tainted.has(edge.target)) continue
+      if (edge.sources.some((s) => tainted.has(s))) {
+        tainted.add(edge.target)
         grew = true
       }
     }
@@ -432,9 +572,21 @@ function unsafeExportsOf(fileAbs: string): Set<string> {
       if (tainted.has(match[1])) exposed.add('default')
     }
 
-    // 4. `export const Y = X`.
-    for (const match of code.matchAll(EXPORT_ASSIGNED_IDENTIFIER_PATTERN)) {
-      if (tainted.has(match[2])) exposed.add(match[1])
+    // 4. `export const Y = …` — whatever the right-hand side was, `tainted` already decided,
+    //    because the declaration itself is one of the edges the fixpoint above walked. That is
+    //    what makes `export const api = { can }` and `export const allow = can` the same case.
+    for (const match of code.matchAll(EXPORT_DECLARED_NAME_PATTERN)) {
+      if (tainted.has(match[1])) exposed.add(match[1])
+    }
+
+    // 5. `export default { … }` / `export default [ … ]` — a static container with no name of its
+    //    own, so it has no taint edge and must be inspected here.
+    for (const match of code.matchAll(EXPORT_DEFAULT_LITERAL_PATTERN)) {
+      const literal = extractBalancedLiteral(code, (match.index ?? 0) + match[0].length)
+      if (!literal) continue
+      if (literalContainedIdentifiers(literal).some((name) => tainted.has(name))) {
+        exposed.add('default')
+      }
     }
   } catch {
     // Unreadable — expose nothing rather than guess.
@@ -886,6 +1038,171 @@ const EXPOSURE_CASES: readonly ExposureCase[] = [
     },
     imports: '{ can }',
     entry: 'zz-c21-a',
+    caught: false,
+  },
+
+  // ── Static container laundering (owner ruling, 2026-08-07) ──────────────────
+  //
+  // `api.can` is the same generic function object. A container is not a bounded API.
+  {
+    name: '22. shorthand object property: `export const api = { can }`',
+    shared: { 'zz-c22-a': `import { can } from '@/lib/permissions'\nexport const api = { can }\n` },
+    imports: '{ api }',
+    entry: 'zz-c22-a',
+    caught: true,
+  },
+  {
+    name: '23. renamed object key: `export const api = { allow: can }`',
+    shared: {
+      'zz-c23-a': `import { can } from '@/lib/permissions'\nexport const api = { allow: can }\n`,
+    },
+    imports: '{ api }',
+    entry: 'zz-c23-a',
+    caught: true,
+  },
+  {
+    name: '24. an imported ALIAS inside the object',
+    shared: {
+      'zz-c24-a': `import { can as internalName } from '@/lib/permissions'\nexport const api = {\n  allow: internalName,\n}\n`,
+    },
+    imports: '{ api }',
+    entry: 'zz-c24-a',
+    caught: true,
+  },
+  {
+    name: '25. a local object, then a bare named export',
+    shared: {
+      'zz-c25-a': `import { can } from '@/lib/permissions'\nconst api = { can }\nexport { api }\n`,
+    },
+    imports: '{ api }',
+    entry: 'zz-c25-a',
+    caught: true,
+  },
+  {
+    name: '26. a local object, aliased, then a renamed export',
+    shared: {
+      'zz-c26-a': `import { can } from '@/lib/permissions'\nconst api = { can }\nconst exportedApi = api\nexport { exportedApi as helpers }\n`,
+    },
+    imports: '{ helpers }',
+    entry: 'zz-c26-a',
+    caught: true,
+  },
+  {
+    name: '27. an object forwarded through ONE barrel',
+    shared: {
+      'zz-c27-b': `import { can } from '@/lib/permissions'\nexport const api = { can }\n`,
+      'zz-c27-a': `export { api } from './zz-c27-b'\n`,
+    },
+    imports: '{ api }',
+    entry: 'zz-c27-a',
+    caught: true,
+  },
+  {
+    name: '28. an object forwarded through TWO barrels, renamed on the way',
+    shared: {
+      'zz-c28-c': `import { can as X } from '@/lib/permissions'\nexport const api = { allow: X }\n`,
+      'zz-c28-b': `export { api as mid } from './zz-c28-c'\n`,
+      'zz-c28-a': `export * from './zz-c28-b'\n`,
+    },
+    imports: '{ mid }',
+    entry: 'zz-c28-a',
+    caught: true,
+  },
+  {
+    name: '29. a default object literal: `export default { can }`',
+    shared: {
+      'zz-c29-a': `import { can } from '@/lib/permissions'\nexport default { can }\n`,
+    },
+    imports: 'theDefault',
+    entry: 'zz-c29-a',
+    caught: true,
+  },
+  {
+    name: '30. an imported alias inside a default object literal',
+    shared: {
+      'zz-c30-a': `import { can as X } from '@/lib/permissions'\nexport default { allow: X }\n`,
+    },
+    imports: 'theDefault',
+    entry: 'zz-c30-a',
+    caught: true,
+  },
+  {
+    name: '31. a NESTED object literal — one extra layer restores nothing',
+    shared: {
+      'zz-c31-a': `import { can } from '@/lib/permissions'\nexport const api = {\n  permissions: {\n    can,\n  },\n}\n`,
+    },
+    imports: '{ api }',
+    entry: 'zz-c31-a',
+    caught: true,
+  },
+  {
+    name: '32. an ARRAY literal: `export const api = [can]`',
+    shared: { 'zz-c32-a': `import { can } from '@/lib/permissions'\nexport const api = [can]\n` },
+    imports: '{ api }',
+    entry: 'zz-c32-a',
+    caught: true,
+  },
+  {
+    name: '33. the same container laundering using `isAdmin`',
+    shared: {
+      'zz-c33-a': `import { isAdmin } from '@/lib/permissions'\nexport default { flags: [isAdmin] }\n`,
+    },
+    imports: 'theDefault',
+    entry: 'zz-c33-a',
+    caught: true,
+  },
+  {
+    name: '34. a spread of a tainted namespace into an object',
+    shared: {
+      'zz-c34-a': `import * as everything from '@/lib/permissions'\nexport const api = { ...everything }\n`,
+    },
+    imports: '{ api }',
+    entry: 'zz-c34-a',
+    caught: true,
+  },
+
+  // ── Containers that must stay ALLOWED ───────────────────────────────────────
+  {
+    name: '35. an object of ordinary values only',
+    shared: { 'zz-c35-a': `export const api = { safe: true, label: 'ok', count: 2 }\n` },
+    imports: '{ api }',
+    entry: 'zz-c35-a',
+    caught: false,
+  },
+  {
+    name: '36. an object holding a locally-defined safe function',
+    shared: {
+      'zz-c36-a': `function safeFn(s: string): string { return s.trim() }\nexport const api = { safeFn }\n`,
+    },
+    imports: '{ api }',
+    entry: 'zz-c36-a',
+    caught: false,
+  },
+  {
+    name: '37. an object holding a WRAPPER that internally calls can',
+    shared: {
+      'zz-c37-a': `import { can } from '@/lib/permissions'\nfunction authorizedWrapper(ctx: never, p: never) { return can(ctx, p) }\nexport const api = { allowed: authorizedWrapper }\n`,
+    },
+    imports: '{ api }',
+    entry: 'zz-c37-a',
+    caught: false,
+  },
+  {
+    name: '38. an object whose property VALUE is a new arrow function calling can',
+    shared: {
+      'zz-c38-a': `import { can } from '@/lib/permissions'\nexport const api = { allowed: (ctx: never, p: never) => can(ctx, p) }\n`,
+    },
+    imports: '{ api }',
+    entry: 'zz-c38-a',
+    caught: false,
+  },
+  {
+    name: '39. a NESTED object of ordinary values only',
+    shared: {
+      'zz-c39-a': `export const api = { tokens: { radius: 4, colour: 'red' }, names: ['a', 'b'] }\n`,
+    },
+    imports: '{ api }',
+    entry: 'zz-c39-a',
     caught: false,
   },
 ]
