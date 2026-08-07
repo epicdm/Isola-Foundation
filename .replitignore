@@ -85,35 +85,22 @@ scripts/tsconfig.tsbuildinfo
 
 # --- deploy staging (added 2026-08-07, runtime-artifact-preservation follow-up) ---
 #
-# `.deploy` is the explicit runtime payload both artifacts' build scripts
-# stage after their own build step (Isola's Next.js standalone output;
-# api-server's esbuild bundle) — see generate-deploy-staging.mjs and
-# build.mjs's `stageDeploy`. The production run commands in both
-# `.replit-artifact/artifact.toml` files point at `.deploy/<artifact>/...`
-# specifically instead of `dist/`/`.next` directly, because real Replit
-# Autoscale builds (5867f18a, then again 464d486f/c8331dd1 after the
-# unrelated pnpm-recursion and snapshot_dirty defects were both independently
-# fixed) lost that build output between the build phase completing and the
-# runtime container starting — `Error: Cannot find module
-# '.../artifacts/api-server/dist/index.mjs'`, a file esbuild's own log
-# confirmed it had just created.
+# `.deploy` is NOT excluded here, and that is load-bearing. It is the staged
+# runtime payload both artifacts' builds write after their own build step
+# (generate-deploy-staging.mjs, build.mjs's `stageDeploy`), and both
+# production run commands start from it. Excluding it would keep it out of
+# the publish and guarantee the runtime cannot start — which is exactly what
+# happened: PR87 added `.deploy` here to satisfy Isola's preflight, and the
+# next two real publishes failed with `Cannot find module` naming the staged
+# path. Every path missing at runtime across this incident was a path listed
+# in THIS file (artifacts/api-server/dist, artifacts/isola/.next, .deploy).
 #
-# The mechanism was never confirmed (Replit's own build/runtime log collector
-# does not forward the full stack trace), so this file is NOT evidence that
-# `.replitignore` inclusion is what caused that loss, and this entry does not
-# assume it. It exists for a narrower, load-bearing reason: both artifacts'
-# builds run sequentially in the SAME container within a single publish
-# (api-server's build, including its own preflight, runs before Isola's), so
-# by the time Isola's preflight runs a second time, `.deploy/api-server/`
-# already exists from the sibling build — without this entry, Isola's own
-# preflight would immediately fail `snapshot_dirty` on its sibling's staged
-# output. `.deploy` is deliberately NOT added to `.gitignore` — it stays a
-# plain untracked path rather than a git-ignored one, so this fix does not
-# rely on the same mechanism (whatever it is) that dropped `dist`/`.next`.
-# Whether staged output actually survives to the runtime container is
-# something only a real Replit Publish can prove; `replitignore.test.ts`
-# pins this entry against the real file, not that outcome.
-.deploy
+# The preflight still has to forgive it — api-server's build runs first in
+# the same container, so Isola's preflight always sees the sibling's staged
+# output — but it is forgiven by SHIPPED_GENERATED_PREFIXES in
+# generate-build-info.mjs, NOT by exclusion here. replitignore.test.ts
+# asserts `.deploy` is absent from this file, so re-adding it fails the
+# suite instead of failing a publish.
 
 # --- dependency trees (added 2026-08-06) ---
 #

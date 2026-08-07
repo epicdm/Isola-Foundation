@@ -33,16 +33,20 @@ NODE_ENV = "production"
 # exists before the build is allowed to succeed.
 # `inc-isola-replit-postbuild-pnpm-store-prune-2026-08-07`.
 #
-# The path is `../../`-prefixed because this artifact starts with a bare
-# `node` invocation (no `pnpm --filter` to re-anchor cwd first), and Replit
-# runs it with cwd = this artifact's own directory (confirmed from the real
-# runtime log: `artifact=artifacts/api-server`). An unprefixed
-# `.deploy/api-server/index.mjs` silently resolved under
-# `artifacts/api-server/.deploy/...` instead of the repo-root staged payload,
-# producing `MODULE_NOT_FOUND` at container start (build 2026-08-07T21:53Z) —
-# a PR87 regression `decision-authorize-artifact-cwd-path-fix-if-reproduced-2026-08-07`.
+# The path is repository-root-relative and must stay that way. Replit runs
+# this artifact with cwd = the REPOSITORY ROOT, not this artifact's directory,
+# despite the runtime log labelling the process `artifact=artifacts/api-server`
+# — that string is a label, not a working directory. PR88 misread it, added a
+# `../../` prefix, and the next real publish resolved the entrypoint to
+# `/home/.deploy/api-server/index.mjs`: only reachable from cwd
+# `/home/runner/workspace`, which is the proof. That prefix is reverted here.
+#
+# Isola's run command is NOT symmetric with this one and correctly keeps its
+# `../../`: it runs via `pnpm --filter`, which re-anchors cwd to the package
+# directory before the script executes. This artifact invokes `node` directly,
+# so nothing re-anchors it.
 [services.production.run]
-args = ["node", "--enable-source-maps", "../../.deploy/api-server/index.mjs"]
+args = ["node", "--enable-source-maps", ".deploy/api-server/index.mjs"]
 
 [services.production.run.env]
 PORT = "8080"

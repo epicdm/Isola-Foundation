@@ -106,19 +106,21 @@ export const FAILURE_REASONS = {
 // ── The snapshot contract ───────────────────────────────────────────────────
 //
 // Every path present in the workspace falls into exactly one class. Anything
-// this file cannot place into one of the first four is class 5, and class 5
+// this file cannot place into one of the first five is class 6, and class 6
 // stops the build. There is no default-allow.
 //
 //   1 TRACKED_CLEAN      identical to the reviewed tree — git does not report it
 //   2 GENERATED_EXEMPT   this generator's own output, one exact path
 //   3 SNAPSHOT_EXCLUDED  proven not to reach the Replit snapshot at all
 //   4 DEPENDENCY_TREE    a package-manager tree at an exact workspace location
-//   5 DIRTY              everything else, including anything unrecognised
+//   5 SHIPPED_GENERATED  staged by this build, and REQUIRED to reach the runtime
+//   6 DIRTY              everything else, including anything unrecognised
 //
 export const PATH_CLASS = Object.freeze({
   generatedExempt: 'generated_exempt',
   snapshotExcluded: 'snapshot_excluded',
   dependencyTree: 'dependency_tree',
+  shippedGenerated: 'shipped_generated',
   dirty: 'dirty',
 })
 
@@ -148,11 +150,7 @@ export const PATH_CLASS = Object.freeze({
  * (build 539f46e5) hit `reason=snapshot_dirty` citing exactly `.agents` and
  * `.config` after the workspace had already been reconciled to a clean commit.
  *
- * `.deploy` is the explicit runtime payload both artifacts stage after their
- * own build step (generate-deploy-staging.mjs, build.mjs's `stageDeploy`),
- * needed here only because both artifacts build sequentially in one
- * container and the second artifact's preflight would otherwise see the
- * first artifact's staged output as snapshot_dirty.
+ * `.deploy` is deliberately NOT in this list — see SHIPPED_GENERATED_PREFIXES.
  */
 export const SNAPSHOT_EXCLUDED_PREFIXES = Object.freeze([
   '.local',
@@ -166,8 +164,50 @@ export const SNAPSHOT_EXCLUDED_PREFIXES = Object.freeze([
   '.agents',
   '.config',
   '.replit-preview-logs',
-  '.deploy',
 ])
+
+/**
+ * CLASS 5 — staged by this build, and REQUIRED to reach the runtime.
+ *
+ * ── Why this class had to exist ────────────────────────────────────────────
+ *
+ * Until now, `.replitignore` membership was the ONLY reason the preflight could
+ * forgive a path it can see. That conflated two different questions:
+ *
+ *   "may this path differ from the reviewed tree?"   (a preflight question)
+ *   "must this path be kept out of what publishes?"  (a packaging question)
+ *
+ * For every path in SNAPSHOT_EXCLUDED_PREFIXES the two answers coincide, so one
+ * list served both. For a staged runtime payload they are OPPOSITE: it must be
+ * allowed to differ (the build writes it), and it must NOT be kept out of the
+ * publish (the runtime starts from it). Forcing it through the old list made the
+ * build pass and then guaranteed the runtime could not start.
+ *
+ * That is not hypothetical. PR87 staged `.deploy` precisely so the runtime
+ * entrypoints would survive the build-to-runtime boundary, and — in the same
+ * change — added `.deploy` to `.replitignore` to get past this preflight. The
+ * next real publish failed with `Cannot find module` for the staged path, as did
+ * the one after it. Three separate runtime failures in this incident name a path
+ * that `.replitignore` excludes: `artifacts/api-server/dist/index.mjs`,
+ * `artifacts/isola/.next` (isola's port never opened), and `.deploy` itself.
+ *
+ * The fail-closed property is unchanged. A forgiven path must still be named by
+ * exactly one list, and `replitignore.test.ts` now pins BOTH directions for both
+ * lists: every SNAPSHOT_EXCLUDED_PREFIXES entry must be excluded by
+ * `.replitignore`, and every entry below must NOT be — so re-adding `.deploy`
+ * there fails the suite instead of failing a publish.
+ *
+ * Entry criteria, all three required:
+ *   1. written by the deployment's own build step, after that build has started;
+ *   2. named by a production run command, so losing it stops the runtime;
+ *   3. never an input to any build — nothing compiles or resolves against it.
+ *
+ * `.deploy` — staged by `generate-deploy-staging.mjs` (isola) and `stageDeploy`
+ * in `build.mjs` (api-server); both assert their entrypoint exists before the
+ * build may succeed. Both artifacts build sequentially in one container, so the
+ * second artifact's preflight always sees the first artifact's staged output.
+ */
+export const SHIPPED_GENERATED_PREFIXES = Object.freeze(['.deploy'])
 
 /**
  * CLASS 4 — package-manager dependency trees, at exact workspace locations.
@@ -192,7 +232,7 @@ export const SNAPSHOT_EXCLUDED_PREFIXES = Object.freeze([
  * exclusion against the real file with the real matcher, in both directions.
  *
  * The locations are exact and exhaustive: one per pnpm workspace package plus
- * the root. A `node_modules` anywhere else is class 5 and stops the build, so a
+ * the root. A `node_modules` anywhere else is class 6 and stops the build, so a
  * new package cannot quietly widen the exemption — adding one is a review event.
  * `generate-build-info.test.ts` pins this list against the real manifest
  * topology.
@@ -240,7 +280,7 @@ export const BUILD_CONSUMED_ENV_FILES = Object.freeze([
  * Every file that can change what `pnpm install` produces.
  *
  * All of these are TRACKED, so a modification is already class 1 dirt and an
- * untracked or ignored copy is already class 5 dirt — the preflight adds no new
+ * untracked or ignored copy is already class 6 dirt — the preflight adds no new
  * detection. What it adds is TIMING and a name: these are named explicitly so
  * that when one of them is dirty the failure says "a package-manager input is
  * unreviewed" before `pnpm install` runs, rather than reporting a generic dirty
@@ -294,7 +334,7 @@ export const ENV_PROBE_DIRECTORIES = Object.freeze([
  * Reduce a git-reported path to one canonical repository-relative spelling, or
  * refuse.
  *
- * Refusing is a real answer: an unnormalisable path is class 5. The point is
+ * Refusing is a real answer: an unnormalisable path is class 6. The point is
  * that exactly one spelling can ever reach an exemption comparison, so no
  * alternate spelling of an exempt path can be constructed. Git emits POSIX
  * separators, no leading slash and no `.`/`..` segments on every platform, so
@@ -356,6 +396,11 @@ export function classifySnapshotPath(raw) {
   for (const prefix of DEPENDENCY_TREE_PATHS) {
     if (isUnderPrefix(path, prefix)) {
       return { path, class: PATH_CLASS.dependencyTree, reason: `pnpm dependency tree (${prefix}), pinned by the tracked lockfile` }
+    }
+  }
+  for (const prefix of SHIPPED_GENERATED_PREFIXES) {
+    if (isUnderPrefix(path, prefix)) {
+      return { path, class: PATH_CLASS.shippedGenerated, reason: `runtime payload staged by this build (${prefix}), and required to publish` }
     }
   }
   return { path, class: PATH_CLASS.dirty, reason: 'not accounted for by the snapshot contract' }
@@ -458,7 +503,7 @@ export function parsePorcelainZ(raw) {
 }
 
 /**
- * Classify every path git reported. Returns the class-5 entries — the ones that
+ * Classify every path git reported. Returns the class-6 entries — the ones that
  * stop the build — alongside the accounted-for ones, so the failure message can
  * say WHY a path was refused rather than only that it was.
  */
