@@ -147,6 +147,12 @@ export const PATH_CLASS = Object.freeze({
  * workspace itself, independent of git. A real publish attempt on 2026-08-07
  * (build 539f46e5) hit `reason=snapshot_dirty` citing exactly `.agents` and
  * `.config` after the workspace had already been reconciled to a clean commit.
+ *
+ * `.deploy` is the explicit runtime payload both artifacts stage after their
+ * own build step (generate-deploy-staging.mjs, build.mjs's `stageDeploy`),
+ * needed here only because both artifacts build sequentially in one
+ * container and the second artifact's preflight would otherwise see the
+ * first artifact's staged output as snapshot_dirty.
  */
 export const SNAPSHOT_EXCLUDED_PREFIXES = Object.freeze([
   '.local',
@@ -160,6 +166,7 @@ export const SNAPSHOT_EXCLUDED_PREFIXES = Object.freeze([
   '.agents',
   '.config',
   '.replit-preview-logs',
+  '.deploy',
 ])
 
 /**
