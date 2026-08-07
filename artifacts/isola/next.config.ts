@@ -5,6 +5,19 @@ const nextConfig: NextConfig = {
   allowedDevOrigins: ['*'],
 
   /**
+   * Self-contained runtime output. `next build` alone produces `.next`, which
+   * still depends on the workspace's full `node_modules` to `next start` —
+   * Replit's real Autoscale runtime lost that dependency at least twice
+   * (builds 5867f18a, 464d486f/c8331dd1: `Error: Cannot find module` for
+   * artifacts genuinely produced during the build). Standalone output traces
+   * only the modules actually imported into a minimal, explicit copy under
+   * `.next/standalone`, which the build then stages into the repo-root
+   * `.deploy/isola/` directory the production run command actually points at
+   * — see generate-deploy-staging.mjs. `inc-isola-replit-postbuild-pnpm-store-prune-2026-08-07`.
+   */
+  output: 'standalone',
+
+  /**
    * Build output directory.
    *
    * Replit runs its OWN `next dev` for this artifact (the PNPM_WORKSPACE agent stack)
