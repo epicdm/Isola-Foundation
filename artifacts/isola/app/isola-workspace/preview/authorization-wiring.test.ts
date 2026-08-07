@@ -4,14 +4,21 @@ import { describe, expect, it } from 'vitest'
 
 /**
  * `preview/page.tsx` is a Next.js Server Component. This repository has no `page.tsx` test
- * anywhere (checked: zero `page.test.tsx` files exist), so the pure logic it composes
- * (`narrowPreviewRole`, `resolvePreviewFixtureScenario` — both covered by
- * `lib/isola-workspace/preview-authorization.test.ts`) is the only part of the authorization
- * fix that ordinary behavioral tests can reach. This file closes the remaining gap the same
- * way `lib/isola-workspace/no-unsafe-permissions-import.test.ts` closes the `can()` gap: a
- * source-text guard that fails if the page stops calling the safe functions, or starts
- * reintroducing the exact patterns the correction removed (`?role=` trusted directly, an
- * absent-role default of `'manager'`, `?tenant=` treated as authorization).
+ * anywhere (checked: zero `page.test.tsx` files exist), so this file is a SOURCE-BOUNDARY
+ * check only: it proves the route calls the right functions and never reintroduces a known-bad
+ * shape, but it cannot prove EXECUTION ORDER or that the unauthorized branch's body actually
+ * returns — a later independent re-review demonstrated exactly that gap by negative control
+ * (`defect-pr82-authorization-wiring-test-control-flow-gap-2026-08-06`): altering the
+ * unauthorized branch while leaving its `if` line untouched left every test in the previous
+ * version of this file green.
+ *
+ * The real fix is `lib/isola-workspace/preview-authorization.ts`'s
+ * `resolveWorkspacePreviewRequest` — a PURE function extracted out of the page specifically so
+ * order, denied-branch output and no-fixture-on-denied can be proven BEHAVIORALLY, on the
+ * function's return value, in `preview-authorization.test.ts`. This file is retained only to
+ * prove `page.tsx` actually calls that seam rather than reimplementing the decision inline —
+ * "do not rely on source text alone" means the behavioral coverage lives elsewhere, not that
+ * this file is unnecessary.
  */
 
 const PAGE_PATH = join(__dirname, 'page.tsx')
@@ -30,7 +37,7 @@ function stripComments(content: string): string {
   return content.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
 }
 
-describe('the preview route composes real authorization, not URL trust', () => {
+describe('the preview route composes real authorization, not URL trust (source boundary)', () => {
   const page = readFileSync(PAGE_PATH, 'utf8')
   const code = stripComments(page)
 
@@ -40,8 +47,15 @@ describe('the preview route composes real authorization, not URL trust', () => {
     expect(code).toMatch(/toWorkspaceRole\s*\(/)
   })
 
-  it('narrows the role through the one function that refuses to widen it', () => {
-    expect(code).toMatch(/narrowPreviewRole\s*\(/)
+  it('decides authorization through the one pure route-decision seam, not inline logic', () => {
+    expect(code).toMatch(/resolveWorkspacePreviewRequest\s*\(/)
+    // narrowPreviewRole/resolvePreviewFixtureScenario are exercised BEHAVIORALLY, through
+    // resolveWorkspacePreviewRequest, in preview-authorization.test.ts. If either reappears
+    // here directly, the decision has been duplicated back into the page — the seam this
+    // hardening pass introduced would be bypassed even though both underlying functions still
+    // individually behave correctly.
+    expect(code).not.toMatch(/narrowPreviewRole\s*\(/)
+    expect(code).not.toMatch(/resolvePreviewFixtureScenario\s*\(/)
   })
 
   it('never assigns a params-derived role default of manager', () => {
@@ -51,12 +65,8 @@ describe('the preview route composes real authorization, not URL trust', () => {
     expect(code).not.toMatch(/normaliseRole/)
   })
 
-  it('resolves the fixture scenario through the allowlisted, non-authoritative function', () => {
-    expect(code).toMatch(/resolvePreviewFixtureScenario\s*\(/)
-  })
-
-  it('renders an unauthorized path when no authoritative role was resolved', () => {
-    expect(code).toMatch(/if\s*\(\s*!authoritativeRole\s*\)/)
+  it('renders an unauthorized path when the route-decision function denies the request', () => {
+    expect(code).toMatch(/if\s*\(\s*!request\.authorized\s*\)/)
   })
 })
 

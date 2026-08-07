@@ -27,7 +27,9 @@ async function render(options: {
   context?: ModuleContext
   state?: ShellState
   module?: string
-  customerHealth?: 'ok' | 'stale' | 'degraded'
+  customerHealth?: 'ok' | 'stale' | 'degraded' | 'unauthorized' | 'empty'
+  /** Forces `CustomerResolution.kind`. Defaults to the fixture's own default (`'one'`). */
+  customerResolution?: 'one' | 'none' | 'many'
   buildModuleHref?: (moduleId: string) => string
   sheetOpen?: boolean
   closeSheetHref?: string
@@ -37,7 +39,10 @@ async function render(options: {
   const context = options.context ?? 'conversation-panel'
   const fixture = fixtureTenant(tenantId)
 
-  const ports = createFixturePorts(tenantId, { customer: options.customerHealth })
+  const ports = createFixturePorts(tenantId, {
+    customer: options.customerHealth,
+    customerResolution: options.customerResolution,
+  })
 
   const ctx: WorkspaceContext = {
     tenant: { id: fixture.id, name: fixture.name, accent: fixture.accent },
@@ -373,5 +378,74 @@ describe('every tab and every More-sheet row is a real, reachable link', () => {
     })
     expect(html).toMatch(/data-iso-sheet-backdrop=""[^>]*href="\/preview-test"/)
     expect(html).toMatch(/data-iso-sheet-close=""[^>]*href="\/preview-test"[^>]*>Close</)
+  })
+})
+
+// ── The follow-up action agrees with what the body actually resolved ────────
+//
+// Closes `defect-pr82-customer-resolution-action-contradiction-2026-08-06`: the no-match and
+// multiple-match CustomerResolution states already told the operator (in the body) that no
+// action should be taken on an unspecified customer, but the shell footer offered "Prepare
+// follow-up" regardless — inconsistent with the body and with the trust boundary the design
+// otherwise enforces everywhere else. `none`/`many` were also unreachable through the fixture
+// port before this correction, so this describe block doubles as the reachability proof.
+
+const PREPARE_FOLLOW_UP = 'Prepare follow-up'
+const PREPARE_FOLLOW_UP_INTENT = 'data-iso-intent="customer.prepare-follow-up"'
+
+describe('the customer follow-up action agrees with what the body actually resolved', () => {
+  it('exactly one resolved customer exposes the follow-up action', async () => {
+    const html = await render({ module: 'customer', customerResolution: 'one' })
+    expect(html).toContain(PREPARE_FOLLOW_UP)
+    expect(html).toContain(PREPARE_FOLLOW_UP_INTENT)
+  })
+
+  it('no customer match never exposes the follow-up action, and the body says why', async () => {
+    const html = await render({ module: 'customer', customerResolution: 'none' })
+    expect(html).not.toContain(PREPARE_FOLLOW_UP)
+    expect(html).not.toContain(PREPARE_FOLLOW_UP_INTENT)
+    expect(html).toContain('We could not match this conversation to a customer')
+  })
+
+  it('multiple customer matches never exposes the follow-up action, and the body offers selection instead', async () => {
+    const html = await render({ module: 'customer', customerResolution: 'many' })
+    expect(html).not.toContain(PREPARE_FOLLOW_UP)
+    expect(html).not.toContain(PREPARE_FOLLOW_UP_INTENT)
+    expect(html).toContain('More than one customer matches this conversation')
+  })
+
+  it('an unresolved customer (the port withheld data entirely) never exposes the follow-up action', async () => {
+    const html = await render({ module: 'customer', customerHealth: 'unauthorized' })
+    expect(html).not.toContain(PREPARE_FOLLOW_UP)
+    expect(html).not.toContain(PREPARE_FOLLOW_UP_INTENT)
+  })
+
+  it('a stale but still-resolved match keeps the follow-up action — staleness is a data-freshness fact, not an identity one', async () => {
+    const html = await render({
+      module: 'customer',
+      customerResolution: 'one',
+      customerHealth: 'stale',
+    })
+    expect(html).toContain(PREPARE_FOLLOW_UP)
+    expect(html).toContain(PREPARE_FOLLOW_UP_INTENT)
+  })
+
+  it('the action also appears for an authorized operator once a customer is resolved (not manager-only)', async () => {
+    const html = await render({ module: 'customer', role: 'operator', customerResolution: 'one' })
+    expect(html).toContain(PREPARE_FOLLOW_UP)
+  })
+})
+
+describe('customer-none and customer-many are directly constructible fixtures, not just theoretical states', () => {
+  it('customer-none renders the no-match empty state and no candidate list', async () => {
+    const html = await render({ module: 'customer', customerResolution: 'none' })
+    expect(html).toContain('We could not match this conversation to a customer')
+    expect(html).not.toContain('More than one customer matches')
+  })
+
+  it('customer-many renders a disambiguation list with real, selectable candidate rows', async () => {
+    const html = await render({ module: 'customer', customerResolution: 'many' })
+    expect(html).toContain('More than one customer matches this conversation')
+    expect(html).toContain('data-intent="customer.choose:joss-boutique"')
   })
 })

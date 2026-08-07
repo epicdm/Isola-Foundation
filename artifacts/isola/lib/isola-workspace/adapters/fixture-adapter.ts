@@ -77,6 +77,15 @@ export interface FixtureHealthOverrides {
   aiTeam?: PortHealth
   today?: PortHealth
   onboarding?: PortHealth
+  /**
+   * Forces `CustomerPort.resolveForConversation` to return a specific `CustomerResolution.kind`
+   * instead of the fixture's default `'one'`. Exists so `none` and `many` — first-class states
+   * the type has always declared, but which the fixture previously never produced — are
+   * actually reachable in the preview gallery and in tests, not just theoretically supported by
+   * the type union. Leaves `entitlements`/tenant identity untouched; this only changes what the
+   * Customer module's own body and the shell footer decide about ONE conversation's identity.
+   */
+  customerResolution?: 'one' | 'none' | 'many'
 }
 
 const READ_AT = '2026-08-06T09:14:00-04:00'
@@ -184,6 +193,32 @@ export function createFixturePorts(
     async resolveForConversation(ref) {
       const c = sampleData.customer
       const conv = sampleData.conversation
+
+      if (overrides.customerResolution === 'none') {
+        return envelope<CustomerResolution>(
+          { kind: 'none' },
+          'salesRecords',
+          overrides.customer ?? 'ok',
+        )
+      }
+
+      if (overrides.customerResolution === 'many') {
+        return envelope<CustomerResolution>(
+          {
+            kind: 'many',
+            candidates: [
+              { id: 'joss-boutique', name: c.name, disambiguation: `${c.industry} · ${c.location}` },
+              {
+                id: 'joss-boutique-annex',
+                name: `${c.name} — Second location`,
+                disambiguation: `${c.industry} · a different number on the same account`,
+              },
+            ],
+          },
+          'salesRecords',
+          overrides.customer ?? 'ok',
+        )
+      }
 
       const resolution: CustomerResolution = {
         kind: 'one',

@@ -6,9 +6,10 @@ import { fixtureEntitlements } from '@/lib/isola-workspace/entitlements'
 import { defaultRegistry } from '@/lib/isola-workspace/modules'
 import { permissionsForRole, toWorkspaceRole } from '@/lib/isola-workspace/permissions'
 import {
+  customerResolutionOverrideFor,
   extractSingleQueryValue,
-  narrowPreviewRole,
-  resolvePreviewFixtureScenario,
+  resolveWorkspacePreviewRequest,
+  underlyingFixtureTenant,
 } from '@/lib/isola-workspace/preview-authorization'
 import { MORE_TAB_ID } from '@/components/isola-workspace/shell'
 import { resolveNavigation } from '@/lib/isola-workspace/registry'
@@ -86,23 +87,33 @@ export default async function IsolaWorkspacePreviewPage({
   // never from anything the browser sent. A `?role=` query value is consulted only below,
   // and only to NARROW this, never to replace it.
   const authz = await resolveWorkspaceAuthz(session)
-  const authoritativeRole = toWorkspaceRole(authz.level)
+  const rawAuthoritativeRole = toWorkspaceRole(authz.level)
 
   const params = await searchParams
 
-  // Denied (no membership, or Membership.role === 'staff') never reaches the fixture
-  // machinery at all: no module list, no tenant name — fixture or real — no permission
-  // names, nothing. `?role=` cannot rescue a denied actor; narrowPreviewRole(null, ...) is
-  // always `null` by construction.
-  if (!authoritativeRole) {
+  // The ONE authorization decision for this route, made by a pure function that performs no
+  // I/O and no rendering (`lib/isola-workspace/preview-authorization.ts`). Denied (no
+  // membership, `Membership.role === 'staff'`, or a malformed authoritative role) never
+  // reaches the fixture machinery at all: no module list, no tenant name — fixture or real —
+  // no permission names, nothing. This is deliberately the ONLY place `params.role`,
+  // `params.scenario` and `params.tenant` are read for authorization purposes — everything
+  // below this point (`context`/`state`/`sheet`/`module`) is presentation-only and carries no
+  // authority regardless of order.
+  const request = resolveWorkspacePreviewRequest(rawAuthoritativeRole, {
+    role: params.role,
+    scenario: params.scenario,
+    tenant: params.tenant,
+  })
+
+  if (!request.authorized) {
     return <UnauthorizedPreview />
   }
 
-  const role = narrowPreviewRole(authoritativeRole, extractSingleQueryValue(params.role))
-  const scenario = resolvePreviewFixtureScenario(
-    extractSingleQueryValue(params.scenario),
-    extractSingleQueryValue(params.tenant),
-  )
+  // Echoed back by `request` rather than reused from `rawAuthoritativeRole` above so the type
+  // system itself proves this value can only be a real, known `WorkspaceRole` here — the same
+  // guarantee `resolveWorkspacePreviewRequest`'s `{ authorized: false }` branch enforces at
+  // runtime.
+  const { authoritativeRole, role, scenario } = request
   const context = normaliseContext(one(params.context))
   const state = normaliseState(one(params.state))
   const sheetOpen = one(params.sheet) === '1'
@@ -125,8 +136,12 @@ export default async function IsolaWorkspacePreviewPage({
   }
   const closeSheetHref = buildPreviewHref(hrefBase, { sheet: undefined })
 
-  const fixture = fixtureTenant(scenario)
-  const ports = createFixturePorts(scenario, {
+  // `customer-none`/`customer-many` are not tenants — they ride on `epic`'s identity and
+  // entitlements with only the Customer port's resolution kind forced. See
+  // `underlyingFixtureTenant`/`customerResolutionOverrideFor`.
+  const tenantId = underlyingFixtureTenant(scenario)
+  const fixture = fixtureTenant(tenantId)
+  const ports = createFixturePorts(tenantId, {
     // Drive the degraded and stale reads straight from the URL so every one of them can be
     // reached deliberately rather than only when something upstream happens to break.
     //
@@ -136,6 +151,7 @@ export default async function IsolaWorkspacePreviewPage({
     // perfectly renderable panel from its last good read.
     customer:
       state === 'unavailable' ? 'degraded' : state === 'stale' ? 'stale' : undefined,
+    customerResolution: customerResolutionOverrideFor(scenario),
   })
 
   const workspaceContext: WorkspaceContext = {
@@ -237,7 +253,7 @@ function PreviewNotice(props: {
         {' · context '}
         <code>{props.context}</code> · state <code>{props.state}</code>
         {' — change with '}
-        <code>?scenario=epic|marche&amp;role=operator|manager|admin&amp;context=conversation-panel|workspace&amp;state=ready|loading|unavailable|stale|unauthorized|empty|offline&amp;module=customer|work|ai-team|today|phone|billing</code>
+        <code>?scenario=epic|marche|customer-none|customer-many&amp;role=operator|manager|admin&amp;context=conversation-panel|workspace&amp;state=ready|loading|unavailable|stale|unauthorized|empty|offline&amp;module=customer|work|ai-team|today|phone|billing</code>
         {' — '}
         <code>role</code> can only narrow your real workspace role, never widen it.
       </div>

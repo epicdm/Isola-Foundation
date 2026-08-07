@@ -105,7 +105,11 @@ export function IsolaWorkspaceView(props: IsolaWorkspaceViewProps): JSX.Element 
       layout={navigation}
       activeModuleId={navigation.activeModuleId}
       counts={counts}
-      primaryAction={primaryActionFor(navigation.activeModuleId, active?.authorized ?? false)}
+      primaryAction={primaryActionFor(
+        navigation.activeModuleId,
+        active?.authorized ?? false,
+        data.customer?.resolution ?? null,
+      )}
       backToConversationLabel={backToConversationLabel}
       onSelectModuleHref={buildModuleHref}
       sheetOpen={sheetOpen}
@@ -233,12 +237,30 @@ export function IsolaOnboardingView(props: {
  * Returns null rather than a disabled placeholder when a module has no natural next action —
  * the design permits exactly one accent button per view, and a greyed-out one still reads as
  * "there is something here for me to press".
+ *
+ * `customerResolution` is mandatory, not optional, so every call site is forced to supply what
+ * it actually knows about customer identity — the bug this parameter closes was exactly a call
+ * site that didn't have to think about it. `null` means "not yet resolved" (the port withheld
+ * data, e.g. still loading or denied); it is treated identically to an explicit `none`/`many`,
+ * because in every one of those cases there is no single authoritative customer to act on.
+ *
+ * A `stale` READ (the port's health, not this parameter) does not block the action: staleness
+ * is a fact about how current the customer's DETAILS are, not about whether their IDENTITY is
+ * known — a resolved customer with an out-of-date opportunity value is still the same customer,
+ * which is why the state chip carries that warning instead of this function withholding the
+ * button. Ambiguity (`many`) and absence (`none`) are the only conditions that withhold it,
+ * because those are the cases where "prepare a follow-up" would not be for anyone in particular.
  */
-function primaryActionFor(moduleId: string | null, authorized: boolean) {
+function primaryActionFor(
+  moduleId: string | null,
+  authorized: boolean,
+  customerResolution: CustomerResolution | null,
+) {
   if (!moduleId || !authorized) return null
 
   switch (moduleId) {
     case 'customer':
+      if (!customerResolution || customerResolution.kind !== 'one') return null
       return {
         label: 'Prepare follow-up',
         note: 'Due tomorrow · nothing sent yet.',
