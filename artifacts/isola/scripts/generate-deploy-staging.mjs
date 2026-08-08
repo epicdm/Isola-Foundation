@@ -52,31 +52,36 @@ function main() {
 
   rmSync(deployDir, { recursive: true, force: true })
   mkdirSync(deployDir, { recursive: true })
-  // `dereference: true` is load-bearing, not a detail.
+  // `verbatimSymlinks: true` is load-bearing, not a detail.
   //
-  // pnpm's standalone output is mostly symlinks: the public package names in
-  // `node_modules` point into `node_modules/.pnpm/...`. In the source tree those
-  // links are RELATIVE, so they resolve within the standalone directory. Node's
-  // `cpSync` defaults to `verbatimSymlinks: false`, which resolves each relative
-  // link and writes it back as an ABSOLUTE path pointing at the ORIGINAL
-  // location — so a plain recursive copy silently produced 24 symlinks like
+  // pnpm's standalone output is 24 symlinks over a `.pnpm` store: the public
+  // package names in `node_modules` point into `node_modules/.pnpm/...`. Every
+  // one of those links is RELATIVE and resolves inside `standalone/`, so the
+  // directory is self-contained as Next.js produced it.
+  //
+  // Node's `cpSync` defaults to `verbatimSymlinks: false`, which RESOLVES each
+  // relative link and writes it back as an ABSOLUTE path pointing at the
+  // ORIGINAL location. A plain recursive copy therefore produced:
   //
   //   .deploy/isola/artifacts/isola/node_modules/next
   //     -> /home/runner/workspace/artifacts/isola/.next/standalone/node_modules/.pnpm/next@…/node_modules/next
   //
-  // pointing straight back into `artifacts/isola/.next`, which `.replitignore`
-  // excludes from the deployment image. The payload staged to survive the
-  // build→runtime boundary therefore depended entirely on a directory that does
-  // not cross it, and isola died with `Cannot find module 'next'` before its
-  // banner while api-server — a single esbuild bundle with no symlinks — started
-  // normally. That is the exact asymmetry seen in production on 2026-08-07/08.
+  // pointing straight back into `artifacts/isola/.next` — which `.replitignore`
+  // excludes from the deployment image. The payload staged precisely to survive
+  // the build→runtime boundary thus depended entirely on a directory that does
+  // not cross it. isola died with `Cannot find module 'next'` before its banner
+  // while api-server — a single esbuild bundle, no symlinks — started normally.
+  // That is the exact asymmetry observed in production on 2026-08-07/08.
   //
-  // Dereferencing materialises every link as a real file, so the staged payload
-  // depends on nothing outside itself. `verbatimSymlinks: true` would also keep
-  // the links resolvable, but only while every target stays inside the copy;
-  // dereferencing does not rely on that and cannot be undone by later filtering.
-  // `pnpm run sim:runtime-image` asserts the result contains no link out.
-  cpSync(standaloneDir, deployDir, { recursive: true, dereference: true })
+  // Copying verbatim keeps the links relative, so they continue to resolve
+  // within the staged copy and the payload depends on nothing outside itself.
+  //
+  // NOT `dereference: true`: that option governs how the SOURCE path itself is
+  // resolved, and does not materialise symlinks encountered during the
+  // recursive walk — verified on node v22.22.0, where a dereferenced copy still
+  // produced a symlink. `pnpm run sim:runtime-image` asserts that no link in the
+  // packaged image escapes it, which is what catches this class of mistake.
+  cpSync(standaloneDir, deployDir, { recursive: true, verbatimSymlinks: true })
 
   if (existsSync(staticSrc)) {
     mkdirSync(staticDest, { recursive: true })

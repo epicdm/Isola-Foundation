@@ -128,8 +128,14 @@ function build() {
 function packageImage() {
   section('package — apply .replitignore to build the runtime image')
   const image = mkdtempSync(join(tmpdir(), 'replit-runtime-image-'))
+  // `verbatimSymlinks: true` or this harness corrupts the very thing it is
+  // measuring: cpSync otherwise rewrites each relative symlink as an ABSOLUTE
+  // path back into REPO_ROOT, so every link in the image would resolve into the
+  // intact source tree — which is both the false-pass that hid this bug and,
+  // once containment is asserted, a false failure. Copy the links as written.
   cpSync(REPO_ROOT, image, {
     recursive: true,
+    verbatimSymlinks: true,
     filter: (src) => !src.split(/[\\/]/).includes('.git'),
   })
 
