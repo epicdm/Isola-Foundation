@@ -547,10 +547,10 @@ describe('workspace dependency trees are excluded from the deployment snapshot',
     }
   })
 
-  it('a similarly named directory that is NOT a declared package tree still ships', () => {
-    // If these were excluded, real source would silently vanish from the build.
+  it('a similarly NAMED path that is not a node_modules segment still ships', () => {
+    // Prefix lookalikes are safe: the pattern matches whole path segments, so
+    // real source is not silently dropped for containing the substring.
     for (const p of [
-      'artifacts/isola/app/node_modules/page.tsx',
       'artifacts/isola/lib/node_modules_helper.ts',
       'node_modules_backup/x.js',
       'docs/node_modules.md',
@@ -558,6 +558,24 @@ describe('workspace dependency trees are excluded from the deployment snapshot',
     ]) {
       expect({ p, excluded: isExcluded(p, rules) }).toEqual({ p, excluded: false })
     }
+  })
+
+  it('a real node_modules SEGMENT is excluded at any depth, wherever it appears', () => {
+    // This previously asserted the opposite, on the assumption that patterns
+    // are anchored at the repository root. The runtime-image simulator proved
+    // otherwise, so it is recorded here as the hazard it is: a directory named
+    // node_modules is excluded no matter where it sits, and source placed
+    // inside one would vanish from the deployed image. The shipped runtime
+    // payload survives only because .replitignore re-includes .deploy LAST.
+    for (const p of [
+      'artifacts/isola/app/node_modules/page.tsx',
+      '.deploy/isola/node_modules/next/package.json',
+    ]) {
+      expect({ p, matched: isExcluded(p, rules.filter((r) => !r.negated)) }).toEqual({ p, matched: true })
+    }
+    // ...and the re-inclusion is what rescues the staged payload specifically.
+    expect(isExcluded('.deploy/isola/node_modules/next/package.json', rules)).toBe(false)
+    expect(isExcluded('artifacts/isola/app/node_modules/page.tsx', rules)).toBe(true)
   })
 
   it('excluding the trees does not exclude anything the install needs', () => {
