@@ -172,9 +172,23 @@ describe('the excluded paths really are rebuilt', () => {
     // same incidents that took down api-server's dist/index.mjs). Standalone
     // output is staged into .deploy/isola/ (generate-deploy-staging.mjs) and
     // the start command points at that staged server.js instead.
-    expect(pkg.scripts['start:prod']).toBe(
-      'prisma migrate deploy && node ../../.deploy/isola/artifacts/isola/server.js',
-    )
+    //
+    // It is ALSO the whole command. The runtime container has no workspace
+    // `node_modules` — every `node_modules` path is excluded by `.replitignore`
+    // — so anything resolved from `node_modules/.bin` is unavailable here. A
+    // real publish proved it: `start:prod` opened with `prisma migrate deploy`
+    // and the runtime answered `sh: 1: prisma: not found`, so isola's port
+    // never opened even though api-server had already started cleanly from its
+    // own staged payload. Migrations moved to the build phase, where the CLI
+    // exists. `decision-run-prisma-migrate-in-build-phase-2026-08-07`.
+    expect(pkg.scripts['start:prod']).toBe('node ../../.deploy/isola/artifacts/isola/server.js')
+  })
+
+  it('the runtime start command invokes no Prisma CLI, which does not exist in the runtime container', () => {
+    const pkg = JSON.parse(readFileSync(`${REPO_ROOT}artifacts/isola/package.json`, 'utf8')) as {
+      scripts: Record<string, string>
+    }
+    expect(pkg.scripts['start:prod']).not.toContain('prisma')
   })
 
   it('the build refuses to run without proven source identity, then stages a self-contained runtime copy', () => {
@@ -182,8 +196,46 @@ describe('the excluded paths really are rebuilt', () => {
       scripts: Record<string, string>
     }
     expect(pkg.scripts.build).toBe(
-      'node ./scripts/generate-build-info.mjs --preflight && pnpm install --frozen-lockfile && node ./scripts/generate-build-info.mjs --require-identity && next build && node ./scripts/generate-deploy-staging.mjs',
+      'node ./scripts/generate-build-info.mjs --preflight && pnpm install --frozen-lockfile && node ./scripts/generate-build-info.mjs --require-identity && next build && node ./scripts/generate-deploy-staging.mjs && prisma migrate deploy',
     )
+  })
+
+  it('migrations run in the build phase, LAST — only after compilation and staging have proven good', () => {
+    const pkg = JSON.parse(readFileSync(`${REPO_ROOT}artifacts/isola/package.json`, 'utf8')) as {
+      scripts: Record<string, string>
+    }
+    const build = pkg.scripts.build
+    const steps = build.split(' && ')
+
+    // Replit's own guidance: "add your migration command to your deployment's
+    // build or pre-deploy step". `.replit` exposes no pre-deploy hook, and
+    // api-server's artifact build runs before isola's, so the end of isola's
+    // build is the last point in the whole build phase.
+    expect(steps[steps.length - 1]).toBe('prisma migrate deploy')
+
+    // Ordering is the safety property, not a style preference. A migration
+    // applied before the build is proven good would leave the database ahead
+    // of a release that then fails to compile, stage, or promote.
+    const migrate = steps.findIndex((s) => s.includes('prisma migrate deploy'))
+    for (const earlier of ['--preflight', '--require-identity', 'next build', 'generate-deploy-staging.mjs']) {
+      const at = steps.findIndex((s) => s.includes(earlier))
+      expect({ step: earlier, beforeMigrate: at !== -1 && at < migrate }).toEqual({ step: earlier, beforeMigrate: true })
+    }
+
+    // `&&` throughout: any failing step stops the chain, so a failed migration
+    // fails the deployment build rather than promoting an unmigrated release.
+    expect(build).not.toContain(';')
+    expect(build).not.toContain('||')
+  })
+
+  it('the backward-compatibility invariant migrating in the build phase creates is written down', () => {
+    // Migrations apply at the END of the build; promotion happens afterwards
+    // and can fail, leaving the NEW schema live under the OLD release. Anyone
+    // authoring a migration has to know that, so it lives beside the
+    // migrations rather than only in a decision record.
+    const readme = readFileSync(`${REPO_ROOT}artifacts/isola/prisma/migrations/README.md`, 'utf8')
+    expect(readme).toContain('backward-compatible with the release that is')
+    expect(readme).toContain('decision-run-prisma-migrate-in-build-phase-2026-08-07')
   })
 
   it('Next.js standalone output is enabled, so the staged copy is self-contained', () => {
