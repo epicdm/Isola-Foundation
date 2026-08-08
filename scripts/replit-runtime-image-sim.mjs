@@ -255,12 +255,22 @@ async function main() {
 
     // Fail BEFORE starting anything if the payload is already broken: a process
     // that cannot start tells you less than the manifest that says why.
-    if (failures.length > 0) {
+    //
+    // SIM_FORCE_RUN=1 overrides that and starts the processes anyway. It exists
+    // for the negative control — demonstrating that a broken image really does
+    // produce the observed production failure (isola: `Cannot find module
+    // 'next'`, dead before the Next.js banner) rather than merely tripping this
+    // harness's own manifest. Never set it to make a red run go green.
+    if (failures.length > 0 && !process.env.SIM_FORCE_RUN) {
       section('RESULT')
       log('  BLOCKED — the runtime image is missing required payload; not starting processes')
       for (const f of failures) log(`    - ${f}`)
+      log('  (set SIM_FORCE_RUN=1 to start them anyway and observe the runtime failure)')
       process.exitCode = 1
       return
+    }
+    if (failures.length > 0) {
+      log('\n  SIM_FORCE_RUN=1 — starting processes against a KNOWN-BROKEN image (negative control)')
     }
 
     section('run — the exact production run commands, from the filtered tree')
