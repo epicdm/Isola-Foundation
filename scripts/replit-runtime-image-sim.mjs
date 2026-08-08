@@ -35,6 +35,7 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process'
+import net from 'node:net'
 import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
@@ -192,6 +193,32 @@ function assertDeployTreeIntact(image) {
 }
 
 /**
+ * A port already in use invalidates the entire run.
+ *
+ * This check exists because its absence produced a FALSE PASS: a next-server
+ * left listening on the isola port by an earlier run answered the health check,
+ * and the harness reported PASS for an isola process that had never started.
+ * A harness that can pass without its own subject running is worse than none,
+ * so a busy port is a hard stop rather than a warning.
+ */
+async function assertPortsFree() {
+  section('PORTS — nothing else is listening where the artifacts will bind')
+  for (const [name, port] of [
+    ['api-server', API_PORT],
+    ['isola', ISOLA_PORT],
+  ]) {
+    const busy = await new Promise((resolve) => {
+      const probe = net.createServer()
+      probe.once('error', () => resolve(true))
+      probe.once("listening", () => probe.close(() => resolve(false)))
+      probe.listen(port, "127.0.0.1")
+    })
+    if (busy) fail(name + " port " + port + " is already in use — a stale process would answer for it")
+    else pass(name + " port " + port + " is free")
+  }
+}
+
+/**
  * Nothing under .deploy may be matchable by ANY rule.
  *
  * This is the property the archive exists to create, and the one the previous
@@ -300,9 +327,14 @@ function start(name, args, image, port, logPrefix) {
   return { child, output: () => output }
 }
 
-async function healthCheck(name, port, path) {
+async function healthCheck(name, port, path, proc) {
   const deadline = Date.now() + HEALTH_TIMEOUT_MS
   while (Date.now() < deadline) {
+    // If our own child died, stop waiting: anything answering now is not it.
+    if (proc && proc.child.exitCode !== null) {
+      fail(name + " process exited with code " + proc.child.exitCode + " before opening :" + port)
+      return 0
+    }
     try {
       const res = await fetch(`http://127.0.0.1:${port}${path}`)
       if (res.ok) {
@@ -321,6 +353,13 @@ async function healthCheck(name, port, path) {
 async function main() {
   let image
   try {
+    await assertPortsFree()
+    if (failures.length > 0) {
+      section('RESULT')
+      log('  BLOCKED — ports are not free; a run now could not prove anything')
+      process.exitCode = 1
+      return
+    }
     build()
     image = packageImage()
     log(`  image: ${image}`)
@@ -351,16 +390,23 @@ async function main() {
     }
 
     section('run — the exact production run commands, from the filtered tree')
-    start('api-server', productionRunArgs('artifacts/api-server'), image, API_PORT, 'api')
-    start('isola', productionRunArgs('artifacts/isola'), image, ISOLA_PORT, 'isola')
+    const api = start('api-server', productionRunArgs('artifacts/api-server'), image, API_PORT, 'api')
+    const isola = start('isola', productionRunArgs('artifacts/isola'), image, ISOLA_PORT, 'isola')
 
     section('health')
-    const apiStatus = await healthCheck('api-server', API_PORT, '/auth/healthz')
-    const isolaStatus = await healthCheck('isola', ISOLA_PORT, '/api/healthz')
+    const apiStatus = await healthCheck('api-server', API_PORT, '/auth/healthz', api)
+    const isolaStatus = await healthCheck('isola', ISOLA_PORT, '/api/healthz', isola)
 
     section('RESULT')
     log(`  FILTERED_API_HEALTH=${apiStatus}`)
     log(`  FILTERED_ISOLA_HEALTH=${isolaStatus}`)
+    // Silence from a "healthy" process is the false-pass signature.
+    if (isolaStatus === 200 && isola.output().trim() === '') {
+      fail('isola reported healthy but produced no output — something else is answering on its port')
+    }
+    if (isolaStatus === 200 && !isola.output().includes('PAYLOAD_UNPACKED=OK')) {
+      fail('isola never logged PAYLOAD_UNPACKED=OK — it did not start from the shipped archive')
+    }
     if (failures.length === 0) log('  PASS — both artifacts start and serve from the filtered runtime image')
     else {
       log('  FAIL')
