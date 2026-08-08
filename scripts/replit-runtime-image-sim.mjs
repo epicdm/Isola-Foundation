@@ -420,4 +420,8 @@ async function main() {
   }
 }
 
-main()
+// Spawned children keep the event loop alive even after SIGKILL is delivered, so
+// exit explicitly: a harness that prints its verdict and then hangs cannot gate
+// anything.
+await main()
+process.exit(process.exitCode ?? 0)
