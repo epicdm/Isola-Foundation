@@ -40,8 +40,13 @@ describe('matchesPattern', () => {
     expect(matchesPattern('artifacts/isola/.nextconfig', 'artifacts/isola/.next')).toBe(false)
   })
 
-  it('is anchored at the start', () => {
-    expect(matchesPattern('vendor/artifacts/isola/.next', 'artifacts/isola/.next')).toBe(false)
+  it('matches at any depth, not only at the repository root', () => {
+    // A bare `node_modules` also claims `.deploy/isola/node_modules`, so the
+    // staged runtime payload must be re-included explicitly rather than assumed
+    // safe. scripts/replit-ignore-model.mjs records what is proven vs assumed.
+    expect(matchesPattern('vendor/artifacts/isola/.next', 'artifacts/isola/.next')).toBe(true)
+    expect(matchesPattern('.deploy/isola/node_modules/next', 'node_modules')).toBe(true)
+    expect(matchesPattern('.deploy/isola/artifacts/isola/.next/BUILD_ID', 'artifacts/isola/.next')).toBe(true)
   })
 
   it('treats * as not crossing a slash and ** as crossing it', () => {
@@ -115,9 +120,16 @@ describe('the real .replitignore', () => {
     // possible outcome of a "hygiene" change, so the rule list itself is pinned.
     // The dependency-tree half is pinned against the real workspace topology in
     // "workspace dependency trees are excluded from the deployment snapshot".
-    const generated = rules.map((r) => r.pattern).filter((p) => !p.endsWith('node_modules'))
+    const generated = rules
+      .filter((r) => !r.negated)
+      .map((r) => r.pattern)
+      .filter((p) => !p.endsWith('node_modules'))
     expect(generated).toEqual(['.local', ...REQUIRED_GENERATED_EXCLUSIONS])
-    expect(rules.every((r) => !r.negated)).toBe(true)
+    // Exactly one negated rule, and it re-includes the shipped payload. It must
+    // be LAST: dockerignore resolves by the last matching rule, so a
+    // re-inclusion above the broad exclusions would simply be overruled.
+    expect(rules.filter((r) => r.negated).map((r) => r.pattern)).toEqual([...REQUIRED_SHIPPED_GENERATED])
+    expect(rules[rules.length - 1]).toEqual({ pattern: '.deploy', negated: true })
   })
 })
 
@@ -573,7 +585,9 @@ describe('workspace dependency trees are excluded from the deployment snapshot',
       '.local',
       ...REQUIRED_GENERATED_EXCLUSIONS,
       ...dependencyRules,
+      // the shipped runtime payload, re-included last
+      ...REQUIRED_SHIPPED_GENERATED,
     ])
-    expect(rules.every((r) => !r.negated)).toBe(true)
+    expect(rules.filter((r) => r.negated).map((r) => r.pattern)).toEqual([...REQUIRED_SHIPPED_GENERATED])
   })
 })
