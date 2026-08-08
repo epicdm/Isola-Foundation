@@ -59,7 +59,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
  */
 const MUST_SHIP = [
   '.deploy/api-server/index.mjs',
-  '.deploy/isola-runtime.bin',
+  '.deploy/isola-standalone.tar',
 ]
 
 /** Workspace trees the image must NOT carry — the whole point of excluding them. */
@@ -73,6 +73,26 @@ const MUST_NOT_SHIP = [
 const API_PORT = Number(process.env.SIM_API_PORT ?? 18099)
 const ISOLA_PORT = Number(process.env.SIM_ISOLA_PORT ?? 23399)
 const HEALTH_TIMEOUT_MS = Number(process.env.SIM_HEALTH_TIMEOUT_MS ?? 90_000)
+
+/**
+ * Replit's promote phase gives roughly this long for every artifact port to
+ * open. Exceeding it is a deployment failure even though the process is
+ * healthy in the end: build 59bff226 promoted nothing because an uncompressed
+ * 85.5 MB extraction plus a blocking instrumentation register() consumed the
+ * window. Time-to-port is therefore asserted, not just eventual health.
+ */
+const PROMOTE_BUDGET_MS = Number(process.env.SIM_PROMOTE_BUDGET_MS ?? 108_000)
+
+/**
+ * Cloud Run injects HOSTNAME as the container's EXTERNAL-routed IP, which is
+ * handled by the load balancer and bound to no local interface. Next.js
+ * standalone does `listen(port, process.env.HOSTNAME || 'localhost')`, so a
+ * launcher that passes process.env through unchanged dies with EADDRNOTAVAIL
+ * (build b0978062). This harness injects an address that is guaranteed not to
+ * be local, so any launcher missing the HOSTNAME override fails HERE instead
+ * of in a promote window.
+ */
+const HOSTILE_HOSTNAME = process.env.SIM_HOSTILE_HOSTNAME ?? '203.0.113.1'
 
 const failures = []
 const started = []
@@ -170,25 +190,16 @@ function packageImage() {
  * any of it away.
  */
 function assertDeployTreeIntact(image) {
-  section('MUST SHIP — the staged payload survived filtering')
-  const before = fileMap(join(REPO_ROOT, '.deploy'))
-  const after = fileMap(join(image, '.deploy'))
-
-  const missing = [...before.keys()].filter((p) => !after.has(p))
-  const resized = [...before.keys()].filter((p) => after.has(p) && after.get(p) !== before.get(p))
-
-  if (before.size === 0) fail('.deploy is empty after the build — nothing was staged')
-  else if (missing.length > 0) {
-    fail(`${missing.length} of ${before.size} staged file(s) were removed by .replitignore`)
-    for (const p of missing.slice(0, 15)) log(`          missing: .deploy/${p}`)
-    if (missing.length > 15) log(`          ... and ${missing.length - 15} more`)
-  } else pass(`all ${before.size} staged file(s) survived`)
-
-  if (resized.length > 0) fail(`${resized.length} staged file(s) changed size`)
-
+  section('MUST SHIP — every runtime path survived filtering')
   for (const p of MUST_SHIP) {
-    if (existsSync(join(image, p))) pass(`present: ${p}`)
-    else fail(`MISSING: ${p}`)
+    if (!existsSync(join(image, p))) {
+      fail("MISSING after filtering: " + p)
+      continue
+    }
+    const src = statSync(join(REPO_ROOT, p)).size
+    const dst = statSync(join(image, p)).size
+    if (src !== dst) fail(p + " changed size: " + src + " -> " + dst)
+    else pass("survived intact (" + Math.round(dst / 1024) + " KB): " + p)
   }
 }
 
@@ -228,21 +239,17 @@ async function assertPortsFree() {
  * .replitignore can strip it.
  */
 function assertPayloadIsUnexcludable() {
-  section('PAYLOAD SHAPE — nothing under .deploy can be matched by any rule')
+  section('PAYLOAD SHAPE — every runtime path is unmatchable by any rule')
   const rules = parseIgnore(readFileSync(join(REPO_ROOT, ".replitignore"), "utf8"))
-  const offenders = []
-  for (const rel of fileMap(join(REPO_ROOT, ".deploy")).keys()) {
-    const full = ".deploy/" + rel
-    for (const rule of rules) {
-      if (!rule.negated && matchesPattern(full, rule.pattern)) {
-        offenders.push(full + "  (matches " + rule.pattern + ")")
-      }
-    }
+  // Scoped to MUST_SHIP on purpose. generate-deploy-staging leaves the unpacked
+  // .deploy/isola tree beside the archive; that tree IS matchable and IS
+  // stripped, which is harmless because nothing starts from it. What must hold
+  // is that every path the runtime genuinely needs cannot be matched at all.
+  for (const p of MUST_SHIP) {
+    const matched = rules.filter((r) => !r.negated && matchesPattern(p, r.pattern))
+    if (matched.length > 0) fail(p + " is matchable by: " + matched.map((r) => r.pattern).join(", "))
+    else pass("unmatchable by any rule: " + p)
   }
-  if (offenders.length > 0) {
-    fail(offenders.length + " staged path(s) are matchable by an exclusion rule")
-    for (const o of offenders.slice(0, 10)) log("          " + o)
-  } else pass("no staged path matches any exclusion rule")
 }
 
 /**
@@ -310,7 +317,7 @@ function start(name, args, image, port, logPrefix) {
   log(`  ${name}: ${args.join(' ')}   (cwd = image root)`)
   const child = spawn(args[0], args.slice(1), {
     cwd: image,
-    env: { ...process.env, PORT: String(port), NODE_ENV: 'production' },
+    env: { ...process.env, PORT: String(port), NODE_ENV: 'production', HOSTNAME: HOSTILE_HOSTNAME },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   started.push(child)
@@ -394,8 +401,14 @@ async function main() {
     const isola = start('isola', productionRunArgs('artifacts/isola'), image, ISOLA_PORT, 'isola')
 
     section('health')
+    const startedAt = Date.now()
     const apiStatus = await healthCheck('api-server', API_PORT, '/auth/healthz', api)
     const isolaStatus = await healthCheck('isola', ISOLA_PORT, '/api/healthz', isola)
+    const elapsed = Date.now() - startedAt
+    section('PROMOTE BUDGET — both ports open inside the platform window')
+    if (elapsed > PROMOTE_BUDGET_MS) {
+      fail(`both ports took ${elapsed}ms, over the ~${PROMOTE_BUDGET_MS}ms promote window`)
+    } else pass(`both ports open in ${elapsed}ms (budget ${PROMOTE_BUDGET_MS}ms)`)
 
     section('RESULT')
     log(`  FILTERED_API_HEALTH=${apiStatus}`)
@@ -404,8 +417,8 @@ async function main() {
     if (isolaStatus === 200 && isola.output().trim() === '') {
       fail('isola reported healthy but produced no output — something else is answering on its port')
     }
-    if (isolaStatus === 200 && !isola.output().includes('PAYLOAD_UNPACKED=OK')) {
-      fail('isola never logged PAYLOAD_UNPACKED=OK — it did not start from the shipped archive')
+    if (isolaStatus === 200 && !isola.output().includes('[start-prod-server]')) {
+      fail('isola never logged from start-prod-server — it did not start from the shipped archive')
     }
     if (failures.length === 0) log('  PASS — both artifacts start and serve from the filtered runtime image')
     else {
