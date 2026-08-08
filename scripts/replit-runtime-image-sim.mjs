@@ -35,7 +35,7 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process'
-import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -57,7 +57,7 @@ const MUST_SHIP = [
   '.deploy/api-server/index.mjs',
   '.deploy/isola/artifacts/isola/server.js',
   '.deploy/isola/artifacts/isola/.next',
-  '.deploy/isola/node_modules/next',
+  '.deploy/isola/artifacts/isola/node_modules/next',
 ]
 
 /** Workspace trees the image must NOT carry — the whole point of excluding them. */
@@ -185,6 +185,48 @@ function assertDeployTreeIntact(image) {
   }
 }
 
+/**
+ * Nothing in the image may reach outside the image.
+ *
+ * This assertion exists because its absence produced a FALSE PASS. An earlier
+ * reconstruction copied the payload with `cp -r`, which dereferences symlinks
+ * into real files, and concluded the payload was self-contained. It was not:
+ * staging had rewritten pnpm's relative links as ABSOLUTE paths into
+ * `artifacts/isola/.next`, so the payload only ever worked while the original
+ * workspace sat next to it — exactly the condition a deployment does not have.
+ *
+ * A copied image whose links still point at the real repository will happily
+ * start and prove nothing at all. So: any symlink resolving outside the image
+ * root is a failure, and a dangling one is a failure.
+ */
+function assertNoLinksOutOfImage(image) {
+  section('CONTAINMENT — the image reaches nothing outside itself')
+  const offenders = []
+  const dangling = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isSymbolicLink()) {
+        const target = resolve(dirname(full), readlinkSync(full))
+        if (relative(image, target).startsWith('..')) offenders.push(`${relative(image, full)} -> ${target}`)
+        else if (!existsSync(target)) dangling.push(relative(image, full))
+      } else if (entry.isDirectory()) walk(full)
+    }
+  }
+  walk(image)
+
+  if (offenders.length > 0) {
+    fail(`${offenders.length} symlink(s) point outside the runtime image`)
+    for (const o of offenders.slice(0, 10)) log(`          ${o}`)
+    if (offenders.length > 10) log(`          ... and ${offenders.length - 10} more`)
+  } else pass('no symlink escapes the image')
+
+  if (dangling.length > 0) {
+    fail(`${dangling.length} dangling symlink(s) inside the image`)
+    for (const d of dangling.slice(0, 10)) log(`          ${d}`)
+  } else pass('no dangling symlinks')
+}
+
 /** The excluded workspace trees really are gone, or the run below proves nothing. */
 function assertWorkspaceTreesAbsent(image) {
   section('MUST NOT SHIP — no workspace trees to fall back on')
@@ -251,6 +293,7 @@ async function main() {
     log(`  image: ${image}`)
 
     assertDeployTreeIntact(image)
+    assertNoLinksOutOfImage(image)
     assertWorkspaceTreesAbsent(image)
 
     // Fail BEFORE starting anything if the payload is already broken: a process
