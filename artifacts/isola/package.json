@@ -5,7 +5,7 @@
   "scripts": {
     "postinstall": "prisma generate",
     "dev": "node ./scripts/generate-build-info.mjs && next dev",
-    "build": "node ./scripts/generate-build-info.mjs --preflight && pnpm install --frozen-lockfile && node ./scripts/generate-build-info.mjs --require-identity && next build && node ./scripts/generate-deploy-staging.mjs && prisma migrate deploy",
+    "build": "node ./scripts/guard-replit-deploy-contract.mjs && node ./scripts/generate-build-info.mjs --preflight && pnpm install --frozen-lockfile && node ./scripts/generate-build-info.mjs --require-identity && next build && node ./scripts/generate-deploy-staging.mjs && prisma migrate deploy",
     "start": "next start",
     "start:prod": "node scripts/start-prod-server.mjs",
     "db:push": "tsx ../../scripts/src/guard-not-prod-db.ts && prisma db push",
