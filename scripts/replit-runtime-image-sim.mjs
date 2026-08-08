@@ -40,24 +40,25 @@ import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { isExcluded, parseIgnore } from './replit-ignore-model.mjs'
+import { isExcluded, matchesPattern, parseIgnore } from './replit-ignore-model.mjs'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
  * Paths the runtime cannot start without.
  *
- * The named entries below are the two entrypoints and the two directories whose
- * loss produced real, observed production failures. They are not the whole
- * contract — `assertDeployTreeIntact` additionally requires that EVERY file
- * staged under `.deploy` survives filtering byte-for-byte, which is what covers
- * the rest of the Next.js standalone trace without having to enumerate it.
+ * Both are single files whose paths contain no segment any exclusion can match.
+ * Isola ships as ONE archive rather than a directory tree precisely because a
+ * tree containing node_modules and .next does not survive filtering — see
+ * artifacts/isola/scripts/payload-archive.mjs.
+ *
+ * assertDeployTreeIntact additionally requires that EVERY file staged under
+ * .deploy survives, and assertPayloadIsUnexcludable requires that nothing under
+ * .deploy could be matched by any rule in the first place.
  */
 const MUST_SHIP = [
   '.deploy/api-server/index.mjs',
-  '.deploy/isola/artifacts/isola/server.js',
-  '.deploy/isola/artifacts/isola/.next',
-  '.deploy/isola/artifacts/isola/node_modules/next',
+  '.deploy/isola-runtime.bin',
 ]
 
 /** Workspace trees the image must NOT carry — the whole point of excluding them. */
@@ -191,6 +192,33 @@ function assertDeployTreeIntact(image) {
 }
 
 /**
+ * Nothing under .deploy may be matchable by ANY rule.
+ *
+ * This is the property the archive exists to create, and the one the previous
+ * approach lacked. It is checked against the SOURCE .deploy, before filtering,
+ * so it states an intrinsic fact about the payload rather than the outcome of
+ * one particular reading of the rules: if no rule can match it, no dialect of
+ * .replitignore can strip it.
+ */
+function assertPayloadIsUnexcludable() {
+  section('PAYLOAD SHAPE — nothing under .deploy can be matched by any rule')
+  const rules = parseIgnore(readFileSync(join(REPO_ROOT, ".replitignore"), "utf8"))
+  const offenders = []
+  for (const rel of fileMap(join(REPO_ROOT, ".deploy")).keys()) {
+    const full = ".deploy/" + rel
+    for (const rule of rules) {
+      if (!rule.negated && matchesPattern(full, rule.pattern)) {
+        offenders.push(full + "  (matches " + rule.pattern + ")")
+      }
+    }
+  }
+  if (offenders.length > 0) {
+    fail(offenders.length + " staged path(s) are matchable by an exclusion rule")
+    for (const o of offenders.slice(0, 10)) log("          " + o)
+  } else pass("no staged path matches any exclusion rule")
+}
+
+/**
  * Nothing in the image may reach outside the image.
  *
  * This assertion exists because its absence produced a FALSE PASS. An earlier
@@ -297,6 +325,7 @@ async function main() {
     image = packageImage()
     log(`  image: ${image}`)
 
+    assertPayloadIsUnexcludable()
     assertDeployTreeIntact(image)
     assertNoLinksOutOfImage(image)
     assertWorkspaceTreesAbsent(image)

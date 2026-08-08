@@ -125,11 +125,11 @@ describe('the real .replitignore', () => {
       .map((r) => r.pattern)
       .filter((p) => !p.endsWith('node_modules'))
     expect(generated).toEqual(['.local', ...REQUIRED_GENERATED_EXCLUSIONS])
-    // Exactly one negated rule, and it re-includes the shipped payload. It must
-    // be LAST: dockerignore resolves by the last matching rule, so a
-    // re-inclusion above the broad exclusions would simply be overruled.
-    expect(rules.filter((r) => r.negated).map((r) => r.pattern)).toEqual([...REQUIRED_SHIPPED_GENERATED])
-    expect(rules[rules.length - 1]).toEqual({ pattern: '.deploy', negated: true })
+    // No negated rule at all. A trailing `!.deploy` re-inclusion was shipped in
+    // build b202729 and did NOT rescue the nested payload, so exclusions are
+    // treated as final and the runtime payload instead ships as a single file
+    // that no rule can match. artifacts/isola/scripts/payload-archive.mjs.
+    expect(rules.filter((r) => r.negated)).toEqual([])
   })
 })
 
@@ -193,7 +193,7 @@ describe('the excluded paths really are rebuilt', () => {
     // never opened even though api-server had already started cleanly from its
     // own staged payload. Migrations moved to the build phase, where the CLI
     // exists. `decision-run-prisma-migrate-in-build-phase-2026-08-07`.
-    expect(pkg.scripts['start:prod']).toBe('node ../../.deploy/isola/artifacts/isola/server.js')
+    expect(pkg.scripts['start:prod']).toBe('node ./scripts/start-from-archive.mjs')
   })
 
   it('the runtime start command invokes no Prisma CLI, which does not exist in the runtime container', () => {
@@ -353,13 +353,15 @@ describe('production run commands resolve to the repo-root staged payload', () =
 // (isola's port never opened), and then `.deploy` itself.
 describe('the staged runtime payload is forgiven by the preflight without being excluded from the publish', () => {
   it('every shipped-generated path is NOT excluded by .replitignore', () => {
+    // Not by a re-inclusion rule — there is none — but because no exclusion
+    // pattern can match the path in the first place.
     for (const prefix of REQUIRED_SHIPPED_GENERATED) {
       expect({ prefix, excluded: isExcluded(prefix, rules) }).toEqual({ prefix, excluded: false })
     }
   })
 
   it('the entrypoints the run commands name are inside a shipped-generated path', () => {
-    for (const entrypoint of ['.deploy/api-server/index.mjs', '.deploy/isola/artifacts/isola/server.js']) {
+    for (const entrypoint of ['.deploy/api-server/index.mjs', '.deploy/isola-runtime.bin']) {
       expect({ entrypoint, excluded: isExcluded(entrypoint, rules) }).toEqual({ entrypoint, excluded: false })
     }
   })
@@ -573,8 +575,10 @@ describe('workspace dependency trees are excluded from the deployment snapshot',
     ]) {
       expect({ p, matched: isExcluded(p, rules.filter((r) => !r.negated)) }).toEqual({ p, matched: true })
     }
-    // ...and the re-inclusion is what rescues the staged payload specifically.
-    expect(isExcluded('.deploy/isola/node_modules/next/package.json', rules)).toBe(false)
+    // ...and this is exactly why the runtime payload may not ship as a tree:
+    // a nested node_modules inside .deploy is matchable, so isola ships as a
+    // single file instead. artifacts/isola/scripts/payload-archive.mjs.
+    expect(isExcluded('.deploy/isola-runtime.bin', rules)).toBe(false)
     expect(isExcluded('artifacts/isola/app/node_modules/page.tsx', rules)).toBe(true)
   })
 
@@ -603,9 +607,7 @@ describe('workspace dependency trees are excluded from the deployment snapshot',
       '.local',
       ...REQUIRED_GENERATED_EXCLUSIONS,
       ...dependencyRules,
-      // the shipped runtime payload, re-included last
-      ...REQUIRED_SHIPPED_GENERATED,
     ])
-    expect(rules.filter((r) => r.negated).map((r) => r.pattern)).toEqual([...REQUIRED_SHIPPED_GENERATED])
+    expect(rules.filter((r) => r.negated)).toEqual([])
   })
 })

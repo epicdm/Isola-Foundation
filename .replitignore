@@ -130,38 +130,24 @@ lib/api-zod/node_modules
 lib/db/node_modules
 scripts/node_modules
 
-# --- the shipped runtime payload, re-included LAST (added 2026-08-08) ---
+# --- the shipped runtime payload (added 2026-08-08) ---
 #
-# Everything above excludes DISPOSABLE workspace trees: build output and
-# dependency trees the deployment's own build reconstructs. `.deploy` is the
-# opposite — it is the runtime payload the build stages, and both production run
-# commands start from it.
+# There is no re-inclusion rule here, and that is deliberate.
 #
-# The exclusions above are matched at ANY depth, not anchored to the repository
-# root. So a bare `node_modules` also claims `.deploy/isola/node_modules`, and
-# `artifacts/isola/.next` also claims
-# `.deploy/isola/artifacts/isola/.next` — the two directories a Next.js
-# standalone payload cannot exist without. That is not a theory: the runtime
-# image simulator (`pnpm run sim:runtime-image`) reconstructs this filtering and
-# showed 2496 of 2520 staged files being destroyed, after which isola died with
-# `Cannot find module 'next'` before its banner while api-server started
-# normally — the exact asymmetry observed in production on 2026-08-07/08.
+# Isola ships as a SINGLE file, .deploy/isola-runtime.bin, because a directory
+# tree cannot: Next.js standalone output contains directories literally named
+# node_modules and .next, and Replit applies the exclusions above to those
+# names nested inside the payload, not only at the repository root. Three
+# publishes showed the same asymmetry -- api-server, a single bundle whose path
+# holds no excluded segment, opened its port every time; isola died before its
+# banner and never opened 23359.
 #
-# This entry restores the whole subtree, and it must stay LAST: dockerignore
-# resolves a path by the LAST rule that matches it, so a re-inclusion placed
-# above the broad exclusions would be overruled by them.
+# A trailing !.deploy re-inclusion was tried and did NOT rescue it (build
+# b202729). .replitignore has no official documentation in Replit docs, in
+# Context7, or on the public web, so which ignore dialect it implements -- and
+# whether ! means anything to it -- cannot be established from authority. The
+# archive removes the dependency on that question instead of answering it:
+# neither .deploy/isola-runtime.bin nor .deploy/api-server/index.mjs contains a
+# path segment any rule above can match, under any dialect.
 #
-# Deliberately NOT written as `/node_modules` or any other anchored spelling.
-# Replit describes this file as dockerignore-style, dockerignore disregards
-# leading and trailing slashes, and no authoritative evidence says a leading
-# slash anchors a pattern here. Re-including the payload explicitly does not
-# depend on how anchoring is interpreted.
-#
-# UNVALIDATED, and the one thing a simulator cannot settle: whether Replit's own
-# matcher honours `!` re-inclusion at all. The simulator proves the resulting
-# TREE is correct under last-match-wins; only a real publish proves Replit
-# applies that rule. If a publish shows the payload still stripped, the fallback
-# that depends on no ignore-syntax feature is to stage the payload as a single
-# archive whose path contains no excluded segment, and unpack it at start.
-# `decision-require-replit-runtime-image-simulator-2026-08-07`.
-!.deploy
+# Verify with: pnpm run sim:runtime-image
