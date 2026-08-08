@@ -125,11 +125,11 @@ describe('the real .replitignore', () => {
       .map((r) => r.pattern)
       .filter((p) => !p.endsWith('node_modules'))
     expect(generated).toEqual(['.local', ...REQUIRED_GENERATED_EXCLUSIONS])
-    // Exactly one negated rule, and it re-includes the shipped payload. It must
-    // be LAST: dockerignore resolves by the last matching rule, so a
-    // re-inclusion above the broad exclusions would simply be overruled.
-    expect(rules.filter((r) => r.negated).map((r) => r.pattern)).toEqual([...REQUIRED_SHIPPED_GENERATED])
-    expect(rules[rules.length - 1]).toEqual({ pattern: '.deploy', negated: true })
+    // No negated rule at all. A trailing `!.deploy` re-inclusion was shipped in
+    // build b202729 and did NOT rescue the nested payload, so exclusions are
+    // treated as final and the runtime payload instead ships as a single file
+    // that no rule can match. artifacts/isola/scripts/payload-archive.mjs.
+    expect(rules.filter((r) => r.negated)).toEqual([])
   })
 })
 
@@ -193,7 +193,7 @@ describe('the excluded paths really are rebuilt', () => {
     // never opened even though api-server had already started cleanly from its
     // own staged payload. Migrations moved to the build phase, where the CLI
     // exists. `decision-run-prisma-migrate-in-build-phase-2026-08-07`.
-    expect(pkg.scripts['start:prod']).toBe('node ../../.deploy/isola/artifacts/isola/server.js')
+    expect(pkg.scripts['start:prod']).toBe('node ./scripts/start-from-archive.mjs')
   })
 
   it('the runtime start command invokes no Prisma CLI, which does not exist in the runtime container', () => {
@@ -279,7 +279,7 @@ describe('production run commands resolve to the repo-root staged payload', () =
   const REPO_ROOT_DIR = REPO_ROOT.replace(/\/$/, '')
   const ISOLA_DIR = `${REPO_ROOT}artifacts/isola`
   const API_SERVER_ENTRYPOINT = `${REPO_ROOT}.deploy/api-server/index.mjs`
-  const ISOLA_ENTRYPOINT = `${REPO_ROOT}.deploy/isola/artifacts/isola/server.js`
+  const ISOLA_ARCHIVE = `${REPO_ROOT}.deploy/isola-runtime.bin`
 
   function extractApiServerRunArg(): string {
     const toml = readFileSync(`${REPO_ROOT}artifacts/api-server/.replit-artifact/artifact.toml`, 'utf8')
@@ -299,8 +299,22 @@ describe('production run commands resolve to the repo-root staged payload', () =
     expect(resolvePath(REPO_ROOT_DIR, extractApiServerRunArg())).toBe(API_SERVER_ENTRYPOINT)
   })
 
-  it('the isola start:prod path resolves to the staged entrypoint from the package directory pnpm anchors it to', () => {
-    expect(resolvePath(ISOLA_DIR, extractIsolaRunArg())).toBe(ISOLA_ENTRYPOINT)
+  it('the isola start:prod runs the archive starter, which is what the runtime has', () => {
+    // isola ships as ONE file (.deploy/isola-runtime.bin) because a directory
+    // tree containing node_modules and .next does not survive filtering. So
+    // start:prod names the starter, not a server inside a tree that is not
+    // there. artifacts/isola/scripts/payload-archive.mjs has the evidence.
+    expect(resolvePath(ISOLA_DIR, extractIsolaRunArg())).toBe(`${ISOLA_DIR}/scripts/start-from-archive.mjs`)
+    expect(existsSync(`${ISOLA_DIR}/scripts/start-from-archive.mjs`)).toBe(true)
+  })
+
+  it('the archive starter unpacks the shipped payload and runs the extracted server', () => {
+    const starter = readFileSync(`${ISOLA_DIR}/scripts/start-from-archive.mjs`, 'utf8')
+    expect(starter).toContain('unpack')
+    expect(starter).toContain('PAYLOAD_UNPACKED=OK')
+    // It must refuse rather than improvise if the payload did not ship: there
+    // is no workspace node_modules in the runtime container to fall back to.
+    expect(starter).toContain('process.exit(1)')
   })
 
   it('the isola artifact runs through pnpm --filter, which is what re-anchors its cwd', () => {
@@ -329,7 +343,7 @@ describe('production run commands resolve to the repo-root staged payload', () =
     },
   )
 
-  it.skipIf(!existsSync(ISOLA_ENTRYPOINT))(
+  it.skipIf(!existsSync(ISOLA_ARCHIVE))(
     'spawning the literal isola staged server.js from the directory pnpm anchors it to resolves the module',
     () => {
       const result = spawnSync(process.execPath, [extractIsolaRunArg()], {
@@ -353,13 +367,15 @@ describe('production run commands resolve to the repo-root staged payload', () =
 // (isola's port never opened), and then `.deploy` itself.
 describe('the staged runtime payload is forgiven by the preflight without being excluded from the publish', () => {
   it('every shipped-generated path is NOT excluded by .replitignore', () => {
+    // Not by a re-inclusion rule — there is none — but because no exclusion
+    // pattern can match the path in the first place.
     for (const prefix of REQUIRED_SHIPPED_GENERATED) {
       expect({ prefix, excluded: isExcluded(prefix, rules) }).toEqual({ prefix, excluded: false })
     }
   })
 
   it('the entrypoints the run commands name are inside a shipped-generated path', () => {
-    for (const entrypoint of ['.deploy/api-server/index.mjs', '.deploy/isola/artifacts/isola/server.js']) {
+    for (const entrypoint of ['.deploy/api-server/index.mjs', '.deploy/isola-runtime.bin']) {
       expect({ entrypoint, excluded: isExcluded(entrypoint, rules) }).toEqual({ entrypoint, excluded: false })
     }
   })
@@ -573,8 +589,10 @@ describe('workspace dependency trees are excluded from the deployment snapshot',
     ]) {
       expect({ p, matched: isExcluded(p, rules.filter((r) => !r.negated)) }).toEqual({ p, matched: true })
     }
-    // ...and the re-inclusion is what rescues the staged payload specifically.
-    expect(isExcluded('.deploy/isola/node_modules/next/package.json', rules)).toBe(false)
+    // ...and this is exactly why the runtime payload may not ship as a tree:
+    // a nested node_modules inside .deploy is matchable, so isola ships as a
+    // single file instead. artifacts/isola/scripts/payload-archive.mjs.
+    expect(isExcluded('.deploy/isola-runtime.bin', rules)).toBe(false)
     expect(isExcluded('artifacts/isola/app/node_modules/page.tsx', rules)).toBe(true)
   })
 
@@ -603,9 +621,7 @@ describe('workspace dependency trees are excluded from the deployment snapshot',
       '.local',
       ...REQUIRED_GENERATED_EXCLUSIONS,
       ...dependencyRules,
-      // the shipped runtime payload, re-included last
-      ...REQUIRED_SHIPPED_GENERATED,
     ])
-    expect(rules.filter((r) => r.negated).map((r) => r.pattern)).toEqual([...REQUIRED_SHIPPED_GENERATED])
+    expect(rules.filter((r) => r.negated)).toEqual([])
   })
 })

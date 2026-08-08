@@ -26,9 +26,11 @@
  * included by Next's own standalone output and must be copied in separately —
  * this is Next.js's own documented manual step, not specific to this repo.
  */
-import { existsSync, cpSync, rmSync, mkdirSync } from 'node:fs'
+import { existsSync, cpSync, rmSync, mkdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import { pack, paths } from './payload-archive.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const isolaDir = resolve(here, '..')
@@ -43,8 +45,9 @@ const stagedAppDir = join(deployDir, 'artifacts', 'isola')
 const staticDest = join(stagedAppDir, '.next', 'static')
 const publicDest = join(stagedAppDir, 'public')
 const entrypoint = join(stagedAppDir, 'server.js')
+const { archive } = paths(repoRoot)
 
-function main() {
+async function main() {
   if (!existsSync(standaloneDir)) {
     console.error(`generate-deploy-staging: ${standaloneDir} does not exist. Did \`next build\` run first?`)
     process.exit(1)
@@ -102,7 +105,30 @@ function main() {
     process.exit(1)
   }
 
-  console.log(`DEPLOY_STAGING=OK entrypoint=${entrypoint}`)
+  // Collapse the staged tree into ONE file, then delete the tree.
+  //
+  // The tree cannot ship: it contains directories named `node_modules` and
+  // `.next`, and Replit applies `.replitignore` exclusions to those names
+  // nested inside the payload, not only at the repository root. Three
+  // publishes showed the same asymmetry — api-server, a single bundle with no
+  // excluded segment anywhere in its path, opened its port every time; isola
+  // died before its banner and never opened 23359. A trailing `!.deploy`
+  // re-inclusion did not rescue it either (build b202729), and `.replitignore`
+  // has no official documentation in Replit docs, in Context7, or on the
+  // public web — so which ignore dialect it implements is not establishable
+  // from authority. A single file whose name matches no exclusion removes the
+  // dependency on that question entirely, under any dialect.
+  const packed = await pack(deployDir, archive)
+  rmSync(deployDir, { recursive: true, force: true })
+
+  if (!existsSync(archive)) {
+    console.error(`generate-deploy-staging: archive missing after pack: ${archive}`)
+    process.exit(1)
+  }
+
+  console.log(
+    `DEPLOY_STAGING=OK archive=${archive} entries=${packed} bytes=${statSync(archive).size}`,
+  )
 }
 
-main()
+await main()
