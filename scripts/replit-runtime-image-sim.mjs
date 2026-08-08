@@ -128,36 +128,35 @@ function build() {
 function packageImage() {
   section('package — apply .replitignore to build the runtime image')
   const image = mkdtempSync(join(tmpdir(), 'replit-runtime-image-'))
-  // `verbatimSymlinks: true` or this harness corrupts the very thing it is
-  // measuring: cpSync otherwise rewrites each relative symlink as an ABSOLUTE
+  const rules = parseIgnore(readFileSync(join(REPO_ROOT, '.replitignore'), 'utf8'))
+  const excluded = []
+
+  // Filtering DURING the copy, rather than copying everything and deleting
+  // after, is what makes this usable: the workspace dependency trees are the
+  // bulk of the repository and copying them only to remove them took the run
+  // from minutes to tens of minutes.
+  //
+  // `verbatimSymlinks: true` or this harness corrupts the very thing it
+  // measures — cpSync otherwise rewrites each relative symlink as an ABSOLUTE
   // path back into REPO_ROOT, so every link in the image would resolve into the
-  // intact source tree — which is both the false-pass that hid this bug and,
-  // once containment is asserted, a false failure. Copy the links as written.
+  // intact source tree. That is precisely the false pass that hid this bug.
   cpSync(REPO_ROOT, image, {
     recursive: true,
     verbatimSymlinks: true,
-    filter: (src) => !src.split(/[\\/]/).includes('.git'),
+    filter: (src) => {
+      const rel = relative(REPO_ROOT, src).split('\\').join('/')
+      if (rel === '') return true
+      if (rel.split('/')[0] === '.git') return false
+      if (isExcluded(rel, rules)) {
+        excluded.push(rel)
+        return false
+      }
+      return true
+    },
   })
 
-  const rules = parseIgnore(readFileSync(join(REPO_ROOT, '.replitignore'), 'utf8'))
-  let removed = 0
-
-  const walk = (dir) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const full = join(dir, entry.name)
-      const rel = relative(image, full).split('\\').join('/')
-      if (isExcluded(rel, rules)) {
-        rmSync(full, { recursive: true, force: true })
-        removed += 1
-        log(`  removed  ${rel}`)
-        continue
-      }
-      if (entry.isDirectory()) walk(full)
-    }
-  }
-  walk(image)
-
-  log(`  ${removed} path(s) removed`)
+  for (const rel of excluded) log(`  excluded  ${rel}`)
+  log(`  ${excluded.length} path(s) excluded by .replitignore`)
   return image
 }
 
