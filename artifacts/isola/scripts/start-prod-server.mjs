@@ -52,7 +52,7 @@ console.log(`[start-prod-server] unpacking ${archivePath} → ${unpackDir}`)
 mkdirSync(unpackDir, { recursive: true })
 
 try {
-  execFileSync('tar', ['-xf', archivePath, '-C', unpackDir], { stdio: 'inherit' })
+  execFileSync('tar', ['-xzf', archivePath, '-C', unpackDir], { stdio: 'inherit' })
 } catch (err) {
   console.error(`[start-prod-server] tar extraction failed: ${String(err)}`)
   process.exit(1)

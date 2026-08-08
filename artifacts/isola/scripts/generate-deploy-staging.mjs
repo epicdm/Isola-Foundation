@@ -147,7 +147,11 @@ function main() {
   console.log('generate-deploy-staging: creating runtime archive ...')
   rmSync(archivePath, { force: true })
   try {
-    execFileSync('tar', ['-cf', archivePath, '-C', deployDir, '.'], { stdio: 'inherit' })
+    // -z: gzip compression.  Reduces the archive from ~85 MB to ~25–30 MB so
+    // the Repl layer upload is faster and there is less data to read during
+    // extraction at container start.  Decompression adds negligible CPU (< 1 s
+    // for 30 MB on Cloud Run hardware); the savings come from reduced I/O.
+    execFileSync('tar', ['-czf', archivePath, '-C', deployDir, '.'], { stdio: 'inherit' })
   } catch (err) {
     console.error(`generate-deploy-staging: tar failed: ${String(err)}`)
     process.exit(1)

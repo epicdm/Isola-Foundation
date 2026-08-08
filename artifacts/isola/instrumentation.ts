@@ -55,35 +55,61 @@ import {
 export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
-  const { default: prisma } = await import('@/lib/prisma');
+  // Fire-and-forget: do NOT await the seeding work here.
+  //
+  // Why: Next.js awaits register() before opening the HTTP listener.  Every
+  // millisecond spent here delays the port opening and eats into the
+  // Replit Autoscale startup-probe window (~108 s from container start).
+  // The archive extraction + module loading already consumes 30-60 s of that
+  // budget; adding 20-60 s of Neon cold-start DB round-trips made the total
+  // exceed the window (build 59bff226: port never detected in 108 s).
+  //
+  // All seed helpers are idempotent and wrapped in their own try/catch — a
+  // failure logs a warning and continues; it never corrupts data.  The health
+  // check route (/api/healthz) returns 200 unconditionally; it does not depend
+  // on seeding state.  Real request handlers read seeded rows from the DB on
+  // demand, so a brief window where seeding is still in progress is safe — the
+  // rows either exist (idempotent no-op) or get created by the background task
+  // before the first live request arrives (Neon cold-start < 5 s in practice).
+  //
+  // `void` silences the "floating promise" lint rule intentionally.
+  void runSeedingBackground();
+}
 
-  // Resolve admin tenant once; both seeds need it
-  const adminTenantId = await resolveAdminTenantId(prisma);
+async function runSeedingBackground() {
+  try {
+    const { default: prisma } = await import('@/lib/prisma');
 
-  await Promise.all([
-    seedWhatsAppTestNumber(prisma, adminTenantId),
-    seedDefaultAgent(prisma, adminTenantId),
-    seedWaveBTenants(prisma),
-    seedEmaSalesAgent(prisma),
-    seedEpicWhatsAppNumbers(prisma, adminTenantId),
-  ]);
+    // Resolve admin tenant once; both seeds need it
+    const adminTenantId = await resolveAdminTenantId(prisma);
 
-  // Gate #4: EMA human-takeover Chatwoot binding — inert until CC's real
-  // inbox ids are configured. Runs after seedEmaSalesAgent so the Tenant
-  // row exists (FK requirement for ChatwootBinding).
-  await seedEmaSalesChatwootBinding(prisma);
+    await Promise.all([
+      seedWhatsAppTestNumber(prisma, adminTenantId),
+      seedDefaultAgent(prisma, adminTenantId),
+      seedWaveBTenants(prisma),
+      seedEmaSalesAgent(prisma),
+      seedEpicWhatsAppNumbers(prisma, adminTenantId),
+    ]);
 
-  // One-time production flips — run after seeding so the relevant Agent row
-  // is guaranteed to exist. Both are idempotent (no-op once already
-  // 'hermes') and ship as code instead of a raw SQL edit against production.
-  await flipEmaSalesToHermesOnce(prisma, adminTenantId);
-  await flipEpicToHermesOnce(prisma, adminTenantId);
+    // Gate #4: EMA human-takeover Chatwoot binding — inert until CC's real
+    // inbox ids are configured. Runs after seedEmaSalesAgent so the Tenant
+    // row exists (FK requirement for ChatwootBinding).
+    await seedEmaSalesChatwootBinding(prisma);
 
-  // v1.11.0 Clawith cutover — EMA (0001) only. Runs last so it always wins
-  // over flipEmaSalesToHermesOnce within the same cold start. Gated at the
-  // routing layer too: ISOLA_BRIDGE_ALLOWED_PHONE_NUMBER_IDS in
-  // lib/brain-provider.ts is the real safety boundary.
-  await flipEmaSalesToClawithOnce(prisma, adminTenantId);
+    // One-time production flips — run after seeding so the relevant Agent row
+    // is guaranteed to exist. Both are idempotent (no-op once already
+    // 'hermes') and ship as code instead of a raw SQL edit against production.
+    await flipEmaSalesToHermesOnce(prisma, adminTenantId);
+    await flipEpicToHermesOnce(prisma, adminTenantId);
+
+    // v1.11.0 Clawith cutover — EMA (0001) only. Runs last so it always wins
+    // over flipEmaSalesToHermesOnce within the same cold start. Gated at the
+    // routing layer too: ISOLA_BRIDGE_ALLOWED_PHONE_NUMBER_IDS in
+    // lib/brain-provider.ts is the real safety boundary.
+    await flipEmaSalesToClawithOnce(prisma, adminTenantId);
+  } catch (err) {
+    console.error('[instrumentation] Background seeding error:', err);
+  }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
