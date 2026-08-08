@@ -208,7 +208,7 @@ describe('the excluded paths really are rebuilt', () => {
       scripts: Record<string, string>
     }
     expect(pkg.scripts.build).toBe(
-      'node ./scripts/generate-build-info.mjs --preflight && pnpm install --frozen-lockfile && node ./scripts/generate-build-info.mjs --require-identity && next build && node ./scripts/generate-deploy-staging.mjs && prisma migrate deploy',
+      'node ./scripts/guard-replit-deploy-contract.mjs && node ./scripts/generate-build-info.mjs --preflight && pnpm install --frozen-lockfile && node ./scripts/generate-build-info.mjs --require-identity && next build && node ./scripts/generate-deploy-staging.mjs && prisma migrate deploy',
     )
   })
 
