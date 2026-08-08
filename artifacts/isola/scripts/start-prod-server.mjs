@@ -71,7 +71,16 @@ console.log(
 
 const server = spawn('node', [serverPath], {
   stdio: 'inherit',
-  env: process.env,
+  env: {
+    ...process.env,
+    // Cloud Run sets HOSTNAME to the container's external-routed IP (e.g.
+    // 34.117.33.233).  That address is NOT bound to any local network
+    // interface inside the container, so Next.js standalone's
+    // `server.listen(port, hostname)` fails with EADDRNOTAVAIL.  Force
+    // 0.0.0.0 so the listener binds to all available interfaces, which is
+    // the correct behaviour for a containerised server behind a load balancer.
+    HOSTNAME: '0.0.0.0',
+  },
 })
 
 server.on('error', (err) => {
