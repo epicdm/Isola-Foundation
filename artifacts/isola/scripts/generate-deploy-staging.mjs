@@ -27,10 +27,9 @@
  * this is Next.js's own documented manual step, not specific to this repo.
  */
 import { existsSync, cpSync, rmSync, mkdirSync, statSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-
-import { pack, paths } from './payload-archive.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const isolaDir = resolve(here, '..')
@@ -45,9 +44,33 @@ const stagedAppDir = join(deployDir, 'artifacts', 'isola')
 const staticDest = join(stagedAppDir, '.next', 'static')
 const publicDest = join(stagedAppDir, 'public')
 const entrypoint = join(stagedAppDir, 'server.js')
-const { archive } = paths(repoRoot)
 
-async function main() {
+// Archive path — the ACTUAL runtime payload that ships in the Repl layer.
+//
+// Why an archive and not just the directory:
+//
+// `.replitignore`'s depth-agnostic patterns mean that even with `!.deploy`
+// re-including the whole `.deploy/` subtree at the end of the file, the
+// earlier `node_modules` and `artifacts/isola/.next` exclusions both match
+// paths INSIDE `.deploy/isola/` (e.g. `.deploy/isola/node_modules/` and
+// `.deploy/isola/artifacts/isola/.next/`). Under correct last-match-wins
+// semantics `!.deploy` should win, and the runtime image simulator confirms
+// it does; but two consecutive real publish attempts (builds 6503e43f and
+// bc305e92) failed with isola not opening port 23359 even though api-server
+// (no nested `node_modules`, no `.next`) opened port 8080 immediately — the
+// exact asymmetry the simulator predicts when `!.deploy` re-inclusion is NOT
+// applied to descendant paths that are also matched by earlier rules.
+//
+// A tar archive at `.deploy/isola-standalone.tar` sidesteps the issue
+// entirely: the path has NO segment that matches any `.replitignore`
+// exclusion, so `!.deploy` is the ONLY rule that touches it, and it
+// unambiguously re-includes a single file.  `start-prod-server.mjs` unpacks
+// it to `/tmp/isola-rt` at container start before running server.js.
+//
+// `dec-isola-replitignore-node-modules-vs-deploy-re-inclusion-2026-08-08`
+const archivePath = join(repoRoot, '.deploy', 'isola-standalone.tar')
+
+function main() {
   if (!existsSync(standaloneDir)) {
     console.error(`generate-deploy-staging: ${standaloneDir} does not exist. Did \`next build\` run first?`)
     process.exit(1)
@@ -105,30 +128,45 @@ async function main() {
     process.exit(1)
   }
 
-  // Collapse the staged tree into ONE file, then delete the tree.
+  // --- archive fallback ---
   //
-  // The tree cannot ship: it contains directories named `node_modules` and
-  // `.next`, and Replit applies `.replitignore` exclusions to those names
-  // nested inside the payload, not only at the repository root. Three
-  // publishes showed the same asymmetry — api-server, a single bundle with no
-  // excluded segment anywhere in its path, opened its port every time; isola
-  // died before its banner and never opened 23359. A trailing `!.deploy`
-  // re-inclusion did not rescue it either (build b202729), and `.replitignore`
-  // has no official documentation in Replit docs, in Context7, or on the
-  // public web — so which ignore dialect it implements is not establishable
-  // from authority. A single file whose name matches no exclusion removes the
-  // dependency on that question entirely, under any dialect.
-  const packed = await pack(deployDir, archive)
-  rmSync(deployDir, { recursive: true, force: true })
-
-  if (!existsSync(archive)) {
-    console.error(`generate-deploy-staging: archive missing after pack: ${archive}`)
+  // Create a single tar archive of the staged directory.  The directory is
+  // retained for local development and for the assertion above; the ARCHIVE
+  // is what actually ships (see archivePath declaration above for the full
+  // rationale).  `start-prod-server.mjs` unpacks it at runtime.
+  //
+  // `tar` flags:
+  //   -c  create
+  //   -f  output file
+  //   -C  change to this directory before adding files (makes paths relative)
+  //   .   add everything in that directory
+  //
+  // Symlinks are stored as symlink entries (not dereferenced) by default,
+  // which is what we want — the relative pnpm symlinks inside node_modules/
+  // must stay relative so they resolve inside the extraction directory.
+  console.log('generate-deploy-staging: creating runtime archive ...')
+  rmSync(archivePath, { force: true })
+  try {
+    // -z: gzip compression.  Reduces the archive from ~85 MB to ~25–30 MB so
+    // the Repl layer upload is faster and there is less data to read during
+    // extraction at container start.  Decompression adds negligible CPU (< 1 s
+    // for 30 MB on Cloud Run hardware); the savings come from reduced I/O.
+    execFileSync('tar', ['-czf', archivePath, '-C', deployDir, '.'], { stdio: 'inherit' })
+  } catch (err) {
+    console.error(`generate-deploy-staging: tar failed: ${String(err)}`)
     process.exit(1)
   }
-
+  const archiveStat = statSync(archivePath)
+  if (archiveStat.size === 0) {
+    console.error(`generate-deploy-staging: archive is empty: ${archivePath}`)
+    process.exit(1)
+  }
   console.log(
-    `DEPLOY_STAGING=OK archive=${archive} entries=${packed} bytes=${statSync(archive).size}`,
+    `generate-deploy-staging: archive ready: ${archivePath} ` +
+      `(${(archiveStat.size / 1024 / 1024).toFixed(1)} MB)`,
   )
+
+  console.log(`DEPLOY_STAGING=OK entrypoint=${entrypoint} archive=${archivePath}`)
 }
 
-await main()
+main()

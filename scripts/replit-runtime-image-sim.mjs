@@ -59,7 +59,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
  */
 const MUST_SHIP = [
   '.deploy/api-server/index.mjs',
-  '.deploy/isola-runtime.bin',
+  '.deploy/isola-standalone.tar',
 ]
 
 /** Workspace trees the image must NOT carry — the whole point of excluding them. */
@@ -73,6 +73,26 @@ const MUST_NOT_SHIP = [
 const API_PORT = Number(process.env.SIM_API_PORT ?? 18099)
 const ISOLA_PORT = Number(process.env.SIM_ISOLA_PORT ?? 23399)
 const HEALTH_TIMEOUT_MS = Number(process.env.SIM_HEALTH_TIMEOUT_MS ?? 90_000)
+
+/**
+ * Replit's promote phase gives roughly this long for every artifact port to
+ * open. Exceeding it is a deployment failure even though the process is
+ * healthy in the end: build 59bff226 promoted nothing because an uncompressed
+ * 85.5 MB extraction plus a blocking instrumentation register() consumed the
+ * window. Time-to-port is therefore asserted, not just eventual health.
+ */
+const PROMOTE_BUDGET_MS = Number(process.env.SIM_PROMOTE_BUDGET_MS ?? 108_000)
+
+/**
+ * Cloud Run injects HOSTNAME as the container's EXTERNAL-routed IP, which is
+ * handled by the load balancer and bound to no local interface. Next.js
+ * standalone does `listen(port, process.env.HOSTNAME || 'localhost')`, so a
+ * launcher that passes process.env through unchanged dies with EADDRNOTAVAIL
+ * (build b0978062). This harness injects an address that is guaranteed not to
+ * be local, so any launcher missing the HOSTNAME override fails HERE instead
+ * of in a promote window.
+ */
+const HOSTILE_HOSTNAME = process.env.SIM_HOSTILE_HOSTNAME ?? '203.0.113.1'
 
 const failures = []
 const started = []
@@ -310,7 +330,7 @@ function start(name, args, image, port, logPrefix) {
   log(`  ${name}: ${args.join(' ')}   (cwd = image root)`)
   const child = spawn(args[0], args.slice(1), {
     cwd: image,
-    env: { ...process.env, PORT: String(port), NODE_ENV: 'production' },
+    env: { ...process.env, PORT: String(port), NODE_ENV: 'production', HOSTNAME: HOSTILE_HOSTNAME },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   started.push(child)
@@ -394,8 +414,14 @@ async function main() {
     const isola = start('isola', productionRunArgs('artifacts/isola'), image, ISOLA_PORT, 'isola')
 
     section('health')
+    const startedAt = Date.now()
     const apiStatus = await healthCheck('api-server', API_PORT, '/auth/healthz', api)
     const isolaStatus = await healthCheck('isola', ISOLA_PORT, '/api/healthz', isola)
+    const elapsed = Date.now() - startedAt
+    section('PROMOTE BUDGET — both ports open inside the platform window')
+    if (elapsed > PROMOTE_BUDGET_MS) {
+      fail(`both ports took ${elapsed}ms, over the ~${PROMOTE_BUDGET_MS}ms promote window`)
+    } else pass(`both ports open in ${elapsed}ms (budget ${PROMOTE_BUDGET_MS}ms)`)
 
     section('RESULT')
     log(`  FILTERED_API_HEALTH=${apiStatus}`)
@@ -404,8 +430,8 @@ async function main() {
     if (isolaStatus === 200 && isola.output().trim() === '') {
       fail('isola reported healthy but produced no output — something else is answering on its port')
     }
-    if (isolaStatus === 200 && !isola.output().includes('PAYLOAD_UNPACKED=OK')) {
-      fail('isola never logged PAYLOAD_UNPACKED=OK — it did not start from the shipped archive')
+    if (isolaStatus === 200 && !isola.output().includes('[start-prod-server]')) {
+      fail('isola never logged from start-prod-server — it did not start from the shipped archive')
     }
     if (failures.length === 0) log('  PASS — both artifacts start and serve from the filtered runtime image')
     else {

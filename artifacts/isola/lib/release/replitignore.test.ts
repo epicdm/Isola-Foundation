@@ -193,7 +193,7 @@ describe('the excluded paths really are rebuilt', () => {
     // never opened even though api-server had already started cleanly from its
     // own staged payload. Migrations moved to the build phase, where the CLI
     // exists. `decision-run-prisma-migrate-in-build-phase-2026-08-07`.
-    expect(pkg.scripts['start:prod']).toBe('node ./scripts/start-from-archive.mjs')
+    expect(pkg.scripts['start:prod']).toBe('node scripts/start-prod-server.mjs')
   })
 
   it('the runtime start command invokes no Prisma CLI, which does not exist in the runtime container', () => {
@@ -279,7 +279,7 @@ describe('production run commands resolve to the repo-root staged payload', () =
   const REPO_ROOT_DIR = REPO_ROOT.replace(/\/$/, '')
   const ISOLA_DIR = `${REPO_ROOT}artifacts/isola`
   const API_SERVER_ENTRYPOINT = `${REPO_ROOT}.deploy/api-server/index.mjs`
-  const ISOLA_ARCHIVE = `${REPO_ROOT}.deploy/isola-runtime.bin`
+  const ISOLA_ARCHIVE = `${REPO_ROOT}.deploy/isola-standalone.tar`
 
   function extractApiServerRunArg(): string {
     const toml = readFileSync(`${REPO_ROOT}artifacts/api-server/.replit-artifact/artifact.toml`, 'utf8')
@@ -304,17 +304,30 @@ describe('production run commands resolve to the repo-root staged payload', () =
     // tree containing node_modules and .next does not survive filtering. So
     // start:prod names the starter, not a server inside a tree that is not
     // there. artifacts/isola/scripts/payload-archive.mjs has the evidence.
-    expect(resolvePath(ISOLA_DIR, extractIsolaRunArg())).toBe(`${ISOLA_DIR}/scripts/start-from-archive.mjs`)
-    expect(existsSync(`${ISOLA_DIR}/scripts/start-from-archive.mjs`)).toBe(true)
+    expect(resolvePath(ISOLA_DIR, extractIsolaRunArg())).toBe(`${ISOLA_DIR}/scripts/start-prod-server.mjs`)
+    expect(existsSync(`${ISOLA_DIR}/scripts/start-prod-server.mjs`)).toBe(true)
   })
 
-  it('the archive starter unpacks the shipped payload and runs the extracted server', () => {
-    const starter = readFileSync(`${ISOLA_DIR}/scripts/start-from-archive.mjs`, 'utf8')
-    expect(starter).toContain('unpack')
-    expect(starter).toContain('PAYLOAD_UNPACKED=OK')
-    // It must refuse rather than improvise if the payload did not ship: there
-    // is no workspace node_modules in the runtime container to fall back to.
+  it('the archive starter unpacks the payload, forces the bind address, and refuses if it is absent', () => {
+    const starter = readFileSync(`${ISOLA_DIR}/scripts/start-prod-server.mjs`, 'utf8')
+    expect(starter).toContain('tar')
+    expect(starter).toContain('[start-prod-server]')
+    // HOSTNAME must be forced. Cloud Run sets it to the container's
+    // external-routed IP, which is bound to no local interface, and Next.js
+    // standalone binds to it — build b0978062 died with EADDRNOTAVAIL.
+    // Passing process.env through unchanged is the defect.
+    expect(starter).toMatch(/HOSTNAME:\s*'0\.0\.0\.0'/)
+    // It must refuse rather than improvise: there is no workspace node_modules
+    // in the runtime container to fall back to.
     expect(starter).toContain('process.exit(1)')
+  })
+
+  it('instrumentation register() does not block the HTTP listener', () => {
+    // Next.js awaits register() before opening the port. Sequential Prisma
+    // calls against a cold Neon endpoint consumed 20–60s of a ~108s promote
+    // window (build 59bff226). Long work must be fired and not awaited.
+    const instrumentation = readFileSync(`${ISOLA_DIR}/instrumentation.ts`, 'utf8')
+    expect(instrumentation).toMatch(/void\s+\w+\(\)/)
   })
 
   it('the isola artifact runs through pnpm --filter, which is what re-anchors its cwd', () => {
@@ -375,7 +388,7 @@ describe('the staged runtime payload is forgiven by the preflight without being 
   })
 
   it('the entrypoints the run commands name are inside a shipped-generated path', () => {
-    for (const entrypoint of ['.deploy/api-server/index.mjs', '.deploy/isola-runtime.bin']) {
+    for (const entrypoint of ['.deploy/api-server/index.mjs', '.deploy/isola-standalone.tar']) {
       expect({ entrypoint, excluded: isExcluded(entrypoint, rules) }).toEqual({ entrypoint, excluded: false })
     }
   })
@@ -592,7 +605,7 @@ describe('workspace dependency trees are excluded from the deployment snapshot',
     // ...and this is exactly why the runtime payload may not ship as a tree:
     // a nested node_modules inside .deploy is matchable, so isola ships as a
     // single file instead. artifacts/isola/scripts/payload-archive.mjs.
-    expect(isExcluded('.deploy/isola-runtime.bin', rules)).toBe(false)
+    expect(isExcluded('.deploy/isola-standalone.tar', rules)).toBe(false)
     expect(isExcluded('artifacts/isola/app/node_modules/page.tsx', rules)).toBe(true)
   })
 
