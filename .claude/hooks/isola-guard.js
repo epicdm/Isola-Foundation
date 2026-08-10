@@ -136,7 +136,7 @@ function evaluate(inp) {
   // procedures get reviewed, not a move away from MCP. Exactly two exact
   // tool names are ever considered: search_procedures (schema/metadata
   // discovery only, always allowed — it never executes a procedure) and
-  // execute_query (gated by a five-procedure allowlist). Every other
+  // execute_query (gated by a four-procedure allowlist). Every other
   // mcp__epic-portal__* tool name — execute_mutation, execute_destructive,
   // or anything unexpected/suffixed this policy has never seen — is blocked
   // outright with no procedure-name parsing attempted, until it receives
@@ -183,7 +183,7 @@ function evaluate(inp) {
             ? ' This specific payload could not be safely inspected (malformed or too deeply nested) — ' +
               'failing closed for an epic-portal-shaped call rather than allowing an unverifiable one through.'
             : ''),
-        'use one of the five allowlisted read-only procedures through this MCP tool. If a write is genuinely ' +
+        'use one of the four allowlisted read-only procedures through this MCP tool. If a write is genuinely ' +
           'needed, get the specific procedure reviewed and added to the allowlist first — do not bypass MCP.'
       );
     }

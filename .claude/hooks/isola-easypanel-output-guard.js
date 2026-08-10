@@ -14,6 +14,14 @@
  * a constant safe placeholder — never the original response, never a partial
  * best-effort reconstruction.
  *
+ * NO PERSISTENT LOGGING. An earlier revision logged exception messages
+ * derived from stdin/tool_input/tool_response/JSON.parse — that is exactly
+ * the kind of output-security boundary where a "helpful" error message can
+ * itself leak the thing being redacted (a JSON.parse error can echo a
+ * fragment of the malformed text near the failure point). This is a
+ * security boundary, not a debugging surface: it either emits the reviewed
+ * placeholder or the reviewed projection, and nothing else, ever.
+ *
  * RECORDED LIMITATIONS (mitigated by nothing in this file):
  *   - the procedure has ALREADY EXECUTED by the time this hook runs. This is
  *     output redaction for what Claude sees, not prevention — prevention is
@@ -31,25 +39,9 @@
 
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
-
-const STATE_DIR = path.join(__dirname, '..', 'state');
-const LOG = path.join(STATE_DIR, 'output-guard.log');
-
 /** The one and only thing ever returned when projection cannot proceed
  * cleanly. Never the original response, never a best-effort partial. */
 const SAFE_PLACEHOLDER = Object.freeze({ status: 'output_withheld_pending_review' });
-
-function log(line) {
-  try {
-    fs.mkdirSync(STATE_DIR, { recursive: true });
-    // Never write raw tool_response content here — only short status lines.
-    fs.appendFileSync(LOG, new Date().toISOString() + ' ' + line + '\n');
-  } catch (_) {
-    /* never fail on logging */
-  }
-}
 
 function emit(updatedToolOutput) {
   process.stdout.write(
@@ -70,6 +62,14 @@ function passthrough() {
 
 // ---------------------------------------------------------------- projectors
 //
+// A Map, not a plain object — never bracket-indexed on an untrusted string.
+// A plain-object registry accessed as REGISTRY[userControlledKey] is a real
+// prototype-chain bypass: REGISTRY['constructor'] resolves to
+// Object.prototype.constructor (a real, callable, non-throwing function)
+// even though 'constructor' was never an own key. Map.get() has no
+// prototype-chain lookup semantics at all — an absent key always returns
+// undefined, full stop.
+//
 // Only a procedure whose real output shape has actually been reviewed gets a
 // projector here. Every other allowlisted procedure — including ones whose
 // INPUT is already allowlisted by isola-guard.js but whose live OUTPUT has
@@ -78,25 +78,34 @@ function passthrough() {
 // falls through to SAFE_PLACEHOLDER. Do not invent fields for an unreviewed
 // shape.
 
-const PROJECTORS = {
-  listProjects: projectListProjects,
-  // listPorts, listMounts, getComposeDockerServices: deliberately absent.
-};
+const MAX_ROWS = 100;
+/** EasyPanel's own real schema constrains project/service names to this
+ * pattern (seen directly in multiple procedures' inputSchema this session):
+ * ^[a-z0-9-_]+$. Reuse it here as an output-side bound too. */
+const NAME_PATTERN = /^[a-z0-9-_]{1,100}$/;
+const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 
-/** Recursively constructs a NEW object containing only reviewed fields —
- * never spread/rest, so an unknown sibling field can never ride along. */
 function projectListProjects(result) {
   if (!Array.isArray(result)) throw new Error('listProjects result is not an array');
+  if (result.length > MAX_ROWS) throw new Error('listProjects row count exceeds bound');
   return result.map((row) => {
     if (row === null || typeof row !== 'object' || Array.isArray(row)) {
       throw new Error('listProjects row is not a plain object');
     }
-    const projected = {};
-    if (typeof row.name === 'string') projected.name = row.name;
-    if (typeof row.createdAt === 'string') projected.createdAt = row.createdAt;
-    return projected;
+    if (typeof row.name !== 'string' || !NAME_PATTERN.test(row.name)) {
+      throw new Error('listProjects row.name failed validation');
+    }
+    if (typeof row.createdAt !== 'string' || !ISO_TIMESTAMP_PATTERN.test(row.createdAt)) {
+      throw new Error('listProjects row.createdAt failed validation');
+    }
+    // Recursively constructed from validated primitives only — never
+    // spread/rest, so an unknown or malformed sibling value can never ride
+    // along merely for occupying an allowed field name.
+    return { name: row.name, createdAt: row.createdAt };
   });
 }
+
+const PROJECTORS = new Map([['listProjects', projectListProjects]]);
 
 // ------------------------------------------------------------- unwrapping
 //
@@ -124,13 +133,8 @@ function unwrapToolResponse(toolResponse) {
 
   if (Array.isArray(blocks)) {
     const textBlock = blocks.find((b) => b && b.type === 'text' && typeof b.text === 'string');
-    if (!textBlock) throw new Error('no text content block found in tool_response');
-    let parsed;
-    try {
-      parsed = JSON.parse(textBlock.text);
-    } catch (e) {
-      throw new Error('content block text is not valid JSON: ' + e.message);
-    }
+    if (!textBlock) throw new Error('no text content block found');
+    const parsed = JSON.parse(textBlock.text); // caller catches; no message ever logged
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new Error('parsed content block text is not a plain object');
     }
@@ -157,8 +161,7 @@ process.stdin.on('end', () => {
     inp = JSON.parse(raw || '{}');
   } catch (_) {
     // Malformed hook stdin itself. We cannot confirm this wasn't our tool,
-    // so fail closed rather than exit silently.
-    log('MALFORMED-STDIN fail-closed');
+    // so fail closed rather than exit silently. No message logged.
     return emit(SAFE_PLACEHOLDER);
   }
 
@@ -168,18 +171,26 @@ process.stdin.on('end', () => {
   }
 
   try {
-    const procedure = extractProcedureFromToolInput(inp.tool_input || {});
+    const requestedProcedure = extractProcedureFromToolInput(inp.tool_input || {});
     const unwrapped = unwrapToolResponse(inp.tool_response);
-    const projector = PROJECTORS[procedure];
+
+    // The response's own procedure field, where present in the reviewed
+    // real shape, must exactly match what was requested. A mismatch is
+    // itself a reason to fail closed, not something to reconcile.
+    if (Object.prototype.hasOwnProperty.call(unwrapped, 'procedure')) {
+      if (unwrapped.procedure !== requestedProcedure) {
+        return emit(SAFE_PLACEHOLDER);
+      }
+    }
+
+    const projector = PROJECTORS.get(requestedProcedure);
     if (!projector) {
-      log('NO-REVIEWED-PROJECTOR procedure=' + procedure);
       return emit(SAFE_PLACEHOLDER);
     }
     const projected = projector(unwrapped.result);
-    log('PROJECTED procedure=' + procedure);
-    return emit({ procedure: procedure, result: projected });
-  } catch (e) {
-    log('PROJECTION-ERROR fail-closed: ' + (e && e.message));
+    return emit({ procedure: requestedProcedure, result: projected });
+  } catch (_) {
+    // No message ever logged — see file header.
     return emit(SAFE_PLACEHOLDER);
   }
 });

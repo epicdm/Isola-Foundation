@@ -318,16 +318,12 @@ const SECRET_DUMP_RE = new RegExp(
  */
 const EASYPANEL_REVIEWED_PROJECT = 'isola';
 
-/** Every service name actually reviewed/discussed this session under the
- * "isola" EasyPanel project. Do not guess additional names — an unreviewed
- * service name fails closed exactly like an unreviewed procedure would. */
-const EASYPANEL_REVIEWED_SERVICES = new Set([
-  'nocobase', 'nocobase-db',
-  'activepieces', 'activepieces-db', 'activepieces-redis',
-  'ai', 'ai-db',
-  'chat', 'chatwoot-db', 'chatwoot-redis', 'chatwoot-sidekiq',
-  'paymenter', 'paymenter-mysql', 'paymenter-redis',
-]);
+// NOTE: there is deliberately no single shared "reviewed services" set here.
+// Service scope is defined per-procedure below (EASYPANEL_SERVICE_SCOPE) —
+// the current work is the NocoBase wave specifically, and a service name
+// being discussed for one procedure must not silently become valid for
+// another. A prior revision of this file had one broad shared set spanning
+// Activepieces/Chatwoot/Paymenter/AI service names; that was corrected.
 
 /** search_procedures is schema/metadata discovery only — it returns
  * procedure descriptions and input schemas, it never executes one. Always
@@ -398,43 +394,70 @@ function requireNoExtraKeys(obj, allowedKeys, label) {
   if (extra.length) throw new Error(label + ' has unexpected fields: ' + extra.join(', '));
 }
 
+/**
+ * Per-PROCEDURE service scope, not one shared global set. The current work
+ * is the NocoBase wave specifically — a procedure being scoped to nocobase/
+ * nocobase-db does not imply Activepieces, Chatwoot, Paymenter or the
+ * Paperclip ("ai") services are fair game for that same procedure merely
+ * because their names have been observed/discussed elsewhere this session.
+ * Extending a procedure's scope to another service is its own reviewed
+ * decision, not an inherited default.
+ */
+const EASYPANEL_SERVICE_SCOPE = new Map([
+  ['listPorts', new Set(['nocobase', 'nocobase-db'])],
+  ['listMounts', new Set(['nocobase', 'nocobase-db'])],
+  ['getComposeDockerServices', new Set(['nocobase', 'nocobase-db'])],
+]);
+
 function requireReviewedTarget(obj, label) {
   if (obj.projectName !== EASYPANEL_REVIEWED_PROJECT) {
     throw new Error(label + ' projectName must be exactly "' + EASYPANEL_REVIEWED_PROJECT + '"');
   }
-  if (typeof obj.serviceName !== 'string' || !EASYPANEL_REVIEWED_SERVICES.has(obj.serviceName)) {
-    throw new Error(label + ' serviceName is missing or not in the reviewed set');
+  const scope = EASYPANEL_SERVICE_SCOPE.get(label);
+  if (typeof obj.serviceName !== 'string' || !scope || !scope.has(obj.serviceName)) {
+    throw new Error(label + ' serviceName is missing or not in that procedure\'s reviewed scope');
   }
 }
 
 /**
- * Exact per-procedure input predicates. Throws (fail-closed) on any
- * deviation — missing/ambiguous/extra target fields, out-of-scope project
- * or service, or a procedure not in this map at all.
+ * Exact per-procedure input predicates, keyed in a Map (never a plain
+ * object) and retrieved via .get() — never bracket-indexed on an untrusted
+ * string. A plain-object registry accessed as REGISTRY[userControlledKey]
+ * is a real prototype-chain bypass: REGISTRY['constructor'] resolves to
+ * Object.prototype.constructor (a real, callable, non-throwing function)
+ * even though 'constructor' was never an own key — confirmed by direct
+ * reproduction during this hardening pass, not theoretical. Map.get() has
+ * no prototype-chain lookup semantics at all: an absent key always returns
+ * undefined, full stop, regardless of what string is asked for.
+ *
+ * Throws (fail-closed) on any deviation — missing/ambiguous/extra target
+ * fields, out-of-scope project or service, or a procedure not in this map.
  */
-const EASYPANEL_QUERY_PREDICATES = {
-  listProjects(input) {
+const EASYPANEL_QUERY_PREDICATES = new Map([
+  ['listProjects', (input) => {
     requireNoExtraKeys(input, new Set([]), 'listProjects');
-  },
-  listPorts(input) {
+  }],
+  ['listPorts', (input) => {
     requireNoExtraKeys(input, new Set(['projectName', 'serviceName']), 'listPorts');
     requireReviewedTarget(input, 'listPorts');
-  },
-  listMounts(input) {
+  }],
+  ['listMounts', (input) => {
     requireNoExtraKeys(input, new Set(['projectName', 'serviceName']), 'listMounts');
     requireReviewedTarget(input, 'listMounts');
-  },
-  getComposeDockerServices(input) {
+  }],
+  ['getComposeDockerServices', (input) => {
     // The vendor schema treats projectName/serviceName as OPTIONAL (omitting
     // them would return data across an unscoped range) — policy requires
     // both present regardless of what the vendor schema permits.
     requireNoExtraKeys(input, new Set(['projectName', 'serviceName']), 'getComposeDockerServices');
     requireReviewedTarget(input, 'getComposeDockerServices');
-  },
+  }],
   // getMonitorTableData: intentionally absent — see the policy comment above.
-};
+]);
 
-const EASYPANEL_ALLOWED_QUERY_PROCEDURES = new Set(Object.keys(EASYPANEL_QUERY_PREDICATES));
+/** The current executable set has FOUR procedures, not five —
+ * getMonitorTableData was removed (see policy comment above). */
+const EASYPANEL_ALLOWED_QUERY_PROCEDURES = new Set(EASYPANEL_QUERY_PREDICATES.keys());
 
 /**
  * True if this call must be blocked.
@@ -467,7 +490,7 @@ function isBlockedEasyPanelCall(toolName, toolInput, cmd) {
     if (typeof ti.procedure !== 'string' || !ti.procedure) {
       throw new Error('missing or non-string procedure field');
     }
-    const predicate = EASYPANEL_QUERY_PREDICATES[ti.procedure];
+    const predicate = EASYPANEL_QUERY_PREDICATES.get(ti.procedure);
     if (!predicate) return true; // not an allowlisted procedure — fail closed
     const resolvedInput = resolveInputObject(ti.input);
     predicate(resolvedInput); // throws on any predicate failure — propagates to fail-closed
@@ -574,7 +597,7 @@ module.exports = {
   SECRET_FILE_RE,
   SECRET_DUMP_RE,
   EASYPANEL_REVIEWED_PROJECT,
-  EASYPANEL_REVIEWED_SERVICES,
+  EASYPANEL_SERVICE_SCOPE,
   EASYPANEL_ALLOWED_QUERY_PROCEDURES,
   EASYPANEL_QUERY_PREDICATES,
   EASYPANEL_METADATA_TOOL_RE,

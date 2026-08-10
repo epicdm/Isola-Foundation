@@ -21,6 +21,7 @@
 
 const { spawnSync } = require('child_process');
 const path = require('path');
+const fs = require('fs');
 
 const GUARD = path.join(__dirname, 'isola-guard.js');
 const STOP = path.join(__dirname, 'isola-stop-gate.js');
@@ -810,6 +811,33 @@ const cases = [
       tool_input: { procedure: 'getComposeDockerServices', input: { projectName: 'isola', serviceName: 'unreviewed-service' } },
     },
   },
+  {
+    name: 'listPorts scoped to nocobase does NOT implicitly allow an Activepieces/Chatwoot/Paymenter/AI service name',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listPorts', input: { projectName: 'isola', serviceName: 'activepieces' } },
+    },
+  },
+
+  // -- PROTOTYPE-CHAIN ADVERSARIAL PROCEDURE NAMES (owner-directed, critical) --
+  // A plain-object registry accessed as REGISTRY[userControlledString] is a
+  // real bypass: REGISTRY['constructor'] resolves to Object.prototype.constructor
+  // (callable, non-throwing) even though 'constructor' was never an own key.
+  // Confirmed by direct reproduction before this fix (Map.get() has no such
+  // lookup semantics at all). Every one of these MUST be blocked.
+  ...['constructor', '__proto__', 'prototype', 'toString', 'valueOf', 'hasOwnProperty', '__defineGetter__', '__defineSetter__'].map((evilProcedure) => ({
+    name: `adversarial procedure name "${evilProcedure}" is BLOCKED, never reaches a real predicate or returns unblocked`,
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: evilProcedure, input: {} },
+    },
+  })),
 
   // -- raw HTTP/RPC/tRPC bypass - path/host/client coverage --
   {
@@ -1218,6 +1246,96 @@ const outputCases = [
       });
       if (r.status !== 0) return 'hook exited non-zero instead of failing closed cleanly: ' + r.status;
       return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'projector exception did not fail to the safe placeholder';
+    },
+  },
+  {
+    name: 'RESPONSE PROCEDURE MISMATCH (response claims a different procedure than requested) FAILS CLOSED',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listPorts', result: [{ name: 'isola', createdAt: '2026-01-01T00:00:00Z' }] },
+      });
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'mismatched response procedure did not fail closed';
+    },
+  },
+  {
+    name: 'listProjects row with a value FAILING the name/timestamp pattern is BLOCKED, not passed through merely for occupying an allowed field',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listProjects', result: [{ name: 'not a valid $$$ name', createdAt: '2026-01-01T00:00:00Z' }] },
+      });
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'an out-of-pattern value was not rejected';
+    },
+  },
+  {
+    name: 'listProjects row count exceeding the bound is BLOCKED',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: {
+          procedure: 'listProjects',
+          result: Array.from({ length: 101 }, (_, i) => ({ name: 'proj-' + i, createdAt: '2026-01-01T00:00:00Z' })),
+        },
+      });
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'an unbounded row count was not rejected';
+    },
+  },
+
+  // -- PROTOTYPE-CHAIN ADVERSARIAL PROCEDURE NAMES (owner-directed, critical) --
+  // Every one of these must return ONLY the safe placeholder - never a raw
+  // result, never a passthrough - even with a superficially plausible
+  // response attached.
+  ...['constructor', '__proto__', 'prototype', 'toString', 'valueOf', 'hasOwnProperty', '__defineGetter__', '__defineSetter__'].map((evilProcedure) => ({
+    name: `adversarial procedure "${evilProcedure}" on the output side always returns the safe placeholder, never a raw result`,
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: evilProcedure, input: {} },
+        tool_response: { procedure: evilProcedure, result: [{ name: 'isola', createdAt: '2026-01-01T00:00:00Z', ...FAKE }] },
+      });
+      if (containsAnyFakeSecret(r.updatedToolOutput)) return 'a fake secret survived via an adversarial procedure name';
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : `procedure="${evilProcedure}" did not fail to the exact safe placeholder`;
+    },
+  })),
+
+  // -- CANARY: nothing leaks anywhere on a malformed-JSON failure path --
+  {
+    name: 'a fake canary positioned before a JSON parse failure never reaches stdout, stderr, or any log/state file (no persistent logging exists in this hook at all)',
+    check: () => {
+      const stateDir = path.join(__dirname, '..', 'state');
+      let before = new Set();
+      try { before = new Set(fs.readdirSync(stateDir)); } catch (_) {}
+
+      const canary = t('CANARY_', 'FAKE_SECRET_', '7e2f9b1a');
+      const malformedText = '{"procedure":"listProjects","canary":"' + canary + '","result":[{"name":';
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: [{ type: 'text', text: malformedText }],
+      });
+
+      if (r.stdout.includes(canary)) return 'canary leaked into stdout';
+      if (r.stderr.includes(canary)) return 'canary leaked into stderr';
+
+      let after = [];
+      try { after = fs.readdirSync(stateDir); } catch (_) {}
+      for (const name of after) {
+        const full = path.join(stateDir, name);
+        try {
+          const stat = fs.statSync(full);
+          if (stat.isFile()) {
+            const content = fs.readFileSync(full, 'utf8');
+            if (content.includes(canary)) return 'canary leaked into state file: ' + name;
+          }
+        } catch (_) { /* directories, permission edge cases - not the target of this check */ }
+      }
+
+      if (JSON.stringify(r.updatedToolOutput).includes(canary)) return 'canary leaked into the sanitized output';
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'malformed-with-canary case did not fail to the exact safe placeholder';
     },
   },
 ];
