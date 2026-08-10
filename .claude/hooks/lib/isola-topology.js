@@ -285,20 +285,23 @@ const SECRET_DUMP_RE = new RegExp(
 /**
  * epic-portal (EasyPanel MCP) policy — ALLOWLIST, not denylist.
  *
- * listProjectsAndServices returns full plaintext secrets (encryption keys,
- * JWT secrets, DB/Redis/MariaDB passwords) for every service on the
- * instance, with no redaction and no per-project scoping. Reclassified P0
- * twice in one session (2026-08-09, 2026-08-10) after direct observation.
- * The connector itself has since been removed from this project's MCP
- * registration (owner decision, 2026-08-10) — this guard is defense in
- * depth for any session where it is re-enabled, not the primary control.
+ * MCP remains Isola's normal AI-to-system control plane; this is not a move
+ * to SSH or direct database access as a replacement. listProjectsAndServices
+ * returns full plaintext secrets (encryption keys, JWT secrets, DB/Redis/
+ * MariaDB passwords) for every service on the instance, with no redaction
+ * and no per-project scoping — reclassified P0 twice in one session
+ * (2026-08-09, 2026-08-10) after direct observation. The connector stays
+ * enabled; this guard narrows what it may currently do until each procedure
+ * has had its own review.
  *
  * Only execute_query may run, and only for these five procedures — no other
  * query is implicitly trusted, and unknown/unrecognized procedures fail
  * closed rather than being allowed through. execute_mutation and
- * execute_destructive are blocked OUTRIGHT regardless of procedure name:
- * EasyPanel mutations go through a host-local protected script (SSH) from
- * here forward, never through this MCP tool.
+ * execute_destructive are blocked OUTRIGHT regardless of procedure name —
+ * TEMPORARILY, pending individual review of each required mutation
+ * procedure's input/output/secret-handling shape before it is added here.
+ * Raw HTTP/RPC/tRPC calls that bypass this MCP tool remain prohibited
+ * outright; they are not a sanctioned alternative route.
  */
 const EASYPANEL_ALLOWED_QUERY_PROCEDURES = new Set([
   'listProjects',
@@ -317,13 +320,14 @@ const EASYPANEL_ANY_TOOL_RE = /^mcp__epic-portal__execute_/;
  * proxy) and tolerant of query strings / trailing slashes. Not procedure-specific:
  * once the native tool is allowlist-gated, a raw bypass has no legitimate use here
  * at all, so the whole class is blocked rather than parsed procedure-by-procedure. */
-const EASYPANEL_RAW_PATH_RE = /\/api\/mcp(?=[\s'"`/?]|$)|\/api\/rpc\/|\/api\/trpc\//i;
+const EASYPANEL_RAW_PATH_RE = /\/api\/(mcp|rpc|trpc)(?=[\s'"`/?]|$)/i;
 
 /** A path match alone is not enough — "prose mentioning the Graph host is still not
  * gated" is the same design rule this reuses. A commit message, a doc, or this very
  * policy file can legitimately contain these path strings without performing a call.
  * Only treat it as a real network call when the command also looks like one. */
-const HTTP_INVOCATION_RE = /\b(curl|wget|Invoke-WebRequest|Invoke-RestMethod|axios)\b|\bfetch\s*\(|\.request\s*\(/i;
+const HTTP_INVOCATION_RE =
+  /\b(curl|wget|Invoke-WebRequest|Invoke-RestMethod|axios)\b|\bfetch\s*\(|\.request\s*\(|\b(requests|httpx)\.(get|post|put|delete|patch|request)\s*\(|\bhttpx\.Client\s*\(/i;
 
 const EASYPANEL_MAX_INSPECT_DEPTH = 6;
 

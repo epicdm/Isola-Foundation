@@ -521,12 +521,48 @@ const cases = [
     },
   },
   {
-    name: 'each of the five allowlisted procedures is ALLOWED via execute_query',
+    name: 'allowlisted procedure listProjects is ALLOWED via execute_query',
     expect: PASS,
     payload: {
       session_id: SID,
       tool_name: 'mcp__epic-portal__execute_query',
       tool_input: { procedure: 'listProjects', input: {} },
+    },
+  },
+  {
+    name: 'allowlisted procedure listPorts is ALLOWED via execute_query',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listPorts', input: { projectName: 'isola', serviceName: 'nocobase-db' } },
+    },
+  },
+  {
+    name: 'allowlisted procedure listMounts is ALLOWED via execute_query',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listMounts', input: { projectName: 'isola', serviceName: 'nocobase' } },
+    },
+  },
+  {
+    name: 'allowlisted procedure getComposeDockerServices is ALLOWED via execute_query',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'getComposeDockerServices', input: {} },
+    },
+  },
+  {
+    name: 'allowlisted procedure getMonitorTableData is ALLOWED via execute_query',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'getMonitorTableData', input: {} },
     },
   },
   {
@@ -570,7 +606,7 @@ const cases = [
     },
   },
   {
-    name: 'raw call to direct-IP exact /api/mcp (no trailing slash) is BLOCKED',
+    name: 'raw curl call to direct-IP exact /api/mcp (no trailing slash) is BLOCKED',
     expect: BLOCK,
     contains: 'easypanel-not-allowlisted',
     payload: {
@@ -580,7 +616,7 @@ const cases = [
     },
   },
   {
-    name: 'raw call to an alternate host exact /api/mcp is BLOCKED (host-agnostic)',
+    name: 'raw curl call to an alternate host exact /api/mcp is BLOCKED (host-agnostic)',
     expect: BLOCK,
     contains: 'easypanel-not-allowlisted',
     payload: {
@@ -610,7 +646,17 @@ const cases = [
     },
   },
   {
-    name: 'raw REST-style /api/rpc/... path is BLOCKED',
+    name: 'exact /api/rpc with no trailing slash is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s https://portal.saas00.epic.dm/api/rpc' },
+    },
+  },
+  {
+    name: 'trailing-slash /api/rpc/ (REST-style sub-path) is BLOCKED',
     expect: BLOCK,
     contains: 'easypanel-not-allowlisted',
     payload: {
@@ -620,13 +666,103 @@ const cases = [
     },
   },
   {
-    name: 'raw tRPC-style /api/trpc/... path is BLOCKED',
+    name: 'query-string variant of /api/rpc is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s "https://portal.saas00.epic.dm/api/rpc?input=%7B%7D"' },
+    },
+  },
+  {
+    name: 'exact /api/trpc with no trailing slash is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s https://portal.saas00.epic.dm/api/trpc' },
+    },
+  },
+  {
+    name: 'trailing-slash /api/trpc/ (dotted namespace sub-path) is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: "curl -s 'https://portal.saas00.epic.dm/api/trpc/projects.listProjects'" },
+    },
+  },
+  {
+    name: 'query-string batch variant of /api/trpc is BLOCKED',
     expect: BLOCK,
     contains: 'easypanel-not-allowlisted',
     payload: {
       session_id: SID,
       tool_name: 'Bash',
       tool_input: { command: "curl -s 'https://portal.saas00.epic.dm/api/trpc/projects.listProjects?batch=1'" },
+    },
+  },
+  {
+    name: 'Python requests.post to the raw endpoint is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: t(
+          'python3 -c "import requests; requests.post(',
+          "'https://portal.saas00.epic.dm/api/mcp', json={})\""
+        ),
+      },
+    },
+  },
+  {
+    name: 'Python httpx.Client to the raw endpoint is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: t(
+          'python3 -c "import httpx; httpx.Client().post(',
+          "'https://portal.saas00.epic.dm/api/rpc/projects/listProjects')\""
+        ),
+      },
+    },
+  },
+  {
+    name: 'Node fetch(...) to the raw endpoint is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: t(
+          'node -e "fetch(',
+          "'https://portal.saas00.epic.dm/api/trpc/projects.listProjects')\""
+        ),
+      },
+    },
+  },
+  {
+    name: 'Node https.request(...) to the raw endpoint is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: t(
+          "node -e \"require('https').request(",
+          "'https://portal.saas00.epic.dm/api/mcp', () => {})\""
+        ),
+      },
     },
   },
   {
@@ -641,6 +777,15 @@ const cases = [
           'requests to EasyPanel"'
         ),
       },
+    },
+  },
+  {
+    name: 'a grep search mentioning /api/mcp and requests. is ALLOWED (not payload-blind)',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: t("grep -rn 'requests.post.*api/mcp' docs/") },
     },
   },
   {

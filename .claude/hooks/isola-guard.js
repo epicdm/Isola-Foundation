@@ -129,12 +129,18 @@ function evaluate(inp) {
   SESSION_ID = inp.session_id || 'unknown';
 
   // -------------------------------------------------------- easypanel-block
-  // Allowlist policy, checked before ANY tool-class branch. Only
-  // execute_query for five named procedures is permitted; execute_mutation/
-  // execute_destructive are blocked outright regardless of procedure name;
-  // raw HTTP bypass to the EasyPanel MCP/RPC/tRPC endpoint is blocked
-  // outright, host-agnostic. See lib/isola-topology.js for the full policy
-  // and defect-easypanel-listprojectsandservices-second-secret-dump-2026-08-10.
+  // Allowlist policy, checked before ANY tool-class branch. epic-portal
+  // (EasyPanel MCP) remains Isola's normal AI-to-system control plane for
+  // this connector — this is a temporary narrowing while individual
+  // procedures get reviewed, not a move away from MCP. Only execute_query
+  // for five reviewed read procedures is permitted right now; every other
+  // query procedure, and execute_mutation/execute_destructive entirely
+  // (regardless of procedure name), stay blocked until each one receives
+  // its own input/output/secret-handling review and is added here
+  // individually. Raw HTTP/RPC/tRPC bypass of this MCP tool is blocked
+  // outright, host-agnostic — it is not an alternative route, it is
+  // prohibited. See lib/isola-topology.js for the full policy and
+  // defect-easypanel-listprojectsandservices-second-secret-dump-2026-08-10.
   //
   // FAIL-CLOSED EXCEPTION: the module-level policy is fail-open on internal
   // error (a guard bug must never halt legitimate work). That is deliberately
@@ -159,10 +165,12 @@ function evaluate(inp) {
     if (blocked || unparseable) {
       deny(
         'easypanel-not-allowlisted',
-        'epic-portal (EasyPanel) is allowlist-gated: only execute_query for ' +
-          Array.from(T.EASYPANEL_ALLOWED_QUERY_PROCEDURES).join(', ') + ' is permitted. ' +
-          'execute_mutation/execute_destructive are blocked outright, and raw HTTP calls to the ' +
-          'EasyPanel MCP/RPC/tRPC endpoint are blocked regardless of host. ' +
+        'epic-portal (EasyPanel MCP) remains the normal AI-to-system control plane, but is currently ' +
+          'allowlist-gated: execute_query is permitted only for ' +
+          Array.from(T.EASYPANEL_ALLOWED_QUERY_PROCEDURES).join(', ') + '. ' +
+          'Mutation/destructive procedures are blocked TEMPORARILY, not outlawed — each one is added here ' +
+          'individually once it has its own input/output/secret-handling review. Raw HTTP/RPC/tRPC calls that ' +
+          'bypass this MCP tool remain prohibited regardless of host. ' +
           'listProjectsAndServices in particular returns full plaintext secrets for every service ' +
           'on the instance with no redaction — reclassified P0 twice this session (see ' +
           'defect-easypanel-listprojectsandservices-second-secret-dump-2026-08-10).' +
@@ -170,8 +178,8 @@ function evaluate(inp) {
             ? ' This specific payload could not be safely inspected (malformed or too deeply nested) — ' +
               'failing closed for an epic-portal-shaped call rather than allowing an unverifiable one through.'
             : ''),
-        'use one of the five allowlisted read-only procedures. For any write/mutation, use a ' +
-          'host-local protected script over SSH instead of this MCP tool.'
+        'use one of the five allowlisted read-only procedures through this MCP tool. If a write is genuinely ' +
+          'needed, get the specific procedure reviewed and added to the allowlist first — do not bypass MCP.'
       );
     }
   }
