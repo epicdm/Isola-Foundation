@@ -1,0 +1,139 @@
+From 940e648a3a227b343bc1870037447485882e7b08 Mon Sep 17 00:00:00 2001
+From: epicdm <eric@epic.dm>
+Date: Fri, 24 Jul 2026 02:47:23 +0000
+Subject: [PATCH] fix(api): redact credential-shaped values from
+ /api/hermes-config
+
+The raw hermes-agent config.yaml tree was passed through to the HTTP
+response verbatim. Provider API keys were already masked via
+maskedCredentials, but everything else in the tree -- notably
+dashboard.basic_auth.secret and password_hash -- was not, and could
+leak in full cleartext to any authenticated workspace session
+(#delta1-hermes-config-secret-disclosure).
+
+Adds redactSecretsDeep(): a recursive walk over the config tree that
+masks any string value whose key matches a credential-shaped pattern
+(secret/password/token/api_key/credential/bearer/private_key/
+signing_key), applied right where the raw config enters the response.
+${ENV_VAR} reference placeholders are left untouched, matching the
+existing convention in mcp-normalize.ts. Non-matching fields (e.g.
+session_ttl_seconds) are unaffected.
+
+Regression test covers: the compromised secret's shape never appears
+in the serialized response, dashboard.basic_auth.secret/password_hash
+are masked, a credential nested arbitrarily deep is still caught, an
+env-var reference is preserved, and non-secret sibling fields are
+untouched.
+---
+ src/server/hermes-config-migration.test.ts | 44 ++++++++++++++++++++++
+ src/server/hermes-config-migration.ts      | 32 +++++++++++++++-
+ 2 files changed, 75 insertions(+), 1 deletion(-)
+
+diff --git a/src/server/hermes-config-migration.test.ts b/src/server/hermes-config-migration.test.ts
+index 0caaae15..130aab5e 100644
+--- a/src/server/hermes-config-migration.test.ts
++++ b/src/server/hermes-config-migration.test.ts
+@@ -71,4 +71,48 @@ describe('normalizeHermesConfigState', () => {
+       source: 'nested',
+     })
+   })
++
++  it('redacts credential-shaped values anywhere in the raw config tree (#delta1-hermes-config-secret-disclosure)', () => {
++    const state = normalizeHermesConfigState({
++      paths,
++      config: {
++        dashboard: {
++          basic_auth: {
++            username: 'eric',
++            password_hash: 'scrypt$16384$8$1$abc==$def=',
++            secret: 'fake-test-fixture-value-not-a-real-secret-000000',
++            session_ttl_seconds: 43200,
++          },
++        },
++        mcp_servers: {
++          'port-io': {
++            headers: { Authorization: 'Bearer ${PORT_MCP_TOKEN}' },
++          },
++        },
++        nested: { deeply: { access_token: 'sk-live-should-not-leak-1234567890' } },
++      },
++      env: {},
++      authProfiles: {},
++      localProviders: [],
++      localModels: [],
++    })
++
++    const dashboard = state.config.dashboard as Record<string, any>
++    const basicAuth = dashboard.basic_auth as Record<string, any>
++    // The literal old secret value must never appear anywhere in the response.
++    expect(JSON.stringify(state)).not.toContain(
++      'fake-test-fixture-value-not-a-real-secret-000000',
++    )
++    expect(basicAuth.secret).toBe('••••')
++    expect(basicAuth.password_hash).toBe('••••')
++    // Non-secret sibling fields are preserved untouched.
++    expect(basicAuth.username).toBe('eric')
++    expect(basicAuth.session_ttl_seconds).toBe(43200)
++    // A credential nested arbitrarily deep is still caught.
++    const nested = state.config.nested as Record<string, any>
++    expect(nested.deeply.access_token).toBe('••••')
++    // An env-var reference placeholder (not a literal secret) is left alone.
++    const mcpServers = state.config.mcp_servers as Record<string, any>
++    expect(mcpServers['port-io'].headers.Authorization).toBe('Bearer ${PORT_MCP_TOKEN}')
++  })
+ })
+diff --git a/src/server/hermes-config-migration.ts b/src/server/hermes-config-migration.ts
+index fd9a1967..d909ec6d 100644
+--- a/src/server/hermes-config-migration.ts
++++ b/src/server/hermes-config-migration.ts
+@@ -1,3 +1,5 @@
++import { MASK_SENTINEL } from './mcp-normalize'
++
+ export type HermesProviderKind = 'oauth' | 'api_key' | 'local' | 'custom'
+
+ export type HermesAuthSource =
+@@ -116,6 +118,34 @@ function maskSecret(value: string): string {
+   return `${value.slice(0, 4)}...${value.slice(-4)}`
+ }
+
++// Any config key shaped like a credential is masked, recursively, no
++// matter where it appears in the tree — this is the last line of
++// defense before an arbitrary hermes-agent config.yaml (which can
++// contain dashboard basic-auth secrets, MCP bearer tokens, provider
++// API keys, etc. anywhere) reaches an HTTP response
++// (#delta1-hermes-config-secret-disclosure).
++const SECRET_KEY_RE =
++  /secret|password|passphrase|token|api[_-]?key|apikey|credential|bearer|private[_-]?key|signing[_-]?key/i
++const ENV_VAR_REF_RE = /^\$\{[A-Z][A-Z0-9_]*\}$/
++
++function redactSecretsDeep(value: unknown): unknown {
++  if (Array.isArray(value)) {
++    return value.map(redactSecretsDeep)
++  }
++  if (value && typeof value === 'object') {
++    const out: Record<string, unknown> = {}
++    for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
++      if (SECRET_KEY_RE.test(key) && typeof v === 'string') {
++        out[key] = v.length === 0 || ENV_VAR_REF_RE.test(v) ? v : MASK_SENTINEL
++      } else {
++        out[key] = redactSecretsDeep(v)
++      }
++    }
++    return out
++  }
++  return value
++}
++
+ function readDefaultModel(config: Record<string, unknown>): HermesConfigState['defaultModel'] {
+   const flatModel = readString(config.model)
+   const flatProvider = readString(config.provider)
+@@ -267,6 +297,6 @@ export function normalizeHermesConfigState(input: NormalizeHermesConfigInput): H
+     activeModel: defaultModel?.model || '',
+     providers,
+     customProviders,
+-    config: input.config,
++    config: redactSecretsDeep(input.config) as Record<string, unknown>,
+   }
+ }
+--
+2.34.1

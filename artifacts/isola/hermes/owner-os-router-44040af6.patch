@@ -1,0 +1,238 @@
+From 44040af614fc46518d066474c27fbc71fadc6c52 Mon Sep 17 00:00:00 2001
+From: epicdm <eric@epic.dm>
+Date: Fri, 24 Jul 2026 01:47:51 +0000
+Subject: [PATCH] preserve: live owner_os_router plugin (epic-operator
+ fast-path, added 2026-07-23)
+
+---
+ plugins/owner_os_router/__init__.py | 204 ++++++++++++++++++++++++++++
+ plugins/owner_os_router/plugin.yaml |   7 +
+ 2 files changed, 211 insertions(+)
+ create mode 100644 plugins/owner_os_router/__init__.py
+ create mode 100644 plugins/owner_os_router/plugin.yaml
+
+diff --git a/plugins/owner_os_router/__init__.py b/plugins/owner_os_router/__init__.py
+new file mode 100644
+index 000000000..e1c990a59
+--- /dev/null
++++ b/plugins/owner_os_router/__init__.py
+@@ -0,0 +1,204 @@
++"""owner_os_router -- deterministic Owner OS fast path for the epic-operator
++Hermes profile.
++
++WHY THIS EXISTS (Port defect-owner-os-telegram-adapter-postprocessing-2026-07-23):
++prompt-only instructions (SOUL.md) were not reliably followed -- the general
++agent kept calling other tools (work-orchestrator, isola-ops) and reformatting
++the canonical Owner OS answer instead of relaying it unmodified. Eric's
++architecture decision (2026-07-23): this is an authority-boundary problem,
++not a prompt-quality problem -- the general agent must never be given the
++chance to reinterpret a canonical answer. This plugin makes that structural,
++not persuasive: an Owner-OS-shaped message never reaches the LLM at all.
++
++MECHANISM (Hermes' own existing extension point, not custom scaffolding):
++the pre_gateway_dispatch hook -- documented at
++https://hermes-agent.nousresearch.com/docs/user-guide/features/overview and
++implemented in gateway/run.py -- fires for every incoming message BEFORE
++auth and BEFORE agent dispatch. A callback may return
++{"action": "skip", ...} to drop the message from normal processing once the
++plugin has already handled it (sent its own reply). This hook is naturally
++sync (gateway/run.py's dispatch loop calls it as `cb(**kwargs)`, no await),
++so sending the reply from here reuses resolve_plugin_command_result() --
++the SAME bridge hermes_cli/plugins.py already uses internally to run an
++async plugin-command result from sync dispatch code -- rather than a
++custom asyncio bridge.
++
++/owner and natural language ("what needs my attention?") are both matched
++here, in the SAME hook, because register_command()'s handler signature
++(raw_args: str) -> Optional[str] carries no caller identity at all, and
++Owner OS's authorization check requires the caller's Telegram id -- so a
++registered /owner slash command would have no way to identify who's asking.
++pre_gateway_dispatch's MessageEvent.source DOES carry that identity, so
++routing everything through one mechanism is not just simpler, it's the only
++one that actually works for this.
++
++Non-Owner-OS messages return None here and fall through to normal dispatch,
++completely unaffected -- epic-operator keeps its full general-agent
++capabilities for everything else.
++"""
++
++import asyncio
++import logging
++import os
++import re
++
++import requests
++
++logger = logging.getLogger(__name__)
++
++# The gateway's own dotenv loading (run_agent.py, module-import-time) is not
++# guaranteed to have already run before this plugin's register(ctx) fires --
++# both are import-order-dependent, and this hook must not depend on that
++# race. Reuse Hermes' own dotenv loader (the same one run_agent.py calls)
++# explicitly here so this plugin's env vars are deterministic regardless of
++# what else has or hasn't imported yet.
++try:
++    from hermes_cli.env_loader import load_hermes_dotenv
++    load_hermes_dotenv()
++except Exception as _dotenv_exc:  # pragma: no cover - defensive only
++    logger.warning("owner_os_router: load_hermes_dotenv failed: %s", _dotenv_exc)
++
++_BFF = os.environ.get("BFF_INTERNAL_URL", "http://127.0.0.1:3005").rstrip("/")
++_SECRET = os.environ.get("OWNER_OS_INTERNAL_SECRET", "")
++_TENANT_ID = os.environ.get("OWNER_OS_TENANT_ID", "")
++_AGENT_ID = os.environ.get("OWNER_OS_AGENT_ID", "")
++_TIMEOUT = float(os.environ.get("OWNER_OS_MCP_HTTP_TIMEOUT", "30"))
++
++# Telegram's hard text.body limit is 4096 chars (same constraint as
++# WhatsApp's Cloud API) -- leave headroom, split on paragraph/line
++# boundaries so a message is never cut mid-sentence.
++_MAX_CHUNK = 4000
++
++_OWNER_COMMAND_RE = re.compile(r"^\s*/owner\b")
++_BRIEF_RE = re.compile(
++    r"what needs my attention"
++    r"|what'?s? overdue"
++    r"|pending approvals?"
++    r"|owner brief"
++    r"|daily brief"
++    r"|what do i need to (know|approve)",
++    re.IGNORECASE,
++)
++_CONFIRM_DENY_RE = re.compile(r"^\s*(approve\s*#?\s*\d+|yes|no)\s*$", re.IGNORECASE)
++
++
++def _is_owner_os_message(text: str) -> bool:
++    if not text:
++        return False
++    stripped = text.strip()
++    if _OWNER_COMMAND_RE.match(stripped):
++        return True
++    if _BRIEF_RE.search(stripped):
++        return True
++    if _CONFIRM_DENY_RE.match(stripped):
++        return True
++    return False
++
++
++def _call_owner_os(channel_identity: str, message: str) -> dict:
++    if not _TENANT_ID or not _AGENT_ID:
++        return {"authorized": False, "answer": "Owner OS is not configured on this profile."}
++    try:
++        resp = requests.post(
++            f"{_BFF}/api/internal/owner-os",
++            headers={"x-owner-os-secret": _SECRET, "Content-Type": "application/json"},
++            json={
++                "tenantId": _TENANT_ID,
++                "agentId": _AGENT_ID,
++                "channel": "telegram",
++                "channelIdentity": channel_identity,
++                "message": message,
++            },
++            timeout=_TIMEOUT,
++        )
++        return resp.json()
++    except Exception as exc:
++        logger.warning("owner_os_router: BFF call failed: %s", exc)
++        return {"authorized": False, "answer": "Owner OS is unreachable right now."}
++
++
++def _split_for_chunking(text: str, max_len: int = _MAX_CHUNK):
++    parts = []
++    remaining = text.strip()
++    while len(remaining) > max_len:
++        cut = remaining.rfind("\n\n", 0, max_len)
++        if cut < max_len * 0.4:
++            cut = remaining.rfind("\n", 0, max_len)
++        if cut < max_len * 0.4:
++            cut = max_len
++        parts.append(remaining[:cut].strip())
++        remaining = remaining[cut:].strip()
++    if remaining:
++        parts.append(remaining)
++    return parts or [text]
++
++
++def _on_pre_gateway_dispatch(event=None, gateway=None, session_store=None, **_kwargs):
++    if event is None or gateway is None:
++        return None
++
++    try:
++        from gateway.config import Platform
++    except Exception:
++        return None
++
++    source = getattr(event, "source", None)
++    if source is None or getattr(source, "platform", None) != Platform.TELEGRAM:
++        return None
++
++    text = getattr(event, "text", "") or ""
++    if not _is_owner_os_message(text):
++        return None
++
++    channel_identity = getattr(source, "user_id", None) or ""
++    if not channel_identity:
++        return None
++
++    result = _call_owner_os(channel_identity, text)
++    answer = result.get("answer") or "Owner OS is unreachable right now."
++    response_id = result.get("responseId", "unknown")
++    operation = result.get("operation", "unknown")
++
++    logger.info(
++        "owner_os_router: response_id=%s operation=%s authorized=%s",
++        response_id, operation, result.get("authorized"),
++    )
++
++    adapter = gateway.adapters.get(Platform.TELEGRAM)
++    if adapter is None:
++        return None
++
++    chunks = _split_for_chunking(answer)
++    chat_id = source.chat_id
++    reply_to = getattr(event, "message_id", None)
++
++    async def _send_all_chunks():
++        # Sent in order, awaited on the SAME loop the adapter's own HTTP
++        # client belongs to. Earlier version routed this through
++        # resolve_plugin_command_result(), which runs the coroutine on a
++        # FRESH event loop in a separate thread when called from sync code
++        # already inside a running loop -- that broke the Telegram
++        # adapter's persistent HTTP client (bound to the main loop),
++        # surfaced as "RuntimeError('Event loop is closed')", triggered the
++        # library's own internal send-retry, and produced a real duplicate
++        # message to Eric. Scheduling via create_task() on the CURRENT loop
++        # (below) avoids ever touching a second loop.
++        for chunk in chunks:
++            try:
++                await adapter.send(chat_id, chunk, reply_to=reply_to)
++            except Exception as exc:
++                logger.warning("owner_os_router: send failed: %s", exc)
++
++    try:
++        asyncio.get_running_loop().create_task(_send_all_chunks())
++    except RuntimeError:
++        # No running loop (shouldn't happen from within gateway dispatch,
++        # but fail safe rather than crash the hook).
++        logger.warning("owner_os_router: no running event loop to schedule send on")
++
++    return {"action": "skip", "reason": "owner-os-fast-path"}
++
++
++def register(ctx) -> None:
++    ctx.register_hook("pre_gateway_dispatch", _on_pre_gateway_dispatch)
++
+diff --git a/plugins/owner_os_router/plugin.yaml b/plugins/owner_os_router/plugin.yaml
+new file mode 100644
+index 000000000..906410577
+--- /dev/null
++++ b/plugins/owner_os_router/plugin.yaml
+@@ -0,0 +1,7 @@
++name: owner_os_router
++version: "1.0.0"
++description: "Deterministic fast-path router for the canonical Owner OS. Matches Owner-OS-shaped Telegram messages (owner brief / overdue / pending approvals / confirm-deny / /owner) via pre_gateway_dispatch and answers them directly from /api/internal/owner-os, before the general agent ever sees the message -- no LLM involvement, no chance of added tool calls or reformatting. Everything else falls through to normal agent dispatch unaffected."
++author: "EPIC Communications"
++hooks:
++  - pre_gateway_dispatch
++
+--
+2.34.1

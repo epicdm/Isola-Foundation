@@ -1,0 +1,40 @@
+From 5e7c37bcbe9020d71ebf9656f76e54117e26b7c7 Mon Sep 17 00:00:00 2001
+From: epicdm <eric@epic.dm>
+Date: Fri, 24 Jul 2026 02:06:00 +0000
+Subject: [PATCH] fix(api): /api/hermes-config returns 401 not 500 when
+ unauthenticated
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+authorize() cast isAuthenticated()'s return value to Response | true, but
+isAuthenticated() actually returns a plain boolean. On failure this made
+authorize() return the literal false where a Response was expected, which
+the router couldn't handle and surfaced as an unhandled 500 instead of a
+clean 401 — inconsistent with every other route in this codebase (e.g.
+swarm-missions.ts), which check isAuthenticated() as a boolean directly.
+---
+ src/server/hermes-config-route.ts | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/server/hermes-config-route.ts b/src/server/hermes-config-route.ts
+index 7113b8e4..b296723b 100644
+--- a/src/server/hermes-config-route.ts
++++ b/src/server/hermes-config-route.ts
+@@ -72,8 +72,12 @@ const LegacyPatchSchema = z.object({
+ })
+
+ async function authorize(request: Request): Promise<AuthResult> {
+-  const result = isAuthenticated(request) as AuthResult
+-  if (result !== true) return result
++  // isAuthenticated() returns a plain boolean, not Response | true — a bare
++  // `false` here is not a valid Response and throws downstream, surfacing
++  // as an unhandled 500 instead of 401 (#delta1-hermes-config-500).
++  if (!isAuthenticated(request)) {
++    return Response.json({ ok: false, error: 'Unauthorized' }, { status: 401 })
++  }
+   await ensureGatewayProbed()
+   return true
+ }
+--
+2.34.1
