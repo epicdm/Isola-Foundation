@@ -23,6 +23,7 @@ const { spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 
 const GUARD = path.join(__dirname, 'isola-guard.js');
 const STOP = path.join(__dirname, 'isola-stop-gate.js');
@@ -35,17 +36,78 @@ const STOP = path.join(__dirname, 'isola-stop-gate.js');
 // directory is snapshotted before this is set and re-checked identical after
 // the full suite completes, so isolation is proven, not just assumed.
 const REAL_STATE_DIR = path.join(__dirname, '..', 'state');
-const REAL_GUARD_LOG = path.join(REAL_STATE_DIR, 'guard.log');
 
-function snapshotRealState() {
-  let guardLogSize = null;
-  try { guardLogSize = fs.statSync(REAL_GUARD_LOG).size; } catch (_) { /* no log yet - fine, null is the baseline */ }
-  let sessionDirs = null;
-  try { sessionDirs = fs.readdirSync(path.join(REAL_STATE_DIR, 'sessions')).sort(); } catch (_) { /* no sessions dir yet - fine */ }
-  return { guardLogSize, sessionDirs };
+/**
+ * Recursively walks a directory and returns a Map<relativePath, entry>
+ * covering every file, subdirectory, and other entry type found - not just
+ * guard.log, not just top-level names. Each file entry carries its size and
+ * a SHA-256 of its actual bytes, so "unchanged" means byte-for-byte, not
+ * merely same-size or same-filename. File CONTENT is read only to hash it
+ * and is never retained, printed, or parsed - the buffer goes out of scope
+ * once the digest is computed.
+ */
+function snapshotDirectoryTree(rootDir) {
+  const entries = new Map();
+  function walk(dir, rel) {
+    let dirents;
+    try {
+      dirents = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (_) {
+      return; // directory does not exist yet - trivially empty
+    }
+    for (const dirent of dirents) {
+      const abs = path.join(dir, dirent.name);
+      const relPath = rel ? rel + '/' + dirent.name : dirent.name;
+      if (dirent.isDirectory()) {
+        entries.set(relPath, { type: 'dir' });
+        walk(abs, relPath);
+      } else if (dirent.isFile()) {
+        try {
+          const buf = fs.readFileSync(abs);
+          entries.set(relPath, { type: 'file', size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex') });
+        } catch (_) {
+          entries.set(relPath, { type: 'file', size: null, sha256: null }); // unreadable still counts as a tracked entry
+        }
+      } else {
+        entries.set(relPath, { type: 'other' });
+      }
+    }
+  }
+  walk(rootDir, '');
+  return entries;
 }
 
-const realStateBefore = snapshotRealState();
+/** Exact equality over two snapshots: same set of relative paths, and for
+ * every file entry, the same type/size/sha256. Comparison happens entirely
+ * over hash strings already held in memory - never re-reads either
+ * directory, never prints a hash or a path. */
+function directoryTreesIdentical(before, after) {
+  if (before.size !== after.size) return false;
+  for (const [relPath, beforeEntry] of before) {
+    const afterEntry = after.get(relPath);
+    if (!afterEntry) return false;
+    if (beforeEntry.type !== afterEntry.type) return false;
+    if (beforeEntry.type === 'file' && (beforeEntry.size !== afterEntry.size || beforeEntry.sha256 !== afterEntry.sha256)) return false;
+  }
+  return true;
+}
+
+/** Recursively scans every file under rootDir for a literal substring,
+ * without ever printing a path or file content - returns only a boolean. */
+function anyFileContains(rootDir, needle) {
+  const tree = snapshotDirectoryTree(rootDir); // re-walked fresh; only used to enumerate file paths here
+  for (const [relPath, entry] of tree) {
+    if (entry.type !== 'file') continue;
+    try {
+      if (fs.readFileSync(path.join(rootDir, relPath), 'utf8').includes(needle)) return true;
+    } catch (_) {
+      /* unreadable/binary - not a text leak by definition */
+    }
+  }
+  return false;
+}
+
+const realStateBefore = snapshotDirectoryTree(REAL_STATE_DIR);
 const DISPOSABLE_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'isola-guard-selftest-'));
 process.env.ISOLA_GUARD_STATE_DIR = DISPOSABLE_STATE_DIR;
 
@@ -102,6 +164,11 @@ const LEAKY_PROCEDURE_NAME = ['listProjects', 'And', 'Services'].join('');
 /** Fake canary for the PreToolUse logging test below - synthetic, never a
  * real secret. */
 const PRETOOLUSE_CANARY = t('PRETOOLUSE_CANARY_', 'FAKE_9d3e7a1c');
+/** Fake canary for the PostToolUse malformed-input logging test below -
+ * hoisted to module scope so the final recursive disposable-directory scan
+ * (which runs after both hook loops complete) can check for it too, not
+ * just PRETOOLUSE_CANARY. */
+const POSTTOOLUSE_MALFORMED_CANARY = t('CANARY_', 'FAKE_SECRET_', '7e2f9b1a');
 
 const cases = [
   // --- THE R5A RULE -------------------------------------------------------
@@ -983,12 +1050,6 @@ const cases = [
   },
 ];
 
-// isola-guard.js writes guard.log under ISOLA_GUARD_STATE_DIR, which points
-// at DISPOSABLE_STATE_DIR for this entire run (set above) - a fresh,
-// initially-nonexistent directory, so the canary check below can read the
-// whole file with no byte-offset bookkeeping and never touches the real log.
-const DISPOSABLE_GUARD_LOG = path.join(DISPOSABLE_STATE_DIR, 'guard.log');
-
 let failed = 0;
 console.log('isola hooks - selftest\n');
 for (const c of cases) {
@@ -1012,36 +1073,16 @@ for (const c of cases) {
   );
 }
 
-// Canary check: guard.log for this entire run lives under the disposable
-// directory (fresh, was empty before this suite started), so the whole file
-// is fair to read - it can never contain anything but what THIS run wrote.
-{
-  let leaked = false;
-  try {
-    leaked = fs.readFileSync(DISPOSABLE_GUARD_LOG, 'utf8').includes(PRETOOLUSE_CANARY);
-  } catch (_) {
-    /* no log file at all - trivially no leak */
-  }
-  const ok = !leaked;
-  if (!ok) failed++;
-  console.log((ok ? '  PASS  ' : '  FAIL  ') + 'PreToolUse canary is absent from guard.log (isolated in a disposable directory for this entire run)');
-}
+// The comprehensive recursive canary scan and the real-state-unchanged
+// comparison both run once, at the very end of the file, after every hook
+// (PreToolUse cases, stop-gate cases, and the PostToolUse output-guard
+// cases) has had a chance to write - see "disposable-directory integrity"
+// below. A single check there covers all of it, rather than partial
+// mid-run checks that would miss writes from later loops.
 {
   const ok = fs.readdirSync(DISPOSABLE_STATE_DIR).length > 0;
   if (!ok) failed++;
   console.log((ok ? '  PASS  ' : '  FAIL  ') + 'the disposable state directory actually received writes this run (proves the override is live, not merely unused)');
-}
-{
-  const after = snapshotRealState();
-  const guardLogOk = after.guardLogSize === realStateBefore.guardLogSize;
-  const sessionsOk = JSON.stringify(after.sessionDirs) === JSON.stringify(realStateBefore.sessionDirs);
-  const ok = guardLogOk && sessionsOk;
-  if (!ok) failed++;
-  console.log(
-    (ok ? '  PASS  ' : '  FAIL  ') +
-      'the real .claude/state/guard.log and .claude/state/sessions/ are byte-for-byte/listing-for-listing unchanged by this entire self-test run' +
-      (ok ? '' : ` (guardLogSize before=${realStateBefore.guardLogSize} after=${after.guardLogSize}; sessionDirs before=${JSON.stringify(realStateBefore.sessionDirs)} after=${JSON.stringify(after.sessionDirs)})`)
-  );
 }
 
 // --- Permission-system backstop (settings.json) -----------------------------
@@ -1399,6 +1440,45 @@ const outputCases = [
       return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'an out-of-pattern value was not rejected';
     },
   },
+  // -- SEMANTIC CALENDAR VALIDATION of createdAt (owner-directed) --
+  // Regex shape alone accepts impossible dates ("2026-02-30", "2026-13-01")
+  // since \d{2} matches any two digits - these must be rejected by explicit
+  // range/leap-year arithmetic, not merely structural pattern matching.
+  ...[
+    { label: 'invalid month (13)', createdAt: '2026-13-01T00:00:00Z' },
+    { label: 'February 30 (no such day in any year)', createdAt: '2026-02-30T00:00:00Z' },
+    { label: 'February 29 in a non-leap year (2026)', createdAt: '2026-02-29T00:00:00Z' },
+    { label: 'invalid hour (24)', createdAt: '2026-01-01T24:00:00Z' },
+    { label: 'invalid minute (60)', createdAt: '2026-01-01T00:60:00Z' },
+    { label: 'invalid second (60)', createdAt: '2026-01-01T00:00:60Z' },
+    { label: 'seven fractional-second digits (exceeds the 1-6 bound)', createdAt: '2026-01-01T00:00:00.1234567Z' },
+  ].map(({ label, createdAt }) => ({
+    name: `createdAt with ${label} is REJECTED to the safe placeholder, not silently normalized`,
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listProjects', result: [{ name: 'isola', createdAt }] },
+      });
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : `"${createdAt}" was not rejected: ` + JSON.stringify(r.updatedToolOutput);
+    },
+  })),
+  ...[
+    { label: 'the reviewed real millisecond format (3 fractional digits)', createdAt: '2026-08-09T20:47:10.605Z' },
+    { label: 'a valid leap day (2024-02-29, 2024 is a leap year)', createdAt: '2024-02-29T12:00:00Z' },
+    { label: 'six fractional-second digits (the maximum allowed)', createdAt: '2026-01-01T00:00:00.123456Z' },
+  ].map(({ label, createdAt }) => ({
+    name: `createdAt with ${label} is ACCEPTED and passes through unchanged`,
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listProjects', result: [{ name: 'isola', createdAt }] },
+      });
+      const row = r.updatedToolOutput && r.updatedToolOutput.result && r.updatedToolOutput.result[0];
+      return row && row.createdAt === createdAt ? null : `"${createdAt}" was not accepted as expected: ` + JSON.stringify(r.updatedToolOutput);
+    },
+  })),
   {
     name: 'listProjects row count exceeding the bound is BLOCKED',
     check: () => {
@@ -1431,43 +1511,24 @@ const outputCases = [
     },
   })),
 
-  // -- CANARY: nothing leaks anywhere on a malformed-JSON failure path --
+  // -- CANARY: nothing leaks into stdout/stderr on a malformed-JSON failure
+  // path. File-level leakage (this hook has no file-writing code path at
+  // all - see its header) is covered by the single comprehensive recursive
+  // scan of the whole disposable directory run after every case completes,
+  // not duplicated here.
   {
-    name: 'a fake canary positioned before a JSON parse failure never reaches stdout, stderr, or any log/state file (no persistent logging exists in this hook at all)',
+    name: 'a fake canary positioned before a JSON parse failure never reaches stdout or stderr (no persistent logging exists in this hook at all)',
     check: () => {
-      // This hook has no file-writing code path at all (see its header), so
-      // there is nothing for ISOLA_GUARD_STATE_DIR to redirect - the disposable
-      // directory is inspected anyway, never the real workspace state, so this
-      // check can never read pre-existing real content even incidentally.
-      const stateDir = DISPOSABLE_STATE_DIR;
-      let before = new Set();
-      try { before = new Set(fs.readdirSync(stateDir)); } catch (_) {}
-
-      const canary = t('CANARY_', 'FAKE_SECRET_', '7e2f9b1a');
-      const malformedText = '{"procedure":"listProjects","canary":"' + canary + '","result":[{"name":';
+      const malformedText = '{"procedure":"listProjects","canary":"' + POSTTOOLUSE_MALFORMED_CANARY + '","result":[{"name":';
       const r = runOutputGuard({
         tool_name: 'mcp__epic-portal__execute_query',
         tool_input: { procedure: 'listProjects', input: {} },
         tool_response: [{ type: 'text', text: malformedText }],
       });
 
-      if (r.stdout.includes(canary)) return 'canary leaked into stdout';
-      if (r.stderr.includes(canary)) return 'canary leaked into stderr';
-
-      let after = [];
-      try { after = fs.readdirSync(stateDir); } catch (_) {}
-      for (const name of after) {
-        const full = path.join(stateDir, name);
-        try {
-          const stat = fs.statSync(full);
-          if (stat.isFile()) {
-            const content = fs.readFileSync(full, 'utf8');
-            if (content.includes(canary)) return 'canary leaked into state file: ' + name;
-          }
-        } catch (_) { /* directories, permission edge cases - not the target of this check */ }
-      }
-
-      if (JSON.stringify(r.updatedToolOutput).includes(canary)) return 'canary leaked into the sanitized output';
+      if (r.stdout.includes(POSTTOOLUSE_MALFORMED_CANARY)) return 'canary leaked into stdout';
+      if (r.stderr.includes(POSTTOOLUSE_MALFORMED_CANARY)) return 'canary leaked into stderr';
+      if (JSON.stringify(r.updatedToolOutput).includes(POSTTOOLUSE_MALFORMED_CANARY)) return 'canary leaked into the sanitized output';
       return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'malformed-with-canary case did not fail to the exact safe placeholder';
     },
   },
@@ -1485,13 +1546,61 @@ for (const c of outputCases) {
   console.log((ok ? '  PASS  ' : '  FAIL  ') + c.name + (ok ? '' : '\n          ' + failure));
 }
 
+// --- Disposable-directory integrity (runs once, after every hook above has
+// had its chance to write - PreToolUse cases, stop-gate cases, and the
+// PostToolUse output-guard cases) -------------------------------------------
+console.log('\ndisposable-directory integrity');
+{
+  // Recursive - every file at every depth under DISPOSABLE_STATE_DIR, not
+  // just guard.log, not just top-level entries. Content is read only to
+  // test for substring containment; never printed, never retained past this
+  // check, never written back anywhere.
+  const preToolUseLeak = anyFileContains(DISPOSABLE_STATE_DIR, PRETOOLUSE_CANARY);
+  const ok = !preToolUseLeak;
+  if (!ok) failed++;
+  console.log((ok ? '  PASS  ' : '  FAIL  ') + 'PRETOOLUSE_CANARY is absent from every file under the disposable state directory (recursive scan)');
+}
+{
+  const postToolUseLeak = anyFileContains(DISPOSABLE_STATE_DIR, POSTTOOLUSE_MALFORMED_CANARY);
+  const ok = !postToolUseLeak;
+  if (!ok) failed++;
+  console.log((ok ? '  PASS  ' : '  FAIL  ') + 'the PostToolUse malformed-input canary is absent from every file under the disposable state directory (recursive scan; expected trivially - this hook has no file-writing code path at all)');
+}
+{
+  // Exact equality: same relative paths, same file sizes, same SHA-256 of
+  // actual bytes, for the ENTIRE real state directory tree (guard.log and
+  // the full sessions/ tree, at every depth) - compared only in memory,
+  // hashes never printed. If this ever needs to fall back to a weaker
+  // check, the claim below must be narrowed accordingly - "byte-for-byte"
+  // is only asserted because this comparison is genuinely content-hash-based.
+  const realStateAfter = snapshotDirectoryTree(REAL_STATE_DIR);
+  const ok = directoryTreesIdentical(realStateBefore, realStateAfter);
+  if (!ok) failed++;
+  console.log(
+    (ok ? '  PASS  ' : '  FAIL  ') +
+      'the real .claude/state directory tree (guard.log and the full sessions/ tree, recursively) is byte-for-byte unchanged by this entire self-test run' +
+      (ok ? '' : ` (entry count before=${realStateBefore.size} after=${realStateAfter.size} - see in-memory snapshots for detail; contents/hashes deliberately not printed here)`)
+  );
+}
+{
+  // Cleanup itself is registered via process.on('exit') so it always runs;
+  // this proves the directory this run actually used is still present RIGHT
+  // NOW (the exit handler hasn't fired yet) - a canary that the override
+  // was pointed at a real, existing path throughout, not a dangling one.
+  const ok = fs.existsSync(DISPOSABLE_STATE_DIR);
+  if (!ok) failed++;
+  console.log((ok ? '  PASS  ' : '  FAIL  ') + 'the disposable state directory used by this run still exists at this point (its removal happens in the process-exit handler, after this line)');
+}
+
 // No manual ledger cleanup needed: every write this run made landed under
 // DISPOSABLE_STATE_DIR (never the real .claude/state/sessions), and that
 // whole directory is removed by the process.on('exit') handler registered
 // above regardless of how this script terminates.
 
 const EXTRA_STANDALONE_CHECKS =
-  3 /* guard.log canary + disposable-dir-received-writes + real-state-unchanged */ + 4 /* settings.json backstop */;
+  4 /* disposable-dir-received-writes + 2x recursive canary scan + real-state-unchanged */ +
+  1 /* disposable dir still exists pre-cleanup */ +
+  4 /* settings.json backstop */;
 console.log(
   '\n' +
     (failed

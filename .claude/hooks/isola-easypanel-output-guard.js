@@ -126,8 +126,37 @@ const NAME_PATTERN = /^[a-z0-9-_]{1,100}$/;
  * longest string this pattern can match is 30 characters
  * ("YYYY-MM-DDTHH:MM:SS.dddddd" + "Z" = 20 + 1 + 6 + 1 = 28, rounded up).
  */
-const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$/;
+const ISO_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?Z$/;
 const MAX_TIMESTAMP_LENGTH = 30;
+
+/** Structural (regex) validity is not calendar validity — "2026-02-30" and
+ * "2026-13-01" both match ISO_TIMESTAMP_PATTERN's digit-count shape. This
+ * checks the captured components against real calendar rules by hand:
+ * explicit range/leap-year arithmetic, never `new Date(str)` — Date silently
+ * NORMALIZES an out-of-range date (e.g. "2026-02-30" becomes March 2) rather
+ * than rejecting it, which would make invalid input pass this check by
+ * accident. */
+function isLeapYear(year) {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+function isValidCalendarTimestamp(match) {
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  if (month < 1 || month > 12) return false;
+  const maxDay = month === 2 && isLeapYear(year) ? 29 : DAYS_IN_MONTH[month - 1];
+  if (day < 1 || day > maxDay) return false;
+  if (hour < 0 || hour > 23) return false;
+  if (minute < 0 || minute > 59) return false;
+  if (second < 0 || second > 59) return false;
+  return true;
+}
 
 function projectListProjects(result) {
   if (!Array.isArray(result)) throw new Error('listProjects result is not an array');
@@ -139,10 +168,12 @@ function projectListProjects(result) {
     if (typeof row.name !== 'string' || !NAME_PATTERN.test(row.name)) {
       throw new Error('listProjects row.name failed validation');
     }
+    const tsMatch = typeof row.createdAt === 'string' ? ISO_TIMESTAMP_PATTERN.exec(row.createdAt) : null;
     if (
       typeof row.createdAt !== 'string' ||
       row.createdAt.length > MAX_TIMESTAMP_LENGTH ||
-      !ISO_TIMESTAMP_PATTERN.test(row.createdAt)
+      !tsMatch ||
+      !isValidCalendarTimestamp(tsMatch)
     ) {
       throw new Error('listProjects row.createdAt failed validation');
     }

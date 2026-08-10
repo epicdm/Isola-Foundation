@@ -11,19 +11,6 @@
     "allow": []
   },
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node",
-            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/isola-guard.js"],
-            "timeout": 20
-          }
-        ]
-      }
-    ],
     "PostToolUse": [
       {
         "matcher": "mcp__epic-portal__execute_query",
