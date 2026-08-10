@@ -128,6 +128,53 @@ function evaluate(inp) {
   const cls = T.classifyTool(tool);
   SESSION_ID = inp.session_id || 'unknown';
 
+  // -------------------------------------------------------- easypanel-block
+  // Deterministic block, checked before ANY tool-class branch — covers the
+  // native epic-portal MCP tool (tool_input.procedure, including nested and
+  // JSON-string-encoded shapes) and raw HTTP bypass routes (/api/mcp,
+  // /api/rpc/..., /api/trpc/...). A remembered rule is not containment; this is.
+  //
+  // FAIL-CLOSED EXCEPTION: the module-level policy is fail-open on internal
+  // error (a guard bug must never halt legitimate work). That default is
+  // deliberately inverted here, and ONLY here: if inspecting an epic-portal-
+  // shaped call throws (a malformed/deeply-nested payload we cannot safely
+  // parse), an unverifiable call to the leakiest tool in this environment
+  // must be denied, not allowed through. Calls that are not epic-portal-shaped
+  // re-throw immediately, so every other tool keeps the existing fail-open
+  // behavior via the outer stdin-handler catch — unrelated to this block.
+  {
+    const cmdForCheck = String(ti.command || ti.script || '');
+    const looksLikeEasyPanelCall =
+      T.EASYPANEL_MCP_TOOL_RE.test(tool) ||
+      (T.HTTP_INVOCATION_RE.test(cmdForCheck) &&
+        (T.EASYPANEL_RAW_ENDPOINT_RE.test(cmdForCheck) || T.EASYPANEL_RAW_PATH_RE.test(cmdForCheck)));
+    let blocked = false;
+    let unparseable = false;
+    try {
+      blocked = T.isBlockedEasyPanelCall(tool, ti, cmdForCheck);
+    } catch (e) {
+      if (!looksLikeEasyPanelCall) throw e; // preserve fail-open for unrelated tools
+      log('EASYPANEL-INSPECT-ERROR fail-closed: ' + (e && e.message));
+      unparseable = true;
+    }
+    if (blocked || unparseable) {
+      deny(
+        'easypanel-secret-dump-procedure',
+        'listProjectsAndServices (epic-portal/EasyPanel) returns full plaintext secrets ' +
+          '(encryption keys, JWT secrets, DB/Redis/MariaDB passwords) for every service on the ' +
+          'instance, with no redaction and no per-project scoping. Reclassified P0 twice this session ' +
+          '(see defect-easypanel-listprojectsandservices-second-secret-dump-2026-08-10) — blocked ' +
+          'outright rather than relied on as a remembered rule.' +
+          (unparseable
+            ? ' This specific payload could not be safely inspected (malformed or too deeply nested) — ' +
+              'failing closed for an epic-portal-shaped call rather than allowing an unverifiable one through.'
+            : ''),
+        'use listProjects (names only) plus a per-service query — listPorts, listMounts, ' +
+          'getComposeDockerServices, or getMonitorTableData — none of which return secret material.'
+      );
+    }
+  }
+
   // ---------------------------------------------------------------- other
   // Text-only / orchestration tools are never inspected for command shapes.
   if (cls === 'other') {

@@ -283,6 +283,122 @@ const SECRET_DUMP_RE = new RegExp(
 );
 
 /**
+ * epic-portal (EasyPanel MCP) procedures that return full plaintext secrets
+ * (encryption keys, JWT secrets, DB/Redis/MariaDB passwords) for every
+ * service on the instance, with no redaction and no per-project scoping.
+ * Confirmed by direct observation twice in one session (2026-08-09, then
+ * again 2026-08-10) — reclassified P0 both times. Its own stated purpose
+ * ("resource selection") has no functional need for runtime secret values,
+ * so this is blocked outright rather than relied on as a remembered rule.
+ * See defect-easypanel-listprojectsandservices-second-secret-dump-2026-08-10.
+ *
+ * Safe alternatives that cover every legitimate need so far: listProjects,
+ * listPorts, listMounts, getComposeDockerServices, getMonitorTableData —
+ * none of these return secret material.
+ */
+const EASYPANEL_BLOCKED_PROCEDURES = new Set(['listProjectsAndServices']);
+
+/** Tool-name prefix used by every epic-portal MCP wrapper (query/mutation/destructive). */
+const EASYPANEL_MCP_TOOL_RE = /^mcp__epic-portal__execute_/;
+
+/** Host/path fingerprints for the raw HTTP bypass routes a blocked procedure could be
+ * reached through: the JSON-RPC-over-HTTPS route documented this session (used when the
+ * native tool wrapper mis-encodes non-empty input), a REST-style /api/rpc/... path, and
+ * a tRPC-style /api/trpc/namespace.procedure path. Checked independent of host, since a
+ * proxy or different hostname must not create a bypass. */
+const EASYPANEL_RAW_ENDPOINT_RE = /portal\.saas00\.epic\.dm\/api\/mcp/i;
+const EASYPANEL_RAW_PATH_RE = /\/api\/(rpc|trpc|mcp)\/[^\s'"]*/i;
+
+/**
+ * A path/endpoint match alone is not enough to block — "prose mentioning the
+ * Graph host is still not gated" is the same design rule this reuses (see
+ * isola-guard.js header). A commit message, a doc, or this very policy file
+ * can legitimately contain the string "/api/rpc/...listProjectsAndServices"
+ * without performing a call. Only treat it as a real network call when the
+ * command also looks like one is actually being made.
+ */
+const HTTP_INVOCATION_RE = /\b(curl|wget|Invoke-WebRequest|Invoke-RestMethod|axios)\b|\bfetch\s*\(|\.request\s*\(/i;
+
+const EASYPANEL_MAX_INSPECT_DEPTH = 6;
+
+/**
+ * True if `name` matches a blocked procedure, bare ("listProjectsAndServices")
+ * or namespaced ("projects.listProjectsAndServices", "projects/listProjectsAndServices").
+ */
+function matchesBlockedEasyPanelProcedureName(name) {
+  if (typeof name !== 'string' || !name) return false;
+  for (const blocked of EASYPANEL_BLOCKED_PROCEDURES) {
+    if (name === blocked || name.endsWith('.' + blocked) || name.endsWith('/' + blocked)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Walks a tool_input payload looking for a procedure name in any plausible
+ * location, defensively handling two real shapes seen this session:
+ *   - the procedure name nested under arguments/params/input/body/data
+ *   - the whole input (or a sub-field) arriving as a JSON-encoded STRING
+ *     rather than a parsed object (the documented native-tool encoding bug)
+ *
+ * Deliberately THROWS (rather than silently giving up) when the payload
+ * nests deeper than a sane bound — an unusually-shaped payload targeting
+ * epic-portal is itself suspicious, and the caller is responsible for
+ * treating a thrown error here as fail-CLOSED for epic-portal-shaped calls.
+ */
+function collectProcedureCandidates(value, depth) {
+  const out = [];
+  if (depth > EASYPANEL_MAX_INSPECT_DEPTH) {
+    throw new Error('easypanel payload nesting exceeds safe inspection depth (' + EASYPANEL_MAX_INSPECT_DEPTH + ')');
+  }
+  if (value == null) return out;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      let parsed;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch (_) {
+        return out; // not JSON after all — nothing further to extract, not an error
+      }
+      out.push(...collectProcedureCandidates(parsed, depth + 1));
+    }
+    return out;
+  }
+  if (typeof value !== 'object') return out;
+  if (typeof value.procedure === 'string') out.push(value.procedure);
+  if (typeof value.method === 'string') out.push(value.method);
+  for (const key of ['arguments', 'params', 'input', 'body', 'data', 'payload']) {
+    if (value[key] !== undefined) out.push(...collectProcedureCandidates(value[key], depth + 1));
+  }
+  return out;
+}
+
+/**
+ * True if this call — through the native MCP tool OR a raw HTTP bypass —
+ * would invoke a blocked EasyPanel procedure. Checked against both tool_input
+ * (native path, including nested/serialized shapes) and a command string
+ * (raw curl/node path, including /api/rpc and /api/trpc forms).
+ *
+ * Throws (does not swallow) if tool_input inspection hits the depth guard —
+ * callers targeting epic-portal MUST treat that as fail-CLOSED, not fail-open.
+ */
+function isBlockedEasyPanelCall(toolName, toolInput, cmd) {
+  const isEasyPanelTool = EASYPANEL_MCP_TOOL_RE.test(toolName || '');
+  if (isEasyPanelTool) {
+    const candidates = collectProcedureCandidates(toolInput, 0);
+    if (candidates.some(matchesBlockedEasyPanelProcedureName)) return true;
+  }
+  if (cmd && HTTP_INVOCATION_RE.test(cmd) && (EASYPANEL_RAW_ENDPOINT_RE.test(cmd) || EASYPANEL_RAW_PATH_RE.test(cmd))) {
+    for (const name of EASYPANEL_BLOCKED_PROCEDURES) {
+      if (cmd.includes(name)) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Tool classification. The central lesson from the incumbent global hook:
  * scanning every tool's serialized input causes false positives on tools that
  * merely DESCRIBE an operation (a task update mentioning a container teardown,
@@ -373,6 +489,14 @@ module.exports = {
   LEGACY_REFERENCE_RE,
   SECRET_FILE_RE,
   SECRET_DUMP_RE,
+  EASYPANEL_BLOCKED_PROCEDURES,
+  EASYPANEL_MCP_TOOL_RE,
+  EASYPANEL_RAW_ENDPOINT_RE,
+  EASYPANEL_RAW_PATH_RE,
+  HTTP_INVOCATION_RE,
+  matchesBlockedEasyPanelProcedureName,
+  collectProcedureCandidates,
+  isBlockedEasyPanelCall,
   TOOL_CLASSES,
   classifyTool,
   normalizePath,

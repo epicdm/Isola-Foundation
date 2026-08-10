@@ -495,6 +495,184 @@ const cases = [
       tool_input: { host: '66.118.37.12', user: 'epicdm', command: 'pm2 jlist' },
     },
   },
+
+  // --- EASYPANEL SECRET-DUMP PROCEDURE (P0, 2026-08-10) -------------------
+  {
+    name: 'epic-portal execute_query listProjectsAndServices is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-secret-dump-procedure',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listProjectsAndServices', input: {} },
+    },
+  },
+  {
+    name: 'epic-portal execute_mutation listProjectsAndServices is BLOCKED (defense in depth)',
+    expect: BLOCK,
+    contains: 'easypanel-secret-dump-procedure',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_mutation',
+      tool_input: { procedure: 'listProjectsAndServices', input: {} },
+    },
+  },
+  {
+    name: 'raw JSON-RPC-over-HTTPS bypass calling listProjectsAndServices is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-secret-dump-procedure',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: t(
+          'curl -s https://portal.saas00.epic.dm/api/mcp -d \'{"method":"tools/call","params":',
+          '{"name":"execute_query","arguments":{"procedure":"listProjectsAndServices","input":{}}}}\''
+        ),
+      },
+    },
+  },
+  {
+    name: 'epic-portal execute_query listProjects (names only) is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listProjects', input: {} },
+    },
+  },
+  {
+    name: 'epic-portal execute_query listPorts is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listPorts', input: { projectName: 'isola', serviceName: 'nocobase' } },
+    },
+  },
+  {
+    name: 'epic-portal execute_query listMounts is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listMounts', input: { projectName: 'isola', serviceName: 'nocobase' } },
+    },
+  },
+  {
+    name: 'epic-portal execute_query getComposeDockerServices is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'getComposeDockerServices', input: {} },
+    },
+  },
+  {
+    name: 'epic-portal execute_query getMonitorTableData is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'getMonitorTableData', input: {} },
+    },
+  },
+
+  // --- EASYPANEL BLOCK — adversarial shapes (owner-directed hardening pass) --
+  {
+    name: 'namespaced procedure "projects.listProjectsAndServices" is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-secret-dump-procedure',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'projects.listProjectsAndServices', input: {} },
+    },
+  },
+  {
+    name: 'procedure name nested under tool_input.arguments is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-secret-dump-procedure',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_mutation',
+      tool_input: { arguments: { procedure: 'listProjectsAndServices', input: {} } },
+    },
+  },
+  {
+    name: 'whole tool_input arriving as a serialized JSON string is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-secret-dump-procedure',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: '{"procedure":"listProjectsAndServices","input":{}}',
+    },
+  },
+  {
+    name: 'raw REST-style /api/rpc/projects/listProjectsAndServices path is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-secret-dump-procedure',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s https://portal.saas00.epic.dm/api/rpc/projects/listProjectsAndServices' },
+    },
+  },
+  {
+    name: 'raw tRPC-style /api/trpc/projects.listProjectsAndServices path is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-secret-dump-procedure',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s "https://portal.saas00.epic.dm/api/trpc/projects.listProjectsAndServices?batch=1"' },
+    },
+  },
+  {
+    // Same design rule as "prose mentioning the Graph host is still not gated":
+    // describing the blocked path/procedure (a commit message, a doc) is not
+    // performing it. No curl/fetch/http-client invocation present here.
+    name: 'a commit message DESCRIBING the blocked path/procedure is ALLOWED (not payload-blind)',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: t(
+          'git commit -m "fix(guard): block /api/rpc/projects/listProjectsAndServices ',
+          'and /api/trpc/... requests"'
+        ),
+      },
+    },
+  },
+  {
+    // 8 levels deep (arguments/params/input/body/data/payload/arguments/params) —
+    // exceeds EASYPANEL_MAX_INSPECT_DEPTH (6) BEFORE the buried procedure name is
+    // ever reached, so this genuinely exercises the throw-on-depth path, not
+    // ordinary candidate extraction succeeding by coincidence.
+    name: 'deeply-nested unparseable epic-portal payload FAILS CLOSED (BLOCKED, not allowed or crashed)',
+    expect: BLOCK,
+    contains: 'easypanel-secret-dump-procedure',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: {
+        arguments: { params: { input: { body: { data: { payload: { arguments: { params: { procedure: 'listProjectsAndServices' } } } } } } } },
+      },
+    },
+  },
+  {
+    name: 'the SAME deeply-nested shape on an UNRELATED tool stays fail-OPEN (existing behavior preserved)',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'SomeUnrelatedTool',
+      tool_input: {
+        arguments: { params: { input: { body: { data: { payload: { arguments: { params: { procedure: 'listProjectsAndServices' } } } } } } } },
+      },
+    },
+  },
 ];
 
 let failed = 0;
