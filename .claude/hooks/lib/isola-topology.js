@@ -283,6 +283,202 @@ const SECRET_DUMP_RE = new RegExp(
 );
 
 /**
+ * epic-portal (EasyPanel MCP) policy — ALLOWLIST, not denylist, and STRICT
+ * SHAPE VALIDATION rather than adversarial nested search.
+ *
+ * MCP remains Isola's normal AI-to-system control plane; this is not a move
+ * to SSH or direct database access as a replacement. listProjectsAndServices
+ * returns full plaintext secrets (encryption keys, JWT secrets, DB/Redis/
+ * MariaDB passwords) for every service on the instance, with no redaction
+ * and no per-project scoping — reclassified P0 twice in one session
+ * (2026-08-09, 2026-08-10) after direct observation. The connector stays
+ * enabled; this guard narrows what it may currently do until each procedure
+ * (and, separately, its output shape — see the PostToolUse output-projection
+ * hook) has had its own review.
+ *
+ * Observed non-empty-input failure on execute_query; wire-level serialization
+ * cause remains unresolved (schema comparison is suggestive, not proof — see
+ * evidence-* / this session's Task 2 diagnosis).
+ *
+ * DESIGN: earlier revisions searched the whole payload for a "procedure"
+ * field wherever it might be nested and blocked if anything disallowed
+ * turned up anywhere. This revision inverts that: the wrapper shape itself
+ * is validated FIRST — exactly {procedure, input} at the top level, nothing
+ * else — and anything that doesn't match that exact shape is rejected as an
+ * unexpected wrapper, full stop, rather than searched loosely hoping to
+ * still find a safe interpretation. Each allowed procedure then has its own
+ * exact input predicate — not "procedure name is on a list", but "procedure
+ * name AND its arguments match a reviewed, scoped shape".
+ *
+ * EXECUTABLE SET REDUCED TO ONE (owner review, 2026-08-10): listPorts,
+ * listMounts and getComposeDockerServices were allowlisted in an earlier
+ * revision but are REMOVED here, alongside getMonitorTableData (removed one
+ * revision earlier for having no scopable fields at all). Three reasons,
+ * together:
+ *   1. Their real output shapes have never been reviewed — every live call
+ *      to any of them has failed with the same unresolved parameterized-
+ *      input 400, so there is no observed response to build a PostToolUse
+ *      projector from (unlike listProjects, whose real output shape this
+ *      session has actually seen).
+ *   2. That same parameterized-input failure means they are not currently
+ *      functional anyway.
+ *   3. If the PostToolUse output-projection hook ever fails to run at all
+ *      (a Claude Code hook crash, timeout, or invalid-output infrastructure
+ *      failure — see isola-easypanel-output-guard.js's header), the
+ *      original, unprojected tool response is what reaches the model. For a
+ *      procedure with no reviewed output shape, that is an unbounded risk;
+ *      for listProjects, whose shape is known and narrow, it is a bounded
+ *      one. A procedure may re-enter the executable set once its raw output
+ *      is judged safe even in the case where PostToolUse replacement itself
+ *      fails to run — not merely once it starts returning 200s.
+ *
+ * The current executable set is ONE query: listProjects.
+ */
+const EASYPANEL_REVIEWED_PROJECT = 'isola';
+
+/** search_procedures is schema/metadata discovery only — it returns
+ * procedure descriptions and input schemas, it never executes one. Always
+ * allowed; not subject to the query allowlist below. */
+const EASYPANEL_METADATA_TOOL_RE = /^mcp__epic-portal__search_procedures$/;
+const EASYPANEL_QUERY_TOOL_RE = /^mcp__epic-portal__execute_query$/;
+/** True prefix catch-all — deliberately NOT a match on just the two exact
+ * names above, so a suffixed or otherwise-unexpected epic-portal tool
+ * (execute_admin, execute_query_extra, search_procedures_extra, a future
+ * tool this policy has never seen) is blocked outright rather than
+ * implicitly trusted for looking similar. */
+const EASYPANEL_ANY_TOOL_RE = /^mcp__epic-portal__/;
+
+/** Raw HTTP bypass: block ANY call reaching an EasyPanel MCP/RPC/tRPC path via an
+ * actual network-client invocation — host-agnostic (direct IP, alternate host, a
+ * proxy) and tolerant of query strings / trailing slashes. Not procedure-specific:
+ * once the native tool is allowlist-gated, a raw bypass has no legitimate use here
+ * at all, so the whole class is blocked rather than parsed procedure-by-procedure. */
+const EASYPANEL_RAW_PATH_RE = /\/api\/(mcp|rpc|trpc)(?=[\s'"`/?]|$)/i;
+
+/** A path match alone is not enough — "prose mentioning the Graph host is still not
+ * gated" is the same design rule this reuses. A commit message, a doc, or this very
+ * policy file can legitimately contain these path strings without performing a call.
+ * Only treat it as a real network call when the command also looks like one.
+ *
+ * HONESTY NOTE: this is tested defense-in-depth against the specific clients this
+ * repo's own agents actually use (curl, wget, PowerShell's web cmdlets, Node
+ * fetch/.request(), Python requests/httpx, axios). It is NOT a claim that every
+ * possible raw network bypass is impossible — any HTTP-capable tool or language
+ * not covered by this pattern (a compiled binary, a different SDK, a language this
+ * regex doesn't recognize) is not caught by this specific check. The PreToolUse
+ * hook is one containment layer; the MCP connector's own allowlisting (once it
+ * exists there) is the layer that would make this true regardless of client. */
+const HTTP_INVOCATION_RE =
+  /\b(curl|wget|Invoke-WebRequest|Invoke-RestMethod|axios)\b|\bfetch\s*\(|\.request\s*\(|\b(requests|httpx)\.(get|post|put|delete|patch|request)\s*\(|\bhttpx\.Client\s*\(/i;
+
+/**
+ * Resolves tool_input.input to a plain object, handling the one legitimate
+ * known quirk (a JSON-encoded STRING instead of a parsed object) without
+ * treating that as inherently suspicious — but anything that still isn't a
+ * plain object after that one allowance fails closed.
+ */
+function resolveInputObject(input) {
+  let resolved = input;
+  if (typeof resolved === 'string') {
+    const trimmed = resolved.trim();
+    if (trimmed === '') {
+      resolved = {};
+    } else {
+      let parsed;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch (_) {
+        // Fixed message only — never the underlying parse error's own
+        // text, which can echo a fragment of the untrusted input itself.
+        throw new Error('input is a string that failed to parse as JSON');
+      }
+      resolved = parsed;
+    }
+  }
+  if (resolved === undefined || resolved === null) resolved = {};
+  if (typeof resolved !== 'object' || Array.isArray(resolved)) {
+    throw new Error('input did not resolve to a plain object');
+  }
+  return resolved;
+}
+
+function requireNoExtraKeys(obj, allowedKeys, label) {
+  const extra = Object.keys(obj).filter((k) => !allowedKeys.has(k));
+  if (extra.length) throw new Error(label + ' has unexpected fields: ' + extra.join(', '));
+}
+
+/**
+ * Exact per-procedure input predicates, keyed in a Map (never a plain
+ * object) and retrieved via .get() — never bracket-indexed on an untrusted
+ * string. A plain-object registry accessed as REGISTRY[userControlledKey]
+ * is a real prototype-chain bypass: REGISTRY['constructor'] resolves to
+ * Object.prototype.constructor (a real, callable, non-throwing function)
+ * even though 'constructor' was never an own key — confirmed by direct
+ * reproduction during this hardening pass, not theoretical. Map.get() has
+ * no prototype-chain lookup semantics at all: an absent key always returns
+ * undefined, full stop, regardless of what string is asked for.
+ *
+ * Throws (fail-closed) on any deviation — extra fields or a procedure not
+ * in this map. Currently a single entry — see the policy comment above for
+ * why listPorts/listMounts/getComposeDockerServices/getMonitorTableData are
+ * not (yet) here, and what re-entry requires.
+ */
+const EASYPANEL_QUERY_PREDICATES = new Map([
+  ['listProjects', (input) => {
+    requireNoExtraKeys(input, new Set([]), 'listProjects');
+  }],
+]);
+
+/** The current executable set is ONE query: listProjects. */
+const EASYPANEL_ALLOWED_QUERY_PROCEDURES = new Set(EASYPANEL_QUERY_PREDICATES.keys());
+
+/**
+ * True if this call must be blocked.
+ *
+ * 1. Tool-name allowlist: only search_procedures (always allowed) and
+ *    execute_query (gated below) are ever considered "safe-shaped" at all;
+ *    every other mcp__epic-portal__* tool name is blocked outright.
+ * 2. Wrapper-shape allowlist: execute_query's tool_input must be exactly
+ *    {procedure: string, input?: ...} — no extra top-level keys, no
+ *    non-object top-level shape. Anything else is an unexpected wrapper,
+ *    rejected outright rather than searched for a recoverable interpretation.
+ * 3. Procedure allowlist + exact input predicate: the named procedure must
+ *    be one of the reviewed ones, AND its resolved input must pass that
+ *    procedure's own exact predicate.
+ *
+ * Throws (does not swallow) on any of the above failing for an
+ * epic-portal-shaped call — callers MUST treat that as fail-CLOSED.
+ */
+function isBlockedEasyPanelCall(toolName, toolInput, cmd) {
+  const tool = toolName || '';
+  if (EASYPANEL_METADATA_TOOL_RE.test(tool)) {
+    return false; // search_procedures: metadata/schema discovery only, never executes anything
+  }
+  if (EASYPANEL_QUERY_TOOL_RE.test(tool)) {
+    const ti = toolInput;
+    if (ti === null || typeof ti !== 'object' || Array.isArray(ti)) {
+      throw new Error('unexpected tool_input shape: not a plain object');
+    }
+    requireNoExtraKeys(ti, new Set(['procedure', 'input']), 'tool_input');
+    if (typeof ti.procedure !== 'string' || !ti.procedure) {
+      throw new Error('missing or non-string procedure field');
+    }
+    const predicate = EASYPANEL_QUERY_PREDICATES.get(ti.procedure);
+    if (!predicate) return true; // not an allowlisted procedure — fail closed
+    const resolvedInput = resolveInputObject(ti.input);
+    predicate(resolvedInput); // throws on any predicate failure — propagates to fail-closed
+    return false;
+  }
+  if (EASYPANEL_ANY_TOOL_RE.test(tool)) {
+    return true; // any epic-portal tool that isn't one of the two exact names above
+  }
+  if (cmd && HTTP_INVOCATION_RE.test(cmd) && EASYPANEL_RAW_PATH_RE.test(cmd)) {
+    return true; // raw bypass to the EasyPanel endpoint is blocked outright, full stop
+  }
+  return false;
+}
+
+/**
  * Tool classification. The central lesson from the incumbent global hook:
  * scanning every tool's serialized input causes false positives on tools that
  * merely DESCRIBE an operation (a task update mentioning a container teardown,
@@ -373,6 +569,16 @@ module.exports = {
   LEGACY_REFERENCE_RE,
   SECRET_FILE_RE,
   SECRET_DUMP_RE,
+  EASYPANEL_REVIEWED_PROJECT,
+  EASYPANEL_ALLOWED_QUERY_PROCEDURES,
+  EASYPANEL_QUERY_PREDICATES,
+  EASYPANEL_METADATA_TOOL_RE,
+  EASYPANEL_QUERY_TOOL_RE,
+  EASYPANEL_ANY_TOOL_RE,
+  EASYPANEL_RAW_PATH_RE,
+  HTTP_INVOCATION_RE,
+  resolveInputObject,
+  isBlockedEasyPanelCall,
   TOOL_CLASSES,
   classifyTool,
   normalizePath,

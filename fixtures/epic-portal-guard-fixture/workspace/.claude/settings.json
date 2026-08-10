@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "deny": [
+      "mcp__epic-portal__execute_mutation",
+      "mcp__epic-portal__execute_destructive"
+    ],
+    "ask": [
+      "mcp__epic-portal__*"
+    ],
+    "allow": []
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "mcp__epic-portal__execute_query",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/isola-easypanel-output-guard.js"],
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

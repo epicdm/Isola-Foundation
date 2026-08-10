@@ -13,7 +13,11 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.join(__dirname, '..', '..', 'state', 'sessions');
+// Same override as isola-guard.js's STATE_DIR — the self-test suite points
+// this at a disposable mkdtemp directory; default (unset) is unchanged.
+const ROOT = process.env.ISOLA_GUARD_STATE_DIR
+  ? path.join(process.env.ISOLA_GUARD_STATE_DIR, 'sessions')
+  : path.join(__dirname, '..', '..', 'state', 'sessions');
 
 function dirFor(sessionId) {
   const safe = String(sessionId || 'unknown').replace(/[^a-z0-9_-]/gi, '');

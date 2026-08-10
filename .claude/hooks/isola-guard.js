@@ -32,7 +32,10 @@ const T = require('./lib/isola-topology.js');
 const S = require('./lib/isola-state.js');
 const M = require('./lib/meta-graph-policy.js');
 
-const STATE_DIR = path.join(__dirname, '..', 'state');
+// Overridable so the self-test suite can point every writer at a disposable
+// mkdtemp directory instead of the real workspace state — default (unset)
+// preserves the existing production path exactly.
+const STATE_DIR = process.env.ISOLA_GUARD_STATE_DIR || path.join(__dirname, '..', 'state');
 const LOG = path.join(STATE_DIR, 'guard.log');
 
 let SESSION_ID = 'unknown';
@@ -116,8 +119,10 @@ process.stdin.on('end', () => {
 
   try {
     evaluate(inp);
-  } catch (e) {
-    log('INTERNAL-ERROR allow: ' + (e && e.message));
+  } catch (_) {
+    // Fixed event code only — never e.message. A guard's own error text can
+    // itself echo a fragment of whatever untrusted input triggered it.
+    log('INTERNAL-ERROR allow');
     process.exit(0); // fail open
   }
 });
@@ -127,6 +132,70 @@ function evaluate(inp) {
   const ti = inp.tool_input || {};
   const cls = T.classifyTool(tool);
   SESSION_ID = inp.session_id || 'unknown';
+
+  // -------------------------------------------------------- easypanel-block
+  // Allowlist policy, checked before ANY tool-class branch, and strict at
+  // the TOOL NAME itself — not just the procedure argument. epic-portal
+  // (EasyPanel MCP) remains Isola's normal AI-to-system control plane for
+  // this connector; this is a temporary narrowing while individual
+  // procedures get reviewed, not a move away from MCP. Exactly two exact
+  // tool names are ever considered: search_procedures (schema/metadata
+  // discovery only, always allowed — it never executes a procedure) and
+  // execute_query (gated by a one-procedure allowlist: listProjects only).
+  // Every other
+  // mcp__epic-portal__* tool name — execute_mutation, execute_destructive,
+  // or anything unexpected/suffixed this policy has never seen — is blocked
+  // outright with no procedure-name parsing attempted, until it receives
+  // its own input/output/secret-handling review and is added here by exact
+  // name. Raw HTTP/RPC/tRPC bypass of this MCP tool is blocked outright,
+  // host-agnostic — it is not an alternative route, it is prohibited (tested
+  // defense-in-depth against known clients, not a claim every bypass is
+  // impossible). See lib/isola-topology.js for the full policy and
+  // defect-easypanel-listprojectsandservices-second-secret-dump-2026-08-10.
+  //
+  // FAIL-CLOSED EXCEPTION: the module-level policy is fail-open on internal
+  // error (a guard bug must never halt legitimate work). That is deliberately
+  // inverted only here: an epic-portal-shaped call whose payload cannot be
+  // safely inspected must be denied, not allowed through. Calls that are not
+  // epic-portal-shaped re-throw immediately, preserving fail-open for every
+  // other tool via the outer stdin-handler catch.
+  {
+    const cmdForCheck = String(ti.command || ti.script || '');
+    const looksLikeEasyPanelCall =
+      T.EASYPANEL_ANY_TOOL_RE.test(tool) ||
+      (T.HTTP_INVOCATION_RE.test(cmdForCheck) && T.EASYPANEL_RAW_PATH_RE.test(cmdForCheck));
+    let blocked = false;
+    let unparseable = false;
+    try {
+      blocked = T.isBlockedEasyPanelCall(tool, ti, cmdForCheck);
+    } catch (e) {
+      if (!looksLikeEasyPanelCall) throw e; // preserve fail-open for unrelated tools
+      // Fixed event code only — never e.message, which can itself contain a
+      // fragment of the untrusted payload that triggered the failure.
+      log('EASYPANEL-INSPECT-ERROR fail-closed');
+      unparseable = true;
+    }
+    if (blocked || unparseable) {
+      deny(
+        'easypanel-not-allowlisted',
+        'epic-portal (EasyPanel MCP) remains the normal AI-to-system control plane, but is currently ' +
+          'allowlist-gated: execute_query is permitted only for ' +
+          Array.from(T.EASYPANEL_ALLOWED_QUERY_PROCEDURES).join(', ') + '. ' +
+          'Mutation/destructive procedures are blocked TEMPORARILY, not outlawed — each one is added here ' +
+          'individually once it has its own input/output/secret-handling review. Raw HTTP/RPC/tRPC calls that ' +
+          'bypass this MCP tool remain prohibited regardless of host. ' +
+          'listProjectsAndServices in particular returns full plaintext secrets for every service ' +
+          'on the instance with no redaction — reclassified P0 twice this session (see ' +
+          'defect-easypanel-listprojectsandservices-second-secret-dump-2026-08-10).' +
+          (unparseable
+            ? ' This specific payload could not be safely inspected (malformed or too deeply nested) — ' +
+              'failing closed for an epic-portal-shaped call rather than allowing an unverifiable one through.'
+            : ''),
+        'use the one executable read-only query through this MCP tool. If a write is genuinely ' +
+          'needed, get the specific procedure reviewed and added to the allowlist first — do not bypass MCP.'
+      );
+    }
+  }
 
   // ---------------------------------------------------------------- other
   // Text-only / orchestration tools are never inspected for command shapes.

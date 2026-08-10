@@ -21,9 +21,107 @@
 
 const { spawnSync } = require('child_process');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const crypto = require('crypto');
 
 const GUARD = path.join(__dirname, 'isola-guard.js');
 const STOP = path.join(__dirname, 'isola-stop-gate.js');
+
+// Every guard/stop-gate child process spawned below inherits process.env by
+// default (spawnSync's documented behavior when no env option is passed).
+// Pointing ISOLA_GUARD_STATE_DIR at a disposable mkdtemp directory before any
+// case runs means every write this run makes - guard.log, session ledgers -
+// lands there instead of the real workspace .claude/state. The real
+// directory is snapshotted before this is set and re-checked identical after
+// the full suite completes, so isolation is proven, not just assumed.
+const REAL_STATE_DIR = path.join(__dirname, '..', 'state');
+
+/**
+ * Recursively walks a directory and returns a Map<relativePath, entry>
+ * covering every file, subdirectory, and other entry type found - not just
+ * guard.log, not just top-level names. Each file entry carries its size and
+ * a SHA-256 of its actual bytes, so "unchanged" means byte-for-byte, not
+ * merely same-size or same-filename. File CONTENT is read only to hash it
+ * and is never retained, printed, or parsed - the buffer goes out of scope
+ * once the digest is computed.
+ */
+function snapshotDirectoryTree(rootDir) {
+  const entries = new Map();
+  function walk(dir, rel) {
+    let dirents;
+    try {
+      dirents = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (_) {
+      return; // directory does not exist yet - trivially empty
+    }
+    for (const dirent of dirents) {
+      const abs = path.join(dir, dirent.name);
+      const relPath = rel ? rel + '/' + dirent.name : dirent.name;
+      if (dirent.isDirectory()) {
+        entries.set(relPath, { type: 'dir' });
+        walk(abs, relPath);
+      } else if (dirent.isFile()) {
+        try {
+          const buf = fs.readFileSync(abs);
+          entries.set(relPath, { type: 'file', size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex') });
+        } catch (_) {
+          entries.set(relPath, { type: 'file', size: null, sha256: null }); // unreadable still counts as a tracked entry
+        }
+      } else {
+        entries.set(relPath, { type: 'other' });
+      }
+    }
+  }
+  walk(rootDir, '');
+  return entries;
+}
+
+/** Exact equality over two snapshots: same set of relative paths, and for
+ * every file entry, the same type/size/sha256. Comparison happens entirely
+ * over hash strings already held in memory - never re-reads either
+ * directory, never prints a hash or a path. */
+function directoryTreesIdentical(before, after) {
+  if (before.size !== after.size) return false;
+  for (const [relPath, beforeEntry] of before) {
+    const afterEntry = after.get(relPath);
+    if (!afterEntry) return false;
+    if (beforeEntry.type !== afterEntry.type) return false;
+    if (beforeEntry.type === 'file' && (beforeEntry.size !== afterEntry.size || beforeEntry.sha256 !== afterEntry.sha256)) return false;
+  }
+  return true;
+}
+
+/** Recursively scans every file under rootDir for a literal substring,
+ * without ever printing a path or file content - returns only a boolean. */
+function anyFileContains(rootDir, needle) {
+  const tree = snapshotDirectoryTree(rootDir); // re-walked fresh; only used to enumerate file paths here
+  for (const [relPath, entry] of tree) {
+    if (entry.type !== 'file') continue;
+    try {
+      if (fs.readFileSync(path.join(rootDir, relPath), 'utf8').includes(needle)) return true;
+    } catch (_) {
+      /* unreadable/binary - not a text leak by definition */
+    }
+  }
+  return false;
+}
+
+const realStateBefore = snapshotDirectoryTree(REAL_STATE_DIR);
+const DISPOSABLE_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'isola-guard-selftest-'));
+process.env.ISOLA_GUARD_STATE_DIR = DISPOSABLE_STATE_DIR;
+
+// Node's 'exit' event fires synchronously immediately before the process
+// actually terminates - including after an uncaught exception - so this is
+// the finally-equivalent for a top-level script with no single enclosing
+// try block. rmSync must stay synchronous here; 'exit' handlers cannot await.
+process.on('exit', () => {
+  try {
+    fs.rmSync(DISPOSABLE_STATE_DIR, { recursive: true, force: true });
+  } catch (_) {
+    /* best-effort cleanup only */
+  }
+});
 
 const t = (...parts) => parts.join('');
 
@@ -57,6 +155,20 @@ const GRAPH = 'https://graph.facebook.com/v23.0/';
  * literally so this file does not itself look like a committed credential.
  */
 const FAKE_TOKEN = t('EA', 'A', 'b3xY7qLm2Nv9Kd4Rt6Wz8Ps1Hj5Gf0Cx', 'Qa7Ue2Ir');
+
+/** The real EasyPanel procedure this whole guard exists to block, assembled
+ * rather than written literally so a naive whole-payload scanner does not
+ * flag this test file itself for containing the string it asserts is unsafe. */
+const LEAKY_PROCEDURE_NAME = ['listProjects', 'And', 'Services'].join('');
+
+/** Fake canary for the PreToolUse logging test below - synthetic, never a
+ * real secret. */
+const PRETOOLUSE_CANARY = t('PRETOOLUSE_CANARY_', 'FAKE_9d3e7a1c');
+/** Fake canary for the PostToolUse malformed-input logging test below -
+ * hoisted to module scope so the final recursive disposable-directory scan
+ * (which runs after both hook loops complete) can check for it too, not
+ * just PRETOOLUSE_CANARY. */
+const POSTTOOLUSE_MALFORMED_CANARY = t('CANARY_', 'FAKE_SECRET_', '7e2f9b1a');
 
 const cases = [
   // --- THE R5A RULE -------------------------------------------------------
@@ -495,6 +607,447 @@ const cases = [
       tool_input: { host: '66.118.37.12', user: 'epicdm', command: 'pm2 jlist' },
     },
   },
+
+
+  // --- EASYPANEL - STRICT ALLOWLIST + EXACT INPUT PREDICATES (v3, 2026-08-10) ---
+  // Two layers: (1) tool-name allowlist - only search_procedures and
+  // execute_query are ever considered; (2) for execute_query, the wrapper
+  // shape itself must be exactly {procedure, input} with nothing else, and
+  // the named procedure must have BOTH an allowlist entry AND a passing
+  // exact input predicate (scoped project/service, no extra fields).
+  // getMonitorTableData has no scopable fields in its real schema and is
+  // therefore NOT in this allowlist at all right now.
+
+  // -- tool-name layer --
+  {
+    name: 'search_procedures (schema discovery only, never executes a procedure) is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__search_procedures',
+      tool_input: { query: 'list projects' },
+    },
+  },
+  {
+    name: 'execute_mutation is BLOCKED outright regardless of procedure name',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_mutation',
+      tool_input: { procedure: 'listProjects', input: {} },
+    },
+  },
+  {
+    name: 'execute_destructive is BLOCKED outright regardless of procedure name',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_destructive',
+      tool_input: { procedure: 'getMonitorTableData', input: {} },
+    },
+  },
+  {
+    name: 'unknown tool mcp__epic-portal__execute_admin is BLOCKED outright',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_admin',
+      tool_input: { procedure: 'listProjects', input: {} },
+    },
+  },
+  {
+    name: 'suffixed tool mcp__epic-portal__execute_query_extra is BLOCKED outright (not fuzzy-matched)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query_extra',
+      tool_input: { procedure: 'listProjects', input: {} },
+    },
+  },
+  {
+    name: 'suffixed tool mcp__epic-portal__search_procedures_extra is BLOCKED outright (not fuzzy-matched)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__search_procedures_extra',
+      tool_input: { query: 'list projects' },
+    },
+  },
+
+  // -- wrapper-shape layer --
+  {
+    name: 'tool_input with an extra top-level key beyond {procedure, input} is BLOCKED (unexpected wrapper shape)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listProjects', input: {}, arguments: { procedure: 'listProjects' } },
+    },
+  },
+  {
+    name: 'tool_input arriving as a bare string (not an object) is BLOCKED (unexpected wrapper shape)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: '{"procedure":"listProjects","input":{}}',
+    },
+  },
+  {
+    name: 'tool_input arriving as an array is BLOCKED (unexpected wrapper shape)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: [{ procedure: 'listProjects', input: {} }],
+    },
+  },
+  {
+    name: 'missing procedure field is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { input: {} },
+    },
+  },
+  {
+    name: 'malformed JSON-string tool_input FAILS CLOSED at the wrapper-shape layer',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: '{"procedure": "listProjects", "input": {}',
+    },
+  },
+
+  // -- the previously-leaky procedure itself, via the new architecture --
+  {
+    name: 'the previously-leaky procedure is BLOCKED (not in the predicate map at all)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: LEAKY_PROCEDURE_NAME, input: {} },
+    },
+  },
+  {
+    name: 'getMonitorTableData is now BLOCKED - removed from the allowlist (unscopable real schema)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'getMonitorTableData', input: {} },
+    },
+  },
+
+  // -- listProjects: exact positive/negative predicate --
+  {
+    name: 'listProjects with empty input is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listProjects', input: {} },
+    },
+  },
+  {
+    name: 'listProjects with absent input is ALLOWED (absent treated as empty)',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listProjects' },
+    },
+  },
+  {
+    name: 'listProjects with ANY non-empty input is BLOCKED (requires strictly empty)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listProjects', input: { unexpected: true } },
+    },
+  },
+
+  // -- listPorts / listMounts / getComposeDockerServices: REMOVED from the
+  // executable set (owner review, 2026-08-10) - not a matter of input shape
+  // anymore, the procedure itself is no longer in the allowlist at all. Each
+  // proven BLOCKED even with a perfectly well-formed, previously-valid input,
+  // to show this isn't an input-predicate rejection but a procedure-level one.
+  {
+    name: 'listPorts is BLOCKED outright even with a well-formed, previously-valid input (removed from the executable set)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listPorts', input: { projectName: 'isola', serviceName: 'nocobase-db' } },
+    },
+  },
+  {
+    name: 'listMounts is BLOCKED outright even with a well-formed, previously-valid input (removed from the executable set)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listMounts', input: { projectName: 'isola', serviceName: 'nocobase' } },
+    },
+  },
+  {
+    name: 'getComposeDockerServices is BLOCKED outright even with a well-formed, previously-valid input (removed from the executable set)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'getComposeDockerServices', input: { projectName: 'isola', serviceName: 'nocobase' } },
+    },
+  },
+
+
+  // -- PROTOTYPE-CHAIN ADVERSARIAL PROCEDURE NAMES (owner-directed, critical) --
+  // A plain-object registry accessed as REGISTRY[userControlledString] is a
+  // real bypass: REGISTRY['constructor'] resolves to Object.prototype.constructor
+  // (callable, non-throwing) even though 'constructor' was never an own key.
+  // Confirmed by direct reproduction before this fix (Map.get() has no such
+  // lookup semantics at all). Every one of these MUST be blocked.
+  ...['constructor', '__proto__', 'prototype', 'toString', 'valueOf', 'hasOwnProperty', '__defineGetter__', '__defineSetter__'].map((evilProcedure) => ({
+    name: `adversarial procedure name "${evilProcedure}" is BLOCKED, never reaches a real predicate or returns unblocked`,
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: evilProcedure, input: {} },
+    },
+  })),
+
+  // -- raw HTTP/RPC/tRPC bypass - path/host/client coverage --
+  {
+    name: 'raw curl call to direct-IP exact /api/mcp (no trailing slash) is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s https://66.118.37.110/api/mcp -d \'{"method":"tools/call"}\'' },
+    },
+  },
+  {
+    name: 'raw curl call to an alternate host exact /api/mcp is BLOCKED (host-agnostic)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s https://some-other-proxy.example.com/api/mcp -d \'{}\'' },
+    },
+  },
+  {
+    name: 'raw call with a query-string variant of /api/mcp is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s "https://portal.saas00.epic.dm/api/mcp?debug=1"' },
+    },
+  },
+  {
+    name: 'raw call with a trailing-slash variant of /api/mcp/ is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: "curl -s 'https://portal.saas00.epic.dm/api/mcp/'" },
+    },
+  },
+  {
+    name: 'exact /api/rpc with no trailing slash is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s https://portal.saas00.epic.dm/api/rpc' },
+    },
+  },
+  {
+    name: 'trailing-slash /api/rpc/ (REST-style sub-path) is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s https://portal.saas00.epic.dm/api/rpc/projects/listProjects' },
+    },
+  },
+  {
+    name: 'query-string variant of /api/rpc is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s "https://portal.saas00.epic.dm/api/rpc?input=%7B%7D"' },
+    },
+  },
+  {
+    name: 'exact /api/trpc with no trailing slash is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s https://portal.saas00.epic.dm/api/trpc' },
+    },
+  },
+  {
+    name: 'trailing-slash /api/trpc/ (dotted namespace sub-path) is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: "curl -s 'https://portal.saas00.epic.dm/api/trpc/projects.listProjects'" },
+    },
+  },
+  {
+    name: 'query-string batch variant of /api/trpc is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: "curl -s 'https://portal.saas00.epic.dm/api/trpc/projects.listProjects?batch=1'" },
+    },
+  },
+  {
+    name: 'Python requests.post to the raw endpoint is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: t(
+          'python3 -c "import requests; requests.post(',
+          "'https://portal.saas00.epic.dm/api/mcp', json={})\""
+        ),
+      },
+    },
+  },
+  {
+    name: 'Python httpx.Client to the raw endpoint is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: t(
+          'python3 -c "import httpx; httpx.Client().post(',
+          "'https://portal.saas00.epic.dm/api/rpc/projects/listProjects')\""
+        ),
+      },
+    },
+  },
+  {
+    name: 'Node fetch(...) to the raw endpoint is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: t(
+          'node -e "fetch(',
+          "'https://portal.saas00.epic.dm/api/trpc/projects.listProjects')\""
+        ),
+      },
+    },
+  },
+  {
+    name: 'Node https.request(...) to the raw endpoint is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: t(
+          "node -e \"require('https').request(",
+          "'https://portal.saas00.epic.dm/api/mcp', () => {})\""
+        ),
+      },
+    },
+  },
+  {
+    name: 'a commit message DESCRIBING these blocked paths is ALLOWED (not payload-blind)',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: t(
+          'git commit -m "fix(guard): block /api/rpc/... /api/trpc/... and direct-IP /api/mcp ',
+          'requests to EasyPanel"'
+        ),
+      },
+    },
+  },
+  {
+    name: 'a grep search mentioning /api/mcp and requests. is ALLOWED (not payload-blind)',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: t("grep -rn 'requests.post.*api/mcp' docs/") },
+    },
+  },
+  {
+    name: 'an UNRELATED tool with an epic-portal-adjacent-looking payload stays fail-OPEN (existing behavior preserved)',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'SomeUnrelatedTool',
+      tool_input: { procedure: LEAKY_PROCEDURE_NAME, arguments: { procedure: LEAKY_PROCEDURE_NAME } },
+    },
+  },
+  {
+    // PreToolUse canary: a fake secret positioned immediately before a
+    // malformed-JSON parse failure inside resolveInputObject(). Confirms
+    // the fixed-event-code logging fix - no e.message derived from this
+    // payload should ever reach stdout or stderr.
+    name: 'PreToolUse: a fake canary immediately before a malformed-serialized-input parse failure never reaches stdout or stderr',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    notContains: PRETOOLUSE_CANARY,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: {
+        procedure: 'listProjects',
+        input: '{"canary":"' + PRETOOLUSE_CANARY + '","unterminated":',
+      },
+    },
+  },
 ];
 
 let failed = 0;
@@ -520,6 +1073,53 @@ for (const c of cases) {
   );
 }
 
+// The comprehensive recursive canary scan and the real-state-unchanged
+// comparison both run once, at the very end of the file, after every hook
+// (PreToolUse cases, stop-gate cases, and the PostToolUse output-guard
+// cases) has had a chance to write - see "disposable-directory integrity"
+// below. A single check there covers all of it, rather than partial
+// mid-run checks that would miss writes from later loops.
+{
+  const ok = fs.readdirSync(DISPOSABLE_STATE_DIR).length > 0;
+  if (!ok) failed++;
+  console.log((ok ? '  PASS  ' : '  FAIL  ') + 'the disposable state directory actually received writes this run (proves the override is live, not merely unused)');
+}
+
+// --- Permission-system backstop (settings.json) -----------------------------
+console.log('\npermission-system backstop (settings.json)');
+{
+  const settingsPath = path.join(__dirname, '..', 'settings.json');
+  const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+  const deny = (settings.permissions && settings.permissions.deny) || [];
+  const ask = (settings.permissions && settings.permissions.ask) || [];
+  const allow = (settings.permissions && settings.permissions.allow) || [];
+
+  const settingsChecks = [
+    { name: 'deny contains mcp__epic-portal__execute_mutation', ok: deny.includes('mcp__epic-portal__execute_mutation') },
+    { name: 'deny contains mcp__epic-portal__execute_destructive', ok: deny.includes('mcp__epic-portal__execute_destructive') },
+    { name: 'ask contains mcp__epic-portal__* (forces approval for every epic-portal call)', ok: ask.includes('mcp__epic-portal__*') },
+    {
+      name: 'allow contains NO mcp__epic-portal__* rule (no MCP allow rule added, as instructed)',
+      ok: !allow.some((r) => r.startsWith('mcp__epic-portal')),
+    },
+  ];
+  for (const c of settingsChecks) {
+    if (!c.ok) failed++;
+    console.log((c.ok ? '  PASS  ' : '  FAIL  ') + c.name);
+  }
+  console.log(
+    '  NOTE  parameterized per-procedure deny rules (e.g. execute_query(procedure:listPorts)) are rejected by the ' +
+      'installed Claude Code 2.1.225 binary specifically for MCP tool rules - reproduced live via `claude doctor` ' +
+      'against a disposable settings.json, exact error: "MCP rules do not support patterns in parentheses. Use ' +
+      '\\"mcp__epic-portal__execute_query\\" without parentheses, or use \\"mcp__epic-portal__*\\" for all tools." ' +
+      'This is unsupported by the installed version, not a general/universal impossibility - a future Claude Code ' +
+      'release could lift this MCP-specific restriction and should be re-probed the same way before relying on it. ' +
+      'Per-procedure enforcement remains the hook\'s (isola-guard.js) responsibility; the permission system backstops ' +
+      'only at the whole-tool level (execute_mutation/execute_destructive denied outright, every epic-portal call ' +
+      'requires approval).'
+  );
+}
+
 // --- Stop gate ------------------------------------------------------------
 console.log('\nstop gate');
 const stopCases = [
@@ -541,17 +1141,507 @@ for (const c of stopCases) {
   console.log((ok ? '  PASS  ' : '  FAIL  ') + c.name + (ok ? '' : ' (expected ' + c.expect + ', got ' + r.verdict + ')'));
 }
 
-// Clean up the ledgers this run created, so a self-test never pollutes the
-// working session's state.
-try {
-  const fs = require('fs');
-  const sessions = path.join(__dirname, '..', 'state', 'sessions');
-  for (const d of fs.readdirSync(sessions)) {
-    if (/^selftest-/.test(d)) fs.rmSync(path.join(sessions, d), { recursive: true, force: true });
+// --- EasyPanel output-projection hook (PostToolUse) ------------------------
+console.log('\neasypanel output-projection hook');
+
+const OUTPUT_GUARD = path.join(__dirname, 'isola-easypanel-output-guard.js');
+
+/** Assembled rather than written literally, same reasoning as FAKE_TOKEN
+ * above — these are synthetic placeholders standing in for secret-shaped
+ * fields, not real credential material, but this file should not itself
+ * read as containing plausible-looking secrets. */
+const FAKE = {
+  password: t('fake_pw_', '9f8a2c1e'),
+  token: t('fake_tok_', 'b7e4d901'),
+  secret: t('fake_sec_', '3c8f5a20'),
+  authorization: t('Bearer fake_', 'auth_11223344'),
+  cookie: t('session=fake_', 'cookie_55667788'),
+  env: { SOME_KEY: t('fake_env_', 'value_1') },
+  environment: { OTHER_KEY: t('fake_env_', 'value_2') },
+  connectionString: t('postgres://fake:', 'pw@host/db'),
+  databaseUrl: t('postgres://fake2:', 'pw2@host/db'),
+  privateKey: t('-----BEGIN FAKE KEY-----\n', 'not-a-real-key\n-----END FAKE KEY-----'),
+  arbitraryUnknownField: 'should never survive projection either',
+};
+
+/**
+ * Wire contract (found live via the owner fixture, not unit tests): for an
+ * MCP tool, updatedToolOutput must be an array of content blocks
+ * ([{type:'text', text}]) — a bare object is applied by Claude Code and then
+ * crashes its content-block accounting (`e.reduce is not a function`),
+ * leaving the model an infrastructure error instead of the projection.
+ * This helper asserts that exact wire shape on every successful emit, then
+ * unwraps the single block's text back to the projection object so the
+ * individual cases below compare against the logical value. A wrong wire
+ * shape leaves updatedToolOutput undefined, failing every dependent case
+ * loudly rather than silently unwrapping something unexpected.
+ */
+function runOutputGuard(payload) {
+  const r = spawnSync(process.execPath, [OUTPUT_GUARD], {
+    input: JSON.stringify(payload),
+    encoding: 'utf8',
+    timeout: 20000,
+  });
+  let updatedToolOutput;
+  let wireShapeOk = false;
+  try {
+    const parsed = JSON.parse(r.stdout || '{}');
+    const raw = parsed.hookSpecificOutput && parsed.hookSpecificOutput.updatedToolOutput;
+    if (
+      Array.isArray(raw) &&
+      raw.length === 1 &&
+      raw[0] &&
+      raw[0].type === 'text' &&
+      typeof raw[0].text === 'string'
+    ) {
+      wireShapeOk = true;
+      updatedToolOutput = JSON.parse(raw[0].text);
+    }
+  } catch (_) {
+    updatedToolOutput = undefined;
   }
-} catch (_) {
-  /* nothing to clean */
+  return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '', updatedToolOutput, wireShapeOk };
 }
 
-console.log('\n' + (failed ? failed + ' FAILURE(S)' : 'all ' + (cases.length + stopCases.length) + ' checks passed'));
+const SAFE_PLACEHOLDER_JSON = JSON.stringify({ status: 'output_withheld_pending_review' });
+
+function containsAnyFakeSecret(obj) {
+  const json = JSON.stringify(obj);
+  return Object.values(FAKE).some((v) => json.includes(typeof v === 'string' ? v : JSON.stringify(v)));
+}
+
+const outputCases = [
+  // -- wire shape (the contract the owner fixture caught being violated) --
+  {
+    name: 'updatedToolOutput is emitted as a SINGLE TEXT CONTENT BLOCK (the MCP wire shape), never a bare object',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listProjects', result: [{ name: 'isola', createdAt: '2026-08-09T20:47:10.605Z' }] },
+      });
+      return r.wireShapeOk ? null : 'wire shape was not a single {type:"text", text:string} content block: ' + r.stdout.slice(0, 200);
+    },
+  },
+  // -- delivery reliability (bounds, and repeated-execution parseability) --
+  {
+    // Precisely calibrated against the real 8192-char/byte bound: 50 rows of
+    // max-length (100-char) names serializes to exactly 8097 chars/bytes -
+    // genuinely near the 8192 limit (within 95 bytes), not merely "some
+    // substantial size". Computed directly (not guessed) before writing
+    // this test, using the exact content-block envelope emit() produces.
+    name: 'a NEAR-LIMIT valid listProjects projection (8097 of 8192 bytes/chars) is emitted in full, not placeholdered',
+    check: () => {
+      const longName = 'a'.repeat(100);
+      const rows = Array.from({ length: 50 }, () => ({ name: longName, createdAt: '2026-01-01T00:00:00.000Z' }));
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listProjects', result: rows },
+      });
+      if (JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON) {
+        return 'a near-limit (8097-byte) valid projection was incorrectly placeholdered';
+      }
+      const actualBytes = Buffer.byteLength(r.stdout, 'utf8');
+      if (actualBytes > 8192) return `near-limit case actually exceeded the bound: ${actualBytes} bytes of stdout`;
+      return Array.isArray(r.updatedToolOutput && r.updatedToolOutput.result) && r.updatedToolOutput.result.length === 50
+        ? null
+        : 'near-limit projection did not come through with the expected row count';
+    },
+  },
+  {
+    // One row more than the near-limit case - 51 rows serializes to 8256
+    // chars/bytes, definitively over 8192. This MUST produce the exact safe
+    // placeholder - a full/partial projection is not an acceptable outcome
+    // here, unlike the earlier, looser version of this test.
+    name: 'an OVER-LIMIT projection (8256 of 8192 bytes/chars) REQUIRES the exact safe placeholder, not a truncated or full response',
+    check: () => {
+      const longName = 'a'.repeat(100);
+      const rows = Array.from({ length: 51 }, () => ({ name: longName, createdAt: '2026-01-01T00:00:00.000Z' }));
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listProjects', result: rows },
+      });
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON
+        ? null
+        : 'over-limit case did not produce the exact safe placeholder - got: ' + JSON.stringify(r.updatedToolOutput).slice(0, 100);
+    },
+  },
+  {
+    name: 'SAFE_PLACEHOLDER itself serializes well under both the 8192-char and 8192-byte bounds',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listProjects', result: 'not-an-array-forces-placeholder' },
+      });
+      const chars = r.stdout.length;
+      const bytes = Buffer.byteLength(r.stdout, 'utf8');
+      return chars <= 8192 && bytes <= 8192 ? null : `placeholder stdout exceeded bounds: chars=${chars} bytes=${bytes}`;
+    },
+  },
+  {
+    name: 'OVERSIZED STDIN (beyond the 2 MiB input bound) FAILS CLOSED to the safe placeholder',
+    check: () => {
+      const hugePadding = 'x'.repeat(3 * 1024 * 1024); // 3 MiB, over the 2 MiB bound
+      const r = spawnSync(process.execPath, [OUTPUT_GUARD], {
+        input: JSON.stringify({
+          tool_name: 'mcp__epic-portal__execute_query',
+          tool_input: { procedure: 'listProjects', input: {} },
+          tool_response: { procedure: 'listProjects', result: [], padding: hugePadding },
+        }),
+        encoding: 'utf8',
+        timeout: 20000,
+        maxBuffer: 10 * 1024 * 1024,
+      });
+      let inner;
+      try {
+        const raw = JSON.parse(r.stdout || '{}').hookSpecificOutput.updatedToolOutput;
+        inner = raw[0].text; // single-text-content-block wire shape
+      } catch (_) {
+        return 'hook crashed or produced no parseable output on oversized stdin: exit=' + r.status;
+      }
+      return inner === SAFE_PLACEHOLDER_JSON ? null : 'oversized stdin did not fail to the safe placeholder';
+    },
+  },
+  {
+    name: 'stdout is complete JSON, under Claude Code\'s 10,000-char cap AND the configured 8192 bound, across 20 repeated child-process executions',
+    check: () => {
+      const CLAUDE_CODE_DOCUMENTED_CAP = 10000;
+      for (let i = 0; i < 20; i++) {
+        const r = runOutputGuard({
+          tool_name: 'mcp__epic-portal__execute_query',
+          tool_input: { procedure: 'listProjects', input: {} },
+          tool_response: { procedure: 'listProjects', result: [{ name: 'isola', createdAt: '2026-08-09T20:47:10.605Z' }] },
+        });
+        let parsed;
+        try {
+          parsed = JSON.parse(r.stdout);
+        } catch (e) {
+          return `run ${i}: stdout was not complete/parseable JSON (${e.message.length} char parse error) - raw length ${r.stdout.length}`;
+        }
+        if (!parsed.hookSpecificOutput || parsed.hookSpecificOutput.updatedToolOutput === undefined) {
+          return `run ${i}: parsed JSON was missing the expected hookSpecificOutput.updatedToolOutput shape`;
+        }
+        const chars = r.stdout.length;
+        const bytes = Buffer.byteLength(r.stdout, 'utf8');
+        if (chars >= CLAUDE_CODE_DOCUMENTED_CAP) return `run ${i}: stdout (${chars} chars) reached Claude Code's documented 10,000-char hook-output cap`;
+        if (chars > 8192 || bytes > 8192) return `run ${i}: stdout exceeded the configured 8192 bound: chars=${chars} bytes=${bytes}`;
+      }
+      return null;
+    },
+  },
+  {
+    name: 'not our tool -> no stdout, harness leaves original response untouched',
+    check: () => {
+      const r = runOutputGuard({ tool_name: 'SomeOtherTool', tool_input: {}, tool_response: { anything: 'here' } });
+      return r.stdout.trim() === '' ? null : 'expected empty stdout, got: ' + r.stdout.slice(0, 100);
+    },
+  },
+  {
+    name: 'listProjects with an ORDINARY OBJECT tool_response containing nested fake secrets: only name/createdAt survive, all FAKE.* values stripped',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: {
+          procedure: 'listProjects',
+          result: [{ name: 'isola', createdAt: '2026-08-09T20:47:10.605Z', ...FAKE }],
+        },
+      });
+      if (containsAnyFakeSecret(r.updatedToolOutput)) return 'a fake secret survived projection: ' + JSON.stringify(r.updatedToolOutput);
+      const row = r.updatedToolOutput && r.updatedToolOutput.result && r.updatedToolOutput.result[0];
+      if (!row || row.name !== 'isola' || Object.keys(row).length !== 2) return 'unexpected projected shape: ' + JSON.stringify(row);
+      return null;
+    },
+  },
+  {
+    name: 'listProjects response as an MCP CONTENT-BLOCK ARRAY (JSON encoded inside text) is unwrapped and projected the same way',
+    check: () => {
+      const inner = JSON.stringify({ procedure: 'listProjects', result: [{ name: 'isola', createdAt: '2026-01-01T00:00:00Z', ...FAKE }] });
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: [{ type: 'text', text: inner }],
+      });
+      if (containsAnyFakeSecret(r.updatedToolOutput)) return 'a fake secret survived content-block projection';
+      const row = r.updatedToolOutput && r.updatedToolOutput.result && r.updatedToolOutput.result[0];
+      if (!row || row.name !== 'isola') return 'content-block shape was not correctly unwrapped/projected';
+      return null;
+    },
+  },
+  {
+    name: 'listProjects response as tool_response.content (nested content-block array) is unwrapped correctly',
+    check: () => {
+      const inner = JSON.stringify({ procedure: 'listProjects', result: [{ name: 'isola', createdAt: '2026-01-01T00:00:00Z' }] });
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { content: [{ type: 'text', text: inner }] },
+      });
+      const row = r.updatedToolOutput && r.updatedToolOutput.result && r.updatedToolOutput.result[0];
+      return row && row.name === 'isola' ? null : 'nested .content array was not correctly unwrapped';
+    },
+  },
+  {
+    name: 'MALFORMED JSON inside a text content block FAILS CLOSED to the safe placeholder',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: [{ type: 'text', text: '{"procedure":"listProjects","result":[{"name":' }],
+      });
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'did not fail to the exact safe placeholder';
+    },
+  },
+  {
+    name: 'UNEXPECTED FIELDS on an otherwise-valid listProjects row are silently dropped, not passed through',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listProjects', result: [{ name: 'isola', createdAt: '2026-01-01T00:00:00Z', someUnexpectedField: 'x' }] },
+      });
+      const row = r.updatedToolOutput && r.updatedToolOutput.result && r.updatedToolOutput.result[0];
+      return row && !('someUnexpectedField' in row) ? null : 'unexpected field survived projection';
+    },
+  },
+  {
+    name: 'UNKNOWN/unreviewed procedure (e.g. listPorts) always returns the safe placeholder, even with a plausible-looking response',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listPorts', input: { projectName: 'isola', serviceName: 'nocobase-db' } },
+        tool_response: { procedure: 'listPorts', result: [{ port: 5432, ...FAKE }] },
+      });
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'unreviewed procedure did not fall back to the safe placeholder';
+    },
+  },
+  {
+    name: 'a plain ARRAY tool_response (not the {procedure,result} shape, not content-blocks) FAILS CLOSED',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: ['not', 'a', 'recognized', 'shape'],
+      });
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'unrecognized array shape did not fail closed';
+    },
+  },
+  {
+    name: 'MALFORMED HOOK STDIN (not valid JSON at all) FAILS CLOSED without crashing',
+    check: () => {
+      const r = spawnSync(process.execPath, [OUTPUT_GUARD], { input: '{not valid json at all', encoding: 'utf8', timeout: 20000 });
+      let inner;
+      try {
+        const raw = JSON.parse(r.stdout || '{}').hookSpecificOutput.updatedToolOutput;
+        inner = raw[0].text; // single-text-content-block wire shape
+      } catch (_) {
+        return 'hook crashed or produced no parseable output on malformed stdin: exit=' + r.status;
+      }
+      return inner === SAFE_PLACEHOLDER_JSON ? null : 'malformed stdin did not fail to the safe placeholder';
+    },
+  },
+  {
+    name: 'a PROJECTOR EXCEPTION (result is not an array where one is required) FAILS CLOSED, does not crash the hook',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listProjects', result: { not: 'an array' } },
+      });
+      if (r.status !== 0) return 'hook exited non-zero instead of failing closed cleanly: ' + r.status;
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'projector exception did not fail to the safe placeholder';
+    },
+  },
+  {
+    name: 'RESPONSE PROCEDURE MISMATCH (response claims a different procedure than requested) FAILS CLOSED',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listPorts', result: [{ name: 'isola', createdAt: '2026-01-01T00:00:00Z' }] },
+      });
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'mismatched response procedure did not fail closed';
+    },
+  },
+  {
+    name: 'listProjects row with a value FAILING the name/timestamp pattern is BLOCKED, not passed through merely for occupying an allowed field',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listProjects', result: [{ name: 'not a valid $$$ name', createdAt: '2026-01-01T00:00:00Z' }] },
+      });
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'an out-of-pattern value was not rejected';
+    },
+  },
+  // -- SEMANTIC CALENDAR VALIDATION of createdAt (owner-directed) --
+  // Regex shape alone accepts impossible dates ("2026-02-30", "2026-13-01")
+  // since \d{2} matches any two digits - these must be rejected by explicit
+  // range/leap-year arithmetic, not merely structural pattern matching.
+  ...[
+    { label: 'invalid month (13)', createdAt: '2026-13-01T00:00:00Z' },
+    { label: 'February 30 (no such day in any year)', createdAt: '2026-02-30T00:00:00Z' },
+    { label: 'February 29 in a non-leap year (2026)', createdAt: '2026-02-29T00:00:00Z' },
+    { label: 'invalid hour (24)', createdAt: '2026-01-01T24:00:00Z' },
+    { label: 'invalid minute (60)', createdAt: '2026-01-01T00:60:00Z' },
+    { label: 'invalid second (60)', createdAt: '2026-01-01T00:00:60Z' },
+    { label: 'seven fractional-second digits (exceeds the 1-6 bound)', createdAt: '2026-01-01T00:00:00.1234567Z' },
+  ].map(({ label, createdAt }) => ({
+    name: `createdAt with ${label} is REJECTED to the safe placeholder, not silently normalized`,
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listProjects', result: [{ name: 'isola', createdAt }] },
+      });
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : `"${createdAt}" was not rejected: ` + JSON.stringify(r.updatedToolOutput);
+    },
+  })),
+  ...[
+    { label: 'the reviewed real millisecond format (3 fractional digits)', createdAt: '2026-08-09T20:47:10.605Z' },
+    { label: 'a valid leap day (2024-02-29, 2024 is a leap year)', createdAt: '2024-02-29T12:00:00Z' },
+    { label: 'six fractional-second digits (the maximum allowed)', createdAt: '2026-01-01T00:00:00.123456Z' },
+  ].map(({ label, createdAt }) => ({
+    name: `createdAt with ${label} is ACCEPTED and passes through unchanged`,
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listProjects', result: [{ name: 'isola', createdAt }] },
+      });
+      const row = r.updatedToolOutput && r.updatedToolOutput.result && r.updatedToolOutput.result[0];
+      return row && row.createdAt === createdAt ? null : `"${createdAt}" was not accepted as expected: ` + JSON.stringify(r.updatedToolOutput);
+    },
+  })),
+  {
+    name: 'listProjects row count exceeding the bound is BLOCKED',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: {
+          procedure: 'listProjects',
+          result: Array.from({ length: 101 }, (_, i) => ({ name: 'proj-' + i, createdAt: '2026-01-01T00:00:00Z' })),
+        },
+      });
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'an unbounded row count was not rejected';
+    },
+  },
+
+  // -- PROTOTYPE-CHAIN ADVERSARIAL PROCEDURE NAMES (owner-directed, critical) --
+  // Every one of these must return ONLY the safe placeholder - never a raw
+  // result, never a passthrough - even with a superficially plausible
+  // response attached.
+  ...['constructor', '__proto__', 'prototype', 'toString', 'valueOf', 'hasOwnProperty', '__defineGetter__', '__defineSetter__'].map((evilProcedure) => ({
+    name: `adversarial procedure "${evilProcedure}" on the output side always returns the safe placeholder, never a raw result`,
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: evilProcedure, input: {} },
+        tool_response: { procedure: evilProcedure, result: [{ name: 'isola', createdAt: '2026-01-01T00:00:00Z', ...FAKE }] },
+      });
+      if (containsAnyFakeSecret(r.updatedToolOutput)) return 'a fake secret survived via an adversarial procedure name';
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : `procedure="${evilProcedure}" did not fail to the exact safe placeholder`;
+    },
+  })),
+
+  // -- CANARY: nothing leaks into stdout/stderr on a malformed-JSON failure
+  // path. File-level leakage (this hook has no file-writing code path at
+  // all - see its header) is covered by the single comprehensive recursive
+  // scan of the whole disposable directory run after every case completes,
+  // not duplicated here.
+  {
+    name: 'a fake canary positioned before a JSON parse failure never reaches stdout or stderr (no persistent logging exists in this hook at all)',
+    check: () => {
+      const malformedText = '{"procedure":"listProjects","canary":"' + POSTTOOLUSE_MALFORMED_CANARY + '","result":[{"name":';
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: [{ type: 'text', text: malformedText }],
+      });
+
+      if (r.stdout.includes(POSTTOOLUSE_MALFORMED_CANARY)) return 'canary leaked into stdout';
+      if (r.stderr.includes(POSTTOOLUSE_MALFORMED_CANARY)) return 'canary leaked into stderr';
+      if (JSON.stringify(r.updatedToolOutput).includes(POSTTOOLUSE_MALFORMED_CANARY)) return 'canary leaked into the sanitized output';
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'malformed-with-canary case did not fail to the exact safe placeholder';
+    },
+  },
+];
+
+for (const c of outputCases) {
+  let failure;
+  try {
+    failure = c.check();
+  } catch (e) {
+    failure = 'test threw: ' + e.message;
+  }
+  const ok = !failure;
+  if (!ok) failed++;
+  console.log((ok ? '  PASS  ' : '  FAIL  ') + c.name + (ok ? '' : '\n          ' + failure));
+}
+
+// --- Disposable-directory integrity (runs once, after every hook above has
+// had its chance to write - PreToolUse cases, stop-gate cases, and the
+// PostToolUse output-guard cases) -------------------------------------------
+console.log('\ndisposable-directory integrity');
+{
+  // Recursive - every file at every depth under DISPOSABLE_STATE_DIR, not
+  // just guard.log, not just top-level entries. Content is read only to
+  // test for substring containment; never printed, never retained past this
+  // check, never written back anywhere.
+  const preToolUseLeak = anyFileContains(DISPOSABLE_STATE_DIR, PRETOOLUSE_CANARY);
+  const ok = !preToolUseLeak;
+  if (!ok) failed++;
+  console.log((ok ? '  PASS  ' : '  FAIL  ') + 'PRETOOLUSE_CANARY is absent from every file under the disposable state directory (recursive scan)');
+}
+{
+  const postToolUseLeak = anyFileContains(DISPOSABLE_STATE_DIR, POSTTOOLUSE_MALFORMED_CANARY);
+  const ok = !postToolUseLeak;
+  if (!ok) failed++;
+  console.log((ok ? '  PASS  ' : '  FAIL  ') + 'the PostToolUse malformed-input canary is absent from every file under the disposable state directory (recursive scan; expected trivially - this hook has no file-writing code path at all)');
+}
+{
+  // Exact equality: same relative paths, same file sizes, same SHA-256 of
+  // actual bytes, for the ENTIRE real state directory tree (guard.log and
+  // the full sessions/ tree, at every depth) - compared only in memory,
+  // hashes never printed. If this ever needs to fall back to a weaker
+  // check, the claim below must be narrowed accordingly - "byte-for-byte"
+  // is only asserted because this comparison is genuinely content-hash-based.
+  const realStateAfter = snapshotDirectoryTree(REAL_STATE_DIR);
+  const ok = directoryTreesIdentical(realStateBefore, realStateAfter);
+  if (!ok) failed++;
+  console.log(
+    (ok ? '  PASS  ' : '  FAIL  ') +
+      'the real .claude/state directory tree (guard.log and the full sessions/ tree, recursively) is byte-for-byte unchanged by this entire self-test run' +
+      (ok ? '' : ` (entry count before=${realStateBefore.size} after=${realStateAfter.size} - see in-memory snapshots for detail; contents/hashes deliberately not printed here)`)
+  );
+}
+{
+  // Cleanup itself is registered via process.on('exit') so it always runs;
+  // this proves the directory this run actually used is still present RIGHT
+  // NOW (the exit handler hasn't fired yet) - a canary that the override
+  // was pointed at a real, existing path throughout, not a dangling one.
+  const ok = fs.existsSync(DISPOSABLE_STATE_DIR);
+  if (!ok) failed++;
+  console.log((ok ? '  PASS  ' : '  FAIL  ') + 'the disposable state directory used by this run still exists at this point (its removal happens in the process-exit handler, after this line)');
+}
+
+// No manual ledger cleanup needed: every write this run made landed under
+// DISPOSABLE_STATE_DIR (never the real .claude/state/sessions), and that
+// whole directory is removed by the process.on('exit') handler registered
+// above regardless of how this script terminates.
+
+const EXTRA_STANDALONE_CHECKS =
+  4 /* disposable-dir-received-writes + 2x recursive canary scan + real-state-unchanged */ +
+  1 /* disposable dir still exists pre-cleanup */ +
+  4 /* settings.json backstop */;
+console.log(
+  '\n' +
+    (failed
+      ? failed + ' FAILURE(S)'
+      : 'all ' + (cases.length + stopCases.length + outputCases.length + EXTRA_STANDALONE_CHECKS) + ' checks passed')
+);
 process.exit(failed ? 1 : 0);
