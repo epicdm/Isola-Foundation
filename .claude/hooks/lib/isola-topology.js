@@ -310,20 +310,31 @@ const SECRET_DUMP_RE = new RegExp(
  * exact input predicate — not "procedure name is on a list", but "procedure
  * name AND its arguments match a reviewed, scoped shape".
  *
- * getMonitorTableData was allowlisted in an earlier revision but is REMOVED
- * here: its real input schema has no properties at all (no project/service
- * fields to scope it with), so per policy ("if it cannot be safely scoped,
- * temporarily remove it") it cannot be given a predicate and stays out until
- * that changes upstream or a scoping mechanism is found.
+ * EXECUTABLE SET REDUCED TO ONE (owner review, 2026-08-10): listPorts,
+ * listMounts and getComposeDockerServices were allowlisted in an earlier
+ * revision but are REMOVED here, alongside getMonitorTableData (removed one
+ * revision earlier for having no scopable fields at all). Three reasons,
+ * together:
+ *   1. Their real output shapes have never been reviewed — every live call
+ *      to any of them has failed with the same unresolved parameterized-
+ *      input 400, so there is no observed response to build a PostToolUse
+ *      projector from (unlike listProjects, whose real output shape this
+ *      session has actually seen).
+ *   2. That same parameterized-input failure means they are not currently
+ *      functional anyway.
+ *   3. If the PostToolUse output-projection hook ever fails to run at all
+ *      (a Claude Code hook crash, timeout, or invalid-output infrastructure
+ *      failure — see isola-easypanel-output-guard.js's header), the
+ *      original, unprojected tool response is what reaches the model. For a
+ *      procedure with no reviewed output shape, that is an unbounded risk;
+ *      for listProjects, whose shape is known and narrow, it is a bounded
+ *      one. A procedure may re-enter the executable set once its raw output
+ *      is judged safe even in the case where PostToolUse replacement itself
+ *      fails to run — not merely once it starts returning 200s.
+ *
+ * The current executable set is ONE query: listProjects.
  */
 const EASYPANEL_REVIEWED_PROJECT = 'isola';
-
-// NOTE: there is deliberately no single shared "reviewed services" set here.
-// Service scope is defined per-procedure below (EASYPANEL_SERVICE_SCOPE) —
-// the current work is the NocoBase wave specifically, and a service name
-// being discussed for one procedure must not silently become valid for
-// another. A prior revision of this file had one broad shared set spanning
-// Activepieces/Chatwoot/Paymenter/AI service names; that was corrected.
 
 /** search_procedures is schema/metadata discovery only — it returns
  * procedure descriptions and input schemas, it never executes one. Always
@@ -376,8 +387,10 @@ function resolveInputObject(input) {
       let parsed;
       try {
         parsed = JSON.parse(trimmed);
-      } catch (e) {
-        throw new Error('input is a string that failed to parse as JSON: ' + e.message);
+      } catch (_) {
+        // Fixed message only — never the underlying parse error's own
+        // text, which can echo a fragment of the untrusted input itself.
+        throw new Error('input is a string that failed to parse as JSON');
       }
       resolved = parsed;
     }
@@ -395,31 +408,6 @@ function requireNoExtraKeys(obj, allowedKeys, label) {
 }
 
 /**
- * Per-PROCEDURE service scope, not one shared global set. The current work
- * is the NocoBase wave specifically — a procedure being scoped to nocobase/
- * nocobase-db does not imply Activepieces, Chatwoot, Paymenter or the
- * Paperclip ("ai") services are fair game for that same procedure merely
- * because their names have been observed/discussed elsewhere this session.
- * Extending a procedure's scope to another service is its own reviewed
- * decision, not an inherited default.
- */
-const EASYPANEL_SERVICE_SCOPE = new Map([
-  ['listPorts', new Set(['nocobase', 'nocobase-db'])],
-  ['listMounts', new Set(['nocobase', 'nocobase-db'])],
-  ['getComposeDockerServices', new Set(['nocobase', 'nocobase-db'])],
-]);
-
-function requireReviewedTarget(obj, label) {
-  if (obj.projectName !== EASYPANEL_REVIEWED_PROJECT) {
-    throw new Error(label + ' projectName must be exactly "' + EASYPANEL_REVIEWED_PROJECT + '"');
-  }
-  const scope = EASYPANEL_SERVICE_SCOPE.get(label);
-  if (typeof obj.serviceName !== 'string' || !scope || !scope.has(obj.serviceName)) {
-    throw new Error(label + ' serviceName is missing or not in that procedure\'s reviewed scope');
-  }
-}
-
-/**
  * Exact per-procedure input predicates, keyed in a Map (never a plain
  * object) and retrieved via .get() — never bracket-indexed on an untrusted
  * string. A plain-object registry accessed as REGISTRY[userControlledKey]
@@ -430,33 +418,18 @@ function requireReviewedTarget(obj, label) {
  * no prototype-chain lookup semantics at all: an absent key always returns
  * undefined, full stop, regardless of what string is asked for.
  *
- * Throws (fail-closed) on any deviation — missing/ambiguous/extra target
- * fields, out-of-scope project or service, or a procedure not in this map.
+ * Throws (fail-closed) on any deviation — extra fields or a procedure not
+ * in this map. Currently a single entry — see the policy comment above for
+ * why listPorts/listMounts/getComposeDockerServices/getMonitorTableData are
+ * not (yet) here, and what re-entry requires.
  */
 const EASYPANEL_QUERY_PREDICATES = new Map([
   ['listProjects', (input) => {
     requireNoExtraKeys(input, new Set([]), 'listProjects');
   }],
-  ['listPorts', (input) => {
-    requireNoExtraKeys(input, new Set(['projectName', 'serviceName']), 'listPorts');
-    requireReviewedTarget(input, 'listPorts');
-  }],
-  ['listMounts', (input) => {
-    requireNoExtraKeys(input, new Set(['projectName', 'serviceName']), 'listMounts');
-    requireReviewedTarget(input, 'listMounts');
-  }],
-  ['getComposeDockerServices', (input) => {
-    // The vendor schema treats projectName/serviceName as OPTIONAL (omitting
-    // them would return data across an unscoped range) — policy requires
-    // both present regardless of what the vendor schema permits.
-    requireNoExtraKeys(input, new Set(['projectName', 'serviceName']), 'getComposeDockerServices');
-    requireReviewedTarget(input, 'getComposeDockerServices');
-  }],
-  // getMonitorTableData: intentionally absent — see the policy comment above.
 ]);
 
-/** The current executable set has FOUR procedures, not five —
- * getMonitorTableData was removed (see policy comment above). */
+/** The current executable set is ONE query: listProjects. */
 const EASYPANEL_ALLOWED_QUERY_PROCEDURES = new Set(EASYPANEL_QUERY_PREDICATES.keys());
 
 /**
@@ -597,7 +570,6 @@ module.exports = {
   SECRET_FILE_RE,
   SECRET_DUMP_RE,
   EASYPANEL_REVIEWED_PROJECT,
-  EASYPANEL_SERVICE_SCOPE,
   EASYPANEL_ALLOWED_QUERY_PROCEDURES,
   EASYPANEL_QUERY_PREDICATES,
   EASYPANEL_METADATA_TOOL_RE,

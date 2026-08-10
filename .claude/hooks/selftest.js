@@ -64,6 +64,10 @@ const FAKE_TOKEN = t('EA', 'A', 'b3xY7qLm2Nv9Kd4Rt6Wz8Ps1Hj5Gf0Cx', 'Qa7Ue2Ir');
  * flag this test file itself for containing the string it asserts is unsafe. */
 const LEAKY_PROCEDURE_NAME = ['listProjects', 'And', 'Services'].join('');
 
+/** Fake canary for the PreToolUse logging test below - synthetic, never a
+ * real secret. */
+const PRETOOLUSE_CANARY = t('PRETOOLUSE_CANARY_', 'FAKE_9d3e7a1c');
+
 const cases = [
   // --- THE R5A RULE -------------------------------------------------------
   {
@@ -677,10 +681,15 @@ const cases = [
     },
   },
 
-  // -- listPorts: exact positive/negative predicate --
+  // -- listPorts / listMounts / getComposeDockerServices: REMOVED from the
+  // executable set (owner review, 2026-08-10) - not a matter of input shape
+  // anymore, the procedure itself is no longer in the allowlist at all. Each
+  // proven BLOCKED even with a perfectly well-formed, previously-valid input,
+  // to show this isn't an input-predicate rejection but a procedure-level one.
   {
-    name: 'listPorts with isola + a reviewed service is ALLOWED',
-    expect: PASS,
+    name: 'listPorts is BLOCKED outright even with a well-formed, previously-valid input (removed from the executable set)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
     payload: {
       session_id: SID,
       tool_name: 'mcp__epic-portal__execute_query',
@@ -688,72 +697,9 @@ const cases = [
     },
   },
   {
-    name: 'listPorts as a serialized-JSON-string input (the known encoding quirk) is still ALLOWED when it resolves to a valid scoped target',
-    expect: PASS,
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: { procedure: 'listPorts', input: '{"projectName":"isola","serviceName":"nocobase-db"}' },
-    },
-  },
-  {
-    name: 'listPorts with an out-of-scope project is BLOCKED',
+    name: 'listMounts is BLOCKED outright even with a well-formed, previously-valid input (removed from the executable set)',
     expect: BLOCK,
     contains: 'easypanel-not-allowlisted',
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: { procedure: 'listPorts', input: { projectName: 'some-other-project', serviceName: 'nocobase-db' } },
-    },
-  },
-  {
-    name: 'listPorts with an out-of-scope (unreviewed) service is BLOCKED',
-    expect: BLOCK,
-    contains: 'easypanel-not-allowlisted',
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: { procedure: 'listPorts', input: { projectName: 'isola', serviceName: 'some-service-never-reviewed' } },
-    },
-  },
-  {
-    name: 'listPorts with a missing required serviceName is BLOCKED',
-    expect: BLOCK,
-    contains: 'easypanel-not-allowlisted',
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: { procedure: 'listPorts', input: { projectName: 'isola' } },
-    },
-  },
-  {
-    name: 'listPorts with an unexpected extra target field is BLOCKED',
-    expect: BLOCK,
-    contains: 'easypanel-not-allowlisted',
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: { procedure: 'listPorts', input: { projectName: 'isola', serviceName: 'nocobase-db', debug: true } },
-    },
-  },
-  {
-    name: 'listPorts with a conflicting nested "procedure" field inside input is BLOCKED',
-    expect: BLOCK,
-    contains: 'easypanel-not-allowlisted',
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: {
-        procedure: 'listPorts',
-        input: { procedure: LEAKY_PROCEDURE_NAME, projectName: 'isola', serviceName: 'nocobase-db' },
-      },
-    },
-  },
-
-  // -- listMounts: exact positive/negative predicate --
-  {
-    name: 'listMounts with isola + a reviewed service is ALLOWED',
-    expect: PASS,
     payload: {
       session_id: SID,
       tool_name: 'mcp__epic-portal__execute_query',
@@ -761,66 +707,16 @@ const cases = [
     },
   },
   {
-    name: 'listMounts with an out-of-scope project is BLOCKED',
+    name: 'getComposeDockerServices is BLOCKED outright even with a well-formed, previously-valid input (removed from the executable set)',
     expect: BLOCK,
     contains: 'easypanel-not-allowlisted',
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: { procedure: 'listMounts', input: { projectName: 'wrong-project', serviceName: 'nocobase' } },
-    },
-  },
-  {
-    name: 'listMounts with a missing required serviceName is BLOCKED',
-    expect: BLOCK,
-    contains: 'easypanel-not-allowlisted',
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: { procedure: 'listMounts', input: { projectName: 'isola' } },
-    },
-  },
-
-  // -- getComposeDockerServices: exact positive/negative predicate --
-  {
-    name: 'getComposeDockerServices with isola + a reviewed service is ALLOWED',
-    expect: PASS,
     payload: {
       session_id: SID,
       tool_name: 'mcp__epic-portal__execute_query',
       tool_input: { procedure: 'getComposeDockerServices', input: { projectName: 'isola', serviceName: 'nocobase' } },
     },
   },
-  {
-    name: 'getComposeDockerServices with NO target fields is BLOCKED (policy stricter than the vendor schema)',
-    expect: BLOCK,
-    contains: 'easypanel-not-allowlisted',
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: { procedure: 'getComposeDockerServices', input: {} },
-    },
-  },
-  {
-    name: 'getComposeDockerServices with an out-of-scope service is BLOCKED',
-    expect: BLOCK,
-    contains: 'easypanel-not-allowlisted',
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: { procedure: 'getComposeDockerServices', input: { projectName: 'isola', serviceName: 'unreviewed-service' } },
-    },
-  },
-  {
-    name: 'listPorts scoped to nocobase does NOT implicitly allow an Activepieces/Chatwoot/Paymenter/AI service name',
-    expect: BLOCK,
-    contains: 'easypanel-not-allowlisted',
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: { procedure: 'listPorts', input: { projectName: 'isola', serviceName: 'activepieces' } },
-    },
-  },
+
 
   // -- PROTOTYPE-CHAIN ADVERSARIAL PROCEDURE NAMES (owner-directed, critical) --
   // A plain-object registry accessed as REGISTRY[userControlledString] is a
@@ -1032,8 +928,32 @@ const cases = [
       tool_input: { procedure: LEAKY_PROCEDURE_NAME, arguments: { procedure: LEAKY_PROCEDURE_NAME } },
     },
   },
-
+  {
+    // PreToolUse canary: a fake secret positioned immediately before a
+    // malformed-JSON parse failure inside resolveInputObject(). Confirms
+    // the fixed-event-code logging fix - no e.message derived from this
+    // payload should ever reach stdout or stderr.
+    name: 'PreToolUse: a fake canary immediately before a malformed-serialized-input parse failure never reaches stdout or stderr',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    notContains: PRETOOLUSE_CANARY,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: {
+        procedure: 'listProjects',
+        input: '{"canary":"' + PRETOOLUSE_CANARY + '","unterminated":',
+      },
+    },
+  },
 ];
+
+// Record the real guard.log's size BEFORE running anything, so the canary
+// check below only ever looks at bytes THIS run appended - never inspects
+// or prints the existing real log content.
+const GUARD_LOG = path.join(__dirname, '..', 'state', 'guard.log');
+let guardLogSizeBefore = 0;
+try { guardLogSizeBefore = fs.statSync(GUARD_LOG).size; } catch (_) { /* no log yet - fine */ }
 
 let failed = 0;
 console.log('isola hooks - selftest\n');
@@ -1055,6 +975,57 @@ for (const c of cases) {
           (c.contains ? ' wanted-rule=' + c.contains : '') +
           (!okNotContains ? ' LEAKED-FORBIDDEN-STRING' : '') +
           (r.stderr ? '\n          stderr: ' + r.stderr.split('\n').slice(0, 2).join(' | ') : ''))
+  );
+}
+
+// Canary check: only the bytes THIS run appended to the real guard.log are
+// inspected (via the byte offset recorded above) - never the pre-existing
+// content.
+{
+  let leaked = false;
+  try {
+    const fd = fs.openSync(GUARD_LOG, 'r');
+    const stat = fs.fstatSync(fd);
+    const appendedSize = Math.max(0, stat.size - guardLogSizeBefore);
+    const buf = Buffer.alloc(appendedSize);
+    fs.readSync(fd, buf, 0, appendedSize, guardLogSizeBefore);
+    fs.closeSync(fd);
+    leaked = buf.toString('utf8').includes(PRETOOLUSE_CANARY);
+  } catch (_) {
+    /* no log file at all - trivially no leak */
+  }
+  const ok = !leaked;
+  if (!ok) failed++;
+  console.log((ok ? '  PASS  ' : '  FAIL  ') + 'PreToolUse canary is absent from the newly-appended portion of guard.log (pre-existing content never inspected)');
+}
+
+// --- Permission-system backstop (settings.json) -----------------------------
+console.log('\npermission-system backstop (settings.json)');
+{
+  const settingsPath = path.join(__dirname, '..', 'settings.json');
+  const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+  const deny = (settings.permissions && settings.permissions.deny) || [];
+  const ask = (settings.permissions && settings.permissions.ask) || [];
+  const allow = (settings.permissions && settings.permissions.allow) || [];
+
+  const settingsChecks = [
+    { name: 'deny contains mcp__epic-portal__execute_mutation', ok: deny.includes('mcp__epic-portal__execute_mutation') },
+    { name: 'deny contains mcp__epic-portal__execute_destructive', ok: deny.includes('mcp__epic-portal__execute_destructive') },
+    { name: 'ask contains mcp__epic-portal__* (forces approval for every epic-portal call)', ok: ask.includes('mcp__epic-portal__*') },
+    {
+      name: 'allow contains NO mcp__epic-portal__* rule (no MCP allow rule added, as instructed)',
+      ok: !allow.some((r) => r.startsWith('mcp__epic-portal')),
+    },
+  ];
+  for (const c of settingsChecks) {
+    if (!c.ok) failed++;
+    console.log((c.ok ? '  PASS  ' : '  FAIL  ') + c.name);
+  }
+  console.log(
+    '  NOTE  parameterized per-procedure deny rules (e.g. execute_query(procedure:listPorts)) are NOT valid Claude Code ' +
+      'permission syntax - confirmed by the harness\'s own settings validator, which rejected them outright. Per-procedure ' +
+      'enforcement remains the hook\'s (isola-guard.js) responsibility; the permission system backstops only at the ' +
+      'whole-tool level (execute_mutation/execute_destructive denied outright, every epic-portal call requires approval).'
   );
 }
 
@@ -1126,6 +1097,94 @@ function containsAnyFakeSecret(obj) {
 }
 
 const outputCases = [
+  // -- delivery reliability (bounds, and repeated-execution parseability) --
+  {
+    name: 'a NEAR-LIMIT valid listProjects projection is emitted normally (within the output-size bound)',
+    check: () => {
+      // Comfortably under the 64 KiB bound but still substantial - proves
+      // the size check does not clip a genuinely valid, reasonably large
+      // projection.
+      const rows = Array.from({ length: 90 }, (_, i) => ({ name: 'proj-' + i, createdAt: '2026-01-01T00:00:00Z' }));
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listProjects', result: rows },
+      });
+      if (JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON) return 'a near-limit valid projection was incorrectly placeholdered';
+      return Array.isArray(r.updatedToolOutput && r.updatedToolOutput.result) && r.updatedToolOutput.result.length === 90
+        ? null
+        : 'near-limit projection did not come through with the expected row count';
+    },
+  },
+  {
+    name: 'an OVER-LIMIT projection (row count within bound but serialized size over it) falls back to the safe placeholder, not a truncated response',
+    check: () => {
+      // MAX_ROWS (100) does not by itself guarantee a small payload if
+      // fields were ever wider - simulate that by using the max allowed row
+      // count with the longest allowed name, which the projector accepts,
+      // and confirm the size guard - not the row-count guard - is what
+      // catches an oversized result if one ever occurs.
+      const longName = 'a'.repeat(100);
+      const rows = Array.from({ length: 100 }, () => ({ name: longName, createdAt: '2026-01-01T00:00:00Z' }));
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listProjects', result: rows },
+      });
+      // Either the safe placeholder (if the size guard tripped) or a fully
+      // valid same-length projection (if it stayed under the bound) is
+      // acceptable - what is NOT acceptable is a truncated/partial result.
+      const out = r.updatedToolOutput;
+      const isPlaceholder = JSON.stringify(out) === SAFE_PLACEHOLDER_JSON;
+      const isFullValidProjection = out && Array.isArray(out.result) && out.result.length === 100;
+      return isPlaceholder || isFullValidProjection ? null : 'response was neither the safe placeholder nor a complete projection - looks truncated';
+    },
+  },
+  {
+    name: 'OVERSIZED STDIN (beyond the 2 MiB input bound) FAILS CLOSED to the safe placeholder',
+    check: () => {
+      const hugePadding = 'x'.repeat(3 * 1024 * 1024); // 3 MiB, over the 2 MiB bound
+      const r = spawnSync(process.execPath, [OUTPUT_GUARD], {
+        input: JSON.stringify({
+          tool_name: 'mcp__epic-portal__execute_query',
+          tool_input: { procedure: 'listProjects', input: {} },
+          tool_response: { procedure: 'listProjects', result: [], padding: hugePadding },
+        }),
+        encoding: 'utf8',
+        timeout: 20000,
+        maxBuffer: 10 * 1024 * 1024,
+      });
+      let updatedToolOutput;
+      try {
+        updatedToolOutput = JSON.parse(r.stdout || '{}').hookSpecificOutput.updatedToolOutput;
+      } catch (_) {
+        return 'hook crashed or produced no parseable output on oversized stdin: exit=' + r.status;
+      }
+      return JSON.stringify(updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'oversized stdin did not fail to the safe placeholder';
+    },
+  },
+  {
+    name: 'stdout is complete, parseable JSON across 20 repeated child-process executions (write-then-exit reliability, not just usually)',
+    check: () => {
+      for (let i = 0; i < 20; i++) {
+        const r = runOutputGuard({
+          tool_name: 'mcp__epic-portal__execute_query',
+          tool_input: { procedure: 'listProjects', input: {} },
+          tool_response: { procedure: 'listProjects', result: [{ name: 'isola', createdAt: '2026-08-09T20:47:10.605Z' }] },
+        });
+        let parsed;
+        try {
+          parsed = JSON.parse(r.stdout);
+        } catch (e) {
+          return `run ${i}: stdout was not complete/parseable JSON (${e.message.length} char parse error) - raw length ${r.stdout.length}`;
+        }
+        if (!parsed.hookSpecificOutput || parsed.hookSpecificOutput.updatedToolOutput === undefined) {
+          return `run ${i}: parsed JSON was missing the expected hookSpecificOutput.updatedToolOutput shape`;
+        }
+      }
+      return null;
+    },
+  },
   {
     name: 'not our tool -> no stdout, harness leaves original response untouched',
     check: () => {
@@ -1364,5 +1423,11 @@ try {
   /* nothing to clean */
 }
 
-console.log('\n' + (failed ? failed + ' FAILURE(S)' : 'all ' + (cases.length + stopCases.length + outputCases.length) + ' checks passed'));
+const EXTRA_STANDALONE_CHECKS = 1 /* guard.log canary */ + 4 /* settings.json backstop */;
+console.log(
+  '\n' +
+    (failed
+      ? failed + ' FAILURE(S)'
+      : 'all ' + (cases.length + stopCases.length + outputCases.length + EXTRA_STANDALONE_CHECKS) + ' checks passed')
+);
 process.exit(failed ? 1 : 0);

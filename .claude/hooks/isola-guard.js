@@ -116,8 +116,10 @@ process.stdin.on('end', () => {
 
   try {
     evaluate(inp);
-  } catch (e) {
-    log('INTERNAL-ERROR allow: ' + (e && e.message));
+  } catch (_) {
+    // Fixed event code only — never e.message. A guard's own error text can
+    // itself echo a fragment of whatever untrusted input triggered it.
+    log('INTERNAL-ERROR allow');
     process.exit(0); // fail open
   }
 });
@@ -136,7 +138,8 @@ function evaluate(inp) {
   // procedures get reviewed, not a move away from MCP. Exactly two exact
   // tool names are ever considered: search_procedures (schema/metadata
   // discovery only, always allowed — it never executes a procedure) and
-  // execute_query (gated by a four-procedure allowlist). Every other
+  // execute_query (gated by a one-procedure allowlist: listProjects only).
+  // Every other
   // mcp__epic-portal__* tool name — execute_mutation, execute_destructive,
   // or anything unexpected/suffixed this policy has never seen — is blocked
   // outright with no procedure-name parsing attempted, until it receives
@@ -164,7 +167,9 @@ function evaluate(inp) {
       blocked = T.isBlockedEasyPanelCall(tool, ti, cmdForCheck);
     } catch (e) {
       if (!looksLikeEasyPanelCall) throw e; // preserve fail-open for unrelated tools
-      log('EASYPANEL-INSPECT-ERROR fail-closed: ' + (e && e.message));
+      // Fixed event code only — never e.message, which can itself contain a
+      // fragment of the untrusted payload that triggered the failure.
+      log('EASYPANEL-INSPECT-ERROR fail-closed');
       unparseable = true;
     }
     if (blocked || unparseable) {
@@ -183,7 +188,7 @@ function evaluate(inp) {
             ? ' This specific payload could not be safely inspected (malformed or too deeply nested) — ' +
               'failing closed for an epic-portal-shaped call rather than allowing an unverifiable one through.'
             : ''),
-        'use one of the four allowlisted read-only procedures through this MCP tool. If a write is genuinely ' +
+        'use the one executable read-only query through this MCP tool. If a write is genuinely ' +
           'needed, get the specific procedure reviewed and added to the allowlist first — do not bypass MCP.'
       );
     }

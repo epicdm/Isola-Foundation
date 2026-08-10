@@ -11,12 +11,15 @@
       "Read(**/*.key)",
       "Read(**/credentials.json)",
       "Read(**/auth.json)",
-      "Read(**/.credentials.json)"
+      "Read(**/.credentials.json)",
+      "mcp__epic-portal__execute_mutation",
+      "mcp__epic-portal__execute_destructive"
     ],
     "ask": [
       "Bash(git push:*)",
       "Bash(gh pr merge:*)",
-      "Bash(gh release:*)"
+      "Bash(gh release:*)",
+      "mcp__epic-portal__*"
     ],
     "allow": [
       "Bash(git status:*)",

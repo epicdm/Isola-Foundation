@@ -10,9 +10,14 @@
  * blocking does not un-execute it or change what content reaches the model.
  * updatedToolOutput is the only field that does that.
  *
- * FAIL-CLOSED ON EVERYTHING: any parse/validation/projection failure returns
- * a constant safe placeholder — never the original response, never a partial
- * best-effort reconstruction.
+ * Fails closed within successful hook execution. Claude Code hook crashes,
+ * timeouts and invalid hook output are non-blocking infrastructure failures
+ * and may leave the original result in place. Any parse/validation/
+ * projection failure THIS PROCESS actually completes returns a constant
+ * safe placeholder — never the original response, never a partial
+ * best-effort reconstruction — but that guarantee only holds for a run that
+ * finishes successfully; it is not a claim about what happens if the
+ * process itself never gets to emit anything at all.
  *
  * NO PERSISTENT LOGGING. An earlier revision logged exception messages
  * derived from stdin/tool_input/tool_response/JSON.parse — that is exactly
@@ -43,21 +48,43 @@
  * cleanly. Never the original response, never a best-effort partial. */
 const SAFE_PLACEHOLDER = Object.freeze({ status: 'output_withheld_pending_review' });
 
+/** Bounds so neither direction can grow without limit in memory or exceed
+ * whatever cap Claude Code enforces on hook stdout. Conservative, well
+ * under typical hook-output limits. */
+const MAX_STDIN_BYTES = 2 * 1024 * 1024; // 2 MiB
+const MAX_OUTPUT_BYTES = 64 * 1024; // 64 KiB
+
+/**
+ * Writes the hook's JSON response and sets a successful exit code WITHOUT
+ * force-exiting immediately. process.stdout.write() is not guaranteed to be
+ * synchronous/flushed when stdout is piped (the normal case for a hook
+ * subprocess) — calling process.exit() right after can leave the write
+ * incomplete or entirely unsent, silently degrading to no updatedToolOutput
+ * at all (an infrastructure failure, not a security failure, but one worth
+ * closing). Setting exitCode and letting the event loop drain naturally
+ * (nothing else is scheduled once stdin ends) lets Node finish the write
+ * before the process actually exits.
+ */
 function emit(updatedToolOutput) {
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: 'PostToolUse',
-        updatedToolOutput: updatedToolOutput,
-      },
-    })
-  );
-  process.exit(0);
+  const payload = JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PostToolUse',
+      updatedToolOutput: updatedToolOutput,
+    },
+  });
+  // If the reviewed projection itself would exceed the bound, fall back to
+  // the (much smaller, constant-size) safe placeholder rather than emit an
+  // oversized response that risks being cut off by an external limit.
+  if (Buffer.byteLength(payload, 'utf8') > MAX_OUTPUT_BYTES && updatedToolOutput !== SAFE_PLACEHOLDER) {
+    return emit(SAFE_PLACEHOLDER);
+  }
+  process.stdout.write(payload);
+  process.exitCode = 0;
 }
 
-/** Not our tool — exit 0 with no stdout, harness leaves the original response untouched. */
+/** Not our tool — no stdout, harness leaves the original response untouched. */
 function passthrough() {
-  process.exit(0);
+  process.exitCode = 0;
 }
 
 // ---------------------------------------------------------------- projectors
@@ -154,8 +181,26 @@ function extractProcedureFromToolInput(toolInput) {
 // ------------------------------------------------------------------- main
 
 let raw = '';
-process.stdin.on('data', (d) => (raw += d));
+let rawBytes = 0;
+let oversized = false;
+process.stdin.on('data', (d) => {
+  if (oversized) return; // already decided; stop accumulating further
+  rawBytes += Buffer.byteLength(d);
+  if (rawBytes > MAX_STDIN_BYTES) {
+    oversized = true;
+    raw = ''; // release whatever was buffered — never hold an oversized payload in memory
+    return;
+  }
+  raw += d;
+});
 process.stdin.on('end', () => {
+  if (oversized) {
+    // Cannot safely inspect tool_name from an oversized payload (would mean
+    // parsing something already discarded), so this cannot be narrowed to
+    // "not our tool" — fail closed rather than assume either way.
+    return emit(SAFE_PLACEHOLDER);
+  }
+
   let inp;
   try {
     inp = JSON.parse(raw || '{}');
