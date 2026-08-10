@@ -163,6 +163,11 @@ function evaluate(inp) {
     const cmdForCheck = String(ti.command || ti.script || '');
     const looksLikeEasyPanelCall =
       T.EASYPANEL_ANY_TOOL_RE.test(tool) ||
+      // A tool that IS the network client carries the endpoint in a URL field
+      // and names no client, so it can never satisfy the command-text rule
+      // below. easyPanelUrlTargeted never throws, so evaluating it here (i.e.
+      // outside the try) cannot itself break the fail-open path.
+      T.easyPanelUrlTargeted(ti) ||
       (T.HTTP_INVOCATION_RE.test(cmdForCheck) && T.EASYPANEL_RAW_PATH_RE.test(cmdForCheck));
     let blocked = false;
     let unparseable = false;
@@ -183,7 +188,9 @@ function evaluate(inp) {
           Array.from(T.EASYPANEL_ALLOWED_QUERY_PROCEDURES).join(', ') + '. ' +
           'Mutation/destructive procedures are blocked TEMPORARILY, not outlawed — each one is added here ' +
           'individually once it has its own input/output/secret-handling review. Raw HTTP/RPC/tRPC calls that ' +
-          'bypass this MCP tool remain prohibited regardless of host. ' +
+          'bypass this MCP tool remain prohibited regardless of host — whether the endpoint appears in a shell ' +
+          'command naming an HTTP client, or in a url/uri/endpoint field of a tool that performs the fetch ' +
+          'itself (WebFetch and anything like it). No raw-endpoint exception is approved. ' +
           'listProjectsAndServices in particular returns full plaintext secrets for every service ' +
           'on the instance with no redaction — reclassified P0 twice this session (see ' +
           'defect-easypanel-listprojectsandservices-second-secret-dump-2026-08-10).' +

@@ -998,6 +998,200 @@ const cases = [
       },
     },
   },
+  // -- raw bypass shape 2: URL-bearing tool inputs (WebFetch and anything
+  //    like it). These tools ARE the network client, so they name no client
+  //    in their payload and structurally cannot match HTTP_INVOCATION_RE.
+  //    Confirmed live before this fix: WebFetch with tool_input.url set to the
+  //    EasyPanel /api/mcp endpoint returned exit 0 (allowed) while the
+  //    equivalent Bash curl was correctly blocked. The `cmd` argument only
+  //    ever receives tool_input.command || tool_input.script, so .url was
+  //    never read at all.
+  {
+    name: 'WebFetch tool_input.url to the exact /api/mcp endpoint is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'WebFetch',
+      tool_input: { url: 'https://portal.saas00.epic.dm/api/mcp', prompt: 'summarize' },
+    },
+  },
+  {
+    name: 'WebFetch url with a query-string variant of /api/mcp is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'WebFetch',
+      tool_input: { url: 'https://portal.saas00.epic.dm/api/mcp?debug=1', prompt: 'x' },
+    },
+  },
+  {
+    name: 'WebFetch url with a trailing-slash variant of /api/mcp/ is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'WebFetch',
+      tool_input: { url: 'https://portal.saas00.epic.dm/api/mcp/', prompt: 'x' },
+    },
+  },
+  {
+    name: 'WebFetch url to a direct-IP /api/mcp is BLOCKED (host-agnostic, same as the command rule)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'WebFetch',
+      tool_input: { url: 'https://66.118.37.110/api/mcp', prompt: 'x' },
+    },
+  },
+  {
+    name: 'WebFetch url to an alternate host / proxy fronting /api/mcp is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'WebFetch',
+      tool_input: { url: 'https://some-other-proxy.example.com/api/mcp', prompt: 'x' },
+    },
+  },
+  {
+    name: 'WebFetch url to /api/rpc is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'WebFetch',
+      tool_input: { url: 'https://portal.saas00.epic.dm/api/rpc', prompt: 'x' },
+    },
+  },
+  {
+    name: 'WebFetch url to a /api/trpc/... procedure path is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'WebFetch',
+      tool_input: { url: t('https://portal.saas00.epic.dm/api/trpc/projects.', 'listProjects'), prompt: 'x' },
+    },
+  },
+  {
+    name: 'plain http:// (not https) to /api/mcp in a url field is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'WebFetch',
+      tool_input: { url: 'http://portal.saas00.epic.dm/api/mcp', prompt: 'x' },
+    },
+  },
+  {
+    name: 'the `uri` key variant carrying the endpoint is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'SomeFetchingTool',
+      tool_input: { uri: 'https://portal.saas00.epic.dm/api/mcp' },
+    },
+  },
+  {
+    name: 'the `endpoint` key variant carrying the endpoint is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'SomeFetchingTool',
+      tool_input: { endpoint: 'https://portal.saas00.epic.dm/api/mcp' },
+    },
+  },
+  {
+    // The check is on the FIELD SHAPE, not on a tool-name list — a name list
+    // goes stale the moment a new fetch-capable tool appears.
+    name: 'an UNKNOWN, never-seen tool name carrying the endpoint in `url` is BLOCKED (field-shape, not tool-name, based)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__some__future_fetch_tool',
+      tool_input: { url: 'https://portal.saas00.epic.dm/api/mcp' },
+    },
+  },
+  {
+    name: 'Bash tool_input.script (not .command) reaching /api/mcp is BLOCKED (both command-text fields covered)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { script: 'curl -s https://portal.saas00.epic.dm/api/mcp -d \'{}\'' },
+    },
+  },
+
+  // -- negative controls for shape 2: the fix must not become a blanket ban
+  //    on the host, on URLs generally, or on records that merely cite the
+  //    endpoint.
+  {
+    name: 'WebFetch to an unrelated public URL is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'WebFetch',
+      tool_input: { url: 'https://github.com/epicdm/Isola-Foundation/pull/96', prompt: 'x' },
+    },
+  },
+  {
+    name: 'WebFetch to a NON-MCP path on the same EasyPanel host is ALLOWED (path-scoped, not host-scoped)',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'WebFetch',
+      tool_input: { url: 'https://portal.saas00.epic.dm/api/health', prompt: 'x' },
+    },
+  },
+  {
+    name: 'a path that merely BEGINS with /api/mcp but continues (/api/mcpx) is ALLOWED (delimiter-bounded)',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'WebFetch',
+      tool_input: { url: 'https://portal.saas00.epic.dm/api/mcpx', prompt: 'x' },
+    },
+  },
+  {
+    // Exact keys, not a suffix match: source_url on a data-record tool is
+    // metadata being STORED, not an endpoint being CALLED. Gating it would
+    // false-positive on the very Port records that document this policy.
+    name: 'a `source_url` METADATA field citing the endpoint on a record tool is ALLOWED (exact-key bound)',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__claude_ai_Port_IO__upsert_entity',
+      tool_input: {
+        blueprintIdentifier: 'evidence',
+        entity: { properties: { source_url: 'https://portal.saas00.epic.dm/api/mcp' } },
+      },
+    },
+  },
+  {
+    name: 'a url field WITHOUT an http(s) scheme containing the path is ALLOWED (scheme required)',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'WebFetch',
+      tool_input: { url: 'docs/isola/notes-about-api-mcp/api/mcp' },
+    },
+  },
+  {
+    name: 'a non-string url field is ALLOWED and does not throw (no fail-closed on an unrelated tool)',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'SomeUnrelatedTool',
+      tool_input: { url: { nested: 'https://portal.saas00.epic.dm/api/mcp' } },
+    },
+  },
   {
     name: 'a commit message DESCRIBING these blocked paths is ALLOWED (not payload-blind)',
     expect: PASS,

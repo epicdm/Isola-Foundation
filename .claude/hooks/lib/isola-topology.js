@@ -367,9 +367,79 @@ const EASYPANEL_RAW_PATH_RE = /\/api\/(mcp|rpc|trpc)(?=[\s'"`/?]|$)/i;
  * not covered by this pattern (a compiled binary, a different SDK, a language this
  * regex doesn't recognize) is not caught by this specific check. The PreToolUse
  * hook is one containment layer; the MCP connector's own allowlisting (once it
- * exists there) is the layer that would make this true regardless of client. */
+ * exists there) is the layer that would make this true regardless of client.
+ *
+ * This pattern applies to COMMAND TEXT only (tool_input.command / .script) —
+ * a shell string that names a network client. It structurally cannot cover a
+ * tool that IS the network client, because such a tool names no client in its
+ * input; it just carries a URL. That second shape is handled separately by
+ * easyPanelUrlTargeted() below. */
 const HTTP_INVOCATION_RE =
   /\b(curl|wget|Invoke-WebRequest|Invoke-RestMethod|axios)\b|\bfetch\s*\(|\.request\s*\(|\b(requests|httpx)\.(get|post|put|delete|patch|request)\s*\(|\bhttpx\.Client\s*\(/i;
+
+/**
+ * URL-BEARING TOOL INPUTS — the second raw-bypass shape.
+ *
+ * HTTP_INVOCATION_RE above requires the payload to NAME a network client, which
+ * is correct for a shell command and useless for a tool that is itself the
+ * client. WebFetch was confirmed to reach an EasyPanel /api/mcp URL unimpeded
+ * for exactly this reason: its input carries {url}, names no client, and so
+ * never matched the command-text rule. The `cmd` argument only ever receives
+ * tool_input.command || tool_input.script, so tool_input.url was never read at
+ * all.
+ *
+ * For these shapes the client-name requirement is dropped deliberately: a
+ * dedicated URL field is not prose. The "a doc may mention this path" concern
+ * that motivates HTTP_INVOCATION_RE does not apply — nothing legitimately puts
+ * an endpoint in a field whose whole meaning is "the address this tool will
+ * contact".
+ *
+ * EXACT top-level keys, not a suffix match, and deliberately so: `source_url`
+ * on a data-record tool (a Port evidence upsert, a task update, a bookmark) is
+ * metadata being STORED, not an endpoint being CALLED, and gating it would be a
+ * false positive on records that legitimately cite the endpoint — including the
+ * very Port records documenting this policy. Iteration is over this fixed key
+ * list rather than the payload's own keys, so an attacker-chosen key name can
+ * never widen or redirect the check.
+ *
+ * BOUNDED COVERAGE — read this before claiming more than it does. This covers
+ * URL-carrying tool inputs using these three conventional key names at the TOP
+ * LEVEL of tool_input, with an explicit http(s) scheme. It does NOT cover: a
+ * URL nested inside a sub-object or array; a tool using some other key name; a
+ * URL assembled at runtime from parts; a redirect from an unrelated allowed
+ * host; or any client not represented in either rule. Together the two rules
+ * cover the raw-bypass paths this repo's agents are actually known to have, and
+ * nothing broader is claimed. The connector-side allowlist remains the only
+ * layer that would be client-independent.
+ */
+const URL_BEARING_INPUT_KEYS = Object.freeze(['url', 'uri', 'endpoint']);
+
+/** A URL field only counts as a network call when it actually carries an
+ * http(s) scheme — this keeps a local path or a bare identifier that happens
+ * to contain the substring out of scope. */
+const HTTP_URL_VALUE_RE = /^\s*https?:\/\//i;
+
+/**
+ * True if tool_input carries a URL, in one of the conventional top-level key
+ * names above, pointing at an EasyPanel MCP/RPC/tRPC path. Host-agnostic, for
+ * the same reason the command-text rule is: a direct IP, an alternate hostname
+ * or a proxy in front of the same endpoint is the same bypass.
+ *
+ * Never throws — a malformed or exotic payload simply does not match, and the
+ * caller's own shape validation remains responsible for fail-closed handling.
+ */
+function easyPanelUrlTargeted(toolInput) {
+  if (toolInput === null || typeof toolInput !== 'object' || Array.isArray(toolInput)) {
+    return false;
+  }
+  for (const key of URL_BEARING_INPUT_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(toolInput, key)) continue;
+    const value = toolInput[key];
+    if (typeof value !== 'string') continue;
+    if (HTTP_URL_VALUE_RE.test(value) && EASYPANEL_RAW_PATH_RE.test(value)) return true;
+  }
+  return false;
+}
 
 /**
  * Resolves tool_input.input to a plain object, handling the one legitimate
@@ -472,6 +542,14 @@ function isBlockedEasyPanelCall(toolName, toolInput, cmd) {
   if (EASYPANEL_ANY_TOOL_RE.test(tool)) {
     return true; // any epic-portal tool that isn't one of the two exact names above
   }
+  // Raw bypass, shape 2: a tool that IS the network client, carrying the
+  // endpoint in a URL field. Checked for EVERY tool name, not a tool-name
+  // allowlist — a name list goes stale the moment a new fetch-capable tool
+  // appears, and the field shape is the thing that actually matters.
+  if (easyPanelUrlTargeted(toolInput)) {
+    return true;
+  }
+  // Raw bypass, shape 1: a shell command naming a network client.
   if (cmd && HTTP_INVOCATION_RE.test(cmd) && EASYPANEL_RAW_PATH_RE.test(cmd)) {
     return true; // raw bypass to the EasyPanel endpoint is blocked outright, full stop
   }
@@ -577,6 +655,9 @@ module.exports = {
   EASYPANEL_ANY_TOOL_RE,
   EASYPANEL_RAW_PATH_RE,
   HTTP_INVOCATION_RE,
+  URL_BEARING_INPUT_KEYS,
+  HTTP_URL_VALUE_RE,
+  easyPanelUrlTargeted,
   resolveInputObject,
   isBlockedEasyPanelCall,
   TOOL_CLASSES,
