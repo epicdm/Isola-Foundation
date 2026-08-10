@@ -69,12 +69,23 @@ const MAX_OUTPUT_BYTES = 8192;
  * closing). Setting exitCode and letting the event loop drain naturally
  * (nothing else is scheduled once stdin ends) lets Node finish the write
  * before the process actually exits.
+ *
+ * SHAPE CONTRACT (found live, not in unit tests): for an MCP tool,
+ * updatedToolOutput must be an ARRAY OF CONTENT BLOCKS
+ * ([{type:'text', text}]), matching the shape MCP tool output natively has.
+ * An earlier revision emitted the projection as a bare object; Claude Code
+ * accepted and applied it ("replaced tool output"), then crashed consuming
+ * it — `e.reduce is not a function` in its content-block length accounting —
+ * so the model received an infrastructure error instead of the projection.
+ * Fail-closed in direction (nothing leaked), but the reviewed projection
+ * never reached the model either. The value the model sees is the text of
+ * the single block: the projection JSON-serialized once.
  */
-function emit(updatedToolOutput) {
+function emit(projectedValue) {
   const payload = JSON.stringify({
     hookSpecificOutput: {
       hookEventName: 'PostToolUse',
-      updatedToolOutput: updatedToolOutput,
+      updatedToolOutput: [{ type: 'text', text: JSON.stringify(projectedValue) }],
     },
   });
   // If the reviewed projection itself would exceed either bound, fall back
@@ -82,7 +93,7 @@ function emit(updatedToolOutput) {
   // a response Claude Code's own hook-output cap might cut off.
   const overChars = payload.length > MAX_OUTPUT_CHARS;
   const overBytes = Buffer.byteLength(payload, 'utf8') > MAX_OUTPUT_BYTES;
-  if ((overChars || overBytes) && updatedToolOutput !== SAFE_PLACEHOLDER) {
+  if ((overChars || overBytes) && projectedValue !== SAFE_PLACEHOLDER) {
     return emit(SAFE_PLACEHOLDER);
   }
   process.stdout.write(payload);

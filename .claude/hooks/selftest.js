@@ -1164,6 +1164,18 @@ const FAKE = {
   arbitraryUnknownField: 'should never survive projection either',
 };
 
+/**
+ * Wire contract (found live via the owner fixture, not unit tests): for an
+ * MCP tool, updatedToolOutput must be an array of content blocks
+ * ([{type:'text', text}]) — a bare object is applied by Claude Code and then
+ * crashes its content-block accounting (`e.reduce is not a function`),
+ * leaving the model an infrastructure error instead of the projection.
+ * This helper asserts that exact wire shape on every successful emit, then
+ * unwraps the single block's text back to the projection object so the
+ * individual cases below compare against the logical value. A wrong wire
+ * shape leaves updatedToolOutput undefined, failing every dependent case
+ * loudly rather than silently unwrapping something unexpected.
+ */
 function runOutputGuard(payload) {
   const r = spawnSync(process.execPath, [OUTPUT_GUARD], {
     input: JSON.stringify(payload),
@@ -1171,13 +1183,24 @@ function runOutputGuard(payload) {
     timeout: 20000,
   });
   let updatedToolOutput;
+  let wireShapeOk = false;
   try {
     const parsed = JSON.parse(r.stdout || '{}');
-    updatedToolOutput = parsed.hookSpecificOutput && parsed.hookSpecificOutput.updatedToolOutput;
+    const raw = parsed.hookSpecificOutput && parsed.hookSpecificOutput.updatedToolOutput;
+    if (
+      Array.isArray(raw) &&
+      raw.length === 1 &&
+      raw[0] &&
+      raw[0].type === 'text' &&
+      typeof raw[0].text === 'string'
+    ) {
+      wireShapeOk = true;
+      updatedToolOutput = JSON.parse(raw[0].text);
+    }
   } catch (_) {
     updatedToolOutput = undefined;
   }
-  return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '', updatedToolOutput };
+  return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '', updatedToolOutput, wireShapeOk };
 }
 
 const SAFE_PLACEHOLDER_JSON = JSON.stringify({ status: 'output_withheld_pending_review' });
@@ -1188,41 +1211,53 @@ function containsAnyFakeSecret(obj) {
 }
 
 const outputCases = [
+  // -- wire shape (the contract the owner fixture caught being violated) --
+  {
+    name: 'updatedToolOutput is emitted as a SINGLE TEXT CONTENT BLOCK (the MCP wire shape), never a bare object',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listProjects', result: [{ name: 'isola', createdAt: '2026-08-09T20:47:10.605Z' }] },
+      });
+      return r.wireShapeOk ? null : 'wire shape was not a single {type:"text", text:string} content block: ' + r.stdout.slice(0, 200);
+    },
+  },
   // -- delivery reliability (bounds, and repeated-execution parseability) --
   {
-    // Precisely calibrated against the real 8192-char/byte bound: 53 rows of
-    // max-length (100-char) names serializes to exactly 8117 chars/bytes -
-    // genuinely near the 8192 limit (within 75 bytes), not merely "some
+    // Precisely calibrated against the real 8192-char/byte bound: 50 rows of
+    // max-length (100-char) names serializes to exactly 8097 chars/bytes -
+    // genuinely near the 8192 limit (within 95 bytes), not merely "some
     // substantial size". Computed directly (not guessed) before writing
-    // this test, using the exact envelope shape emit() produces.
-    name: 'a NEAR-LIMIT valid listProjects projection (8117 of 8192 bytes/chars) is emitted in full, not placeholdered',
+    // this test, using the exact content-block envelope emit() produces.
+    name: 'a NEAR-LIMIT valid listProjects projection (8097 of 8192 bytes/chars) is emitted in full, not placeholdered',
     check: () => {
       const longName = 'a'.repeat(100);
-      const rows = Array.from({ length: 53 }, () => ({ name: longName, createdAt: '2026-01-01T00:00:00.000Z' }));
+      const rows = Array.from({ length: 50 }, () => ({ name: longName, createdAt: '2026-01-01T00:00:00.000Z' }));
       const r = runOutputGuard({
         tool_name: 'mcp__epic-portal__execute_query',
         tool_input: { procedure: 'listProjects', input: {} },
         tool_response: { procedure: 'listProjects', result: rows },
       });
       if (JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON) {
-        return 'a near-limit (8117-byte) valid projection was incorrectly placeholdered';
+        return 'a near-limit (8097-byte) valid projection was incorrectly placeholdered';
       }
       const actualBytes = Buffer.byteLength(r.stdout, 'utf8');
       if (actualBytes > 8192) return `near-limit case actually exceeded the bound: ${actualBytes} bytes of stdout`;
-      return Array.isArray(r.updatedToolOutput && r.updatedToolOutput.result) && r.updatedToolOutput.result.length === 53
+      return Array.isArray(r.updatedToolOutput && r.updatedToolOutput.result) && r.updatedToolOutput.result.length === 50
         ? null
         : 'near-limit projection did not come through with the expected row count';
     },
   },
   {
-    // One row more than the near-limit case - 54 rows serializes to 8268
+    // One row more than the near-limit case - 51 rows serializes to 8256
     // chars/bytes, definitively over 8192. This MUST produce the exact safe
     // placeholder - a full/partial projection is not an acceptable outcome
     // here, unlike the earlier, looser version of this test.
-    name: 'an OVER-LIMIT projection (8268 of 8192 bytes/chars) REQUIRES the exact safe placeholder, not a truncated or full response',
+    name: 'an OVER-LIMIT projection (8256 of 8192 bytes/chars) REQUIRES the exact safe placeholder, not a truncated or full response',
     check: () => {
       const longName = 'a'.repeat(100);
-      const rows = Array.from({ length: 54 }, () => ({ name: longName, createdAt: '2026-01-01T00:00:00.000Z' }));
+      const rows = Array.from({ length: 51 }, () => ({ name: longName, createdAt: '2026-01-01T00:00:00.000Z' }));
       const r = runOutputGuard({
         tool_name: 'mcp__epic-portal__execute_query',
         tool_input: { procedure: 'listProjects', input: {} },
@@ -1260,13 +1295,14 @@ const outputCases = [
         timeout: 20000,
         maxBuffer: 10 * 1024 * 1024,
       });
-      let updatedToolOutput;
+      let inner;
       try {
-        updatedToolOutput = JSON.parse(r.stdout || '{}').hookSpecificOutput.updatedToolOutput;
+        const raw = JSON.parse(r.stdout || '{}').hookSpecificOutput.updatedToolOutput;
+        inner = raw[0].text; // single-text-content-block wire shape
       } catch (_) {
         return 'hook crashed or produced no parseable output on oversized stdin: exit=' + r.status;
       }
-      return JSON.stringify(updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'oversized stdin did not fail to the safe placeholder';
+      return inner === SAFE_PLACEHOLDER_JSON ? null : 'oversized stdin did not fail to the safe placeholder';
     },
   },
   {
@@ -1397,13 +1433,14 @@ const outputCases = [
     name: 'MALFORMED HOOK STDIN (not valid JSON at all) FAILS CLOSED without crashing',
     check: () => {
       const r = spawnSync(process.execPath, [OUTPUT_GUARD], { input: '{not valid json at all', encoding: 'utf8', timeout: 20000 });
-      let updatedToolOutput;
+      let inner;
       try {
-        updatedToolOutput = JSON.parse(r.stdout || '{}').hookSpecificOutput.updatedToolOutput;
+        const raw = JSON.parse(r.stdout || '{}').hookSpecificOutput.updatedToolOutput;
+        inner = raw[0].text; // single-text-content-block wire shape
       } catch (_) {
         return 'hook crashed or produced no parseable output on malformed stdin: exit=' + r.status;
       }
-      return JSON.stringify(updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'malformed stdin did not fail to the safe placeholder';
+      return inner === SAFE_PLACEHOLDER_JSON ? null : 'malformed stdin did not fail to the safe placeholder';
     },
   },
   {
