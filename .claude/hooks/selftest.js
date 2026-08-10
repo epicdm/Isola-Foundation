@@ -812,12 +812,69 @@ const cases = [
     },
   },
   {
-    name: 'search_procedures (not execute_*) is unaffected by the allowlist',
+    // search_procedures is schema/metadata discovery only - it returns
+    // procedure descriptions and input schemas, it never executes one.
+    // Documented and tested here as exactly that, not as a loophole.
+    name: 'search_procedures (schema discovery only, never executes a procedure) is ALLOWED',
     expect: PASS,
     payload: {
       session_id: SID,
       tool_name: 'mcp__epic-portal__search_procedures',
       tool_input: { query: 'list projects' },
+    },
+  },
+
+  // --- EASYPANEL — STRICT TOOL-NAME ALLOWLIST (owner-directed hardening) --
+  // Allowlist-by-tool-name, not "known-bad names blocked": only the two
+  // EXACT tool names above are ever considered safe. Anything else matching
+  // the epic-portal prefix - including names that look adjacent to a safe
+  // one - is blocked outright, with no procedure-name parsing attempted.
+  {
+    name: 'unknown tool mcp__epic-portal__execute_admin is BLOCKED outright',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_admin',
+      tool_input: { procedure: 'listProjects', input: {} },
+    },
+  },
+  {
+    name: 'suffixed tool mcp__epic-portal__execute_query_extra is BLOCKED outright (not fuzzy-matched to execute_query)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query_extra',
+      tool_input: { procedure: 'listProjects', input: {} },
+    },
+  },
+  {
+    name: 'suffixed tool mcp__epic-portal__search_procedures_extra is BLOCKED outright (not fuzzy-matched to search_procedures)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__search_procedures_extra',
+      tool_input: { query: 'list projects' },
+    },
+  },
+  {
+    // Top-level procedure is on the allowlist, but the nested `input` field
+    // is a string that LOOKS like JSON and fails to parse. Must fail closed
+    // even though a safe-looking top-level procedure was already found -
+    // an unparseable field is exactly how a real procedure name could be
+    // hidden from this check.
+    name: 'listProjects at top level + malformed nested JSON hiding a forbidden procedure FAILS CLOSED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: {
+        procedure: 'listProjects',
+        input: '{"procedure": "listProjectsAndServices", "unterminated": ',
+      },
     },
   },
 ];

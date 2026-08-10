@@ -129,17 +129,22 @@ function evaluate(inp) {
   SESSION_ID = inp.session_id || 'unknown';
 
   // -------------------------------------------------------- easypanel-block
-  // Allowlist policy, checked before ANY tool-class branch. epic-portal
+  // Allowlist policy, checked before ANY tool-class branch, and strict at
+  // the TOOL NAME itself — not just the procedure argument. epic-portal
   // (EasyPanel MCP) remains Isola's normal AI-to-system control plane for
-  // this connector — this is a temporary narrowing while individual
-  // procedures get reviewed, not a move away from MCP. Only execute_query
-  // for five reviewed read procedures is permitted right now; every other
-  // query procedure, and execute_mutation/execute_destructive entirely
-  // (regardless of procedure name), stay blocked until each one receives
-  // its own input/output/secret-handling review and is added here
-  // individually. Raw HTTP/RPC/tRPC bypass of this MCP tool is blocked
-  // outright, host-agnostic — it is not an alternative route, it is
-  // prohibited. See lib/isola-topology.js for the full policy and
+  // this connector; this is a temporary narrowing while individual
+  // procedures get reviewed, not a move away from MCP. Exactly two exact
+  // tool names are ever considered: search_procedures (schema/metadata
+  // discovery only, always allowed — it never executes a procedure) and
+  // execute_query (gated by a five-procedure allowlist). Every other
+  // mcp__epic-portal__* tool name — execute_mutation, execute_destructive,
+  // or anything unexpected/suffixed this policy has never seen — is blocked
+  // outright with no procedure-name parsing attempted, until it receives
+  // its own input/output/secret-handling review and is added here by exact
+  // name. Raw HTTP/RPC/tRPC bypass of this MCP tool is blocked outright,
+  // host-agnostic — it is not an alternative route, it is prohibited (tested
+  // defense-in-depth against known clients, not a claim every bypass is
+  // impossible). See lib/isola-topology.js for the full policy and
   // defect-easypanel-listprojectsandservices-second-secret-dump-2026-08-10.
   //
   // FAIL-CLOSED EXCEPTION: the module-level policy is fail-open on internal

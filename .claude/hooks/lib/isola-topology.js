@@ -311,9 +311,15 @@ const EASYPANEL_ALLOWED_QUERY_PROCEDURES = new Set([
   'getMonitorTableData',
 ]);
 
+/** Exact tool names — deliberately NOT a prefix match on the two live ones, so a
+ * suffixed or otherwise-unexpected epic-portal tool (execute_admin,
+ * execute_query_extra, search_procedures_extra, ...) is not implicitly trusted
+ * merely for looking similar. EASYPANEL_ANY_TOOL_RE below is the true prefix
+ * catch-all, used to fail closed on anything that isn't one of these two exact
+ * names — this is allowlist-by-tool-name, not "known-bad tool names blocked". */
+const EASYPANEL_METADATA_TOOL_RE = /^mcp__epic-portal__search_procedures$/;
 const EASYPANEL_QUERY_TOOL_RE = /^mcp__epic-portal__execute_query$/;
-const EASYPANEL_MUTATING_TOOL_RE = /^mcp__epic-portal__execute_(mutation|destructive)$/;
-const EASYPANEL_ANY_TOOL_RE = /^mcp__epic-portal__execute_/;
+const EASYPANEL_ANY_TOOL_RE = /^mcp__epic-portal__/;
 
 /** Raw HTTP bypass: block ANY call reaching an EasyPanel MCP/RPC/tRPC path via an
  * actual network-client invocation — host-agnostic (direct IP, alternate host, a
@@ -325,7 +331,16 @@ const EASYPANEL_RAW_PATH_RE = /\/api\/(mcp|rpc|trpc)(?=[\s'"`/?]|$)/i;
 /** A path match alone is not enough — "prose mentioning the Graph host is still not
  * gated" is the same design rule this reuses. A commit message, a doc, or this very
  * policy file can legitimately contain these path strings without performing a call.
- * Only treat it as a real network call when the command also looks like one. */
+ * Only treat it as a real network call when the command also looks like one.
+ *
+ * HONESTY NOTE: this is tested defense-in-depth against the specific clients this
+ * repo's own agents actually use (curl, wget, PowerShell's web cmdlets, Node
+ * fetch/.request(), Python requests/httpx, axios). It is NOT a claim that every
+ * possible raw network bypass is impossible — any HTTP-capable tool or language
+ * not covered by this pattern (a compiled binary, a different SDK, a language this
+ * regex doesn't recognize) is not caught by this specific check. The PreToolUse
+ * hook is one containment layer; the MCP connector's own allowlisting (once it
+ * exists there) is the layer that would make this true regardless of client. */
 const HTTP_INVOCATION_RE =
   /\b(curl|wget|Invoke-WebRequest|Invoke-RestMethod|axios)\b|\bfetch\s*\(|\.request\s*\(|\b(requests|httpx)\.(get|post|put|delete|patch|request)\s*\(|\bhttpx\.Client\s*\(/i;
 
@@ -355,8 +370,13 @@ function collectProcedureCandidates(value, depth) {
       let parsed;
       try {
         parsed = JSON.parse(trimmed);
-      } catch (_) {
-        return out; // not JSON after all — nothing further to extract, not an error
+      } catch (parseErr) {
+        // JSON-SHAPED BUT UNPARSEABLE — fail closed, even if an allowed
+        // top-level procedure was already found elsewhere in this same
+        // payload. A field that LOOKS like it should be inspectable but
+        // isn't is exactly the case an attacker (or a genuine encoding bug)
+        // would produce to hide a real procedure name from this check.
+        throw new Error('easypanel payload contains a JSON-looking string that failed to parse: ' + parseErr.message);
       }
       out.push(...collectProcedureCandidates(parsed, depth + 1));
     }
@@ -375,19 +395,32 @@ function collectProcedureCandidates(value, depth) {
 }
 
 /**
- * True if this call must be blocked under the allowlist policy above.
- * Throws (does not swallow) if tool_input inspection hits the depth guard —
- * callers targeting epic-portal MUST treat that as fail-CLOSED, not fail-open.
+ * True if this call must be blocked. Allowlist-by-TOOL-NAME first: only the
+ * two exact tool names below are ever considered — search_procedures is
+ * schema/metadata discovery only (it returns procedure descriptions, never
+ * executes one, so it is unconditionally allowed) and execute_query is
+ * gated by the five-procedure allowlist. ANY other mcp__epic-portal__* tool
+ * name — execute_mutation, execute_destructive, or anything unexpected
+ * (execute_admin, execute_query_extra, search_procedures_extra, a future
+ * tool this policy has never seen) — is blocked outright by the final
+ * prefix check, with no procedure-name parsing attempted on it at all.
+ *
+ * Throws (does not swallow) if tool_input inspection hits the depth guard
+ * or a JSON-looking-but-unparseable string — callers targeting epic-portal
+ * MUST treat that as fail-CLOSED, not fail-open.
  */
 function isBlockedEasyPanelCall(toolName, toolInput, cmd) {
   const tool = toolName || '';
-  if (EASYPANEL_MUTATING_TOOL_RE.test(tool)) {
-    return true; // outright — no procedure name makes a mutation/destructive call safe here
+  if (EASYPANEL_METADATA_TOOL_RE.test(tool)) {
+    return false; // search_procedures: metadata/schema discovery only, never executes anything
   }
   if (EASYPANEL_QUERY_TOOL_RE.test(tool)) {
     const candidates = collectProcedureCandidates(toolInput, 0);
     if (candidates.length === 0) return true; // no identifiable procedure — fail closed
     return candidates.some((c) => !EASYPANEL_ALLOWED_QUERY_PROCEDURES.has(c));
+  }
+  if (EASYPANEL_ANY_TOOL_RE.test(tool)) {
+    return true; // any epic-portal tool that isn't one of the two exact names above
   }
   if (cmd && HTTP_INVOCATION_RE.test(cmd) && EASYPANEL_RAW_PATH_RE.test(cmd)) {
     return true; // raw bypass to the EasyPanel endpoint is blocked outright, full stop
@@ -487,8 +520,8 @@ module.exports = {
   SECRET_FILE_RE,
   SECRET_DUMP_RE,
   EASYPANEL_ALLOWED_QUERY_PROCEDURES,
+  EASYPANEL_METADATA_TOOL_RE,
   EASYPANEL_QUERY_TOOL_RE,
-  EASYPANEL_MUTATING_TOOL_RE,
   EASYPANEL_ANY_TOOL_RE,
   EASYPANEL_RAW_PATH_RE,
   HTTP_INVOCATION_RE,
