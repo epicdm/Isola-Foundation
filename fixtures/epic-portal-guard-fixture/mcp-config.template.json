@@ -1,0 +1,9 @@
+{
+  "_comment": "TEMPLATE ONLY - not consumed directly. launch.ps1 generates mcp-config.generated.json (git-ignored) next to this file at run time, with the \"args\" path resolved to this checkout's actual absolute path via $PSScriptRoot. This file exists so the exact registered shape - server name 'epic-portal' (matching the real hook matcher), command, and the absence of any URL/token/env - is reviewable without running anything.",
+  "mcpServers": {
+    "epic-portal": {
+      "command": "node",
+      "args": ["<resolved-at-launch-to-this-checkout's-absolute-path>/server/epic-portal-fixture-server.js"]
+    }
+  }
+}

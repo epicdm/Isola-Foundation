@@ -22,9 +22,44 @@
 const { spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
 const GUARD = path.join(__dirname, 'isola-guard.js');
 const STOP = path.join(__dirname, 'isola-stop-gate.js');
+
+// Every guard/stop-gate child process spawned below inherits process.env by
+// default (spawnSync's documented behavior when no env option is passed).
+// Pointing ISOLA_GUARD_STATE_DIR at a disposable mkdtemp directory before any
+// case runs means every write this run makes - guard.log, session ledgers -
+// lands there instead of the real workspace .claude/state. The real
+// directory is snapshotted before this is set and re-checked identical after
+// the full suite completes, so isolation is proven, not just assumed.
+const REAL_STATE_DIR = path.join(__dirname, '..', 'state');
+const REAL_GUARD_LOG = path.join(REAL_STATE_DIR, 'guard.log');
+
+function snapshotRealState() {
+  let guardLogSize = null;
+  try { guardLogSize = fs.statSync(REAL_GUARD_LOG).size; } catch (_) { /* no log yet - fine, null is the baseline */ }
+  let sessionDirs = null;
+  try { sessionDirs = fs.readdirSync(path.join(REAL_STATE_DIR, 'sessions')).sort(); } catch (_) { /* no sessions dir yet - fine */ }
+  return { guardLogSize, sessionDirs };
+}
+
+const realStateBefore = snapshotRealState();
+const DISPOSABLE_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'isola-guard-selftest-'));
+process.env.ISOLA_GUARD_STATE_DIR = DISPOSABLE_STATE_DIR;
+
+// Node's 'exit' event fires synchronously immediately before the process
+// actually terminates - including after an uncaught exception - so this is
+// the finally-equivalent for a top-level script with no single enclosing
+// try block. rmSync must stay synchronous here; 'exit' handlers cannot await.
+process.on('exit', () => {
+  try {
+    fs.rmSync(DISPOSABLE_STATE_DIR, { recursive: true, force: true });
+  } catch (_) {
+    /* best-effort cleanup only */
+  }
+});
 
 const t = (...parts) => parts.join('');
 
@@ -948,12 +983,11 @@ const cases = [
   },
 ];
 
-// Record the real guard.log's size BEFORE running anything, so the canary
-// check below only ever looks at bytes THIS run appended - never inspects
-// or prints the existing real log content.
-const GUARD_LOG = path.join(__dirname, '..', 'state', 'guard.log');
-let guardLogSizeBefore = 0;
-try { guardLogSizeBefore = fs.statSync(GUARD_LOG).size; } catch (_) { /* no log yet - fine */ }
+// isola-guard.js writes guard.log under ISOLA_GUARD_STATE_DIR, which points
+// at DISPOSABLE_STATE_DIR for this entire run (set above) - a fresh,
+// initially-nonexistent directory, so the canary check below can read the
+// whole file with no byte-offset bookkeeping and never touches the real log.
+const DISPOSABLE_GUARD_LOG = path.join(DISPOSABLE_STATE_DIR, 'guard.log');
 
 let failed = 0;
 console.log('isola hooks - selftest\n');
@@ -978,25 +1012,36 @@ for (const c of cases) {
   );
 }
 
-// Canary check: only the bytes THIS run appended to the real guard.log are
-// inspected (via the byte offset recorded above) - never the pre-existing
-// content.
+// Canary check: guard.log for this entire run lives under the disposable
+// directory (fresh, was empty before this suite started), so the whole file
+// is fair to read - it can never contain anything but what THIS run wrote.
 {
   let leaked = false;
   try {
-    const fd = fs.openSync(GUARD_LOG, 'r');
-    const stat = fs.fstatSync(fd);
-    const appendedSize = Math.max(0, stat.size - guardLogSizeBefore);
-    const buf = Buffer.alloc(appendedSize);
-    fs.readSync(fd, buf, 0, appendedSize, guardLogSizeBefore);
-    fs.closeSync(fd);
-    leaked = buf.toString('utf8').includes(PRETOOLUSE_CANARY);
+    leaked = fs.readFileSync(DISPOSABLE_GUARD_LOG, 'utf8').includes(PRETOOLUSE_CANARY);
   } catch (_) {
     /* no log file at all - trivially no leak */
   }
   const ok = !leaked;
   if (!ok) failed++;
-  console.log((ok ? '  PASS  ' : '  FAIL  ') + 'PreToolUse canary is absent from the newly-appended portion of guard.log (pre-existing content never inspected)');
+  console.log((ok ? '  PASS  ' : '  FAIL  ') + 'PreToolUse canary is absent from guard.log (isolated in a disposable directory for this entire run)');
+}
+{
+  const ok = fs.readdirSync(DISPOSABLE_STATE_DIR).length > 0;
+  if (!ok) failed++;
+  console.log((ok ? '  PASS  ' : '  FAIL  ') + 'the disposable state directory actually received writes this run (proves the override is live, not merely unused)');
+}
+{
+  const after = snapshotRealState();
+  const guardLogOk = after.guardLogSize === realStateBefore.guardLogSize;
+  const sessionsOk = JSON.stringify(after.sessionDirs) === JSON.stringify(realStateBefore.sessionDirs);
+  const ok = guardLogOk && sessionsOk;
+  if (!ok) failed++;
+  console.log(
+    (ok ? '  PASS  ' : '  FAIL  ') +
+      'the real .claude/state/guard.log and .claude/state/sessions/ are byte-for-byte/listing-for-listing unchanged by this entire self-test run' +
+      (ok ? '' : ` (guardLogSize before=${realStateBefore.guardLogSize} after=${after.guardLogSize}; sessionDirs before=${JSON.stringify(realStateBefore.sessionDirs)} after=${JSON.stringify(after.sessionDirs)})`)
+  );
 }
 
 // --- Permission-system backstop (settings.json) -----------------------------
@@ -1022,10 +1067,15 @@ console.log('\npermission-system backstop (settings.json)');
     console.log((c.ok ? '  PASS  ' : '  FAIL  ') + c.name);
   }
   console.log(
-    '  NOTE  parameterized per-procedure deny rules (e.g. execute_query(procedure:listPorts)) are NOT valid Claude Code ' +
-      'permission syntax - confirmed by the harness\'s own settings validator, which rejected them outright. Per-procedure ' +
-      'enforcement remains the hook\'s (isola-guard.js) responsibility; the permission system backstops only at the ' +
-      'whole-tool level (execute_mutation/execute_destructive denied outright, every epic-portal call requires approval).'
+    '  NOTE  parameterized per-procedure deny rules (e.g. execute_query(procedure:listPorts)) are rejected by the ' +
+      'installed Claude Code 2.1.225 binary specifically for MCP tool rules - reproduced live via `claude doctor` ' +
+      'against a disposable settings.json, exact error: "MCP rules do not support patterns in parentheses. Use ' +
+      '\\"mcp__epic-portal__execute_query\\" without parentheses, or use \\"mcp__epic-portal__*\\" for all tools." ' +
+      'This is unsupported by the installed version, not a general/universal impossibility - a future Claude Code ' +
+      'release could lift this MCP-specific restriction and should be re-probed the same way before relying on it. ' +
+      'Per-procedure enforcement remains the hook\'s (isola-guard.js) responsibility; the permission system backstops ' +
+      'only at the whole-tool level (execute_mutation/execute_destructive denied outright, every epic-portal call ' +
+      'requires approval).'
   );
 }
 
@@ -1099,45 +1149,60 @@ function containsAnyFakeSecret(obj) {
 const outputCases = [
   // -- delivery reliability (bounds, and repeated-execution parseability) --
   {
-    name: 'a NEAR-LIMIT valid listProjects projection is emitted normally (within the output-size bound)',
+    // Precisely calibrated against the real 8192-char/byte bound: 53 rows of
+    // max-length (100-char) names serializes to exactly 8117 chars/bytes -
+    // genuinely near the 8192 limit (within 75 bytes), not merely "some
+    // substantial size". Computed directly (not guessed) before writing
+    // this test, using the exact envelope shape emit() produces.
+    name: 'a NEAR-LIMIT valid listProjects projection (8117 of 8192 bytes/chars) is emitted in full, not placeholdered',
     check: () => {
-      // Comfortably under the 64 KiB bound but still substantial - proves
-      // the size check does not clip a genuinely valid, reasonably large
-      // projection.
-      const rows = Array.from({ length: 90 }, (_, i) => ({ name: 'proj-' + i, createdAt: '2026-01-01T00:00:00Z' }));
+      const longName = 'a'.repeat(100);
+      const rows = Array.from({ length: 53 }, () => ({ name: longName, createdAt: '2026-01-01T00:00:00.000Z' }));
       const r = runOutputGuard({
         tool_name: 'mcp__epic-portal__execute_query',
         tool_input: { procedure: 'listProjects', input: {} },
         tool_response: { procedure: 'listProjects', result: rows },
       });
-      if (JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON) return 'a near-limit valid projection was incorrectly placeholdered';
-      return Array.isArray(r.updatedToolOutput && r.updatedToolOutput.result) && r.updatedToolOutput.result.length === 90
+      if (JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON) {
+        return 'a near-limit (8117-byte) valid projection was incorrectly placeholdered';
+      }
+      const actualBytes = Buffer.byteLength(r.stdout, 'utf8');
+      if (actualBytes > 8192) return `near-limit case actually exceeded the bound: ${actualBytes} bytes of stdout`;
+      return Array.isArray(r.updatedToolOutput && r.updatedToolOutput.result) && r.updatedToolOutput.result.length === 53
         ? null
         : 'near-limit projection did not come through with the expected row count';
     },
   },
   {
-    name: 'an OVER-LIMIT projection (row count within bound but serialized size over it) falls back to the safe placeholder, not a truncated response',
+    // One row more than the near-limit case - 54 rows serializes to 8268
+    // chars/bytes, definitively over 8192. This MUST produce the exact safe
+    // placeholder - a full/partial projection is not an acceptable outcome
+    // here, unlike the earlier, looser version of this test.
+    name: 'an OVER-LIMIT projection (8268 of 8192 bytes/chars) REQUIRES the exact safe placeholder, not a truncated or full response',
     check: () => {
-      // MAX_ROWS (100) does not by itself guarantee a small payload if
-      // fields were ever wider - simulate that by using the max allowed row
-      // count with the longest allowed name, which the projector accepts,
-      // and confirm the size guard - not the row-count guard - is what
-      // catches an oversized result if one ever occurs.
       const longName = 'a'.repeat(100);
-      const rows = Array.from({ length: 100 }, () => ({ name: longName, createdAt: '2026-01-01T00:00:00Z' }));
+      const rows = Array.from({ length: 54 }, () => ({ name: longName, createdAt: '2026-01-01T00:00:00.000Z' }));
       const r = runOutputGuard({
         tool_name: 'mcp__epic-portal__execute_query',
         tool_input: { procedure: 'listProjects', input: {} },
         tool_response: { procedure: 'listProjects', result: rows },
       });
-      // Either the safe placeholder (if the size guard tripped) or a fully
-      // valid same-length projection (if it stayed under the bound) is
-      // acceptable - what is NOT acceptable is a truncated/partial result.
-      const out = r.updatedToolOutput;
-      const isPlaceholder = JSON.stringify(out) === SAFE_PLACEHOLDER_JSON;
-      const isFullValidProjection = out && Array.isArray(out.result) && out.result.length === 100;
-      return isPlaceholder || isFullValidProjection ? null : 'response was neither the safe placeholder nor a complete projection - looks truncated';
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON
+        ? null
+        : 'over-limit case did not produce the exact safe placeholder - got: ' + JSON.stringify(r.updatedToolOutput).slice(0, 100);
+    },
+  },
+  {
+    name: 'SAFE_PLACEHOLDER itself serializes well under both the 8192-char and 8192-byte bounds',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listProjects', result: 'not-an-array-forces-placeholder' },
+      });
+      const chars = r.stdout.length;
+      const bytes = Buffer.byteLength(r.stdout, 'utf8');
+      return chars <= 8192 && bytes <= 8192 ? null : `placeholder stdout exceeded bounds: chars=${chars} bytes=${bytes}`;
     },
   },
   {
@@ -1164,8 +1229,9 @@ const outputCases = [
     },
   },
   {
-    name: 'stdout is complete, parseable JSON across 20 repeated child-process executions (write-then-exit reliability, not just usually)',
+    name: 'stdout is complete JSON, under Claude Code\'s 10,000-char cap AND the configured 8192 bound, across 20 repeated child-process executions',
     check: () => {
+      const CLAUDE_CODE_DOCUMENTED_CAP = 10000;
       for (let i = 0; i < 20; i++) {
         const r = runOutputGuard({
           tool_name: 'mcp__epic-portal__execute_query',
@@ -1181,6 +1247,10 @@ const outputCases = [
         if (!parsed.hookSpecificOutput || parsed.hookSpecificOutput.updatedToolOutput === undefined) {
           return `run ${i}: parsed JSON was missing the expected hookSpecificOutput.updatedToolOutput shape`;
         }
+        const chars = r.stdout.length;
+        const bytes = Buffer.byteLength(r.stdout, 'utf8');
+        if (chars >= CLAUDE_CODE_DOCUMENTED_CAP) return `run ${i}: stdout (${chars} chars) reached Claude Code's documented 10,000-char hook-output cap`;
+        if (chars > 8192 || bytes > 8192) return `run ${i}: stdout exceeded the configured 8192 bound: chars=${chars} bytes=${bytes}`;
       }
       return null;
     },
@@ -1365,7 +1435,11 @@ const outputCases = [
   {
     name: 'a fake canary positioned before a JSON parse failure never reaches stdout, stderr, or any log/state file (no persistent logging exists in this hook at all)',
     check: () => {
-      const stateDir = path.join(__dirname, '..', 'state');
+      // This hook has no file-writing code path at all (see its header), so
+      // there is nothing for ISOLA_GUARD_STATE_DIR to redirect - the disposable
+      // directory is inspected anyway, never the real workspace state, so this
+      // check can never read pre-existing real content even incidentally.
+      const stateDir = DISPOSABLE_STATE_DIR;
       let before = new Set();
       try { before = new Set(fs.readdirSync(stateDir)); } catch (_) {}
 
@@ -1411,19 +1485,13 @@ for (const c of outputCases) {
   console.log((ok ? '  PASS  ' : '  FAIL  ') + c.name + (ok ? '' : '\n          ' + failure));
 }
 
-// Clean up the ledgers this run created, so a self-test never pollutes the
-// working session's state.
-try {
-  const fs = require('fs');
-  const sessions = path.join(__dirname, '..', 'state', 'sessions');
-  for (const d of fs.readdirSync(sessions)) {
-    if (/^selftest-/.test(d)) fs.rmSync(path.join(sessions, d), { recursive: true, force: true });
-  }
-} catch (_) {
-  /* nothing to clean */
-}
+// No manual ledger cleanup needed: every write this run made landed under
+// DISPOSABLE_STATE_DIR (never the real .claude/state/sessions), and that
+// whole directory is removed by the process.on('exit') handler registered
+// above regardless of how this script terminates.
 
-const EXTRA_STANDALONE_CHECKS = 1 /* guard.log canary */ + 4 /* settings.json backstop */;
+const EXTRA_STANDALONE_CHECKS =
+  3 /* guard.log canary + disposable-dir-received-writes + real-state-unchanged */ + 4 /* settings.json backstop */;
 console.log(
   '\n' +
     (failed
