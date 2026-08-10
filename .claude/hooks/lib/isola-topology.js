@@ -283,7 +283,8 @@ const SECRET_DUMP_RE = new RegExp(
 );
 
 /**
- * epic-portal (EasyPanel MCP) policy — ALLOWLIST, not denylist.
+ * epic-portal (EasyPanel MCP) policy — ALLOWLIST, not denylist, and STRICT
+ * SHAPE VALIDATION rather than adversarial nested search.
  *
  * MCP remains Isola's normal AI-to-system control plane; this is not a move
  * to SSH or direct database access as a replacement. listProjectsAndServices
@@ -292,33 +293,52 @@ const SECRET_DUMP_RE = new RegExp(
  * and no per-project scoping — reclassified P0 twice in one session
  * (2026-08-09, 2026-08-10) after direct observation. The connector stays
  * enabled; this guard narrows what it may currently do until each procedure
- * has had its own review.
+ * (and, separately, its output shape — see the PostToolUse output-projection
+ * hook) has had its own review.
  *
- * Only execute_query may run, and only for these five procedures — no other
- * query is implicitly trusted, and unknown/unrecognized procedures fail
- * closed rather than being allowed through. execute_mutation and
- * execute_destructive are blocked OUTRIGHT regardless of procedure name —
- * TEMPORARILY, pending individual review of each required mutation
- * procedure's input/output/secret-handling shape before it is added here.
- * Raw HTTP/RPC/tRPC calls that bypass this MCP tool remain prohibited
- * outright; they are not a sanctioned alternative route.
+ * Observed non-empty-input failure on execute_query; wire-level serialization
+ * cause remains unresolved (schema comparison is suggestive, not proof — see
+ * evidence-* / this session's Task 2 diagnosis).
+ *
+ * DESIGN: earlier revisions searched the whole payload for a "procedure"
+ * field wherever it might be nested and blocked if anything disallowed
+ * turned up anywhere. This revision inverts that: the wrapper shape itself
+ * is validated FIRST — exactly {procedure, input} at the top level, nothing
+ * else — and anything that doesn't match that exact shape is rejected as an
+ * unexpected wrapper, full stop, rather than searched loosely hoping to
+ * still find a safe interpretation. Each allowed procedure then has its own
+ * exact input predicate — not "procedure name is on a list", but "procedure
+ * name AND its arguments match a reviewed, scoped shape".
+ *
+ * getMonitorTableData was allowlisted in an earlier revision but is REMOVED
+ * here: its real input schema has no properties at all (no project/service
+ * fields to scope it with), so per policy ("if it cannot be safely scoped,
+ * temporarily remove it") it cannot be given a predicate and stays out until
+ * that changes upstream or a scoping mechanism is found.
  */
-const EASYPANEL_ALLOWED_QUERY_PROCEDURES = new Set([
-  'listProjects',
-  'listPorts',
-  'listMounts',
-  'getComposeDockerServices',
-  'getMonitorTableData',
+const EASYPANEL_REVIEWED_PROJECT = 'isola';
+
+/** Every service name actually reviewed/discussed this session under the
+ * "isola" EasyPanel project. Do not guess additional names — an unreviewed
+ * service name fails closed exactly like an unreviewed procedure would. */
+const EASYPANEL_REVIEWED_SERVICES = new Set([
+  'nocobase', 'nocobase-db',
+  'activepieces', 'activepieces-db', 'activepieces-redis',
+  'ai', 'ai-db',
+  'chat', 'chatwoot-db', 'chatwoot-redis', 'chatwoot-sidekiq',
+  'paymenter', 'paymenter-mysql', 'paymenter-redis',
 ]);
 
-/** Exact tool names — deliberately NOT a prefix match on the two live ones, so a
- * suffixed or otherwise-unexpected epic-portal tool (execute_admin,
- * execute_query_extra, search_procedures_extra, ...) is not implicitly trusted
- * merely for looking similar. EASYPANEL_ANY_TOOL_RE below is the true prefix
- * catch-all, used to fail closed on anything that isn't one of these two exact
- * names — this is allowlist-by-tool-name, not "known-bad tool names blocked". */
+/** search_procedures is schema/metadata discovery only — it returns
+ * procedure descriptions and input schemas, it never executes one. Always
+ * allowed; not subject to the query allowlist below. */
 const EASYPANEL_METADATA_TOOL_RE = /^mcp__epic-portal__search_procedures$/;
 const EASYPANEL_QUERY_TOOL_RE = /^mcp__epic-portal__execute_query$/;
+/** True prefix catch-all — deliberately NOT a match on just the two exact
+ * names above, so a suffixed or otherwise-unexpected epic-portal tool
+ * (execute_admin, execute_query_extra, search_procedures_extra, a future
+ * tool this policy has never seen) is blocked outright rather than
+ * implicitly trusted for looking similar. */
 const EASYPANEL_ANY_TOOL_RE = /^mcp__epic-portal__/;
 
 /** Raw HTTP bypass: block ANY call reaching an EasyPanel MCP/RPC/tRPC path via an
@@ -344,70 +364,94 @@ const EASYPANEL_RAW_PATH_RE = /\/api\/(mcp|rpc|trpc)(?=[\s'"`/?]|$)/i;
 const HTTP_INVOCATION_RE =
   /\b(curl|wget|Invoke-WebRequest|Invoke-RestMethod|axios)\b|\bfetch\s*\(|\.request\s*\(|\b(requests|httpx)\.(get|post|put|delete|patch|request)\s*\(|\bhttpx\.Client\s*\(/i;
 
-const EASYPANEL_MAX_INSPECT_DEPTH = 6;
-
 /**
- * Walks a tool_input payload looking for a "procedure" field in any plausible
- * location, defensively handling three real shapes: nesting under
- * arguments/params/input/body/data/payload, arrays at any of those levels,
- * and a (sub-)value arriving as a JSON-encoded STRING rather than a parsed
- * object (the documented native-tool encoding bug).
- *
- * Deliberately THROWS when the payload nests deeper than a sane bound — an
- * unusually-shaped payload targeting epic-portal is itself suspicious, and
- * the caller must treat a thrown error here as fail-CLOSED for
- * epic-portal-shaped calls, not fail-open.
+ * Resolves tool_input.input to a plain object, handling the one legitimate
+ * known quirk (a JSON-encoded STRING instead of a parsed object) without
+ * treating that as inherently suspicious — but anything that still isn't a
+ * plain object after that one allowance fails closed.
  */
-function collectProcedureCandidates(value, depth) {
-  const out = [];
-  if (depth > EASYPANEL_MAX_INSPECT_DEPTH) {
-    throw new Error('easypanel payload nesting exceeds safe inspection depth (' + EASYPANEL_MAX_INSPECT_DEPTH + ')');
-  }
-  if (value == null) return out;
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+function resolveInputObject(input) {
+  let resolved = input;
+  if (typeof resolved === 'string') {
+    const trimmed = resolved.trim();
+    if (trimmed === '') {
+      resolved = {};
+    } else {
       let parsed;
       try {
         parsed = JSON.parse(trimmed);
-      } catch (parseErr) {
-        // JSON-SHAPED BUT UNPARSEABLE — fail closed, even if an allowed
-        // top-level procedure was already found elsewhere in this same
-        // payload. A field that LOOKS like it should be inspectable but
-        // isn't is exactly the case an attacker (or a genuine encoding bug)
-        // would produce to hide a real procedure name from this check.
-        throw new Error('easypanel payload contains a JSON-looking string that failed to parse: ' + parseErr.message);
+      } catch (e) {
+        throw new Error('input is a string that failed to parse as JSON: ' + e.message);
       }
-      out.push(...collectProcedureCandidates(parsed, depth + 1));
+      resolved = parsed;
     }
-    return out;
   }
-  if (Array.isArray(value)) {
-    for (const item of value) out.push(...collectProcedureCandidates(item, depth + 1));
-    return out;
+  if (resolved === undefined || resolved === null) resolved = {};
+  if (typeof resolved !== 'object' || Array.isArray(resolved)) {
+    throw new Error('input did not resolve to a plain object');
   }
-  if (typeof value !== 'object') return out;
-  if (typeof value.procedure === 'string') out.push(value.procedure);
-  for (const key of ['arguments', 'params', 'input', 'body', 'data', 'payload']) {
-    if (value[key] !== undefined) out.push(...collectProcedureCandidates(value[key], depth + 1));
+  return resolved;
+}
+
+function requireNoExtraKeys(obj, allowedKeys, label) {
+  const extra = Object.keys(obj).filter((k) => !allowedKeys.has(k));
+  if (extra.length) throw new Error(label + ' has unexpected fields: ' + extra.join(', '));
+}
+
+function requireReviewedTarget(obj, label) {
+  if (obj.projectName !== EASYPANEL_REVIEWED_PROJECT) {
+    throw new Error(label + ' projectName must be exactly "' + EASYPANEL_REVIEWED_PROJECT + '"');
   }
-  return out;
+  if (typeof obj.serviceName !== 'string' || !EASYPANEL_REVIEWED_SERVICES.has(obj.serviceName)) {
+    throw new Error(label + ' serviceName is missing or not in the reviewed set');
+  }
 }
 
 /**
- * True if this call must be blocked. Allowlist-by-TOOL-NAME first: only the
- * two exact tool names below are ever considered — search_procedures is
- * schema/metadata discovery only (it returns procedure descriptions, never
- * executes one, so it is unconditionally allowed) and execute_query is
- * gated by the five-procedure allowlist. ANY other mcp__epic-portal__* tool
- * name — execute_mutation, execute_destructive, or anything unexpected
- * (execute_admin, execute_query_extra, search_procedures_extra, a future
- * tool this policy has never seen) — is blocked outright by the final
- * prefix check, with no procedure-name parsing attempted on it at all.
+ * Exact per-procedure input predicates. Throws (fail-closed) on any
+ * deviation — missing/ambiguous/extra target fields, out-of-scope project
+ * or service, or a procedure not in this map at all.
+ */
+const EASYPANEL_QUERY_PREDICATES = {
+  listProjects(input) {
+    requireNoExtraKeys(input, new Set([]), 'listProjects');
+  },
+  listPorts(input) {
+    requireNoExtraKeys(input, new Set(['projectName', 'serviceName']), 'listPorts');
+    requireReviewedTarget(input, 'listPorts');
+  },
+  listMounts(input) {
+    requireNoExtraKeys(input, new Set(['projectName', 'serviceName']), 'listMounts');
+    requireReviewedTarget(input, 'listMounts');
+  },
+  getComposeDockerServices(input) {
+    // The vendor schema treats projectName/serviceName as OPTIONAL (omitting
+    // them would return data across an unscoped range) — policy requires
+    // both present regardless of what the vendor schema permits.
+    requireNoExtraKeys(input, new Set(['projectName', 'serviceName']), 'getComposeDockerServices');
+    requireReviewedTarget(input, 'getComposeDockerServices');
+  },
+  // getMonitorTableData: intentionally absent — see the policy comment above.
+};
+
+const EASYPANEL_ALLOWED_QUERY_PROCEDURES = new Set(Object.keys(EASYPANEL_QUERY_PREDICATES));
+
+/**
+ * True if this call must be blocked.
  *
- * Throws (does not swallow) if tool_input inspection hits the depth guard
- * or a JSON-looking-but-unparseable string — callers targeting epic-portal
- * MUST treat that as fail-CLOSED, not fail-open.
+ * 1. Tool-name allowlist: only search_procedures (always allowed) and
+ *    execute_query (gated below) are ever considered "safe-shaped" at all;
+ *    every other mcp__epic-portal__* tool name is blocked outright.
+ * 2. Wrapper-shape allowlist: execute_query's tool_input must be exactly
+ *    {procedure: string, input?: ...} — no extra top-level keys, no
+ *    non-object top-level shape. Anything else is an unexpected wrapper,
+ *    rejected outright rather than searched for a recoverable interpretation.
+ * 3. Procedure allowlist + exact input predicate: the named procedure must
+ *    be one of the reviewed ones, AND its resolved input must pass that
+ *    procedure's own exact predicate.
+ *
+ * Throws (does not swallow) on any of the above failing for an
+ * epic-portal-shaped call — callers MUST treat that as fail-CLOSED.
  */
 function isBlockedEasyPanelCall(toolName, toolInput, cmd) {
   const tool = toolName || '';
@@ -415,9 +459,19 @@ function isBlockedEasyPanelCall(toolName, toolInput, cmd) {
     return false; // search_procedures: metadata/schema discovery only, never executes anything
   }
   if (EASYPANEL_QUERY_TOOL_RE.test(tool)) {
-    const candidates = collectProcedureCandidates(toolInput, 0);
-    if (candidates.length === 0) return true; // no identifiable procedure — fail closed
-    return candidates.some((c) => !EASYPANEL_ALLOWED_QUERY_PROCEDURES.has(c));
+    const ti = toolInput;
+    if (ti === null || typeof ti !== 'object' || Array.isArray(ti)) {
+      throw new Error('unexpected tool_input shape: not a plain object');
+    }
+    requireNoExtraKeys(ti, new Set(['procedure', 'input']), 'tool_input');
+    if (typeof ti.procedure !== 'string' || !ti.procedure) {
+      throw new Error('missing or non-string procedure field');
+    }
+    const predicate = EASYPANEL_QUERY_PREDICATES[ti.procedure];
+    if (!predicate) return true; // not an allowlisted procedure — fail closed
+    const resolvedInput = resolveInputObject(ti.input);
+    predicate(resolvedInput); // throws on any predicate failure — propagates to fail-closed
+    return false;
   }
   if (EASYPANEL_ANY_TOOL_RE.test(tool)) {
     return true; // any epic-portal tool that isn't one of the two exact names above
@@ -519,13 +573,16 @@ module.exports = {
   LEGACY_REFERENCE_RE,
   SECRET_FILE_RE,
   SECRET_DUMP_RE,
+  EASYPANEL_REVIEWED_PROJECT,
+  EASYPANEL_REVIEWED_SERVICES,
   EASYPANEL_ALLOWED_QUERY_PROCEDURES,
+  EASYPANEL_QUERY_PREDICATES,
   EASYPANEL_METADATA_TOOL_RE,
   EASYPANEL_QUERY_TOOL_RE,
   EASYPANEL_ANY_TOOL_RE,
   EASYPANEL_RAW_PATH_RE,
   HTTP_INVOCATION_RE,
-  collectProcedureCandidates,
+  resolveInputObject,
   isBlockedEasyPanelCall,
   TOOL_CLASSES,
   classifyTool,

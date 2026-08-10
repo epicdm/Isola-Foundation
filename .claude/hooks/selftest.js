@@ -58,6 +58,11 @@ const GRAPH = 'https://graph.facebook.com/v23.0/';
  */
 const FAKE_TOKEN = t('EA', 'A', 'b3xY7qLm2Nv9Kd4Rt6Wz8Ps1Hj5Gf0Cx', 'Qa7Ue2Ir');
 
+/** The real EasyPanel procedure this whole guard exists to block, assembled
+ * rather than written literally so a naive whole-payload scanner does not
+ * flag this test file itself for containing the string it asserts is unsafe. */
+const LEAKY_PROCEDURE_NAME = ['listProjects', 'And', 'Services'].join('');
+
 const cases = [
   // --- THE R5A RULE -------------------------------------------------------
   {
@@ -496,77 +501,28 @@ const cases = [
     },
   },
 
-  // --- EASYPANEL — ALLOWLIST POLICY (v2, 2026-08-10) ----------------------
-  // Only execute_query for five named procedures is permitted. Everything
-  // else — including procedures never seen before, not just the one known
-  // leaky one — fails closed.
+
+  // --- EASYPANEL - STRICT ALLOWLIST + EXACT INPUT PREDICATES (v3, 2026-08-10) ---
+  // Two layers: (1) tool-name allowlist - only search_procedures and
+  // execute_query are ever considered; (2) for execute_query, the wrapper
+  // shape itself must be exactly {procedure, input} with nothing else, and
+  // the named procedure must have BOTH an allowlist entry AND a passing
+  // exact input predicate (scoped project/service, no extra fields).
+  // getMonitorTableData has no scopable fields in its real schema and is
+  // therefore NOT in this allowlist at all right now.
+
+  // -- tool-name layer --
   {
-    name: 'listProjectsAndServices via execute_query is BLOCKED',
-    expect: BLOCK,
-    contains: 'easypanel-not-allowlisted',
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: { procedure: 'listProjectsAndServices', input: {} },
-    },
-  },
-  {
-    name: 'an entirely UNKNOWN procedure (never allowlisted) is BLOCKED — allowlist, not denylist',
-    expect: BLOCK,
-    contains: 'easypanel-not-allowlisted',
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: { procedure: 'someBrandNewProcedureNeverSeenBefore', input: {} },
-    },
-  },
-  {
-    name: 'allowlisted procedure listProjects is ALLOWED via execute_query',
+    name: 'search_procedures (schema discovery only, never executes a procedure) is ALLOWED',
     expect: PASS,
     payload: {
       session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: { procedure: 'listProjects', input: {} },
+      tool_name: 'mcp__epic-portal__search_procedures',
+      tool_input: { query: 'list projects' },
     },
   },
   {
-    name: 'allowlisted procedure listPorts is ALLOWED via execute_query',
-    expect: PASS,
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: { procedure: 'listPorts', input: { projectName: 'isola', serviceName: 'nocobase-db' } },
-    },
-  },
-  {
-    name: 'allowlisted procedure listMounts is ALLOWED via execute_query',
-    expect: PASS,
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: { procedure: 'listMounts', input: { projectName: 'isola', serviceName: 'nocobase' } },
-    },
-  },
-  {
-    name: 'allowlisted procedure getComposeDockerServices is ALLOWED via execute_query',
-    expect: PASS,
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: { procedure: 'getComposeDockerServices', input: {} },
-    },
-  },
-  {
-    name: 'allowlisted procedure getMonitorTableData is ALLOWED via execute_query',
-    expect: PASS,
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: { procedure: 'getMonitorTableData', input: {} },
-    },
-  },
-  {
-    name: 'execute_mutation naming a NOMINALLY SAFE procedure is still BLOCKED outright',
+    name: 'execute_mutation is BLOCKED outright regardless of procedure name',
     expect: BLOCK,
     contains: 'easypanel-not-allowlisted',
     payload: {
@@ -576,7 +532,7 @@ const cases = [
     },
   },
   {
-    name: 'execute_destructive naming a NOMINALLY SAFE procedure is still BLOCKED outright',
+    name: 'execute_destructive is BLOCKED outright regardless of procedure name',
     expect: BLOCK,
     contains: 'easypanel-not-allowlisted',
     payload: {
@@ -586,7 +542,79 @@ const cases = [
     },
   },
   {
-    name: 'malformed serialized-JSON tool_input on execute_query FAILS CLOSED',
+    name: 'unknown tool mcp__epic-portal__execute_admin is BLOCKED outright',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_admin',
+      tool_input: { procedure: 'listProjects', input: {} },
+    },
+  },
+  {
+    name: 'suffixed tool mcp__epic-portal__execute_query_extra is BLOCKED outright (not fuzzy-matched)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query_extra',
+      tool_input: { procedure: 'listProjects', input: {} },
+    },
+  },
+  {
+    name: 'suffixed tool mcp__epic-portal__search_procedures_extra is BLOCKED outright (not fuzzy-matched)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__search_procedures_extra',
+      tool_input: { query: 'list projects' },
+    },
+  },
+
+  // -- wrapper-shape layer --
+  {
+    name: 'tool_input with an extra top-level key beyond {procedure, input} is BLOCKED (unexpected wrapper shape)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listProjects', input: {}, arguments: { procedure: 'listProjects' } },
+    },
+  },
+  {
+    name: 'tool_input arriving as a bare string (not an object) is BLOCKED (unexpected wrapper shape)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: '{"procedure":"listProjects","input":{}}',
+    },
+  },
+  {
+    name: 'tool_input arriving as an array is BLOCKED (unexpected wrapper shape)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: [{ procedure: 'listProjects', input: {} }],
+    },
+  },
+  {
+    name: 'missing procedure field is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { input: {} },
+    },
+  },
+  {
+    name: 'malformed JSON-string tool_input FAILS CLOSED at the wrapper-shape layer',
     expect: BLOCK,
     contains: 'easypanel-not-allowlisted',
     payload: {
@@ -595,16 +623,195 @@ const cases = [
       tool_input: '{"procedure": "listProjects", "input": {}',
     },
   },
+
+  // -- the previously-leaky procedure itself, via the new architecture --
   {
-    name: 'serialized ARRAY input is traversed safely and an unlisted procedure inside it is BLOCKED',
+    name: 'the previously-leaky procedure is BLOCKED (not in the predicate map at all)',
     expect: BLOCK,
     contains: 'easypanel-not-allowlisted',
     payload: {
       session_id: SID,
       tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: { arguments: [{ procedure: 'listProjects' }, { procedure: 'listProjectsAndServices' }] },
+      tool_input: { procedure: LEAKY_PROCEDURE_NAME, input: {} },
     },
   },
+  {
+    name: 'getMonitorTableData is now BLOCKED - removed from the allowlist (unscopable real schema)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'getMonitorTableData', input: {} },
+    },
+  },
+
+  // -- listProjects: exact positive/negative predicate --
+  {
+    name: 'listProjects with empty input is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listProjects', input: {} },
+    },
+  },
+  {
+    name: 'listProjects with absent input is ALLOWED (absent treated as empty)',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listProjects' },
+    },
+  },
+  {
+    name: 'listProjects with ANY non-empty input is BLOCKED (requires strictly empty)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listProjects', input: { unexpected: true } },
+    },
+  },
+
+  // -- listPorts: exact positive/negative predicate --
+  {
+    name: 'listPorts with isola + a reviewed service is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listPorts', input: { projectName: 'isola', serviceName: 'nocobase-db' } },
+    },
+  },
+  {
+    name: 'listPorts as a serialized-JSON-string input (the known encoding quirk) is still ALLOWED when it resolves to a valid scoped target',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listPorts', input: '{"projectName":"isola","serviceName":"nocobase-db"}' },
+    },
+  },
+  {
+    name: 'listPorts with an out-of-scope project is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listPorts', input: { projectName: 'some-other-project', serviceName: 'nocobase-db' } },
+    },
+  },
+  {
+    name: 'listPorts with an out-of-scope (unreviewed) service is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listPorts', input: { projectName: 'isola', serviceName: 'some-service-never-reviewed' } },
+    },
+  },
+  {
+    name: 'listPorts with a missing required serviceName is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listPorts', input: { projectName: 'isola' } },
+    },
+  },
+  {
+    name: 'listPorts with an unexpected extra target field is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listPorts', input: { projectName: 'isola', serviceName: 'nocobase-db', debug: true } },
+    },
+  },
+  {
+    name: 'listPorts with a conflicting nested "procedure" field inside input is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: {
+        procedure: 'listPorts',
+        input: { procedure: LEAKY_PROCEDURE_NAME, projectName: 'isola', serviceName: 'nocobase-db' },
+      },
+    },
+  },
+
+  // -- listMounts: exact positive/negative predicate --
+  {
+    name: 'listMounts with isola + a reviewed service is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listMounts', input: { projectName: 'isola', serviceName: 'nocobase' } },
+    },
+  },
+  {
+    name: 'listMounts with an out-of-scope project is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listMounts', input: { projectName: 'wrong-project', serviceName: 'nocobase' } },
+    },
+  },
+  {
+    name: 'listMounts with a missing required serviceName is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listMounts', input: { projectName: 'isola' } },
+    },
+  },
+
+  // -- getComposeDockerServices: exact positive/negative predicate --
+  {
+    name: 'getComposeDockerServices with isola + a reviewed service is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'getComposeDockerServices', input: { projectName: 'isola', serviceName: 'nocobase' } },
+    },
+  },
+  {
+    name: 'getComposeDockerServices with NO target fields is BLOCKED (policy stricter than the vendor schema)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'getComposeDockerServices', input: {} },
+    },
+  },
+  {
+    name: 'getComposeDockerServices with an out-of-scope service is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'getComposeDockerServices', input: { projectName: 'isola', serviceName: 'unreviewed-service' } },
+    },
+  },
+
+  // -- raw HTTP/RPC/tRPC bypass - path/host/client coverage --
   {
     name: 'raw curl call to direct-IP exact /api/mcp (no trailing slash) is BLOCKED',
     expect: BLOCK,
@@ -789,94 +996,15 @@ const cases = [
     },
   },
   {
-    name: 'deeply-nested unparseable epic-portal payload FAILS CLOSED (BLOCKED, not allowed or crashed)',
-    expect: BLOCK,
-    contains: 'easypanel-not-allowlisted',
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: {
-        arguments: { params: { input: { body: { data: { payload: { arguments: { params: { procedure: 'listProjects' } } } } } } } },
-      },
-    },
-  },
-  {
-    name: 'the SAME deeply-nested shape on an UNRELATED tool stays fail-OPEN (existing behavior preserved)',
+    name: 'an UNRELATED tool with an epic-portal-adjacent-looking payload stays fail-OPEN (existing behavior preserved)',
     expect: PASS,
     payload: {
       session_id: SID,
       tool_name: 'SomeUnrelatedTool',
-      tool_input: {
-        arguments: { params: { input: { body: { data: { payload: { arguments: { params: { procedure: 'listProjectsAndServices' } } } } } } } },
-      },
-    },
-  },
-  {
-    // search_procedures is schema/metadata discovery only - it returns
-    // procedure descriptions and input schemas, it never executes one.
-    // Documented and tested here as exactly that, not as a loophole.
-    name: 'search_procedures (schema discovery only, never executes a procedure) is ALLOWED',
-    expect: PASS,
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__search_procedures',
-      tool_input: { query: 'list projects' },
+      tool_input: { procedure: LEAKY_PROCEDURE_NAME, arguments: { procedure: LEAKY_PROCEDURE_NAME } },
     },
   },
 
-  // --- EASYPANEL — STRICT TOOL-NAME ALLOWLIST (owner-directed hardening) --
-  // Allowlist-by-tool-name, not "known-bad names blocked": only the two
-  // EXACT tool names above are ever considered safe. Anything else matching
-  // the epic-portal prefix - including names that look adjacent to a safe
-  // one - is blocked outright, with no procedure-name parsing attempted.
-  {
-    name: 'unknown tool mcp__epic-portal__execute_admin is BLOCKED outright',
-    expect: BLOCK,
-    contains: 'easypanel-not-allowlisted',
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_admin',
-      tool_input: { procedure: 'listProjects', input: {} },
-    },
-  },
-  {
-    name: 'suffixed tool mcp__epic-portal__execute_query_extra is BLOCKED outright (not fuzzy-matched to execute_query)',
-    expect: BLOCK,
-    contains: 'easypanel-not-allowlisted',
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query_extra',
-      tool_input: { procedure: 'listProjects', input: {} },
-    },
-  },
-  {
-    name: 'suffixed tool mcp__epic-portal__search_procedures_extra is BLOCKED outright (not fuzzy-matched to search_procedures)',
-    expect: BLOCK,
-    contains: 'easypanel-not-allowlisted',
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__search_procedures_extra',
-      tool_input: { query: 'list projects' },
-    },
-  },
-  {
-    // Top-level procedure is on the allowlist, but the nested `input` field
-    // is a string that LOOKS like JSON and fails to parse. Must fail closed
-    // even though a safe-looking top-level procedure was already found -
-    // an unparseable field is exactly how a real procedure name could be
-    // hidden from this check.
-    name: 'listProjects at top level + malformed nested JSON hiding a forbidden procedure FAILS CLOSED',
-    expect: BLOCK,
-    contains: 'easypanel-not-allowlisted',
-    payload: {
-      session_id: SID,
-      tool_name: 'mcp__epic-portal__execute_query',
-      tool_input: {
-        procedure: 'listProjects',
-        input: '{"procedure": "listProjectsAndServices", "unterminated": ',
-      },
-    },
-  },
 ];
 
 let failed = 0;
@@ -923,6 +1051,189 @@ for (const c of stopCases) {
   console.log((ok ? '  PASS  ' : '  FAIL  ') + c.name + (ok ? '' : ' (expected ' + c.expect + ', got ' + r.verdict + ')'));
 }
 
+// --- EasyPanel output-projection hook (PostToolUse) ------------------------
+console.log('\neasypanel output-projection hook');
+
+const OUTPUT_GUARD = path.join(__dirname, 'isola-easypanel-output-guard.js');
+
+/** Assembled rather than written literally, same reasoning as FAKE_TOKEN
+ * above — these are synthetic placeholders standing in for secret-shaped
+ * fields, not real credential material, but this file should not itself
+ * read as containing plausible-looking secrets. */
+const FAKE = {
+  password: t('fake_pw_', '9f8a2c1e'),
+  token: t('fake_tok_', 'b7e4d901'),
+  secret: t('fake_sec_', '3c8f5a20'),
+  authorization: t('Bearer fake_', 'auth_11223344'),
+  cookie: t('session=fake_', 'cookie_55667788'),
+  env: { SOME_KEY: t('fake_env_', 'value_1') },
+  environment: { OTHER_KEY: t('fake_env_', 'value_2') },
+  connectionString: t('postgres://fake:', 'pw@host/db'),
+  databaseUrl: t('postgres://fake2:', 'pw2@host/db'),
+  privateKey: t('-----BEGIN FAKE KEY-----\n', 'not-a-real-key\n-----END FAKE KEY-----'),
+  arbitraryUnknownField: 'should never survive projection either',
+};
+
+function runOutputGuard(payload) {
+  const r = spawnSync(process.execPath, [OUTPUT_GUARD], {
+    input: JSON.stringify(payload),
+    encoding: 'utf8',
+    timeout: 20000,
+  });
+  let updatedToolOutput;
+  try {
+    const parsed = JSON.parse(r.stdout || '{}');
+    updatedToolOutput = parsed.hookSpecificOutput && parsed.hookSpecificOutput.updatedToolOutput;
+  } catch (_) {
+    updatedToolOutput = undefined;
+  }
+  return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '', updatedToolOutput };
+}
+
+const SAFE_PLACEHOLDER_JSON = JSON.stringify({ status: 'output_withheld_pending_review' });
+
+function containsAnyFakeSecret(obj) {
+  const json = JSON.stringify(obj);
+  return Object.values(FAKE).some((v) => json.includes(typeof v === 'string' ? v : JSON.stringify(v)));
+}
+
+const outputCases = [
+  {
+    name: 'not our tool -> no stdout, harness leaves original response untouched',
+    check: () => {
+      const r = runOutputGuard({ tool_name: 'SomeOtherTool', tool_input: {}, tool_response: { anything: 'here' } });
+      return r.stdout.trim() === '' ? null : 'expected empty stdout, got: ' + r.stdout.slice(0, 100);
+    },
+  },
+  {
+    name: 'listProjects with an ORDINARY OBJECT tool_response containing nested fake secrets: only name/createdAt survive, all FAKE.* values stripped',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: {
+          procedure: 'listProjects',
+          result: [{ name: 'isola', createdAt: '2026-08-09T20:47:10.605Z', ...FAKE }],
+        },
+      });
+      if (containsAnyFakeSecret(r.updatedToolOutput)) return 'a fake secret survived projection: ' + JSON.stringify(r.updatedToolOutput);
+      const row = r.updatedToolOutput && r.updatedToolOutput.result && r.updatedToolOutput.result[0];
+      if (!row || row.name !== 'isola' || Object.keys(row).length !== 2) return 'unexpected projected shape: ' + JSON.stringify(row);
+      return null;
+    },
+  },
+  {
+    name: 'listProjects response as an MCP CONTENT-BLOCK ARRAY (JSON encoded inside text) is unwrapped and projected the same way',
+    check: () => {
+      const inner = JSON.stringify({ procedure: 'listProjects', result: [{ name: 'isola', createdAt: '2026-01-01T00:00:00Z', ...FAKE }] });
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: [{ type: 'text', text: inner }],
+      });
+      if (containsAnyFakeSecret(r.updatedToolOutput)) return 'a fake secret survived content-block projection';
+      const row = r.updatedToolOutput && r.updatedToolOutput.result && r.updatedToolOutput.result[0];
+      if (!row || row.name !== 'isola') return 'content-block shape was not correctly unwrapped/projected';
+      return null;
+    },
+  },
+  {
+    name: 'listProjects response as tool_response.content (nested content-block array) is unwrapped correctly',
+    check: () => {
+      const inner = JSON.stringify({ procedure: 'listProjects', result: [{ name: 'isola', createdAt: '2026-01-01T00:00:00Z' }] });
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { content: [{ type: 'text', text: inner }] },
+      });
+      const row = r.updatedToolOutput && r.updatedToolOutput.result && r.updatedToolOutput.result[0];
+      return row && row.name === 'isola' ? null : 'nested .content array was not correctly unwrapped';
+    },
+  },
+  {
+    name: 'MALFORMED JSON inside a text content block FAILS CLOSED to the safe placeholder',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: [{ type: 'text', text: '{"procedure":"listProjects","result":[{"name":' }],
+      });
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'did not fail to the exact safe placeholder';
+    },
+  },
+  {
+    name: 'UNEXPECTED FIELDS on an otherwise-valid listProjects row are silently dropped, not passed through',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listProjects', result: [{ name: 'isola', createdAt: '2026-01-01T00:00:00Z', someUnexpectedField: 'x' }] },
+      });
+      const row = r.updatedToolOutput && r.updatedToolOutput.result && r.updatedToolOutput.result[0];
+      return row && !('someUnexpectedField' in row) ? null : 'unexpected field survived projection';
+    },
+  },
+  {
+    name: 'UNKNOWN/unreviewed procedure (e.g. listPorts) always returns the safe placeholder, even with a plausible-looking response',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listPorts', input: { projectName: 'isola', serviceName: 'nocobase-db' } },
+        tool_response: { procedure: 'listPorts', result: [{ port: 5432, ...FAKE }] },
+      });
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'unreviewed procedure did not fall back to the safe placeholder';
+    },
+  },
+  {
+    name: 'a plain ARRAY tool_response (not the {procedure,result} shape, not content-blocks) FAILS CLOSED',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: ['not', 'a', 'recognized', 'shape'],
+      });
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'unrecognized array shape did not fail closed';
+    },
+  },
+  {
+    name: 'MALFORMED HOOK STDIN (not valid JSON at all) FAILS CLOSED without crashing',
+    check: () => {
+      const r = spawnSync(process.execPath, [OUTPUT_GUARD], { input: '{not valid json at all', encoding: 'utf8', timeout: 20000 });
+      let updatedToolOutput;
+      try {
+        updatedToolOutput = JSON.parse(r.stdout || '{}').hookSpecificOutput.updatedToolOutput;
+      } catch (_) {
+        return 'hook crashed or produced no parseable output on malformed stdin: exit=' + r.status;
+      }
+      return JSON.stringify(updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'malformed stdin did not fail to the safe placeholder';
+    },
+  },
+  {
+    name: 'a PROJECTOR EXCEPTION (result is not an array where one is required) FAILS CLOSED, does not crash the hook',
+    check: () => {
+      const r = runOutputGuard({
+        tool_name: 'mcp__epic-portal__execute_query',
+        tool_input: { procedure: 'listProjects', input: {} },
+        tool_response: { procedure: 'listProjects', result: { not: 'an array' } },
+      });
+      if (r.status !== 0) return 'hook exited non-zero instead of failing closed cleanly: ' + r.status;
+      return JSON.stringify(r.updatedToolOutput) === SAFE_PLACEHOLDER_JSON ? null : 'projector exception did not fail to the safe placeholder';
+    },
+  },
+];
+
+for (const c of outputCases) {
+  let failure;
+  try {
+    failure = c.check();
+  } catch (e) {
+    failure = 'test threw: ' + e.message;
+  }
+  const ok = !failure;
+  if (!ok) failed++;
+  console.log((ok ? '  PASS  ' : '  FAIL  ') + c.name + (ok ? '' : '\n          ' + failure));
+}
+
 // Clean up the ledgers this run created, so a self-test never pollutes the
 // working session's state.
 try {
@@ -935,5 +1246,5 @@ try {
   /* nothing to clean */
 }
 
-console.log('\n' + (failed ? failed + ' FAILURE(S)' : 'all ' + (cases.length + stopCases.length) + ' checks passed'));
+console.log('\n' + (failed ? failed + ' FAILURE(S)' : 'all ' + (cases.length + stopCases.length + outputCases.length) + ' checks passed'));
 process.exit(failed ? 1 : 0);

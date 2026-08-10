@@ -55,6 +55,17 @@
             "timeout": 180
           }
         ]
+      },
+      {
+        "matcher": "mcp__epic-portal__execute_query",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/isola-easypanel-output-guard.js"],
+            "timeout": 20
+          }
+        ]
       }
     ],
     "Stop": [
