@@ -128,6 +128,54 @@ function evaluate(inp) {
   const cls = T.classifyTool(tool);
   SESSION_ID = inp.session_id || 'unknown';
 
+  // -------------------------------------------------------- easypanel-block
+  // Allowlist policy, checked before ANY tool-class branch. Only
+  // execute_query for five named procedures is permitted; execute_mutation/
+  // execute_destructive are blocked outright regardless of procedure name;
+  // raw HTTP bypass to the EasyPanel MCP/RPC/tRPC endpoint is blocked
+  // outright, host-agnostic. See lib/isola-topology.js for the full policy
+  // and defect-easypanel-listprojectsandservices-second-secret-dump-2026-08-10.
+  //
+  // FAIL-CLOSED EXCEPTION: the module-level policy is fail-open on internal
+  // error (a guard bug must never halt legitimate work). That is deliberately
+  // inverted only here: an epic-portal-shaped call whose payload cannot be
+  // safely inspected must be denied, not allowed through. Calls that are not
+  // epic-portal-shaped re-throw immediately, preserving fail-open for every
+  // other tool via the outer stdin-handler catch.
+  {
+    const cmdForCheck = String(ti.command || ti.script || '');
+    const looksLikeEasyPanelCall =
+      T.EASYPANEL_ANY_TOOL_RE.test(tool) ||
+      (T.HTTP_INVOCATION_RE.test(cmdForCheck) && T.EASYPANEL_RAW_PATH_RE.test(cmdForCheck));
+    let blocked = false;
+    let unparseable = false;
+    try {
+      blocked = T.isBlockedEasyPanelCall(tool, ti, cmdForCheck);
+    } catch (e) {
+      if (!looksLikeEasyPanelCall) throw e; // preserve fail-open for unrelated tools
+      log('EASYPANEL-INSPECT-ERROR fail-closed: ' + (e && e.message));
+      unparseable = true;
+    }
+    if (blocked || unparseable) {
+      deny(
+        'easypanel-not-allowlisted',
+        'epic-portal (EasyPanel) is allowlist-gated: only execute_query for ' +
+          Array.from(T.EASYPANEL_ALLOWED_QUERY_PROCEDURES).join(', ') + ' is permitted. ' +
+          'execute_mutation/execute_destructive are blocked outright, and raw HTTP calls to the ' +
+          'EasyPanel MCP/RPC/tRPC endpoint are blocked regardless of host. ' +
+          'listProjectsAndServices in particular returns full plaintext secrets for every service ' +
+          'on the instance with no redaction — reclassified P0 twice this session (see ' +
+          'defect-easypanel-listprojectsandservices-second-secret-dump-2026-08-10).' +
+          (unparseable
+            ? ' This specific payload could not be safely inspected (malformed or too deeply nested) — ' +
+              'failing closed for an epic-portal-shaped call rather than allowing an unverifiable one through.'
+            : ''),
+        'use one of the five allowlisted read-only procedures. For any write/mutation, use a ' +
+          'host-local protected script over SSH instead of this MCP tool.'
+      );
+    }
+  }
+
   // ---------------------------------------------------------------- other
   // Text-only / orchestration tools are never inspected for command shapes.
   if (cls === 'other') {

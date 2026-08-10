@@ -495,6 +495,186 @@ const cases = [
       tool_input: { host: '66.118.37.12', user: 'epicdm', command: 'pm2 jlist' },
     },
   },
+
+  // --- EASYPANEL — ALLOWLIST POLICY (v2, 2026-08-10) ----------------------
+  // Only execute_query for five named procedures is permitted. Everything
+  // else — including procedures never seen before, not just the one known
+  // leaky one — fails closed.
+  {
+    name: 'listProjectsAndServices via execute_query is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listProjectsAndServices', input: {} },
+    },
+  },
+  {
+    name: 'an entirely UNKNOWN procedure (never allowlisted) is BLOCKED — allowlist, not denylist',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'someBrandNewProcedureNeverSeenBefore', input: {} },
+    },
+  },
+  {
+    name: 'each of the five allowlisted procedures is ALLOWED via execute_query',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'listProjects', input: {} },
+    },
+  },
+  {
+    name: 'execute_mutation naming a NOMINALLY SAFE procedure is still BLOCKED outright',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_mutation',
+      tool_input: { procedure: 'listProjects', input: {} },
+    },
+  },
+  {
+    name: 'execute_destructive naming a NOMINALLY SAFE procedure is still BLOCKED outright',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_destructive',
+      tool_input: { procedure: 'getMonitorTableData', input: {} },
+    },
+  },
+  {
+    name: 'malformed serialized-JSON tool_input on execute_query FAILS CLOSED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: '{"procedure": "listProjects", "input": {}',
+    },
+  },
+  {
+    name: 'serialized ARRAY input is traversed safely and an unlisted procedure inside it is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { arguments: [{ procedure: 'listProjects' }, { procedure: 'listProjectsAndServices' }] },
+    },
+  },
+  {
+    name: 'raw call to direct-IP exact /api/mcp (no trailing slash) is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s https://66.118.37.110/api/mcp -d \'{"method":"tools/call"}\'' },
+    },
+  },
+  {
+    name: 'raw call to an alternate host exact /api/mcp is BLOCKED (host-agnostic)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s https://some-other-proxy.example.com/api/mcp -d \'{}\'' },
+    },
+  },
+  {
+    name: 'raw call with a query-string variant of /api/mcp is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s "https://portal.saas00.epic.dm/api/mcp?debug=1"' },
+    },
+  },
+  {
+    name: 'raw call with a trailing-slash variant of /api/mcp/ is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: "curl -s 'https://portal.saas00.epic.dm/api/mcp/'" },
+    },
+  },
+  {
+    name: 'raw REST-style /api/rpc/... path is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s https://portal.saas00.epic.dm/api/rpc/projects/listProjects' },
+    },
+  },
+  {
+    name: 'raw tRPC-style /api/trpc/... path is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: "curl -s 'https://portal.saas00.epic.dm/api/trpc/projects.listProjects?batch=1'" },
+    },
+  },
+  {
+    name: 'a commit message DESCRIBING these blocked paths is ALLOWED (not payload-blind)',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: t(
+          'git commit -m "fix(guard): block /api/rpc/... /api/trpc/... and direct-IP /api/mcp ',
+          'requests to EasyPanel"'
+        ),
+      },
+    },
+  },
+  {
+    name: 'deeply-nested unparseable epic-portal payload FAILS CLOSED (BLOCKED, not allowed or crashed)',
+    expect: BLOCK,
+    contains: 'easypanel-not-allowlisted',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: {
+        arguments: { params: { input: { body: { data: { payload: { arguments: { params: { procedure: 'listProjects' } } } } } } } },
+      },
+    },
+  },
+  {
+    name: 'the SAME deeply-nested shape on an UNRELATED tool stays fail-OPEN (existing behavior preserved)',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'SomeUnrelatedTool',
+      tool_input: {
+        arguments: { params: { input: { body: { data: { payload: { arguments: { params: { procedure: 'listProjectsAndServices' } } } } } } } },
+      },
+    },
+  },
+  {
+    name: 'search_procedures (not execute_*) is unaffected by the allowlist',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__search_procedures',
+      tool_input: { query: 'list projects' },
+    },
+  },
 ];
 
 let failed = 0;

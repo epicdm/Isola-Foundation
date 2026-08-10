@@ -283,6 +283,115 @@ const SECRET_DUMP_RE = new RegExp(
 );
 
 /**
+ * epic-portal (EasyPanel MCP) policy — ALLOWLIST, not denylist.
+ *
+ * listProjectsAndServices returns full plaintext secrets (encryption keys,
+ * JWT secrets, DB/Redis/MariaDB passwords) for every service on the
+ * instance, with no redaction and no per-project scoping. Reclassified P0
+ * twice in one session (2026-08-09, 2026-08-10) after direct observation.
+ * The connector itself has since been removed from this project's MCP
+ * registration (owner decision, 2026-08-10) — this guard is defense in
+ * depth for any session where it is re-enabled, not the primary control.
+ *
+ * Only execute_query may run, and only for these five procedures — no other
+ * query is implicitly trusted, and unknown/unrecognized procedures fail
+ * closed rather than being allowed through. execute_mutation and
+ * execute_destructive are blocked OUTRIGHT regardless of procedure name:
+ * EasyPanel mutations go through a host-local protected script (SSH) from
+ * here forward, never through this MCP tool.
+ */
+const EASYPANEL_ALLOWED_QUERY_PROCEDURES = new Set([
+  'listProjects',
+  'listPorts',
+  'listMounts',
+  'getComposeDockerServices',
+  'getMonitorTableData',
+]);
+
+const EASYPANEL_QUERY_TOOL_RE = /^mcp__epic-portal__execute_query$/;
+const EASYPANEL_MUTATING_TOOL_RE = /^mcp__epic-portal__execute_(mutation|destructive)$/;
+const EASYPANEL_ANY_TOOL_RE = /^mcp__epic-portal__execute_/;
+
+/** Raw HTTP bypass: block ANY call reaching an EasyPanel MCP/RPC/tRPC path via an
+ * actual network-client invocation — host-agnostic (direct IP, alternate host, a
+ * proxy) and tolerant of query strings / trailing slashes. Not procedure-specific:
+ * once the native tool is allowlist-gated, a raw bypass has no legitimate use here
+ * at all, so the whole class is blocked rather than parsed procedure-by-procedure. */
+const EASYPANEL_RAW_PATH_RE = /\/api\/mcp(?=[\s'"`/?]|$)|\/api\/rpc\/|\/api\/trpc\//i;
+
+/** A path match alone is not enough — "prose mentioning the Graph host is still not
+ * gated" is the same design rule this reuses. A commit message, a doc, or this very
+ * policy file can legitimately contain these path strings without performing a call.
+ * Only treat it as a real network call when the command also looks like one. */
+const HTTP_INVOCATION_RE = /\b(curl|wget|Invoke-WebRequest|Invoke-RestMethod|axios)\b|\bfetch\s*\(|\.request\s*\(/i;
+
+const EASYPANEL_MAX_INSPECT_DEPTH = 6;
+
+/**
+ * Walks a tool_input payload looking for a "procedure" field in any plausible
+ * location, defensively handling three real shapes: nesting under
+ * arguments/params/input/body/data/payload, arrays at any of those levels,
+ * and a (sub-)value arriving as a JSON-encoded STRING rather than a parsed
+ * object (the documented native-tool encoding bug).
+ *
+ * Deliberately THROWS when the payload nests deeper than a sane bound — an
+ * unusually-shaped payload targeting epic-portal is itself suspicious, and
+ * the caller must treat a thrown error here as fail-CLOSED for
+ * epic-portal-shaped calls, not fail-open.
+ */
+function collectProcedureCandidates(value, depth) {
+  const out = [];
+  if (depth > EASYPANEL_MAX_INSPECT_DEPTH) {
+    throw new Error('easypanel payload nesting exceeds safe inspection depth (' + EASYPANEL_MAX_INSPECT_DEPTH + ')');
+  }
+  if (value == null) return out;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      let parsed;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch (_) {
+        return out; // not JSON after all — nothing further to extract, not an error
+      }
+      out.push(...collectProcedureCandidates(parsed, depth + 1));
+    }
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) out.push(...collectProcedureCandidates(item, depth + 1));
+    return out;
+  }
+  if (typeof value !== 'object') return out;
+  if (typeof value.procedure === 'string') out.push(value.procedure);
+  for (const key of ['arguments', 'params', 'input', 'body', 'data', 'payload']) {
+    if (value[key] !== undefined) out.push(...collectProcedureCandidates(value[key], depth + 1));
+  }
+  return out;
+}
+
+/**
+ * True if this call must be blocked under the allowlist policy above.
+ * Throws (does not swallow) if tool_input inspection hits the depth guard —
+ * callers targeting epic-portal MUST treat that as fail-CLOSED, not fail-open.
+ */
+function isBlockedEasyPanelCall(toolName, toolInput, cmd) {
+  const tool = toolName || '';
+  if (EASYPANEL_MUTATING_TOOL_RE.test(tool)) {
+    return true; // outright — no procedure name makes a mutation/destructive call safe here
+  }
+  if (EASYPANEL_QUERY_TOOL_RE.test(tool)) {
+    const candidates = collectProcedureCandidates(toolInput, 0);
+    if (candidates.length === 0) return true; // no identifiable procedure — fail closed
+    return candidates.some((c) => !EASYPANEL_ALLOWED_QUERY_PROCEDURES.has(c));
+  }
+  if (cmd && HTTP_INVOCATION_RE.test(cmd) && EASYPANEL_RAW_PATH_RE.test(cmd)) {
+    return true; // raw bypass to the EasyPanel endpoint is blocked outright, full stop
+  }
+  return false;
+}
+
+/**
  * Tool classification. The central lesson from the incumbent global hook:
  * scanning every tool's serialized input causes false positives on tools that
  * merely DESCRIBE an operation (a task update mentioning a container teardown,
@@ -373,6 +482,14 @@ module.exports = {
   LEGACY_REFERENCE_RE,
   SECRET_FILE_RE,
   SECRET_DUMP_RE,
+  EASYPANEL_ALLOWED_QUERY_PROCEDURES,
+  EASYPANEL_QUERY_TOOL_RE,
+  EASYPANEL_MUTATING_TOOL_RE,
+  EASYPANEL_ANY_TOOL_RE,
+  EASYPANEL_RAW_PATH_RE,
+  HTTP_INVOCATION_RE,
+  collectProcedureCandidates,
+  isBlockedEasyPanelCall,
   TOOL_CLASSES,
   classifyTool,
   normalizePath,
