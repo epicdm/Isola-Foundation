@@ -80,7 +80,13 @@ describe("what the gateway sends", () => {
   it("fails closed with no bearer, without opening a socket", async () => {
     const { runtime, captured } = client(() => jsonResponse({}), null);
     const result = await runtime.invoke(REQUEST);
-    expect(result).toEqual({ text: null, outcome: "unauthorized", correlationId: "run-1" });
+    expect(result).toEqual({
+      text: null,
+      outcome: "unauthorized",
+      correlationId: "run-1",
+      completionState: null,
+      contractVersion: null,
+    });
     expect(captured).toHaveLength(0);
   });
 
@@ -110,9 +116,9 @@ describe("what the gateway reads back", () => {
     expect(readInlineText(null)).toBeNull();
   });
 
-  it("returns null text on a 200 that carries no answer — today's real behaviour", async () => {
-    // isola-runtime does not implement responseMode yet: it answers
-    // {ok, outcome, correlationId} and posts its output to Paperclip instead.
+  it("returns null text on a 200 that carries no answer and no completion state", async () => {
+    // A pre-contract-v1 runtime: {ok, outcome, correlationId} and nothing else.
+    // The gateway must still classify it as "no answer", never invent one.
     const { runtime } = client(() =>
       jsonResponse({ ok: true, outcome: "ok", correlationId: "runtime-corr" }),
     );
@@ -120,6 +126,8 @@ describe("what the gateway reads back", () => {
       text: null,
       outcome: "ok",
       correlationId: "runtime-corr",
+      completionState: null,
+      contractVersion: null,
     });
   });
 

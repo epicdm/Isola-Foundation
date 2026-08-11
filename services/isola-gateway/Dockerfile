@@ -9,8 +9,10 @@
 # Dockerfile to ./Dockerfile.
 #
 # Deliberately absent: any VOLUME, any writable path at all, any shell tooling
-# in the runtime layer. This service has no filesystem state — the delivery
-# de-duplication window is in memory by design (README §8).
+# in the runtime layer. This service still has NO filesystem state: delivery
+# de-duplication is durable, but it lives in a private Postgres reached over the
+# container network, not on disk here. `node:fs` appears nowhere in src/ and
+# test/no-direct-network.test.ts asserts it.
 
 # ---------- build ----------
 FROM node:22-alpine AS build
@@ -25,6 +27,12 @@ COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 RUN npx tsc -p tsconfig.build.json
 
+# The production dependency closure, resolved separately so the runtime layer
+# never carries the compiler or the test runner. `pg` is the ONLY runtime
+# dependency, and src/ledger.ts is the only module allowed to import it.
+RUN npm ci --omit=dev --no-audit --no-fund --ignore-scripts \
+ && npm prune --omit=dev
+
 # ---------- runtime ----------
 FROM node:22-alpine AS runtime
 ENV NODE_ENV=production \
@@ -33,8 +41,8 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 
-# There are zero runtime dependencies, so no node_modules is copied at all.
 COPY --chown=node:node package.json ./
+COPY --chown=node:node --from=build /app/node_modules ./node_modules
 COPY --chown=node:node --from=build /app/dist ./dist
 
 # Non-root. The app directory is owned by root and is not writable by the app

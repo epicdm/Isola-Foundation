@@ -35,6 +35,25 @@ export interface GatewayConfig {
   idempotencyTtlMs: number;
   idempotencyMaxEntries: number;
 
+  /**
+   * Connection string for the private durable delivery ledger. `null` means the
+   * ledger is not configured, and the service refuses to boot — an ACK that is
+   * not durably recorded is the exact failure this store exists to remove.
+   */
+  ledgerUrl: string | null;
+  /**
+   * How long a delivery's lease is held before the recovery sweeper may take it
+   * over. Must comfortably exceed the runtime timeout, or a slow-but-healthy
+   * run gets picked up twice.
+   */
+  ledgerLeaseMs: number;
+  /** How often the recovery sweeper looks for expired leases. */
+  ledgerRecoveryIntervalMs: number;
+  /** Maximum deliveries recovered per sweep. */
+  ledgerRecoveryBatch: number;
+  /** Set false ONLY for a deliberate, temporary, in-memory-only fallback. */
+  ledgerRequired: boolean;
+
   applyLabels: boolean;
   applyCustomAttributes: boolean;
   answeredLabel: string | null;
@@ -56,6 +75,10 @@ export const DEFAULT_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 export const DEFAULT_IDEMPOTENCY_MAX_ENTRIES = 50_000;
 export const DEFAULT_ANSWERED_LABEL = "isola-ai-answered";
 export const DEFAULT_ESCALATED_LABEL = "isola-ai-escalated";
+/** Comfortably longer than DEFAULT_RUNTIME_TIMEOUT_MS, or a slow run is stolen. */
+export const DEFAULT_LEDGER_LEASE_MS = 5 * 60 * 1000;
+export const DEFAULT_LEDGER_RECOVERY_INTERVAL_MS = 60 * 1000;
+export const DEFAULT_LEDGER_RECOVERY_BATCH = 20;
 
 export type EnvRecord = Record<string, string | undefined>;
 
@@ -137,6 +160,20 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
       DEFAULT_IDEMPOTENCY_MAX_ENTRIES,
     ),
 
+    ledgerUrl: str(env, "GATEWAY_LEDGER_URL"),
+    ledgerLeaseMs: int(env, "GATEWAY_LEDGER_LEASE_MS", DEFAULT_LEDGER_LEASE_MS),
+    ledgerRecoveryIntervalMs: int(
+      env,
+      "GATEWAY_LEDGER_RECOVERY_INTERVAL_MS",
+      DEFAULT_LEDGER_RECOVERY_INTERVAL_MS,
+    ),
+    ledgerRecoveryBatch: int(
+      env,
+      "GATEWAY_LEDGER_RECOVERY_BATCH",
+      DEFAULT_LEDGER_RECOVERY_BATCH,
+    ),
+    ledgerRequired: bool(env, "GATEWAY_LEDGER_REQUIRED", true),
+
     applyLabels: bool(env, "GATEWAY_APPLY_LABELS", true),
     applyCustomAttributes: bool(env, "GATEWAY_APPLY_CUSTOM_ATTRIBUTES", true),
     answeredLabel: label(env, "GATEWAY_LABEL_ANSWERED", DEFAULT_ANSWERED_LABEL),
@@ -202,10 +239,18 @@ export function bootWarnings(config: GatewayConfig): string[] {
     warnings.push("RUNTIME_BASE_URL is not a valid URL: the runtime can never be reached.");
   }
 
-  // The dependency this whole service is blocked on. Say it at every boot.
-  warnings.push(
-    "isola-runtime does not implement responseMode:\"inline\" yet. Until it does, every successful invocation returns no text, which this gateway classifies as runtime_no_text: no customer message is sent and the conversation is escalated to a human.",
-  );
+  if (config.ledgerUrl === null) {
+    warnings.push(
+      config.ledgerRequired
+        ? "GATEWAY_LEDGER_URL is unset: the durable delivery ledger cannot be reached, so an acknowledged webhook could not be recorded. The service will refuse to start."
+        : "GATEWAY_LEDGER_URL is unset and GATEWAY_LEDGER_REQUIRED is false: de-duplication is in memory only and will NOT survive a container replacement.",
+    );
+  }
+  if (config.ledgerLeaseMs <= config.runtimeTimeoutMs) {
+    warnings.push(
+      "GATEWAY_LEDGER_LEASE_MS is not longer than the runtime timeout: a slow but healthy run can have its lease stolen and be processed twice.",
+    );
+  }
 
   return warnings;
 }

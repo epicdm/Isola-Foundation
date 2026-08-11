@@ -21,12 +21,16 @@
  *
  * Verified isola-runtime contract (`POST /v1/invoke`):
  *   Authorization: Bearer <RUNTIME_SECRET_PUBLIC>
- *   body {templateId, exposure: "PUBLIC", agentId, runId, context}
- *   200 -> {ok, outcome, correlationId}
+ *   body {templateId, exposure: "PUBLIC", agentId, runId, context, responseMode}
+ *   200 -> {ok, outcome, correlationId, completionState, contractVersion, answerText}
  *   504 -> model_timeout
- *   502 -> provider_error
+ *   502 -> provider_error OR persistence_failed OR invalid_output
  *   402 -> budget_exhausted
  *   403 -> exposure_mismatch
+ *
+ * NOTE THE 502. Three different end states share it, so the HTTP status alone
+ * cannot classify a failure. `completionState` in the body is the authority and
+ * this client prefers it; the status is the fallback for a body without one.
  */
 import type { SafeFetch } from "./egress.js";
 import { EgressBlockedError } from "./errors.js";
@@ -35,6 +39,10 @@ export type RuntimeOutcome =
   | "ok"
   | "model_timeout"
   | "provider_error"
+  | "persistence_failed"
+  | "invalid_output"
+  | "duplicate_in_flight"
+  | "rejected"
   | "budget_exhausted"
   | "exposure_mismatch"
   | "unauthorized"
@@ -49,11 +57,78 @@ export interface AgentRuntimeRequest {
   context: Record<string, unknown>;
 }
 
+/**
+ * The runtime's own truthful end state, contract v1. Read from the BODY.
+ *
+ * The HTTP status is lossy: the runtime returns 502 for both `provider_error`
+ * (the provider errored) and `persistence_failed` (the model answered but
+ * Paperclip refused the write-back). Mapping status→outcome therefore reported
+ * a persistence failure as a provider failure, which is untrue and cost real
+ * diagnostic time. `completionState` is the authority; the status is only the
+ * fallback for a body that does not carry one.
+ */
+export const RUNTIME_COMPLETION_STATES = [
+  "completed",
+  "timeout",
+  "provider_error",
+  "invalid_output",
+  "persistence_failed",
+  "budget_exhausted",
+  "internal_error",
+  "duplicate_in_flight",
+  "rejected",
+] as const;
+export type RuntimeCompletionState = (typeof RUNTIME_COMPLETION_STATES)[number];
+
+export function isCompletionState(value: unknown): value is RuntimeCompletionState {
+  return (
+    typeof value === "string" &&
+    (RUNTIME_COMPLETION_STATES as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * Map the runtime's `completionState` onto this gateway's failure vocabulary.
+ *
+ * `completed` has no failure name — the caller must not reach here with it.
+ * Every other state maps to a distinct, truthful outcome; nothing collapses
+ * into `provider_error` any more.
+ */
+export function outcomeForCompletionState(state: RuntimeCompletionState): string {
+  switch (state) {
+    case "timeout":
+      return "model_timeout";
+    case "provider_error":
+      return "provider_error";
+    case "invalid_output":
+      return "invalid_output";
+    case "persistence_failed":
+      return "persistence_failed";
+    case "budget_exhausted":
+      return "budget_exhausted";
+    case "internal_error":
+      return "runtime_error";
+    case "duplicate_in_flight":
+      return "duplicate_in_flight";
+    case "rejected":
+      return "rejected";
+    default:
+      return "runtime_error";
+  }
+}
+
 export interface AgentRuntimeResult {
   /** The assistant text, or null when the runtime did not return one. */
   text: string | null;
   outcome: string;
   correlationId: string;
+  /**
+   * The runtime's structured end state when it supplied one, else null. The
+   * pipeline PREFERS this over `outcome` for classification.
+   */
+  completionState: RuntimeCompletionState | null;
+  /** Contract version echoed by the runtime, when present. */
+  contractVersion: number | null;
 }
 
 export interface AgentRuntime {
@@ -115,6 +190,18 @@ function readCorrelationId(payload: unknown, fallback: string): string {
   return fallback;
 }
 
+export function readCompletionState(payload: unknown): RuntimeCompletionState | null {
+  if (!isRecord(payload)) return null;
+  const value = payload["completionState"];
+  return isCompletionState(value) ? value : null;
+}
+
+function readContractVersion(payload: unknown): number | null {
+  if (!isRecord(payload)) return null;
+  const value = payload["contractVersion"];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 export interface HttpAgentRuntimeOptions {
   baseUrl: string;
   invokePath: string;
@@ -139,7 +226,13 @@ export class HttpAgentRuntime implements AgentRuntime {
   async invoke(request: AgentRuntimeRequest): Promise<AgentRuntimeResult> {
     if (this.bearer === null) {
       // Fail closed rather than sending an unauthenticated invocation.
-      return { text: null, outcome: "unauthorized", correlationId: request.runId };
+      return {
+        text: null,
+        outcome: "unauthorized",
+        correlationId: request.runId,
+        completionState: null,
+        contractVersion: null,
+      };
     }
 
     const controller = new AbortController();
@@ -176,12 +269,16 @@ export class HttpAgentRuntime implements AgentRuntime {
           text: null,
           outcome: "runtime_unreachable",
           correlationId: request.runId,
+          completionState: null,
+          contractVersion: null,
         };
       }
       return {
         text: null,
         outcome: timedOut ? "model_timeout" : "runtime_unreachable",
         correlationId: request.runId,
+        completionState: null,
+        contractVersion: null,
       };
     } finally {
       clearTimeout(timer);
@@ -196,11 +293,20 @@ export class HttpAgentRuntime implements AgentRuntime {
 
     const correlationId = readCorrelationId(payload, request.runId);
     const statusOutcome = outcomeForStatus(response.status);
+    const completionState = readCompletionState(payload);
+    const contractVersion = readContractVersion(payload);
 
     if (statusOutcome !== "ok") {
       // A failure body may carry an error string in `message`. It is NOT an
       // answer, so text is pinned to null on every non-2xx.
-      return { text: null, outcome: statusOutcome, correlationId };
+      //
+      // The BODY decides what to call the failure. 502 alone cannot tell
+      // `provider_error` from `persistence_failed`; `completionState` can.
+      const outcome =
+        completionState !== null && completionState !== "completed"
+          ? outcomeForCompletionState(completionState)
+          : statusOutcome;
+      return { text: null, outcome, correlationId, completionState, contractVersion };
     }
 
     // A 200 that says `ok: false` is a failure regardless of its status code.
@@ -209,10 +315,32 @@ export class HttpAgentRuntime implements AgentRuntime {
         ? (payload["outcome"] as string)
         : "ok";
     if (bodyOutcome !== "ok") {
-      return { text: null, outcome: bodyOutcome, correlationId };
+      const outcome =
+        completionState !== null && completionState !== "completed"
+          ? outcomeForCompletionState(completionState)
+          : bodyOutcome;
+      return { text: null, outcome, correlationId, completionState, contractVersion };
     }
 
-    return { text: readInlineText(payload), outcome: "ok", correlationId };
+    // A 200 with `ok: true` but a non-`completed` state is still a failure —
+    // the runtime is telling us it has no persisted answer.
+    if (completionState !== null && completionState !== "completed") {
+      return {
+        text: null,
+        outcome: outcomeForCompletionState(completionState),
+        correlationId,
+        completionState,
+        contractVersion,
+      };
+    }
+
+    return {
+      text: readInlineText(payload),
+      outcome: "ok",
+      correlationId,
+      completionState,
+      contractVersion,
+    };
   }
 }
 

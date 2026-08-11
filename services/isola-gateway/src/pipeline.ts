@@ -31,10 +31,18 @@ import {
   renderHandoffNote,
   type HandoffFailedStep,
 } from "./handoff.js";
-import { createWriteGuard, type IdempotencyStore, type WriteGuard } from "./idempotency.js";
+import { DELIVERY_ACTION, type LedgerIdentity } from "./deliveryref.js";
+import type { Ledger } from "./ledger.js";
 import type { Logger } from "./log.js";
 import type { AgentRuntime } from "./runtime.js";
 import type { NoTextClassification, WebhookPayload } from "./webhook.js";
+import {
+  runGuardedWrite,
+  sendGuardedMessage,
+  type SendOutcome,
+  type WriteContext,
+  type WriteDeps,
+} from "./writes.js";
 
 export type DeliveryOutcome =
   /** The customer received the AI answer. */
@@ -78,16 +86,28 @@ const WRITE = {
  */
 export const FAILURE_EXPLANATIONS: Readonly<Record<string, string>> = Object.freeze({
   runtime_no_text:
-    'the AI runtime reported success but returned no answer text (responseMode "inline" is not implemented upstream yet)',
+    "the AI runtime reported success but returned no answer text, which violates the inline response contract",
   budget_exhausted: "the AI employee's monthly budget is fully committed; the model was not called",
   provider_error: "the model provider returned an error",
   model_timeout: "the model provider did not answer inside the deadline",
+  // Distinct from provider_error on purpose. The model DID answer; Paperclip
+  // refused the write-back, so the answer was never persisted and must not be
+  // sent. Both escalate, but an operator needs to know which one happened.
+  persistence_failed:
+    "the model answered, but Paperclip would not accept the write-back, so the answer was not persisted and was withheld",
+  invalid_output: "the model provider answered with no usable assistant text",
+  duplicate_in_flight:
+    "a duplicate of a run that is still executing; the original run owns the answer",
+  rejected:
+    "the AI runtime refused this invocation before calling the model, for a reason other than budget",
   exposure_mismatch:
     "the AI runtime refused this invocation: the credential is not authorised for this template's exposure class",
   unauthorized: "the AI runtime rejected this gateway's credential",
   runtime_unreachable: "the AI runtime could not be reached",
   runtime_error: "the AI runtime returned an unexpected error",
   reply_failed: "the answer could not be delivered to the customer",
+  reply_unresolved:
+    "the answer may or may not have reached the customer and could not be reconciled; nothing was re-sent",
 });
 
 export function explainFailure(outcome: string): string {
@@ -145,11 +165,16 @@ export interface DeliveryJob {
   correlationId: string;
   deliveryId: string | null;
   /**
-   * The key this delivery was claimed under. Every write below is claimed
-   * beneath it, so a duplicate cannot produce a second note, a second
-   * assignment or a second customer message.
+   * The atomic key this delivery was reserved under, in the durable ledger.
+   * Every write below is claimed beneath it, so a duplicate cannot produce a
+   * second note, a second assignment or a second customer message — and that
+   * now holds ACROSS a container replacement, not only within one process.
    */
-  idempotencyKey: string;
+  identity: LedgerIdentity;
+  /** sha256 of the raw signed body, as reserved. Carried onto every write row. */
+  digest: string;
+  /** Epoch seconds at which the delivery was reserved. Bounds reconciliation. */
+  reservedAtEpochSec: number;
   binding: Binding;
   payload: WebhookPayload;
   /** display_id, already known to be non-null by the suppression predicate. */
@@ -165,8 +190,8 @@ export interface PipelineDeps {
   chatwoot: ChatwootApi;
   runtime: AgentRuntime;
   logger: Logger;
-  /** The same store the webhook path claims delivery ids in. */
-  idempotency: IdempotencyStore;
+  /** The same durable ledger the webhook path reserved the delivery in. */
+  ledger: Ledger;
   now: () => number;
 }
 
@@ -201,15 +226,43 @@ export async function processDelivery(
     tenantId: binding.tenantId,
   };
 
-  const writes = createWriteGuard({
-    store: deps.idempotency,
-    deliveryKey: job.idempotencyKey,
-    now: deps.now,
-  });
+  const writeDeps: WriteDeps = {
+    chatwoot: deps.chatwoot,
+    ledger: deps.ledger,
+    logger: deps.logger,
+    leaseMs: deps.config.ledgerLeaseMs,
+  };
+  const writes: WriteContext = {
+    identity: job.identity,
+    digest: job.digest,
+    correlationId: job.correlationId,
+    reservedAtEpochSec: job.reservedAtEpochSec,
+    base,
+  };
+
+  const finish = async (outcome: string): Promise<void> => {
+    try {
+      await deps.ledger.complete(job.identity, DELIVERY_ACTION, null);
+    } catch (err) {
+      // The work is done; only the bookkeeping failed. The recovery sweeper
+      // will find the row, reconcile every write as already-present and close
+      // it out without sending anything again.
+      deps.logger.error({
+        ...base,
+        event: "delivery",
+        alert: true,
+        alertCode: "ledger_close_failed",
+        outcome,
+        detail: err instanceof Error ? err.message : "unknown ledger failure",
+      });
+    }
+  };
 
   // No usable text: hand over to a human, and never call the model.
   if (job.mode === "handoff") {
-    return processHandoff(deps, job, target, writes, base);
+    const handoff = await processHandoff(deps, job, target, writeDeps, writes, base);
+    await finish(handoff.outcome);
+    return handoff;
   }
 
   // Chatwoot retries the same delivery id, so reusing it as the run id makes
@@ -224,6 +277,10 @@ export async function processDelivery(
     context: buildRuntimeContext(binding, payload),
   });
 
+  // `result.outcome` has already been derived from the runtime's structured
+  // `completionState` where it supplied one (see src/runtime.ts), so
+  // `persistence_failed` arrives here as itself and not as `provider_error`.
+  //
   // The contract violation. `outcome: ok` with no text is NOT an empty answer.
   const failureOutcome =
     result.outcome !== "ok"
@@ -234,20 +291,28 @@ export async function processDelivery(
 
   if (failureOutcome === null) {
     const answer = result.text as string;
-    try {
-      await writes.once(WRITE.reply, () => deps.chatwoot.postMessage(target, answer, false));
-    } catch (err) {
-      // We cannot know whether the message landed, so it is never re-sent.
+    const sent = await sendGuardedMessage(
+      writeDeps,
+      writes,
+      WRITE.reply,
+      target,
+      answer,
+      false,
+    );
+
+    if (sent.kind === "failed") {
       deps.logger.error({
         ...base,
         event: "reply",
         outcome: "reply_failed",
         runtimeOutcome: result.outcome,
+        runtimeCompletionState: result.completionState,
         runtimeCorrelationId: result.correlationId,
         durationMs: deps.now() - job.startedAtMs,
-        detail: err instanceof Error ? err.message : "unknown chatwoot failure",
+        detail: sent.detail,
       });
-      await escalate(deps, job, target, writes, "reply_failed");
+      await escalate(deps, job, target, writeDeps, writes, "reply_failed");
+      await finish("reply_failed");
       return {
         outcome: "escalated",
         runtimeOutcome: "reply_failed",
@@ -258,20 +323,57 @@ export async function processDelivery(
       };
     }
 
-    await annotate(deps, job, target, writes, "replied");
+    if (sent.kind === "ambiguous") {
+      // Fail CLOSED. The answer may already be with the customer, so it is not
+      // re-sent and no second acknowledgement is invented. The alert has
+      // already been raised by `sendGuardedMessage`; the conversation is opened
+      // so a human can look at it.
+      deps.logger.error({
+        ...base,
+        event: "reply",
+        outcome: "reply_unresolved",
+        runtimeOutcome: result.outcome,
+        runtimeCompletionState: result.completionState,
+        runtimeCorrelationId: result.correlationId,
+        customerMessageSent: false,
+        needsRetry: true,
+        durationMs: deps.now() - job.startedAtMs,
+        detail: sent.detail,
+      });
+      await escalate(deps, job, target, writeDeps, writes, "reply_unresolved");
+      // Deliberately NOT completed: the ledger row stays claimed so a later
+      // sweep can reconcile it once Chatwoot is answering again.
+      return {
+        outcome: "escalated",
+        runtimeOutcome: "reply_unresolved",
+        customerMessageSent: false,
+        escalated: true,
+        handoffBlocked: false,
+        needsRetry: true,
+      };
+    }
+
+    const alreadyPresent = sent.kind === "already_present" || sent.kind === "skipped";
+    await annotate(deps, job, target, writeDeps, writes, "replied");
     deps.logger.info({
       ...base,
       event: "delivery",
       outcome: "replied",
       runtimeOutcome: result.outcome,
+      runtimeCompletionState: result.completionState,
       runtimeCorrelationId: result.correlationId,
       answerChars: answer.length,
+      // True when this delivery physically posted the message; false when a
+      // previous attempt had already posted it and reconciliation proved so.
+      messagePostedNow: sent.kind === "sent",
+      chatwootMessageId: sent.kind === "skipped" ? null : sent.messageId,
       durationMs: deps.now() - job.startedAtMs,
     });
+    await finish("replied");
     return {
       outcome: "replied",
       runtimeOutcome: result.outcome,
-      customerMessageSent: true,
+      customerMessageSent: !alreadyPresent,
       escalated: false,
       handoffBlocked: false,
       needsRetry: false,
@@ -283,11 +385,16 @@ export async function processDelivery(
     event: "delivery",
     outcome: failureOutcome,
     runtimeOutcome: result.outcome,
+    // The truthful end state, straight from the runtime's body. This is the
+    // field that distinguishes persistence_failed from provider_error.
+    runtimeCompletionState: result.completionState,
+    runtimeContractVersion: result.contractVersion,
     runtimeCorrelationId: result.correlationId,
     customerMessageSent: false,
     durationMs: deps.now() - job.startedAtMs,
   });
-  await escalate(deps, job, target, writes, failureOutcome);
+  await escalate(deps, job, target, writeDeps, writes, failureOutcome);
+  await finish(failureOutcome);
   return {
     outcome: "escalated",
     runtimeOutcome: failureOutcome,
@@ -325,7 +432,8 @@ async function processHandoff(
   deps: PipelineDeps,
   job: DeliveryJob,
   target: ChatwootTarget,
-  writes: WriteGuard,
+  writeDeps: WriteDeps,
+  writes: WriteContext,
   base: Record<string, unknown>,
 ): Promise<DeliveryResult> {
   // `mode === "handoff"` always carries a classification; this keeps the
@@ -350,9 +458,11 @@ async function processHandoff(
 
   // ---- 1. open -----------------------------------------------------------
   try {
-    await writes.once(WRITE.handoffStatus, () => deps.chatwoot.openConversation(target));
+    await runGuardedWrite(writeDeps, writes, WRITE.handoffStatus, () =>
+      deps.chatwoot.openConversation(target),
+    );
   } catch (err) {
-    return blockHandoff(deps, job, target, writes, context, classification, teamId, {
+    return blockHandoff(deps, job, target, writeDeps, writes, context, classification, teamId, {
       failedStep: "toggle_status",
       detail: err instanceof Error ? err.message : "unknown chatwoot failure",
     });
@@ -361,13 +471,13 @@ async function processHandoff(
   // ---- 2. assign ---------------------------------------------------------
   if (teamId !== null) {
     try {
-      await writes.once(WRITE.handoffAssignment, () =>
+      await runGuardedWrite(writeDeps, writes, WRITE.handoffAssignment, () =>
         deps.chatwoot.assignTeam(target, teamId),
       );
     } catch (err) {
       // The conversation stays open — that half succeeded and undoing it would
       // only hide the problem from the human who has to pick this up.
-      return blockHandoff(deps, job, target, writes, context, classification, teamId, {
+      return blockHandoff(deps, job, target, writeDeps, writes, context, classification, teamId, {
         failedStep: "assignment",
         detail: err instanceof Error ? err.message : "unknown chatwoot failure",
       });
@@ -383,41 +493,53 @@ async function processHandoff(
     tenantId: job.binding.tenantId,
     assignedTeamId: teamId,
   });
-  let noteRecorded = true;
-  try {
-    await writes.once(WRITE.handoffNote, () => deps.chatwoot.postMessage(target, note, true));
-  } catch (err) {
+  const notePosted = await sendGuardedMessage(
+    writeDeps,
+    writes,
+    WRITE.handoffNote,
+    target,
+    note,
+    true,
+  );
+  const noteRecorded = notePosted.kind !== "failed" && notePosted.kind !== "ambiguous";
+  if (!noteRecorded) {
     // A missing note does not make the acknowledgement untrue — the
     // conversation IS open and assigned — so it does not block step 5. It is
     // still an operator-visible error.
-    noteRecorded = false;
     deps.logger.error({
       ...context,
       event: "handoff",
       outcome: "handoff_note_failed",
-      detail: err instanceof Error ? err.message : "unknown chatwoot failure",
+      detail: notePosted.kind === "failed" ? notePosted.detail : notePosted.detail,
     });
   }
 
   // ---- 5. exactly one customer-visible message ---------------------------
   const acknowledgement = customerAcknowledgement(classification.reason);
-  try {
-    await writes.once(WRITE.handoffAck, () =>
-      deps.chatwoot.postMessage(target, acknowledgement, false),
-    );
-  } catch (err) {
-    // Never re-sent: we cannot know whether it landed, and a duplicate is worse.
+  const ack = await sendGuardedMessage(
+    writeDeps,
+    writes,
+    WRITE.handoffAck,
+    target,
+    acknowledgement,
+    false,
+  );
+
+  if (ack.kind === "failed" || ack.kind === "ambiguous") {
+    // Never re-sent blind: `sendGuardedMessage` has already reconciled, and
+    // either proved the acknowledgement absent (failed) or could not resolve it
+    // (ambiguous, alerted). Either way the customer is told nothing more.
     deps.logger.error({
       ...context,
       event: "handoff",
-      outcome: "handoff_ack_failed",
+      outcome: ack.kind === "failed" ? "handoff_ack_failed" : "handoff_ack_unresolved",
       customerMessageSent: false,
       noteRecorded,
       needsRetry: true,
       durationMs: deps.now() - job.startedAtMs,
-      detail: err instanceof Error ? err.message : "unknown chatwoot failure",
+      detail: ack.detail,
     });
-    await annotate(deps, job, target, writes, "handed_off");
+    await annotate(deps, job, target, writeDeps, writes, "handed_off");
     return {
       outcome: "handed_off",
       runtimeOutcome: RUNTIME_NOT_INVOKED,
@@ -433,15 +555,16 @@ async function processHandoff(
     event: "delivery",
     outcome: "handed_off",
     customerMessageSent: true,
+    messagePostedNow: ack.kind === "sent",
     noteRecorded,
     assignedTeamId: teamId,
     durationMs: deps.now() - job.startedAtMs,
   });
-  await annotate(deps, job, target, writes, "handed_off");
+  await annotate(deps, job, target, writeDeps, writes, "handed_off");
   return {
     outcome: "handed_off",
     runtimeOutcome: RUNTIME_NOT_INVOKED,
-    customerMessageSent: true,
+    customerMessageSent: ack.kind === "sent",
     escalated: true,
     handoffBlocked: false,
     needsRetry: false,
@@ -456,7 +579,8 @@ async function blockHandoff(
   deps: PipelineDeps,
   job: DeliveryJob,
   target: ChatwootTarget,
-  writes: WriteGuard,
+  writeDeps: WriteDeps,
+  writes: WriteContext,
   context: Record<string, unknown>,
   classification: NoTextClassification,
   teamId: number | null,
@@ -481,18 +605,24 @@ async function blockHandoff(
     assignedTeamId: teamId,
     failedStep: failure.failedStep,
   });
-  try {
-    await writes.once(WRITE.handoffNote, () => deps.chatwoot.postMessage(target, note, true));
-  } catch (err) {
+  const posted = await sendGuardedMessage(
+    writeDeps,
+    writes,
+    WRITE.handoffNote,
+    target,
+    note,
+    true,
+  );
+  if (posted.kind === "failed" || posted.kind === "ambiguous") {
     deps.logger.error({
       ...context,
       event: "handoff",
       outcome: "handoff_note_failed",
-      detail: err instanceof Error ? err.message : "unknown chatwoot failure",
+      detail: posted.detail,
     });
   }
 
-  await annotate(deps, job, target, writes, "handoff_blocked");
+  await annotate(deps, job, target, writeDeps, writes, "handoff_blocked");
   return {
     outcome: "handoff_blocked",
     runtimeOutcome: RUNTIME_NOT_INVOKED,
@@ -512,7 +642,8 @@ async function escalate(
   deps: PipelineDeps,
   job: DeliveryJob,
   target: ChatwootTarget,
-  writes: WriteGuard,
+  writeDeps: WriteDeps,
+  writes: WriteContext,
   outcome: string,
 ): Promise<void> {
   const base = {
@@ -530,19 +661,27 @@ async function escalate(
     tenantId: job.binding.tenantId,
   });
 
-  try {
-    await writes.once(WRITE.failureNote, () => deps.chatwoot.postMessage(target, note, true));
-  } catch (err) {
+  const posted: SendOutcome = await sendGuardedMessage(
+    writeDeps,
+    writes,
+    WRITE.failureNote,
+    target,
+    note,
+    true,
+  );
+  if (posted.kind === "failed" || posted.kind === "ambiguous") {
     deps.logger.error({
       ...base,
       event: "escalate",
       outcome: "private_note_failed",
-      detail: err instanceof Error ? err.message : "unknown chatwoot failure",
+      detail: posted.detail,
     });
   }
 
   try {
-    await writes.once(WRITE.escalateStatus, () => deps.chatwoot.openConversation(target));
+    await runGuardedWrite(writeDeps, writes, WRITE.escalateStatus, () =>
+      deps.chatwoot.openConversation(target),
+    );
   } catch (err) {
     deps.logger.error({
       ...base,
@@ -555,7 +694,7 @@ async function escalate(
   const teamId = job.binding.escalationTeamId;
   if (teamId !== undefined) {
     try {
-      await writes.once(WRITE.escalateAssignment, () =>
+      await runGuardedWrite(writeDeps, writes, WRITE.escalateAssignment, () =>
         deps.chatwoot.assignTeam(target, teamId),
       );
     } catch (err) {
@@ -570,7 +709,7 @@ async function escalate(
   }
 
   deps.logger.warn({ ...base, event: "escalate", outcome: "escalated", failure: outcome });
-  await annotate(deps, job, target, writes, outcome);
+  await annotate(deps, job, target, writeDeps, writes, outcome);
 }
 
 /**
@@ -584,7 +723,8 @@ async function annotate(
   deps: PipelineDeps,
   job: DeliveryJob,
   target: ChatwootTarget,
-  writes: WriteGuard,
+  writeDeps: WriteDeps,
+  writes: WriteContext,
   outcome: string,
 ): Promise<void> {
   const base = {
@@ -621,7 +761,9 @@ async function annotate(
         // is a full replacement, so a no-op write is still a write.
         if (merged.length !== existing.length) {
           try {
-            await writes.once(WRITE.labels, () => deps.chatwoot.setLabels(target, merged));
+            await runGuardedWrite(writeDeps, writes, WRITE.labels, () =>
+              deps.chatwoot.setLabels(target, merged),
+            );
           } catch (err) {
             deps.logger.warn({
               ...base,
@@ -657,7 +799,7 @@ async function annotate(
     if (existing !== null) {
       const merged = mergeCustomAttributes(existing, additions);
       try {
-        await writes.once(WRITE.customAttributes, () =>
+        await runGuardedWrite(writeDeps, writes, WRITE.customAttributes, () =>
           deps.chatwoot.setCustomAttributes(target, merged),
         );
       } catch (err) {

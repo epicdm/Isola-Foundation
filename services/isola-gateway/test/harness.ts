@@ -8,12 +8,27 @@ import type { AddressInfo } from "node:net";
 
 import { createGateway, type Gateway, type GatewayDeps } from "../src/app.js";
 import type { Binding } from "../src/bindings.js";
-import type { ChatwootApi, ChatwootTarget } from "../src/chatwoot.js";
+import type { ChatwootApi, ChatwootTarget, ReconcileResult } from "../src/chatwoot.js";
+import { DELIVERY_ACTION, type LedgerIdentity } from "../src/deliveryref.js";
 import type { SafeFetch } from "../src/egress.js";
 import { ChatwootApiError } from "../src/errors.js";
+import {
+  LedgerUnavailableError,
+  type ClaimResult,
+  type DeliveryState,
+  type Ledger,
+  type RecoverableDelivery,
+  type ReserveArgs,
+  type ReserveResult,
+} from "../src/ledger.js";
 import { loadConfig, type EnvRecord, type GatewayConfig } from "../src/config.js";
 import { createLogger, type Logger } from "../src/log.js";
-import type { AgentRuntime, AgentRuntimeRequest, AgentRuntimeResult } from "../src/runtime.js";
+import type {
+  AgentRuntime,
+  AgentRuntimeRequest,
+  AgentRuntimeResult,
+  RuntimeCompletionState,
+} from "../src/runtime.js";
 import { computeSignature } from "../src/signature.js";
 
 /**
@@ -226,6 +241,8 @@ export class CapturingLogger {
 export interface RecordedChatwootCall {
   kind:
     | "message"
+    | "reconcile"
+    | "conversation_read"
     | "toggle_status"
     | "assignment"
     | "labels_read"
@@ -240,6 +257,7 @@ export interface RecordedChatwootCall {
   teamId?: number;
   labels?: string[];
   attributes?: Record<string, unknown>;
+  deliveryRef?: string | null;
 }
 
 export class StubChatwootApi implements ChatwootApi {
@@ -287,11 +305,29 @@ export class StubChatwootApi implements ChatwootApi {
     return this.calls.filter((c) => c.kind === "attributes_write");
   }
 
+  /**
+   * Messages that Chatwoot actually holds, keyed by delivery ref. This is what
+   * `reconcileDeliveryRef` reads, so a test can distinguish "the send threw but
+   * Chatwoot committed" from "the send threw and nothing landed" — the exact
+   * ambiguity the reconciliation path exists for.
+   */
+  readonly stored = new Map<string, { id: number; createdAt: number }>();
+  /** Set to make reconciliation fail, forcing the fail-closed branch. */
+  reconcileFailure: ChatwootApiError | null = null;
+  /** Set to make reconciliation report that it could not prove absence. */
+  reconcileInconclusive = false;
+  /** When true, a throwing postMessage still commits the message in Chatwoot. */
+  commitDespiteFailure = false;
+  conversationRecord: unknown = null;
+
+  private nextMessageId = 5000;
+
   async postMessage(
     target: ChatwootTarget,
     content: string,
     isPrivate: boolean,
-  ): Promise<void> {
+    deliveryRef?: string,
+  ): Promise<number | null> {
     await this.pause();
     this.calls.push({
       kind: "message",
@@ -300,9 +336,55 @@ export class StubChatwootApi implements ChatwootApi {
       accessToken: target.accessToken,
       content,
       private: isPrivate,
+      deliveryRef: deliveryRef ?? null,
     });
-    if (this.postMessageFailure && !isPrivate) throw this.postMessageFailure;
-    if (this.privateNoteFailure && isPrivate) throw this.privateNoteFailure;
+    const failing =
+      (this.postMessageFailure && !isPrivate) || (this.privateNoteFailure && isPrivate);
+    if (failing && !this.commitDespiteFailure) {
+      throw (isPrivate ? this.privateNoteFailure : this.postMessageFailure) as ChatwootApiError;
+    }
+    const id = this.nextMessageId++;
+    if (deliveryRef !== undefined) {
+      this.stored.set(deliveryRef, { id, createdAt: Math.floor(Date.now() / 1000) });
+    }
+    if (failing) {
+      throw (isPrivate ? this.privateNoteFailure : this.postMessageFailure) as ChatwootApiError;
+    }
+    return id;
+  }
+
+  async reconcileDeliveryRef(
+    _target: ChatwootTarget,
+    deliveryRef: string,
+    _reservedAtEpochSec: number,
+  ): Promise<ReconcileResult> {
+    this.calls.push({
+      kind: "reconcile",
+      accountId: _target.accountId,
+      conversationId: _target.conversationId,
+      accessToken: _target.accessToken,
+      deliveryRef,
+    });
+    if (this.reconcileFailure) {
+      return { kind: "inconclusive", detail: this.reconcileFailure.message };
+    }
+    if (this.reconcileInconclusive) {
+      return { kind: "inconclusive", detail: "page budget exhausted" };
+    }
+    const found = this.stored.get(deliveryRef);
+    return found === undefined
+      ? { kind: "absent" }
+      : { kind: "found", messageId: found.id };
+  }
+
+  async getConversationRecord(target: ChatwootTarget): Promise<unknown> {
+    this.calls.push({
+      kind: "conversation_read",
+      accountId: target.accountId,
+      conversationId: target.conversationId,
+      accessToken: target.accessToken,
+    });
+    return this.conversationRecord;
   }
 
   async openConversation(target: ChatwootTarget): Promise<void> {
@@ -376,6 +458,209 @@ export class StubChatwootApi implements ChatwootApi {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Ledger double
+// ---------------------------------------------------------------------------
+
+interface FakeRow {
+  digest: string;
+  state: DeliveryState;
+  attempts: number;
+  leaseExpiresAt: number | null;
+  conversationId: number | null;
+  messageId: number | null;
+  mode: string | null;
+  correlationId: string;
+  chatwootMessageId: number | null;
+}
+
+/**
+ * An in-memory ledger that models the SQL semantics exactly: one row per
+ * (identity, action), insert-or-take-over-on-expired-lease, digest conflict,
+ * and terminal states that refuse a re-claim.
+ *
+ * `survivesRestart()` returns a fresh instance sharing the same row map, which
+ * is how the tests simulate a container replacement: the process state is gone,
+ * the ledger is not.
+ */
+export class FakeLedger implements Ledger {
+  readonly rows: Map<string, FakeRow>;
+  /** Set to make every operation fail, as an unreachable store would. */
+  unavailable = false;
+  migrated = 0;
+
+  constructor(rows: Map<string, FakeRow> = new Map()) {
+    this.rows = rows;
+  }
+
+  /** A new process against the same durable store. */
+  survivesRestart(): FakeLedger {
+    return new FakeLedger(this.rows);
+  }
+
+  private key(identity: LedgerIdentity, action: string): string {
+    return [
+      identity.tenantId,
+      identity.bindingId,
+      identity.chatwootAccountId,
+      identity.chatwootInboxId,
+      identity.eventId,
+      action,
+    ].join("|");
+  }
+
+  private guard(): void {
+    if (this.unavailable) throw new LedgerUnavailableError("stub_unavailable");
+  }
+
+  async migrate(): Promise<void> {
+    this.guard();
+    this.migrated += 1;
+  }
+
+  async reserve(args: ReserveArgs): Promise<ReserveResult> {
+    this.guard();
+    const key = this.key(args.identity, DELIVERY_ACTION);
+    const existing = this.rows.get(key);
+    const now = Date.now();
+
+    if (existing === undefined) {
+      this.rows.set(key, {
+        digest: args.digest,
+        state: "reserved",
+        attempts: 1,
+        leaseExpiresAt: now + args.leaseMs,
+        conversationId: args.conversationId,
+        messageId: args.messageId,
+        mode: args.mode,
+        correlationId: args.correlationId,
+        chatwootMessageId: null,
+      });
+      return { kind: "reserved", attempts: 1 };
+    }
+
+    if (existing.digest !== args.digest) {
+      return { kind: "conflict", storedDigest: existing.digest };
+    }
+    if (existing.state === "completed" || existing.state === "failed") {
+      return { kind: "duplicate", state: existing.state };
+    }
+    if (existing.leaseExpiresAt !== null && existing.leaseExpiresAt > now) {
+      return { kind: "duplicate", state: existing.state };
+    }
+    existing.attempts += 1;
+    existing.state = "reserved";
+    existing.leaseExpiresAt = now + args.leaseMs;
+    return { kind: "resumed", attempts: existing.attempts };
+  }
+
+  async claimAction(
+    identity: LedgerIdentity,
+    action: string,
+    digest: string,
+    correlationId: string,
+    leaseMs: number,
+  ): Promise<ClaimResult> {
+    this.guard();
+    const key = this.key(identity, action);
+    const existing = this.rows.get(key);
+    if (existing === undefined) {
+      this.rows.set(key, {
+        digest,
+        state: "in_progress",
+        attempts: 1,
+        leaseExpiresAt: Date.now() + leaseMs,
+        conversationId: null,
+        messageId: null,
+        mode: null,
+        correlationId,
+        chatwootMessageId: null,
+      });
+      return { kind: "claimed" };
+    }
+    if (existing.state === "completed") {
+      return { kind: "completed", chatwootMessageId: existing.chatwootMessageId };
+    }
+    if (existing.state === "failed") return { kind: "completed", chatwootMessageId: null };
+    existing.attempts += 1;
+    return { kind: "ambiguous", attempts: existing.attempts };
+  }
+
+  async complete(
+    identity: LedgerIdentity,
+    action: string,
+    chatwootMessageId: number | null,
+  ): Promise<void> {
+    this.guard();
+    const row = this.rows.get(this.key(identity, action));
+    if (row === undefined) return;
+    row.state = "completed";
+    row.leaseExpiresAt = null;
+    if (chatwootMessageId !== null) row.chatwootMessageId = chatwootMessageId;
+  }
+
+  async fail(identity: LedgerIdentity, action: string): Promise<void> {
+    this.guard();
+    const row = this.rows.get(this.key(identity, action));
+    if (row === undefined) return;
+    row.state = "failed";
+    row.leaseExpiresAt = null;
+  }
+
+  async heartbeat(
+    identity: LedgerIdentity,
+    action: string,
+    leaseMs: number,
+  ): Promise<void> {
+    this.guard();
+    const row = this.rows.get(this.key(identity, action));
+    if (row === undefined) return;
+    row.state = "in_progress";
+    row.leaseExpiresAt = Date.now() + leaseMs;
+  }
+
+  async dueForRecovery(limit: number): Promise<RecoverableDelivery[]> {
+    this.guard();
+    const now = Date.now();
+    const out: RecoverableDelivery[] = [];
+    for (const [key, row] of this.rows) {
+      const parts = key.split("|");
+      if (parts[5] !== DELIVERY_ACTION) continue;
+      if (row.state !== "reserved" && row.state !== "in_progress") continue;
+      if (row.leaseExpiresAt !== null && row.leaseExpiresAt > now) continue;
+      out.push({
+        tenantId: parts[0] as string,
+        bindingId: parts[1] as string,
+        chatwootAccountId: Number(parts[2]),
+        chatwootInboxId: Number(parts[3]),
+        eventId: parts[4] as string,
+        payloadDigest: row.digest,
+        correlationId: row.correlationId,
+        conversationId: row.conversationId,
+        messageId: row.messageId,
+        mode: row.mode,
+        state: row.state,
+        attempts: row.attempts,
+      });
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
+  async healthy(): Promise<boolean> {
+    return !this.unavailable;
+  }
+
+  async close(): Promise<void> {
+    /* nothing to close */
+  }
+
+  /** Force every live lease to look expired, as a restart effectively does. */
+  expireAllLeases(): void {
+    for (const row of this.rows.values()) row.leaseExpiresAt = 0;
+  }
+}
+
 export class StubAgentRuntime implements AgentRuntime {
   readonly requests: AgentRuntimeRequest[] = [];
   constructor(
@@ -392,6 +677,8 @@ export class StubAgentRuntime implements AgentRuntime {
       text,
       outcome: "ok",
       correlationId: "runtime-correlation-id",
+      completionState: "completed",
+      contractVersion: 1,
     }));
   }
 
@@ -401,6 +688,8 @@ export class StubAgentRuntime implements AgentRuntime {
       text: null,
       outcome: "ok",
       correlationId: "runtime-correlation-id",
+      completionState: "completed",
+      contractVersion: 1,
     }));
   }
 
@@ -409,6 +698,25 @@ export class StubAgentRuntime implements AgentRuntime {
       text: null,
       outcome,
       correlationId: "runtime-correlation-id",
+      completionState: null,
+      contractVersion: null,
+    }));
+  }
+
+  /**
+   * A failure carrying the runtime's structured end state — the shape the
+   * deployed runtime actually returns.
+   */
+  static failingWithState(
+    completionState: RuntimeCompletionState,
+    outcome: string,
+  ): StubAgentRuntime {
+    return new StubAgentRuntime(async () => ({
+      text: null,
+      outcome,
+      correlationId: "runtime-correlation-id",
+      completionState,
+      contractVersion: 1,
     }));
   }
 
@@ -418,7 +726,14 @@ export class StubAgentRuntime implements AgentRuntime {
       () =>
         new Promise((resolve) =>
           setTimeout(
-            () => resolve({ text, outcome: "ok", correlationId: "runtime-correlation-id" }),
+            () =>
+              resolve({
+                text,
+                outcome: "ok",
+                correlationId: "runtime-correlation-id",
+                completionState: "completed",
+                contractVersion: 1,
+              }),
             delayMs,
           ),
         ),
@@ -476,11 +791,13 @@ export interface TestServer {
   gateway: Gateway;
   chatwoot: StubChatwootApi;
   runtime: AgentRuntime;
+  ledger: FakeLedger;
   close(): Promise<void>;
 }
 
 export interface StartArgs extends Partial<GatewayDeps> {
   config?: GatewayConfig;
+  ledger?: FakeLedger;
 }
 
 export async function startServer(args: StartArgs = {}): Promise<TestServer> {
@@ -488,12 +805,14 @@ export async function startServer(args: StartArgs = {}): Promise<TestServer> {
   // No test is ever allowed to reach a real Chatwoot or a real runtime.
   const chatwoot = (args.chatwoot as StubChatwootApi | undefined) ?? new StubChatwootApi();
   const runtime = args.runtime ?? StubAgentRuntime.answering("Here is your answer.");
+  const ledger = args.ledger ?? new FakeLedger();
 
   const gateway = createGateway({
     ...args,
     config,
     chatwoot,
     runtime,
+    ledger,
   });
 
   const server: Server = createServer(gateway.handler);
@@ -505,6 +824,7 @@ export async function startServer(args: StartArgs = {}): Promise<TestServer> {
     gateway,
     chatwoot,
     runtime,
+    ledger,
     close: async () => {
       await gateway.drain();
       await new Promise<void>((resolve, reject) =>
@@ -518,6 +838,7 @@ export interface RealClientServer {
   url: string;
   gateway: Gateway;
   egress: EgressRecorder;
+  ledger: FakeLedger;
   close(): Promise<void>;
 }
 
@@ -528,13 +849,15 @@ export interface RealClientServer {
  * service tried to reach for a delivery.
  */
 export async function startRealClientServer(
-  args: { config?: GatewayConfig; logger?: Logger } = {},
+  args: { config?: GatewayConfig; logger?: Logger; ledger?: FakeLedger } = {},
 ): Promise<RealClientServer> {
   const egress = recordingEgress();
+  const ledger = args.ledger ?? new FakeLedger();
   const gateway = createGateway({
     config: args.config ?? envConfig(),
     ...(args.logger === undefined ? {} : { logger: args.logger }),
     safeFetch: egress.safeFetch,
+    ledger,
   });
   const server: Server = createServer(gateway.handler);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -543,6 +866,7 @@ export async function startRealClientServer(
     url: `http://127.0.0.1:${address.port}`,
     gateway,
     egress,
+    ledger,
     close: async () => {
       await gateway.drain();
       await new Promise<void>((resolve, reject) =>

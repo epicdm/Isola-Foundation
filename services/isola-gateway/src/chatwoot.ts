@@ -29,6 +29,7 @@
  */
 import type { SafeFetch } from "./egress.js";
 import { ChatwootApiError, EgressBlockedError } from "./errors.js";
+import { DELIVERY_REF_ATTRIBUTE } from "./deliveryref.js";
 
 export interface ChatwootTarget {
   accountId: number;
@@ -38,8 +39,49 @@ export interface ChatwootTarget {
   accessToken: string;
 }
 
+/**
+ * The outcome of a reconciliation scan for a deterministic delivery ref.
+ *
+ *  - `found`        the message is already in Chatwoot. Never send it again.
+ *  - `absent`       PROVEN absent: the scan reached back past the moment the
+ *                   delivery was reserved without finding the ref, so the
+ *                   message cannot have been sent by this delivery.
+ *  - `inconclusive` the scan ran out of pages before it could prove absence, or
+ *                   the read itself failed. The caller must FAIL CLOSED — an
+ *                   unproven absence is not an absence.
+ */
+export type ReconcileResult =
+  | { kind: "found"; messageId: number }
+  | { kind: "absent" }
+  | { kind: "inconclusive"; detail: string };
+
 export interface ChatwootApi {
-  postMessage(target: ChatwootTarget, content: string, isPrivate: boolean): Promise<void>;
+  /**
+   * Returns the created message id when Chatwoot reports one. `deliveryRef`,
+   * when supplied, is stamped into `content_attributes` — never into `content`.
+   */
+  postMessage(
+    target: ChatwootTarget,
+    content: string,
+    isPrivate: boolean,
+    deliveryRef?: string,
+  ): Promise<number | null>;
+  /**
+   * Look for a message carrying `deliveryRef` in this conversation, scanning
+   * back until the scan is older than `reservedAtEpochSec` or the page budget
+   * is spent.
+   */
+  reconcileDeliveryRef(
+    target: ChatwootTarget,
+    deliveryRef: string,
+    reservedAtEpochSec: number,
+  ): Promise<ReconcileResult>;
+  /**
+   * The whole conversation record, verbatim. Used only by restart recovery,
+   * which must rebuild a delivery from the system that actually owns the
+   * message rather than from a copy of it in the ledger.
+   */
+  getConversationRecord(target: ChatwootTarget): Promise<unknown>;
   openConversation(target: ChatwootTarget): Promise<void>;
   assignTeam(target: ChatwootTarget, teamId: number): Promise<void>;
   getLabels(target: ChatwootTarget): Promise<string[]>;
@@ -128,8 +170,52 @@ export interface HttpChatwootApiOptions {
 
 const DEFAULT_CALL_TIMEOUT_MS = 15_000;
 
+/**
+ * How far back a reconciliation scan will page before giving up. Reaching this
+ * limit is `inconclusive`, never `absent`: the caller then fails closed rather
+ * than risking a duplicate customer message.
+ */
+export const RECONCILE_PAGE_BUDGET = 3;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readMessageId(payload: unknown): number | null {
+  if (!isRecord(payload)) return null;
+  const id = payload["id"];
+  return typeof id === "number" && Number.isFinite(id) ? id : null;
+}
+
+export interface ScannedMessage {
+  id: number;
+  createdAt: number | null;
+  deliveryRef: string | null;
+}
+
+/**
+ * Pull `(id, created_at, content_attributes.isola_delivery_ref)` out of a
+ * messages page. Deliberately reads nothing else — message content never enters
+ * this path.
+ */
+export function readMessageList(payload: unknown): ScannedMessage[] {
+  const list = isRecord(payload) ? payload["payload"] : payload;
+  if (!Array.isArray(list)) return [];
+  const out: ScannedMessage[] = [];
+  for (const entry of list) {
+    if (!isRecord(entry)) continue;
+    const id = entry["id"];
+    if (typeof id !== "number" || !Number.isFinite(id)) continue;
+    const createdAt = entry["created_at"];
+    const attributes = entry["content_attributes"];
+    const ref = isRecord(attributes) ? attributes[DELIVERY_REF_ATTRIBUTE] : undefined;
+    out.push({
+      id,
+      createdAt: typeof createdAt === "number" ? createdAt : null,
+      deliveryRef: typeof ref === "string" && ref.length > 0 ? ref : null,
+    });
+  }
+  return out;
 }
 
 export class HttpChatwootApi implements ChatwootApi {
@@ -203,17 +289,100 @@ export class HttpChatwootApi implements ChatwootApi {
     }
   }
 
+  /**
+   * `content_attributes` is passed through verbatim by Chatwoot's
+   * `Messages::MessageBuilder` (`content_attributes: content_attributes.presence`),
+   * and `ContentAttributeValidator` constrains only `items` for the
+   * `input_select` / `cards` / `form` / `article` content types — so an extra
+   * top-level key on a plain text message is accepted and preserved. Verified
+   * against the deployed v4.16.1 source.
+   *
+   * `source_id` is NOT used: it is accepted by the builder but its index is not
+   * unique and no model validation enforces uniqueness, so it buys no
+   * idempotency — and on a real channel it belongs to the provider's message id.
+   */
   async postMessage(
     target: ChatwootTarget,
     content: string,
     isPrivate: boolean,
-  ): Promise<void> {
-    await this.request(
+    deliveryRef?: string,
+  ): Promise<number | null> {
+    const payload = await this.request(
       "POST",
       this.conversationPath(target, "/messages"),
-      { content, message_type: "outgoing", private: isPrivate },
+      {
+        content,
+        message_type: "outgoing",
+        private: isPrivate,
+        ...(deliveryRef === undefined
+          ? {}
+          : { content_attributes: { [DELIVERY_REF_ATTRIBUTE]: deliveryRef } }),
+      },
       target.accessToken,
     );
+    return readMessageId(payload);
+  }
+
+  async reconcileDeliveryRef(
+    target: ChatwootTarget,
+    deliveryRef: string,
+    reservedAtEpochSec: number,
+  ): Promise<ReconcileResult> {
+    let before: number | null = null;
+    for (let page = 0; page < RECONCILE_PAGE_BUDGET; page += 1) {
+      let payload: unknown;
+      try {
+        payload = await this.request(
+          "GET",
+          this.conversationPath(
+            target,
+            `/messages${before === null ? "" : `?before=${encodeURIComponent(String(before))}`}`,
+          ),
+          undefined,
+          target.accessToken,
+        );
+      } catch (err) {
+        return {
+          kind: "inconclusive",
+          detail: err instanceof Error ? err.message : "message read failed",
+        };
+      }
+
+      const messages = readMessageList(payload);
+      if (messages.length === 0) {
+        // No more history. Nothing older exists, so absence is proven.
+        return { kind: "absent" };
+      }
+
+      for (const message of messages) {
+        if (message.deliveryRef === deliveryRef) {
+          return { kind: "found", messageId: message.id };
+        }
+      }
+
+      const oldest = messages.reduce(
+        (min, m) => (m.createdAt !== null && m.createdAt < min ? m.createdAt : min),
+        Number.POSITIVE_INFINITY,
+      );
+      // The scan has reached back past the moment this delivery was reserved,
+      // so a message from this delivery cannot be hiding further back.
+      if (Number.isFinite(oldest) && oldest < reservedAtEpochSec) {
+        return { kind: "absent" };
+      }
+
+      const lowestId = messages.reduce((min, m) => (m.id < min ? m.id : min), Infinity);
+      if (!Number.isFinite(lowestId)) return { kind: "absent" };
+      before = lowestId;
+    }
+
+    return {
+      kind: "inconclusive",
+      detail: `scanned ${RECONCILE_PAGE_BUDGET} pages without reaching the reservation time`,
+    };
+  }
+
+  async getConversationRecord(target: ChatwootTarget): Promise<unknown> {
+    return this.request("GET", this.conversationPath(target, ""), undefined, target.accessToken);
   }
 
   async openConversation(target: ChatwootTarget): Promise<void> {

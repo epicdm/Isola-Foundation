@@ -62,10 +62,27 @@ describe("binding validation is a boot gate", () => {
     expect(bootWarnings(config).join(" ")).toMatch(/no inbox is bound/);
   });
 
-  it("always warns about the open responseMode dependency", () => {
+  it("warns loudly when the durable delivery ledger is not configured", () => {
+    // Replaces the old "responseMode inline is not implemented" warning: the
+    // runtime shipped contract v1, and the open dependency is now the ledger.
     const config = loadConfig({ GATEWAY_BINDINGS_JSON: bindingsJson([makeBinding()]) });
-    expect(bootWarnings(config).join(" ")).toMatch(/inline/);
-    expect(bootWarnings(config).join(" ")).toMatch(/runtime_no_text/);
+    const warnings = bootWarnings(config).join(" ");
+    expect(warnings).toMatch(/GATEWAY_LEDGER_URL is unset/);
+    expect(warnings).toMatch(/refuse to start/);
+  });
+
+  it("warns when the ledger lease is not longer than the runtime timeout", () => {
+    // A lease shorter than a legitimate run lets the sweeper steal a healthy
+    // delivery and process it twice.
+    const config = loadConfig({
+      GATEWAY_BINDINGS_JSON: bindingsJson([makeBinding()]),
+      GATEWAY_LEDGER_URL: "postgres://ledger.invalid/db",
+      GATEWAY_LEDGER_LEASE_MS: "1000",
+      GATEWAY_RUNTIME_TIMEOUT_MS: "90000",
+    });
+    expect(bootWarnings(config).join(" ")).toMatch(
+      /GATEWAY_LEDGER_LEASE_MS is not longer than the runtime timeout/,
+    );
   });
 
   it("warns when every binding is retired", () => {

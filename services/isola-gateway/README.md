@@ -74,19 +74,31 @@ native escalation. This service does not build a parallel one — it only escala
 explicitly on the paths where it *did* answer the webhook with 200 and then
 failed downstream, where the native escalation cannot fire.
 
-So the request path does **only** in-memory work:
+So the request path does only pure work plus **one** I/O call:
 
 1. read the raw bytes,
 2. verify the HMAC,
-3. de-duplicate,
-4. resolve the binding,
-5. evaluate the suppression predicate,
+3. resolve the binding,
+4. evaluate the suppression predicate,
+5. **durably reserve the delivery** in the private ledger (§8),
 6. **ACK 200**,
 
 and everything else — the runtime call, the reply, the escalation, the labels —
 happens after the response has been written. `test/webhook-http.test.ts` injects
 a runtime that takes 2 seconds and asserts the ACK still returns in under 1
 second, with no message sent at ACK time.
+
+Step 5 is a single `INSERT ... ON CONFLICT` against a Postgres on the container
+network — single-digit milliseconds. It is on the request path deliberately: an
+acknowledgement that is not durably recorded is an acknowledgement that a
+restart can forget, and Chatwoot never re-offers a delivery it saw ACKed.
+
+Note that binding resolution now precedes de-duplication, which is the reverse
+of the original order. The ledger's atomic key is scoped by tenant and binding,
+so you cannot claim a key until you know whose key it is. The only observable
+difference is that a duplicate addressed to a retired binding reports
+`binding_retired` rather than `duplicate_suppressed`; both are 200 with nothing
+done.
 
 ---
 
@@ -322,8 +334,13 @@ time even though boot validation already rejects them.
 | `EGRESS_ALLOWLIST` | derived from `CHATWOOT_BASE_URL` + `RUNTIME_BASE_URL` | Comma-separated hostnames. Exact match only, no suffix matching. An explicit value replaces the derived list wholesale. |
 | `GATEWAY_MAX_REQUEST_BYTES` | `1048576` | Hard ceiling on a webhook body. |
 | `GATEWAY_REPLAY_WINDOW_SEC` | `300` | Signature timestamp skew allowed, **past and future**. |
-| `GATEWAY_IDEMPOTENCY_TTL_MS` | `86400000` | How long a delivery id is remembered. |
-| `GATEWAY_IDEMPOTENCY_MAX_ENTRIES` | `50000` | Cap on the in-memory de-duplication window; oldest evicted first. A delivery occupies the delivery key plus one key per write it performs (§4.1), so budget roughly six entries per delivery. |
+| `GATEWAY_LEDGER_URL` | *(unset)* | Connection string for the private durable delivery ledger. **Unset ⇒ the service refuses to boot** (§8). |
+| `GATEWAY_LEDGER_LEASE_MS` | `300000` | How long a delivery's lease is held before the recovery sweeper may take it over. Must exceed `GATEWAY_RUNTIME_TIMEOUT_MS` or a slow-but-healthy run gets processed twice; a boot warning fires if it does not. |
+| `GATEWAY_LEDGER_RECOVERY_INTERVAL_MS` | `60000` | How often the sweeper looks for expired leases. |
+| `GATEWAY_LEDGER_RECOVERY_BATCH` | `20` | Maximum deliveries recovered per sweep. |
+| `GATEWAY_LEDGER_REQUIRED` | `true` | Set false only for a deliberate, temporary run without durability. |
+| `GATEWAY_IDEMPOTENCY_TTL_MS` | `86400000` | Retained for compatibility; the ledger has no TTL. |
+| `GATEWAY_IDEMPOTENCY_MAX_ENTRIES` | `50000` | Retained for compatibility; the ledger has no entry cap. |
 | `GATEWAY_APPLY_LABELS` | `true` | Apply the outcome label (read-modify-write). |
 | `GATEWAY_APPLY_CUSTOM_ATTRIBUTES` | `true` | Apply the outcome attributes (read-modify-write). |
 | `GATEWAY_LABEL_ANSWERED` | `isola-ai-answered` | Label applied on a successful reply. Set to empty to disable. |
@@ -381,17 +398,61 @@ isola_last_correlation_id · isola_last_run_at
 
 ---
 
-## 8. Persistence — and the honest limit
+## 8. Persistence — the durable delivery ledger
 
-There is **no persistence at all**. The delivery de-duplication window lives in
-memory.
+This service still has **no local state**: `node:fs` is imported nowhere in
+`src/`, there is no volume, and `/app` is read-only. What it has instead is a
+dependency on `isola-ledger-db` — a dedicated Postgres in the same EasyPanel
+project, with **no domain and no exposed port**, reachable only on the container
+network. The gateway container remains disposable; the ledger does not.
 
-A container replacement loses it. The worst case is one duplicate reply for a
-delivery that was in flight across the restart — and since Chatwoot only retries
-429 and 500, and this service answers 200 on every branch it has already
-processed, that window is very narrow. Making it durable would mean giving the
-only publicly-exposed component a filesystem or a database, which is a worse
-trade. `IdempotencyStore` is an interface if that judgement ever changes.
+**Why it exists.** De-duplication used to live in a `Map`. A container
+replacement lost it, so a duplicate delivery arriving across a restart produced
+a second customer reply. That was recorded honestly as a known limitation and
+has now been closed.
+
+**The atomic key** is the table's primary key, so uniqueness is enforced by
+Postgres rather than argued for in prose:
+
+```
+(tenant_id, binding_id, chatwoot_account_id, chatwoot_inbox_id, event_id, action_type)
+```
+
+`action_type` is `delivery` for the reservation taken before the ACK, and one
+row per individual write beneath it (`reply`, `failure_note`, `handoff_ack`, …).
+
+**What is stored:** identifiers, action type, payload digest, correlation id,
+delivery state, lease owner and expiry, attempt count, the returned Chatwoot
+message id, timestamps and a failure code.
+
+**What is never stored:** message bodies, AI answers, attachment filenames or
+URLs, credentials — anything a customer wrote or the model produced.
+`test/ledger-no-content.test.ts` asserts the column list by scanning the DDL, so
+a content-bearing column added later fails the build.
+
+**Restart recovery.** A reservation whose lease expires is picked up by the
+sweeper (`src/recovery.ts`), which re-reads the conversation **from Chatwoot** —
+the system that owns the message — rather than from a copy in the ledger. That
+also means the suppression predicate is re-evaluated against current state, so a
+conversation a human took over during the outage is closed out instead of being
+answered late.
+
+**Digest conflict.** The same event id re-presented with a different signed body
+is refused with `409 ledger_conflict` and alerted on. It is a collision or a
+tampering attempt, not a retry.
+
+**Ledger unavailable.** The webhook answers `500 ledger_unavailable` rather than
+a false `200`. 500 is deliberate: Chatwoot v4.16.1 retries an agent-bot webhook
+on `429` and `500` **only** (`Webhooks::Trigger::RETRYABLE_AGENT_BOT_STATUSES`),
+so any other status would drop the delivery silently. After the three retries
+are spent, Chatwoot's own failure handling opens the conversation and posts
+`agent_bot.error_moved_to_open`, so the customer reaches a human.
+
+**The remaining honest limit.** If the ledger is down for longer than Chatwoot's
+three retries (≈9 seconds), that delivery is not answered by the AI at all. It
+is not lost silently — the conversation is opened to a human by Chatwoot itself,
+and `alertCode: ledger_unavailable_on_ack` fires. Failing closed to a human is
+the intended behaviour, not a gap.
 
 An **ACKed delivery is never retried by Chatwoot**, so `SIGTERM` drains the
 in-flight deliveries before exiting.
@@ -499,7 +560,11 @@ not a second webhook.
    per-binding extras, and a hardcoded five-key attribute allowlist. Anything
    else the code tries to write is dropped by `filterApproved*`.
 
-9. **The de-duplication window is in memory.** See §8.
+9. **De-duplication is durable, in a private Postgres.** See §8. This reverses
+   the original judgement, which was that giving the only publicly-exposed
+   component a database was the worse trade. It was the worse trade only while
+   the alternative was a *filesystem*; a domain-less, port-less store on the
+   container network costs far less than a duplicate reply to a customer.
 
 10. **`/healthz` omits the base URLs.** They are not secrets, but the endpoint is
     unauthenticated and the runtime hostname is internal. They are on
@@ -522,12 +587,13 @@ not a second webhook.
     private note is not a customer message, so it cannot make the gateway
     dishonest to the customer.
 
-14. **`needsRetry` is a flag on the result and the log line, not a queue.** This
-    service has no persistence by design (§8), so "surfaced for retry" means an
+14. **`needsRetry` is a flag, and the ledger is now the retry surface.** An
     error-level log line plus `isola_last_outcome: handoff_blocked` on the
-    conversation — both of which an operator can alert and filter on. Building
-    a durable retry queue would mean giving the only publicly-exposed component
-    a database.
+    conversation are still emitted, but the unfinished work is also a ledger row
+    in `reserved` / `in_progress` with an expired lease, which the recovery
+    sweeper picks up. A write left genuinely ambiguous is deliberately NOT
+    completed, so it stays visible and re-reconcilable rather than being
+    silently written off.
 
 15. **An unsupported `content_type` is mapped to `other`, not carried.** Same
     reasoning as `file_type`: anything that can reach a private note or a log

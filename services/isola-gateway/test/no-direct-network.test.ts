@@ -72,6 +72,25 @@ describe("source scan: exactly one network primitive", () => {
     expect(offenders).toEqual([]);
   });
 
+  /**
+   * The durable ledger gives this service a SECOND outbound primitive: a
+   * Postgres socket to a private, non-exposed host. It is confined the same way
+   * the HTTP primitive is — to exactly one module.
+   */
+  it("the database driver is imported only by src/ledger.ts", () => {
+    const importers = FILES.filter((f) => /from\s+["']pg["']/.test(f.code)).map(
+      (f) => f.rel,
+    );
+    expect(importers).toEqual(["ledger.ts"]);
+  });
+
+  it("no other database or queue driver is imported anywhere", () => {
+    const pattern =
+      /from\s+["'](postgres|mysql2?|ioredis|redis|mongodb|better-sqlite3|sqlite3|amqplib|kafkajs|bullmq)["']/;
+    const offenders = FILES.filter((f) => pattern.test(f.code)).map((f) => f.rel);
+    expect(offenders).toEqual([]);
+  });
+
   it("only server.ts imports node:http, and app.ts imports only its types", () => {
     const importers = FILES.filter((f) => /from\s+["']node:http["']/.test(f.code)).map(
       (f) => f.rel,

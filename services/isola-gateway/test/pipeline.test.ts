@@ -98,6 +98,8 @@ describe("runtime_no_text — the contract violation", () => {
       text: "   \n ",
       outcome: "ok",
       correlationId: "c",
+      completionState: "completed",
+      contractVersion: 1,
     }));
     const { chatwoot } = await run({ runtime });
     expect(chatwoot.customerMessages).toHaveLength(0);

@@ -17,7 +17,7 @@ import {
   renderHandoffNote,
   summariseAttachments,
 } from "../src/handoff.js";
-import { MemoryIdempotencyStore, writeKey } from "../src/idempotency.js";
+import { bindingIdentity } from "../src/deliveryref.js";
 import {
   classifyNoText,
   hasUsableText,
@@ -38,6 +38,8 @@ import {
   CONVERSATION_DISPLAY_ID,
   emptyMessagePayload,
   envConfig,
+  FakeLedger,
+  INBOX_ID,
   makeBinding,
   messageCreatedPayload,
   postWebhook,
@@ -426,28 +428,36 @@ describe("idempotency by the Chatwoot delivery id", () => {
     }
   });
 
-  it("the per-write guard is the SAME store, keyed under the delivery key", async () => {
+  it("every handoff write is claimed in the DURABLE ledger beneath the delivery key", async () => {
     // The second line of defence: even if a duplicate ever reached the
-    // pipeline, each individual write is claimed beneath the delivery key.
-    const store = new MemoryIdempotencyStore({ ttlMs: 60_000, maxEntries: 100 });
+    // pipeline, each individual write is claimed beneath the delivery key —
+    // and that claim now lives in the ledger, so it survives this process.
+    const ledger = new FakeLedger();
     const config = withTeamConfig();
-    const server = await startServer({ config, idempotency: store });
+    const server = await startServer({ config, ledger });
     try {
       await postWebhook(
         server.url,
         signRequest({ body: attachmentOnlyPayload(), deliveryId: "delivery-handoff-2" }),
       );
       await server.gateway.drain();
-      // Claimed already => claim() returns false for each write name.
+
+      const identity = {
+        tenantId: TENANT_ID,
+        bindingId: bindingIdentity(makeBinding()),
+        chatwootAccountId: ACCOUNT_ID,
+        chatwootInboxId: INBOX_ID,
+        eventId: "delivery:delivery-handoff-2",
+      };
       for (const write of [
         "handoff_toggle_status",
         "handoff_assignment",
         "handoff_note",
         "handoff_customer_message",
       ]) {
-        expect(store.claim(writeKey("delivery:delivery-handoff-2", write), Date.now())).toBe(
-          false,
-        );
+        // Already completed => a re-claim reports completed, never `claimed`.
+        const claim = await ledger.claimAction(identity, write, "digest", "c", 60_000);
+        expect(claim.kind).toBe("completed");
       }
     } finally {
       await server.close();

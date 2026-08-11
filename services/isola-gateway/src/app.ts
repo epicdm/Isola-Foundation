@@ -33,12 +33,14 @@ import {
 } from "./bindings.js";
 import { createChatwootApi, type ChatwootApi } from "./chatwoot.js";
 import { configuredBindings, type GatewayConfig } from "./config.js";
-import { createSafeFetch, type SafeFetch } from "./egress.js";
 import {
-  idempotencyKey,
-  MemoryIdempotencyStore,
-  type IdempotencyStore,
-} from "./idempotency.js";
+  bindingIdentity,
+  payloadDigest,
+  type LedgerIdentity,
+} from "./deliveryref.js";
+import { createSafeFetch, type SafeFetch } from "./egress.js";
+import { idempotencyKey } from "./idempotency.js";
+import type { Ledger, ReserveResult } from "./ledger.js";
 import { constantTimeEquals } from "./signature.js";
 import { createLogger, type Logger } from "./log.js";
 import { processDelivery, type DeliveryJob, type DeliveryMode } from "./pipeline.js";
@@ -73,6 +75,21 @@ export type Outcome =
   | "binding_retired"
   | "binding_not_public"
   | "suppressed"
+  /**
+   * The same event id re-presented with a different signed body. Refused with
+   * 409 — not retryable, and alerted on. Chatwoot's own failure handling then
+   * opens the conversation to a human, which is the right place for an anomaly.
+   */
+  | "ledger_conflict"
+  /**
+   * The durable ledger could not record the acceptance. Answered with 500,
+   * which is one of the two statuses Chatwoot actually retries
+   * (`RETRYABLE_AGENT_BOT_STATUSES = [429, 500]`, v4.16.1), so the delivery is
+   * re-offered instead of being silently lost. After the third failed attempt
+   * Chatwoot opens the conversation and posts `agent_bot.error_moved_to_open`,
+   * so the customer reaches a human rather than nothing.
+   */
+  | "ledger_unavailable"
   | "not_found"
   | "method_not_allowed"
   | "no_admin_token_configured";
@@ -166,11 +183,14 @@ export type DeliveryDecision =
        */
       mode: DeliveryMode;
       classification: NoTextClassification | null;
-      /** The key this delivery was claimed under; every write is claimed beneath it. */
-      idempotencyKey: string;
+      /**
+       * The webhook event id. Combined with the tenant, binding and routing
+       * identifiers it forms the ledger's atomic key; every write is claimed
+       * beneath it.
+       */
+      eventId: string;
     }
   | { kind: "reject"; reason: RejectionReason }
-  | { kind: "duplicate" }
   | { kind: "not_deduplicable" }
   | { kind: "bad_request" }
   | { kind: "binding_refused"; outcome: Outcome; detail: Record<string, unknown> }
@@ -180,7 +200,6 @@ export interface DecideArgs {
   raw: Buffer;
   headers: IncomingMessage["headers"];
   bindings: readonly Binding[];
-  idempotency: IdempotencyStore;
   nowMs: number;
   replayWindowSec: number;
 }
@@ -209,10 +228,20 @@ export interface DecideResult {
  *     checked against every secret registered for it, including retired and
  *     (impossible-by-boot-validation) non-PUBLIC ones — so an authentic
  *     delivery to a retired bot is reported as "retired", not as "unauthorized".
- *  3. Idempotency, on `X-Chatwoot-Delivery`, falling back to
+ *  3. Binding resolution to exactly one active PUBLIC binding.
+ *  4. The suppression predicate.
+ *  5. The event id, on `X-Chatwoot-Delivery`, falling back to
  *     (account, conversation, message, event).
- *  4. Binding resolution to exactly one active PUBLIC binding.
- *  5. The suppression predicate.
+ *
+ * Binding resolution now comes BEFORE de-duplication, where it used to come
+ * after. That is forced by the ledger's atomic key, which is scoped by tenant
+ * and binding: you cannot claim a key until you know whose key it is. The
+ * observable consequence is small and strictly more informative — a duplicate
+ * delivery to a retired binding is now reported as `binding_retired` rather
+ * than `duplicate_suppressed`. Both are 200 with nothing done.
+ *
+ * This function stays PURE. The durable reservation is the caller's job,
+ * because it is I/O and it must happen after this decision and before the ACK.
  *
  * A body that cannot be parsed enough to select a secret is `unparseable_body`
  * and is rejected with 401: an unverifiable request is not an authenticated one.
@@ -252,16 +281,6 @@ export function decideDelivery(args: DecideArgs): DecideResult {
   const payload = parseWebhookPayload(args.raw);
   if (payload === null) return at({ kind: "bad_request" });
 
-  const key = idempotencyKey({
-    deliveryId: parseDeliveryHeader(args.headers[DELIVERY_HEADER]),
-    accountId: payload.accountId,
-    conversationId: payload.conversationDisplayId,
-    messageId: payload.messageId,
-    event: payload.event,
-  });
-  if (key === null) return at({ kind: "not_deduplicable" });
-  if (!args.idempotency.claim(key, args.nowMs)) return at({ kind: "duplicate" });
-
   const resolution = resolveBinding(args.bindings, payload.accountId, payload.inboxId);
   switch (resolution.kind) {
     case "not_found":
@@ -295,6 +314,15 @@ export function decideDelivery(args: DecideArgs): DecideResult {
     return at({ kind: "suppressed", reason: verdict.reason, payload });
   }
 
+  const eventId = idempotencyKey({
+    deliveryId: parseDeliveryHeader(args.headers[DELIVERY_HEADER]),
+    accountId: payload.accountId,
+    conversationId: payload.conversationDisplayId,
+    messageId: payload.messageId,
+    event: payload.event,
+  });
+  if (eventId === null) return at({ kind: "not_deduplicable" });
+
   return at({
     kind: "accept",
     binding: resolution.binding,
@@ -303,7 +331,7 @@ export function decideDelivery(args: DecideArgs): DecideResult {
     conversationId: payload.conversationDisplayId as number,
     mode: verdict.action === "handoff" ? "handoff" : "answer",
     classification: verdict.action === "handoff" ? verdict.classification : null,
-    idempotencyKey: key,
+    eventId,
   });
 }
 
@@ -320,7 +348,13 @@ export interface GatewayDeps {
   chatwoot?: ChatwootApi;
   /** Injected in tests; defaults to the real allowlisted isola-runtime client. */
   runtime?: AgentRuntime;
-  idempotency?: IdempotencyStore;
+  /**
+   * The durable delivery ledger. Required: there is no in-memory default any
+   * more, because "the store is missing" must never silently degrade into
+   * "every delivery looks new". `server.ts` builds the real one and refuses to
+   * boot without it; tests inject a fake.
+   */
+  ledger: Ledger;
   safeFetch?: SafeFetch;
   now?: () => number;
   newCorrelationId?: () => string;
@@ -332,6 +366,9 @@ export interface Gateway {
   drain(): Promise<void>;
   inflight(): number;
   bindingStore: BindingStore;
+  /** Exposed so the recovery sweeper reuses the same allowlisted clients. */
+  chatwoot: ChatwootApi;
+  runtime: AgentRuntime;
 }
 
 export function createApp(deps: GatewayDeps): Handler {
@@ -368,12 +405,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
       timeoutMs: config.runtimeTimeoutMs,
     });
 
-  const idempotency =
-    deps.idempotency ??
-    new MemoryIdempotencyStore({
-      ttlMs: config.idempotencyTtlMs,
-      maxEntries: config.idempotencyMaxEntries,
-    });
+  const ledger = deps.ledger;
 
   const inflight = new Set<Promise<unknown>>();
 
@@ -430,7 +462,6 @@ export function createGateway(deps: GatewayDeps): Gateway {
       raw,
       headers: req.headers,
       bindings: bindingStore.list(),
-      idempotency,
       nowMs: now(),
       replayWindowSec: config.replayWindowSec,
     });
@@ -458,11 +489,6 @@ export function createGateway(deps: GatewayDeps): Gateway {
         });
         return;
 
-      case "duplicate":
-        // 200 and absolutely nothing else.
-        finish(200, "duplicate_suppressed");
-        return;
-
       case "binding_refused":
         // 200 so Chatwoot stops retrying; nothing is sent.
         finish(200, decision.outcome, decision.detail);
@@ -488,10 +514,105 @@ export function createGateway(deps: GatewayDeps): Gateway {
         return;
     }
 
+    // ---- DURABLY RESERVE, THEN ACK. ---------------------------------------
+    //
+    // This is the whole point of the ledger. The acceptance is written to a
+    // store that survives this container BEFORE the 200 goes out, so an
+    // acknowledged delivery can never be forgotten by a restart, and a
+    // duplicate arriving after a restart still finds the claim.
+    //
+    // It is one INSERT against a private Postgres on the container network —
+    // single-digit milliseconds, comfortably inside Chatwoot's 5s deadline. No
+    // model call, no Chatwoot call, nothing else happens before the ACK; the
+    // `no Chatwoot or runtime call on the request path` property is unchanged
+    // and still asserted by test/webhook-http.test.ts.
+    const identity: LedgerIdentity = {
+      tenantId: decision.binding.tenantId,
+      bindingId: bindingIdentity(decision.binding),
+      chatwootAccountId: decision.binding.chatwootAccountId,
+      chatwootInboxId: decision.binding.chatwootInboxId,
+      eventId: decision.eventId,
+    };
+    const digest = payloadDigest(raw);
+    const reservedAtMs = now();
+
+    let reservation: ReserveResult;
+    try {
+      reservation = await ledger.reserve({
+        identity,
+        digest,
+        correlationId,
+        conversationId: decision.conversationId,
+        messageId: decision.payload.messageId,
+        mode: decision.mode,
+        leaseMs: config.ledgerLeaseMs,
+      });
+    } catch (err) {
+      // Do NOT acknowledge. A 200 here would tell Chatwoot the delivery is
+      // handled while nothing durable records it — precisely the silent loss
+      // this work exists to prevent. 500 is retryable for an AgentBot webhook,
+      // and after the retries are spent Chatwoot escalates to a human itself.
+      logger.error({
+        event: "webhook",
+        alert: true,
+        alertCode: "ledger_unavailable_on_ack",
+        correlationId,
+        deliveryId,
+        accountId: routing.accountId,
+        inboxId: routing.inboxId,
+        tenantId: decision.binding.tenantId,
+        outcome: "ledger_unavailable",
+        httpStatus: 500,
+        durationMs: now() - startedAt,
+        detail: err instanceof Error ? err.name : "unknown ledger failure",
+      });
+      sendJson(res, 500, correlationId, {
+        ok: false,
+        outcome: "ledger_unavailable",
+        error: "delivery could not be durably recorded; retry",
+      });
+      return;
+    }
+
+    if (reservation.kind === "conflict") {
+      // Same event id, different signed body. Not a retry — a collision or a
+      // tampering attempt. Refuse it and alert; never process it.
+      logger.error({
+        event: "webhook",
+        alert: true,
+        alertCode: "delivery_digest_conflict",
+        correlationId,
+        deliveryId,
+        accountId: routing.accountId,
+        inboxId: routing.inboxId,
+        tenantId: decision.binding.tenantId,
+        outcome: "ledger_conflict",
+        httpStatus: 409,
+        durationMs: now() - startedAt,
+        // Digests only. Neither body is logged.
+        presentedDigest: digest,
+        storedDigest: reservation.storedDigest,
+      });
+      sendJson(res, 409, correlationId, {
+        ok: false,
+        outcome: "ledger_conflict",
+        error: "this delivery id was already recorded with a different payload",
+      });
+      return;
+    }
+
+    if (reservation.kind === "duplicate") {
+      // 200 and absolutely nothing else — now durable across a restart.
+      finish(200, "duplicate_suppressed", { priorState: reservation.state });
+      return;
+    }
+
     const job: DeliveryJob = {
       correlationId,
       deliveryId,
-      idempotencyKey: decision.idempotencyKey,
+      identity,
+      digest,
+      reservedAtEpochSec: Math.floor(reservedAtMs / 1000),
       binding: decision.binding,
       payload: decision.payload,
       conversationId: decision.conversationId,
@@ -500,11 +621,13 @@ export function createGateway(deps: GatewayDeps): Gateway {
       classification: decision.classification,
     };
 
-    // ---- ACK FIRST. Everything below this line is asynchronous. ------------
+    // ---- ACK NOW. Everything below this line is asynchronous. --------------
     // The handoff is on the asynchronous side too: opening, assigning, noting
     // and acknowledging are four Chatwoot round trips, and none of them may be
     // inside Chatwoot's 5s webhook deadline.
     finish(200, "accepted", {
+      reservation: reservation.kind,
+      attempts: reservation.attempts,
       accountId: decision.binding.chatwootAccountId,
       inboxId: decision.binding.chatwootInboxId,
       conversationId: decision.conversationId,
@@ -519,7 +642,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
     });
 
     track(
-      processDelivery({ config, chatwoot, runtime, logger, idempotency, now }, job).catch(
+      processDelivery({ config, chatwoot, runtime, logger, ledger, now }, job).catch(
         (err: unknown) => {
           logger.error({
             event: "delivery",
@@ -538,8 +661,15 @@ export function createGateway(deps: GatewayDeps): Gateway {
     );
   }
 
-  function handleHealth(res: ServerResponse, correlationId: string): void {
+  /**
+   * Reports ledger reachability, but stays 200 while the ledger is down. The
+   * orchestrator must not kill and reschedule this container because its
+   * database blinked — the webhook path already fails closed with a retryable
+   * 500 on its own. `ledger: "unreachable"` is the field to alert on.
+   */
+  async function handleHealth(res: ServerResponse, correlationId: string): Promise<void> {
     const bindings = bindingStore.list();
+    const ledgerHealthy = await ledger.healthy().catch(() => false);
     sendJson(res, 200, correlationId, {
       status: "ok",
       version: SERVICE_VERSION,
@@ -548,6 +678,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
         active: bindings.filter((b) => b.status === "active").length,
         retired: bindings.filter((b) => b.status !== "active").length,
       },
+      ledger: ledgerHealthy ? "ok" : "unreachable",
       egressAllowlist: config.egressAllowlist,
       inflightDeliveries: inflight.size,
     });
@@ -626,7 +757,15 @@ export function createGateway(deps: GatewayDeps): Gateway {
     };
 
     if (method === "GET" && pathname === "/healthz") {
-      handleHealth(res, correlationId);
+      void handleHealth(res, correlationId).catch(() => {
+        if (!res.headersSent) {
+          sendJson(res, 200, correlationId, {
+            status: "ok",
+            version: SERVICE_VERSION,
+            ledger: "unreachable",
+          });
+        }
+      });
       return;
     }
     if (pathname === "/v1/bindings") {
@@ -669,6 +808,8 @@ export function createGateway(deps: GatewayDeps): Gateway {
     handler,
     inflight: () => inflight.size,
     bindingStore,
+    chatwoot,
+    runtime,
     drain: async () => {
       // Deliveries can be started while we wait, so loop until the set drains.
       while (inflight.size > 0) {
