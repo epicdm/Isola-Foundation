@@ -1,0 +1,125 @@
+{
+  "$comment": "Thin Isola sidecar. Holds ONLY the cross-system contract Paperclip does not own.",
+  "templateId": "isola-ai-sales-front-desk-agent",
+  "templateVersion": "v1",
+  "templateKey": "isola-ai-sales-front-desk-agent@v1",
+  "displayName": "Isola AI Sales & Front Desk Agent v1",
+  "epicInstanceName": "EPIC AI Sales & Front Desk Agent",
+  "exposure": "PUBLIC",
+  "exposureFailClosed": "INTERNAL",
+  "lifecycle": "staged-not-ready",
+  "lifecycleReason": "Created paused and unbound. Remains paused until the public-safe runtime proof AND the Chatwoot test-inbox lifecycle both pass. It must not be reported Ready before then.",
+
+  "runtimeProfile": {
+    "kind": "isola-isolated-http-runtime",
+    "adapterType": "http",
+    "service": "isola/isola-runtime (EasyPanel project `isola`)",
+    "credentialClass": "RUNTIME_SECRET_PUBLIC",
+    "timeoutMs": 60000,
+    "synchronous": true,
+    "prohibitedRuntimes": [
+      "the shared unauthenticated Ollama path — PUBLIC/customer input must never be sent to it"
+    ]
+  },
+
+  "toolPolicy": {
+    "shell": false,
+    "filesystem": false,
+    "web": false,
+    "mcp": false,
+    "customTools": false,
+    "paperclipVolume": false,
+    "masterKey": false,
+    "unrelatedCredentials": false,
+    "internalEmployeeContext": false,
+    "enforcedBy": "Separate runtime credential class bound to PUBLIC; the runtime implements no tool mechanism and restricts egress to an explicit allowlist. The INTERNAL employee's bearer returns 403 against this template."
+  },
+
+  "channelRequirements": {
+    "chatwoot": "one Website/API test inbox, via a Chatwoot AgentBot that acts ONLY as the inbox connector",
+    "agentBotIsNotAnEmployee": true,
+    "publicInboxBindingPermitted": "only after the Chatwoot test-inbox lifecycle passes; NOT bound at creation",
+    "internalEmployeeMayBindPublicInbox": false,
+    "meta": "none",
+    "whatsapp": "none",
+    "pbx": "none",
+    "odooWrite": false,
+    "externalChannelProviderSends": "never — replies go out only through the Chatwoot Message API"
+  },
+
+  "approvalThresholds": {
+    "hireRequiresBoardApproval": true,
+    "approvalType": "hire_agent",
+    "budgetMonthlyCents": 1000,
+    "budgetSoftAlertPercent": 80,
+    "budgetHardStopPercent": 100,
+    "activationRequires": [
+      "public-safe runtime proof",
+      "Chatwoot test-inbox takeover/handback lifecycle proof"
+    ]
+  },
+
+  "acceptanceJob": {
+    "name": "Front Desk conversation lifecycle",
+    "inputs": "Synthetic business information plus a synthetic test customer on a controlled Chatwoot Website/API inbox. No real customer data, no real channel.",
+    "passCriteria": [
+      "answers correctly from the supplied synthetic business information",
+      "captures name, contact details and request into Chatwoot",
+      "applies the approved Chatwoot labels and conversation attributes",
+      "recommends an appropriate next step",
+      "escalates to a human on request or when it cannot answer",
+      "is silent while a human owns the conversation",
+      "resumes exactly once after explicit handback, with prior context",
+      "a duplicate webhook delivery produces no duplicate reply",
+      "a runtime timeout produces an honest failure/handoff state and never a fabricated answer"
+    ],
+    "notYetRun": true
+  },
+
+  "escalationAndHandback": {
+    "escalationTriggers": [
+      "customer asks for a human",
+      "customer is upset, or raises a dispute or refund",
+      "the supplied business information does not answer the question",
+      "runtime failure or timeout"
+    ],
+    "escalationAction": "Assign the Chatwoot conversation to the approved human/team, post a private note carrying the captured context, and stop replying.",
+    "suppressionRule": "Chatwoot does NOT suppress the inbox bot when a human is assigned — verified in v4.16.1 (app/listeners/agent_bot_listener.rb:65-77 checks neither status nor assignee). Suppression is the gateway's responsibility. Reply only when conversation.status=='pending' AND meta.assignee is null AND message_type=='incoming' AND private==false AND sender.type!='agent_bot'.",
+    "handbackAction": "A human returns the conversation with toggle_status {\"status\":\"pending\"} (or reassigns assignee_type AgentBot). The gateway then resumes exactly once, keyed on the handback event, not on every subsequent delivery.",
+    "honestFailure": "On bot delivery failure Chatwoot natively re-opens a pending conversation and posts an agent_bot error activity. Use that native mechanism; do not invent a parallel one."
+  },
+
+  "supportBoundary": {
+    "ownedByIsola": [
+      "runtime service, tool/egress policy, exposure credential binding",
+      "the gateway's binding resolution, idempotency and suppression predicate",
+      "template version and promotion"
+    ],
+    "ownedByPaperclip": ["employee record, hire approval, run history, budget"],
+    "ownedByChatwoot": ["the conversation, human takeover, labels, timeline"],
+    "notSupported": [
+      "any write to Odoo",
+      "any Meta/WhatsApp/PBX channel",
+      "any action in an external business system"
+    ]
+  },
+
+  "rollback": {
+    "deactivate": "PATCH /api/agents/{agentId} {\"status\":\"paused\"} — this employee is already paused at creation.",
+    "unbind": "Detach the AgentBot from the inbox (POST .../inboxes/{id}/set_agent_bot with no agent_bot) and mark the registry binding retired. Never delete the Chatwoot inbox, account, user or conversations.",
+    "runtime": "Redeploy the previous isola-runtime image tag, or stop the service — the employee then fails closed and Chatwoot re-opens the conversation to a human.",
+    "credential": "Rotate RUNTIME_SECRET_PUBLIC and re-provision this agent's adapterConfig headers. Rotating it does not affect the INTERNAL employee.",
+    "neverDelete": ["the Paperclip Company", "the agent record", "Chatwoot conversations", "run or activity history"]
+  },
+
+  "provenance": {
+    "controllingDecisions": [
+      "decision-paperclip-native-agent-hiring-workforce-boundary-2026-08-09",
+      "decision-apptension-customer-portal-nocobase-control-plane-2026-08-10",
+      "decision-paperclip-selected-easypanel-canonical-instance-2026-08-10"
+    ],
+    "packet": "xp-isola-signup-to-agent-mvp-2026-08-10",
+    "company": "EPIC Communications Inc / 3ed3869b-463c-4876-8e16-ddc058f06cd9",
+    "instance": "https://isola-ai.saas00.epic.dm"
+  }
+}

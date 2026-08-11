@@ -1,0 +1,50 @@
+schema: paperclip/v1
+# Versioned Paperclip sidecar for the Isola AI Sales & Front Desk Agent employee.
+# Template name : Isola AI Sales & Front Desk Agent
+# EPIC instance : EPIC AI Sales & Front Desk Agent
+
+agent:
+  slug: isola-ai-sales-front-desk-agent
+  name: EPIC AI Sales & Front Desk Agent   # instance name on the EPIC company
+  title: AI Sales & Front Desk Agent
+  role: general
+  reportsTo: ceo
+  capabilities: >-
+    Answers customer questions from approved business information, explains products and
+    services, performs basic lead qualification, captures name/contact/request, recommends
+    a next step, escalates to a human and resumes only after explicit handback. Performs no
+    action in any external system.
+
+  adapterType: http
+
+  adapterConfig:
+    method: POST
+    timeoutMs: 60000          # tighter than INTERNAL: a customer is waiting
+    payloadTemplate:
+      templateId: isola-ai-sales-front-desk-agent@v1
+      exposure: PUBLIC
+    # url and headers.Authorization injected at provision time. The bearer is bound to the
+    # PUBLIC exposure class; the INTERNAL bearer cannot invoke this template and vice versa.
+
+  runtimeConfig:
+    heartbeat:
+      enabled: false          # timer heartbeats disabled; this employee is event-driven only
+      wakeOnDemand: true
+      intervalSec: 300
+      cooldownSec: 10
+      maxConcurrentRuns: 1
+
+  budgetMonthlyCents: 1000
+
+  # STAGED, NOT READY. Created paused and unbound. It stays paused until BOTH the
+  # public-safe runtime proof and the Chatwoot test-inbox lifecycle pass.
+  status: paused
+  pauseReason: manual
+
+  metadata:
+    isolaTemplateId: isola-ai-sales-front-desk-agent
+    isolaTemplateVersion: v1
+    isolaExposure: PUBLIC
+    isolaDepartment: Customer Experience
+    isolaLifecycle: staged-not-ready
+    isolaManagedBy: xp-isola-signup-to-agent-mvp-2026-08-10

@@ -1,0 +1,54 @@
+schema: paperclip/v1
+# Versioned Paperclip sidecar for the EPIC Staff Operations Coordinator employee.
+# Consumed by the Isola provisioning script; mirrors what is sent to
+# POST /api/companies/{companyId}/agent-hires on the canonical instance.
+#
+# NOTE: `schema:` is written by Paperclip's exporter but is NOT validated on import at
+# the deployed commit 8af38fb (one writer, zero readers). It is recorded for provenance,
+# not relied on.
+
+agent:
+  slug: epic-staff-operations-coordinator
+  name: EPIC Staff Operations Coordinator
+  title: Staff Operations Coordinator — Internal Operations
+  role: general
+  reportsTo: ceo
+  capabilities: >-
+    Reads a human-supplied internal operations fixture and returns a prioritised,
+    decision-ready action list. Analysis and recommendation only; performs no action
+    in any external system.
+
+  # The isolated Isola runtime. Chosen because native OpenCode could not be made
+  # fail-closed on tool permissions at this deployed commit — defaults are
+  # allow-by-default, the adapterConfig merge has no floor, and an agent can PATCH
+  # its own adapterConfig. Containment therefore comes from the container boundary.
+  adapterType: http
+
+  adapterConfig:
+    method: POST
+    # timeoutMs, NOT timeoutSec. docs/adapters/http.md:25 is wrong; the code reads
+    # timeoutMs (server/src/adapters/http/execute.ts:10,16) and 0/absent means NO timeout.
+    timeoutMs: 90000
+    payloadTemplate:
+      templateId: epic-staff-operations-coordinator@v1
+      exposure: INTERNAL
+    # url and headers.Authorization are injected at provision time from the approved
+    # secret store. The bearer is bound to the INTERNAL exposure class in the runtime,
+    # so possession of it cannot invoke a PUBLIC template.
+
+  runtimeConfig:
+    heartbeat:
+      enabled: false          # timer heartbeats disabled initially, per the hiring ruling
+      wakeOnDemand: true
+      intervalSec: 300
+      cooldownSec: 10
+      maxConcurrentRuns: 1
+
+  budgetMonthlyCents: 1000    # hard stop at 100%; soft alert at 80% (native Paperclip)
+
+  metadata:
+    isolaTemplateId: epic-staff-operations-coordinator
+    isolaTemplateVersion: v1
+    isolaExposure: INTERNAL
+    isolaDepartment: Internal Operations
+    isolaManagedBy: xp-isola-signup-to-agent-mvp-2026-08-10

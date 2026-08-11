@@ -1,0 +1,122 @@
+{
+  "$comment": "Thin Isola sidecar. Holds ONLY the cross-system contract Paperclip does not own. It must never duplicate Paperclip workforce state, Chatwoot conversations or Odoo records.",
+  "templateId": "epic-staff-operations-coordinator",
+  "templateVersion": "v1",
+  "templateKey": "epic-staff-operations-coordinator@v1",
+  "displayName": "EPIC Staff Operations Coordinator v1",
+  "exposure": "INTERNAL",
+  "exposureFailClosed": "INTERNAL",
+
+  "runtimeProfile": {
+    "kind": "isola-isolated-http-runtime",
+    "adapterType": "http",
+    "service": "isola/isola-runtime (EasyPanel project `isola`)",
+    "credentialClass": "RUNTIME_SECRET_INTERNAL",
+    "timeoutMs": 90000,
+    "synchronous": true,
+    "ration": "Native OpenCode failed the fail-closed tool-permission requirement at deployed commit 8af38fb. Owner ruling 2026-08-11: do not re-evaluate.",
+    "modelProvider": "OpenAI-compatible endpoint configured on the runtime service; NOT the shared unauthenticated Ollama path."
+  },
+
+  "toolPolicy": {
+    "shell": false,
+    "filesystem": false,
+    "web": false,
+    "mcp": false,
+    "customTools": false,
+    "paperclipVolume": false,
+    "masterKey": false,
+    "unrelatedCredentials": false,
+    "enforcedBy": "The runtime service implements no tool mechanism at all and restricts egress to an explicit host allowlist. Enforcement is the container/network boundary, NOT a Paperclip setting — Paperclip's adapterConfig merge cannot enforce a restriction."
+  },
+
+  "channelRequirements": {
+    "chatwoot": "none",
+    "publicInboxBindingPermitted": false,
+    "externalSends": "none",
+    "meta": "none",
+    "whatsapp": "none",
+    "pbx": "none",
+    "odooWrite": false
+  },
+
+  "approvalThresholds": {
+    "hireRequiresBoardApproval": true,
+    "nativeMechanism": "company.requireBoardApprovalForNewAgents=true forces POST /api/companies/{id}/agent-hires; direct POST /agents returns 409.",
+    "approvalType": "hire_agent",
+    "budgetMonthlyCents": 1000,
+    "budgetSoftAlertPercent": 80,
+    "budgetHardStopPercent": 100,
+    "anyCustomerContact": "requires human approval — the employee may only recommend"
+  },
+
+  "acceptanceJob": {
+    "name": "Overdue Receivables Action List",
+    "inputs": "A synthetic overdue-invoice fixture supplied in the run context. No real customer data.",
+    "requiredColumns": [
+      "account/customer reference",
+      "balance",
+      "days overdue",
+      "priority",
+      "recommended next action",
+      "escalation reason",
+      "requires human approval"
+    ],
+    "mustNot": [
+      "contact anyone",
+      "update any record",
+      "claim an action was performed",
+      "invent rows when the fixture is missing or unparseable"
+    ],
+    "passCriteria": [
+      "exactly one employee exists after provisioning",
+      "a provisioning retry returns the existing employee and creates no duplicate",
+      "one synthetic run completes",
+      "the output is recorded in Paperclip",
+      "prohibited capabilities are unavailable",
+      "failure and timeout states are truthful",
+      "no cross-company access occurs",
+      "native approval and activity history are retained"
+    ]
+  },
+
+  "escalationAndHandback": {
+    "applicable": false,
+    "reason": "INTERNAL analysis-only employee. It has no conversation surface, so there is no takeover or handback lifecycle. Escalation is expressed as a column in its output for a human to act on."
+  },
+
+  "supportBoundary": {
+    "ownedByIsola": [
+      "runtime service availability and its tool/egress policy",
+      "template version and its promotion",
+      "exposure classification and the credential binding that enforces it"
+    ],
+    "ownedByPaperclip": [
+      "employee record, org placement, hire approval",
+      "run history, activity log, budget accounting"
+    ],
+    "notSupported": [
+      "any action in an external business system",
+      "any customer-facing communication"
+    ]
+  },
+
+  "rollback": {
+    "deactivate": "PATCH /api/agents/{agentId} with {\"status\":\"paused\"} — reversible, preserves history.",
+    "retire": "Set metadata.isolaLifecycle=retired and pause. Do NOT delete the agent; Paperclip has no company DELETE enabled and agent history is the audit trail.",
+    "runtime": "Redeploy the previous isola-runtime image tag, or stop the service. Stopping fails the employee closed: runs error truthfully rather than producing unsupervised output.",
+    "credential": "Rotate RUNTIME_SECRET_INTERNAL in the runtime service env and re-provision the agent's adapterConfig headers.",
+    "neverDelete": ["the Paperclip Company", "the agent record", "run or activity history"]
+  },
+
+  "provenance": {
+    "controllingDecisions": [
+      "decision-paperclip-native-agent-hiring-workforce-boundary-2026-08-09",
+      "decision-apptension-customer-portal-nocobase-control-plane-2026-08-10",
+      "decision-paperclip-selected-easypanel-canonical-instance-2026-08-10"
+    ],
+    "packet": "xp-isola-signup-to-agent-mvp-2026-08-10",
+    "company": "EPIC Communications Inc / 3ed3869b-463c-4876-8e16-ddc058f06cd9",
+    "instance": "https://isola-ai.saas00.epic.dm (EasyPanel project isola, service ai, image ghcr.io/paperclipai/paperclip:sha-8af38fb)"
+  }
+}
