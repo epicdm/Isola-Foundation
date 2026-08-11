@@ -339,6 +339,7 @@ time even though boot validation already rejects them.
 | `GATEWAY_LEDGER_RECOVERY_INTERVAL_MS` | `60000` | How often the sweeper looks for expired leases. |
 | `GATEWAY_LEDGER_RECOVERY_BATCH` | `20` | Maximum deliveries recovered per sweep. |
 | `GATEWAY_LEDGER_REQUIRED` | `true` | Set false only for a deliberate, temporary run without durability. |
+| `GATEWAY_FAILPOINT` | *(unset)* | **TEST-ONLY, never set in production.** Names one deterministic failpoint; the process terminates there. The only accepted value is `after_chatwoot_commit_before_ledger_complete`, which fires after Chatwoot has committed a message and before the ledger records it. Any other non-empty value **refuses the boot** rather than being ignored, so a typo cannot look like "disarmed". When armed it is reported on `/healthz` as `failpoint` and shouted about at boot. See §8. |
 | `GATEWAY_IDEMPOTENCY_TTL_MS` | `86400000` | Retained for compatibility; the ledger has no TTL. |
 | `GATEWAY_IDEMPOTENCY_MAX_ENTRIES` | `50000` | Retained for compatibility; the ledger has no entry cap. |
 | `GATEWAY_APPLY_LABELS` | `true` | Apply the outcome label (read-modify-write). |
@@ -456,6 +457,26 @@ the intended behaviour, not a gap.
 
 An **ACKed delivery is never retried by Chatwoot**, so `SIGTERM` drains the
 in-flight deliveries before exiting.
+
+### Proving the crash window
+
+One property cannot be proven by timing: the window between Chatwoot committing
+a message and the ledger recording that it did. It is a couple of hundred
+milliseconds wide, and every fault lever available on this platform (SIGTERM,
+stopping a service, stopping the database) acts more slowly than a whole
+delivery completes — four separate attempts to hit it by wall clock all failed,
+each for a different reason.
+
+So the window is made explicit rather than raced. `GATEWAY_FAILPOINT`
+(`src/failpoint.ts`) names it, and the process terminates there. The proof runs
+on an **isolated deployment** with its own ledger database, never on the
+production gateway, and is torn down afterwards.
+
+Disarmed, the failpoint is a single call that returns immediately. Nothing on
+the production path was loosened, delayed or made more permissive to make the
+test reproducible — `test/failpoint.test.ts` asserts a production-shaped
+environment yields `null`, and that an unknown name refuses the boot instead of
+silently disarming.
 
 ---
 

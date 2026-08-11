@@ -32,6 +32,7 @@ import {
   type HandoffFailedStep,
 } from "./handoff.js";
 import { DELIVERY_ACTION, type LedgerIdentity } from "./deliveryref.js";
+import type { Failpoint } from "./failpoint.js";
 import type { Ledger } from "./ledger.js";
 import type { Logger } from "./log.js";
 import type { AgentRuntime } from "./runtime.js";
@@ -190,6 +191,8 @@ export interface PipelineDeps {
   logger: Logger;
   /** The same durable ledger the webhook path reserved the delivery in. */
   ledger: Ledger;
+  /** Test-only; `DISARMED` in every production deployment. */
+  failpoint: Failpoint;
   now: () => number;
 }
 
@@ -229,6 +232,7 @@ export async function processDelivery(
     ledger: deps.ledger,
     logger: deps.logger,
     leaseMs: deps.config.ledgerLeaseMs,
+    failpoint: deps.failpoint,
   };
   const writes: WriteContext = {
     identity: job.identity,

@@ -24,7 +24,13 @@
 import type { Binding, BindingStore } from "./bindings.js";
 import type { ChatwootApi } from "./chatwoot.js";
 import type { GatewayConfig } from "./config.js";
-import { bindingIdentity, DELIVERY_ACTION, type LedgerIdentity } from "./deliveryref.js";
+import {
+  bindingIdentity,
+  DELIVERY_ACTION,
+  deliveryRef,
+  type LedgerIdentity,
+} from "./deliveryref.js";
+import type { Failpoint } from "./failpoint.js";
 import type { Ledger, RecoverableDelivery } from "./ledger.js";
 import type { Logger } from "./log.js";
 import { processDelivery, type DeliveryJob } from "./pipeline.js";
@@ -46,6 +52,8 @@ export interface RecoveryDeps {
   chatwoot: ChatwootApi;
   runtime: AgentRuntime;
   logger: Logger;
+  /** Test-only; `DISARMED` in every production deployment. */
+  failpoint: Failpoint;
   now: () => number;
 }
 
@@ -233,6 +241,41 @@ export function createSweeper(deps: RecoveryDeps): Sweeper {
       accessToken: binding.agentBotAccessToken,
     };
 
+    // ---- Did this delivery already answer? --------------------------------
+    //
+    // Ask FIRST, before trying to rebuild the inbound message. If the process
+    // died between Chatwoot committing the reply and the ledger recording it,
+    // the reply is already in the conversation and the delivery is done — it
+    // must be closed out, not re-run.
+    //
+    // Asking first is also the only thing that works: a bot can see just the
+    // newest message and the newest non-activity message, so once our own
+    // reply is the newest, the inbound message it answered is no longer
+    // visible and `rebuildPayload` would abandon the row. Reconciling first
+    // resolves that case correctly instead of losing it.
+    if (row.mode !== "handoff") {
+      const already = await deps.chatwoot.reconcileDeliveryRef(
+        target,
+        deliveryRef(identity, "reply"),
+        row.messageId,
+      );
+      if (already.kind === "found") {
+        deps.logger.warn({
+          event: "recovery",
+          outcome: "resolved_already_delivered",
+          correlationId: row.correlationId,
+          tenantId: row.tenantId,
+          conversationId: row.conversationId,
+          chatwootMessageId: already.messageId,
+          detail:
+            "the reply was already in Chatwoot; the ledger had not recorded it. Completed without sending.",
+        });
+        await deps.ledger.complete(identity, "reply", already.messageId);
+        await deps.ledger.complete(identity, DELIVERY_ACTION, null);
+        return true;
+      }
+    }
+
     // Re-read the conversation from the system that owns it.
     let record: unknown;
     try {
@@ -315,6 +358,7 @@ export function createSweeper(deps: RecoveryDeps): Sweeper {
         runtime: deps.runtime,
         logger: deps.logger,
         ledger: deps.ledger,
+        failpoint: deps.failpoint,
         now: deps.now,
       },
       job,

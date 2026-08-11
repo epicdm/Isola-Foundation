@@ -36,6 +36,19 @@ for (const warning of bootWarnings(config)) {
   logger.warn({ event: "boot_warning", outcome: "boot_warning", detail: warning });
 }
 
+// A failpoint name that is set but unknown is refused outright. Treating a
+// typo as "disarmed" would be the worst of both worlds: the operator believes a
+// failpoint is armed and it silently is not, or vice versa.
+if (config.failpoint === "unrecognised") {
+  logger.error({
+    event: "boot",
+    outcome: "boot_refused",
+    detail:
+      "GATEWAY_FAILPOINT is set to an unknown failpoint name; refusing to start rather than run with a typo that looks disarmed",
+  });
+  process.exit(1);
+}
+
 // The ledger is the second boot gate. Without it an acknowledged delivery
 // cannot be durably recorded, which is the exact failure mode this service was
 // changed to remove — so an unconfigured ledger refuses to start rather than
@@ -94,6 +107,7 @@ const sweeper = createSweeper({
   bindingStore: gateway.bindingStore,
   chatwoot: gateway.chatwoot,
   runtime: gateway.runtime,
+  failpoint: gateway.failpoint,
   logger,
   now: () => Date.now(),
 });

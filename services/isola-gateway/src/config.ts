@@ -7,6 +7,7 @@
  */
 import { hostOf, parseAllowlist } from "./egress.js";
 import { parseBindings, type Binding, type BindingParseResult } from "./bindings.js";
+import { isFailpointName, type FailpointName } from "./failpoint.js";
 
 export interface GatewayConfig {
   port: number;
@@ -53,6 +54,14 @@ export interface GatewayConfig {
   ledgerRecoveryBatch: number;
   /** Set false ONLY for a deliberate, temporary, in-memory-only fallback. */
   ledgerRequired: boolean;
+
+  /**
+   * A named, test-only failpoint (see `src/failpoint.ts`). `null` in every
+   * production deployment. `unrecognised` when the variable was set to
+   * something that is not a known failpoint — refused at boot rather than
+   * silently ignored, so a typo can never look like "disarmed".
+   */
+  failpoint: FailpointName | null | "unrecognised";
 
   applyLabels: boolean;
   applyCustomAttributes: boolean;
@@ -118,6 +127,17 @@ function stripTrailingSlash(url: string): string {
   return url.replace(/\/+$/, "");
 }
 
+/**
+ * An unset or empty `GATEWAY_FAILPOINT` is the only thing that means "off".
+ * Anything set but unrecognised is reported as `unrecognised` so `server.ts`
+ * can refuse to boot: a typo must never be indistinguishable from disarmed.
+ */
+function readFailpoint(env: EnvRecord): FailpointName | null | "unrecognised" {
+  const raw = str(env, "GATEWAY_FAILPOINT");
+  if (raw === null) return null;
+  return isFailpointName(raw) ? raw : "unrecognised";
+}
+
 export function loadConfig(env: EnvRecord): GatewayConfig {
   const chatwootBaseUrl = stripTrailingSlash(
     str(env, "CHATWOOT_BASE_URL") ?? DEFAULT_CHATWOOT_BASE_URL,
@@ -173,6 +193,8 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
       DEFAULT_LEDGER_RECOVERY_BATCH,
     ),
     ledgerRequired: bool(env, "GATEWAY_LEDGER_REQUIRED", true),
+
+    failpoint: readFailpoint(env),
 
     applyLabels: bool(env, "GATEWAY_APPLY_LABELS", true),
     applyCustomAttributes: bool(env, "GATEWAY_APPLY_CUSTOM_ATTRIBUTES", true),
@@ -244,6 +266,15 @@ export function bootWarnings(config: GatewayConfig): string[] {
       config.ledgerRequired
         ? "GATEWAY_LEDGER_URL is unset: the durable delivery ledger cannot be reached, so an acknowledged webhook could not be recorded. The service will refuse to start."
         : "GATEWAY_LEDGER_URL is unset and GATEWAY_LEDGER_REQUIRED is false: de-duplication is in memory only and will NOT survive a container replacement.",
+    );
+  }
+  if (config.failpoint === "unrecognised") {
+    warnings.push(
+      "GATEWAY_FAILPOINT is set to a value that is not a known failpoint. The service will refuse to start rather than run with a typo that looks disarmed.",
+    );
+  } else if (config.failpoint !== null) {
+    warnings.push(
+      `GATEWAY_FAILPOINT is ARMED (${config.failpoint}). This is a TEST-ONLY build configuration: the process will deliberately terminate mid-delivery. It must never be set on a production deployment.`,
     );
   }
   if (config.ledgerLeaseMs <= config.runtimeTimeoutMs) {

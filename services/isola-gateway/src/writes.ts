@@ -23,6 +23,7 @@
  */
 import type { ChatwootApi, ChatwootTarget } from "./chatwoot.js";
 import { deliveryRef, type LedgerIdentity } from "./deliveryref.js";
+import { DISARMED, type Failpoint } from "./failpoint.js";
 import type { Ledger } from "./ledger.js";
 import { LedgerUnavailableError } from "./ledger.js";
 import type { Logger } from "./log.js";
@@ -32,7 +33,11 @@ export interface WriteDeps {
   ledger: Ledger;
   logger: Logger;
   leaseMs: number;
+  /** Test-only; `DISARMED` everywhere else. See src/failpoint.ts. */
+  failpoint: Failpoint;
 }
+
+export { DISARMED };
 
 export interface WriteContext {
   identity: LedgerIdentity;
@@ -191,6 +196,21 @@ export async function sendGuardedMessage(
     });
     return { kind: "ambiguous", detail: reconciled.detail };
   }
+
+  // ---- THE CRASH WINDOW --------------------------------------------------
+  // Chatwoot has committed the message and returned its id; the ledger does
+  // not know yet. Everything between here and `settle` is the ambiguity that
+  // reconciliation exists to resolve, and it is far too narrow to hit with
+  // wall-clock fault injection. The failpoint makes it deterministic.
+  //
+  // Disarmed in production, where this is a no-op call that returns
+  // immediately. See src/failpoint.ts.
+  await deps.failpoint.trip("after_chatwoot_commit_before_ledger_complete", {
+    ...context.base,
+    correlationId: context.correlationId,
+    action,
+    chatwootMessageId: messageId,
+  });
 
   // ---- 5. record ---------------------------------------------------------
   await settle(deps, context, action, messageId);

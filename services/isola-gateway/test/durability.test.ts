@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest";
 
 import { bindingIdentity, deliveryRef, payloadDigest } from "../src/deliveryref.js";
 import { ChatwootApiError } from "../src/errors.js";
+import { DISARMED } from "../src/failpoint.js";
 import { createSweeper } from "../src/recovery.js";
 import {
   ACCOUNT_ID,
@@ -168,6 +169,7 @@ describe("3. a restart after durable enqueue but before processing", () => {
       chatwoot,
       runtime,
       logger: logger.logger,
+      failpoint: DISARMED,
       now: () => Date.now(),
     });
 
@@ -209,6 +211,7 @@ describe("3. a restart after durable enqueue but before processing", () => {
       chatwoot,
       runtime,
       logger: logger.logger,
+      failpoint: DISARMED,
       now: () => Date.now(),
     });
     await sweeper.sweep();
@@ -252,6 +255,7 @@ describe("3. a restart after durable enqueue but before processing", () => {
       chatwoot,
       runtime,
       logger: logger.logger,
+      failpoint: DISARMED,
       now: () => Date.now(),
     }).sweep();
 
@@ -260,6 +264,94 @@ describe("3. a restart after durable enqueue but before processing", () => {
     expect(logger.withOutcome("suppressed_on_resume")[0]?.["suppressionReason"]).toBe(
       "human_assigned",
     );
+  });
+});
+
+describe("4a. the crash window itself, made deterministic by the failpoint", () => {
+  it("recovery resolves an already-delivered reply without sending a second one", async () => {
+    // This is the deployed proof, in miniature: the process dies between
+    // Chatwoot committing the reply and the ledger recording it. The reply row
+    // is left claimed, the message IS in Chatwoot, and the sweeper must
+    // reconcile rather than re-send.
+    const ledger = new FakeLedger();
+    const chatwoot = new StubChatwootApi();
+    chatwoot.conversationRecord = conversationRecord();
+    const runtime = StubAgentRuntime.answering("Nine to five.");
+    const logger = new CapturingLogger();
+
+    // The delivery reserved, and the reply action was claimed and never
+    // completed — exactly the state the failpoint leaves behind.
+    await ledger.reserve({
+      identity: IDENTITY,
+      digest: "digest-1",
+      correlationId: "corr-1",
+      conversationId: CONVERSATION_DISPLAY_ID,
+      messageId: MESSAGE_ID,
+      mode: "answer",
+      leaseMs: 60_000,
+    });
+    await ledger.claimAction(IDENTITY, "reply", "digest-1", "corr-1", 60_000);
+
+    // Chatwoot HAS the reply, carrying the deterministic ref.
+    const ref = deliveryRef(IDENTITY, "reply");
+    chatwoot.stored.set(ref, { id: 4242, createdAt: 1_786_459_100 });
+
+    ledger.expireAllLeases();
+
+    const resumed = await createSweeper({
+      config: envConfig(),
+      ledger,
+      bindingStore: { list: () => [makeBinding()] },
+      chatwoot,
+      runtime,
+      logger: logger.logger,
+      failpoint: DISARMED,
+      now: () => Date.now(),
+    }).sweep();
+
+    expect(resumed).toBe(1);
+    // The model was never called again and nothing was posted again.
+    expect(runtime.requests).toHaveLength(0);
+    expect(chatwoot.messages).toHaveLength(0);
+
+    const line = logger.withOutcome("resolved_already_delivered")[0];
+    expect(line).toBeDefined();
+    expect(line?.["chatwootMessageId"]).toBe(4242);
+  });
+
+  it("still answers when the reply is genuinely absent, not merely unrecorded", async () => {
+    // The mirror case: same claimed-but-incomplete state, but Chatwoot does
+    // NOT have the message. Recovery must go on to answer.
+    const ledger = new FakeLedger();
+    const chatwoot = new StubChatwootApi();
+    chatwoot.conversationRecord = conversationRecord();
+    const runtime = StubAgentRuntime.answering("Nine to five.");
+    const logger = new CapturingLogger();
+
+    await ledger.reserve({
+      identity: IDENTITY,
+      digest: "digest-1",
+      correlationId: "corr-1",
+      conversationId: CONVERSATION_DISPLAY_ID,
+      messageId: MESSAGE_ID,
+      mode: "answer",
+      leaseMs: 60_000,
+    });
+    ledger.expireAllLeases();
+
+    await createSweeper({
+      config: envConfig(),
+      ledger,
+      bindingStore: { list: () => [makeBinding()] },
+      chatwoot,
+      runtime,
+      logger: logger.logger,
+      failpoint: DISARMED,
+      now: () => Date.now(),
+    }).sweep();
+
+    expect(runtime.requests).toHaveLength(1);
+    expect(chatwoot.customerMessages).toHaveLength(1);
   });
 });
 

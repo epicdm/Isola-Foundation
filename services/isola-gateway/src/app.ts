@@ -39,6 +39,7 @@ import {
   type LedgerIdentity,
 } from "./deliveryref.js";
 import { createSafeFetch, type SafeFetch } from "./egress.js";
+import { createFailpoint, DISARMED, type Failpoint } from "./failpoint.js";
 import { idempotencyKey } from "./idempotency.js";
 import type { Ledger, ReserveResult } from "./ledger.js";
 import { constantTimeEquals } from "./signature.js";
@@ -356,6 +357,11 @@ export interface GatewayDeps {
    */
   ledger: Ledger;
   safeFetch?: SafeFetch;
+  /**
+   * Test-only. Defaults to the env-configured failpoint, which is DISARMED in
+   * every production deployment.
+   */
+  failpoint?: Failpoint;
   now?: () => number;
   newCorrelationId?: () => string;
 }
@@ -369,6 +375,7 @@ export interface Gateway {
   /** Exposed so the recovery sweeper reuses the same allowlisted clients. */
   chatwoot: ChatwootApi;
   runtime: AgentRuntime;
+  failpoint: Failpoint;
 }
 
 export function createApp(deps: GatewayDeps): Handler {
@@ -406,6 +413,15 @@ export function createGateway(deps: GatewayDeps): Gateway {
     });
 
   const ledger = deps.ledger;
+
+  // `config.failpoint` is `"unrecognised"` only when the variable was set to
+  // something unknown, and `server.ts` refuses to boot on that — so by the time
+  // a gateway is constructed it is a real name or null.
+  const failpoint =
+    deps.failpoint ??
+    (config.failpoint === null || config.failpoint === "unrecognised"
+      ? DISARMED
+      : createFailpoint({ armed: config.failpoint, logger }));
 
   const inflight = new Set<Promise<unknown>>();
 
@@ -640,7 +656,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
     });
 
     track(
-      processDelivery({ config, chatwoot, runtime, logger, ledger, now }, job).catch(
+      processDelivery({ config, chatwoot, runtime, logger, ledger, failpoint, now }, job).catch(
         (err: unknown) => {
           logger.error({
             event: "delivery",
@@ -677,6 +693,8 @@ export function createGateway(deps: GatewayDeps): Gateway {
         retired: bindings.filter((b) => b.status !== "active").length,
       },
       ledger: ledgerHealthy ? "ok" : "unreachable",
+      // Impossible to run an armed failpoint unnoticed.
+      failpoint: failpoint.armed,
       egressAllowlist: config.egressAllowlist,
       inflightDeliveries: inflight.size,
     });
@@ -808,6 +826,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
     bindingStore,
     chatwoot,
     runtime,
+    failpoint,
     drain: async () => {
       // Deliveries can be started while we wait, so loop until the set drains.
       while (inflight.size > 0) {
