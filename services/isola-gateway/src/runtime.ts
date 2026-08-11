@@ -2,7 +2,9 @@
  * The isola-runtime client — and the one place the open contract lives.
  *
  * ===========================================================================
- * DEPENDENCY: `responseMode: "inline"` IS NOT IMPLEMENTED IN isola-runtime YET
+ * isola-runtime implements `responseMode: "inline"` as of contract v1
+ * (runtime v1.1.0). It returns the answer in `answerText`, byte-identical to
+ * the text it persisted to Paperclip.
  * ===========================================================================
  *
  * isola-runtime posts the employee's output to Paperclip; it does NOT return
@@ -10,11 +12,10 @@
  * this client sends `responseMode: "inline"` and reads the answer out of the
  * response body:
  *
- *     data.text ?? data.content ?? data.message ?? null
+ *     data.answerText ?? data.text ?? data.content ?? data.message ?? null
  *
- * Until isola-runtime honours `responseMode`, every successful invocation will
- * come back with `text === null`, which this gateway classifies as
- * `runtime_no_text`: a CONTRACT VIOLATION. On that outcome the pipeline posts
+ * If a run reports success but carries no usable string, this gateway
+ * classifies it as `runtime_no_text`: a CONTRACT VIOLATION. On that outcome the pipeline posts
  * no customer message at all and escalates to a human. It never invents a
  * reply, and it never re-uses the runtime's error strings as an answer.
  *
@@ -84,11 +85,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * The inline-response reader. Deliberately narrow: only a non-empty string in
- * one of the three agreed fields counts as an answer.
+ * one of the agreed fields counts as an answer.
+ *
+ * `answerText` is the field isola-runtime actually returns (contract v1). The
+ * other three were provisional names written before the runtime implemented the
+ * contract; they are kept as a tolerant fallback but must never be preferred
+ * over `answerText`.
+ *
+ * A failed inline run returns `answerText: null` with a truthful
+ * `completionState`, so "no usable string here" is the runtime telling us it has
+ * no answer — never a reason to substitute one.
  */
+export const INLINE_TEXT_FIELDS = ["answerText", "text", "content", "message"] as const;
+
 export function readInlineText(payload: unknown): string | null {
   if (!isRecord(payload)) return null;
-  for (const key of ["text", "content", "message"]) {
+  for (const key of INLINE_TEXT_FIELDS) {
     const value = payload[key];
     if (typeof value === "string" && value.trim().length > 0) return value;
   }

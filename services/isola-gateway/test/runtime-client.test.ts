@@ -151,3 +151,39 @@ describe("what the gateway reads back", () => {
     expect(outcomeForStatus(418)).toBe("runtime_error");
   });
 });
+
+/**
+ * Regression: the gateway originally read `text`/`content`/`message`, but
+ * isola-runtime returns the answer in `answerText`. Live, that mismatch made
+ * every successful run look like a contract violation — the gateway escalated
+ * to a human instead of replying. It failed safe, but it never answered.
+ */
+describe("inline text field — answerText is the real contract", () => {
+  it("reads answerText, which is what isola-runtime actually returns", () => {
+    expect(readInlineText({ answerText: "the answer" })).toBe("the answer");
+  });
+
+  it("prefers answerText over the provisional field names", () => {
+    expect(
+      readInlineText({ answerText: "correct", text: "stale", content: "stale", message: "stale" }),
+    ).toBe("correct");
+  });
+
+  it("still tolerates the provisional names if answerText is absent", () => {
+    expect(readInlineText({ text: "fallback" })).toBe("fallback");
+    expect(readInlineText({ content: "fallback" })).toBe("fallback");
+    expect(readInlineText({ message: "fallback" })).toBe("fallback");
+  });
+
+  it("treats a null or blank answerText as no answer — never substitutes one", () => {
+    // This is the shape of EVERY failed inline run: answerText null plus a
+    // truthful completionState. It must never become a customer reply.
+    expect(readInlineText({ answerText: null, completionState: "timeout" })).toBeNull();
+    expect(readInlineText({ answerText: "   ", completionState: "completed" })).toBeNull();
+    expect(readInlineText({ completionState: "provider_error" })).toBeNull();
+  });
+
+  it("never mistakes an error string for an answer", () => {
+    expect(readInlineText({ answerText: null, error: "model_timeout_after_60000ms" })).toBeNull();
+  });
+});
