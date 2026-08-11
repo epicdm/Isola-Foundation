@@ -41,6 +41,14 @@ export interface RuntimeConfig {
   // ---- callbacks and the loop fix ----------------------------------------
   handoff: HandoffPolicy;
 
+  /**
+   * RUNTIME_CONVERSATION_ISSUES. When a run carries a conversation reference but
+   * no issue id, create-or-get a Paperclip issue for that conversation so the
+   * output has somewhere to be persisted. Off restores the previous behaviour
+   * exactly: such a run cannot persist and is reported `persistence_failed`.
+   */
+  conversationIssues: boolean;
+
   // ---- metering ----------------------------------------------------------
   /** Cost-event `provider`. Derived from MODEL_BASE_URL unless set. */
   modelProvider: string;
@@ -219,6 +227,8 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
       reviewAssigneeUserId: str(env, "PAPERCLIP_REVIEW_ASSIGNEE_USER_ID") ?? null,
     }),
 
+    conversationIssues: bool(env, "RUNTIME_CONVERSATION_ISSUES", true),
+
     modelProvider: str(env, "MODEL_PROVIDER") ?? deriveProvider(modelBaseUrl),
     rateOverrides: Object.freeze({
       inputPerMtokCents: price(env, "MODEL_PRICE_INPUT_PER_MTOK_CENTS"),
@@ -310,6 +320,11 @@ export function bootWarnings(config: RuntimeConfig): string[] {
   ) {
     warnings.push(
       "No employee agent API key is configured (PAPERCLIP_AGENT_KEY_INTERNAL / PAPERCLIP_AGENT_KEY_PUBLIC / PAPERCLIP_API_KEY): comments, issue transitions and cost events will all be skipped, and the run loop will not be broken.",
+    );
+  }
+  if (!config.conversationIssues) {
+    warnings.push(
+      "RUNTIME_CONVERSATION_ISSUES is off: a run that carries a conversation reference but no issue id has nowhere to persist its output, so it will be reported persistence_failed and no answer will be returned.",
     );
   }
   if (!config.budgetEnforcement) {

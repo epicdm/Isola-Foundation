@@ -88,6 +88,19 @@ const NOT_ATTEMPTED: TransitionOutcome = Object.freeze({
 });
 
 /**
+ * "No transition was attempted, and that is correct."
+ *
+ * Used for a conversation-scoped issue. `PAPERCLIP_SUCCESS_STATUS` and
+ * `PAPERCLIP_FAILURE_STATUS` exist to close an issue-driven WORK ITEM and hand
+ * it to a human; a conversation issue is a record, not a work item, and moving
+ * it to `in_review` or `blocked` would create human queue noise for every single
+ * customer message. Transitions stay for genuinely issue-driven runs only.
+ */
+export function transitionNotAttempted(): TransitionOutcome {
+  return { ...NOT_ATTEMPTED };
+}
+
+/**
  * Move the issue. Never throws: a transition failure must not flip a successful
  * model run into a failed HTTP status, exactly as a recorder failure does not.
  */

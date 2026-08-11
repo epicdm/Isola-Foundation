@@ -18,6 +18,14 @@
  *  - Budget read:      GET   /api/agents/{agentId}
  *                      GET   /api/companies/{companyId}/budgets/overview
  *  - Pause:            POST  /api/agents/{agentId}/pause
+ *  - Issue create:     POST  /api/companies/{companyId}/issues -> 201, the issue
+ *  - Issue list:       GET   /api/companies/{companyId}/issues -> array
+ *
+ * `createIssueSchema` (packages/shared/src/validators/issue.ts) accepts
+ * title / description / status / priority / assigneeAgentId and a set of uuid
+ * relations. It has NO free-form `metadata` field, so an external key can only
+ * be carried in the title — see `src/conversation.ts` for the marker it uses and
+ * why the title is the only place it can live.
  */
 import type { SafeFetch } from "./egress.js";
 import { EgressBlockedError, PaperclipApiError } from "./errors.js";
@@ -38,6 +46,40 @@ export type IssueStatus = (typeof ISSUE_STATUSES)[number];
 
 export function isIssueStatus(value: unknown): value is IssueStatus {
   return typeof value === "string" && (ISSUE_STATUSES as readonly string[]).includes(value);
+}
+
+/** The priorities Paperclip accepts on POST /api/companies/{id}/issues. */
+export const ISSUE_PRIORITIES = ["critical", "high", "medium", "low"] as const;
+
+export type IssuePriority = (typeof ISSUE_PRIORITIES)[number];
+
+/** The subset of an issue this service reads back. Never the whole record. */
+export interface IssueSummary {
+  id: string;
+  title: string;
+  status: string | null;
+}
+
+/**
+ * What this service is allowed to put on a new issue.
+ *
+ * Deliberately narrow: no assignee of any kind, because an assigned actionable
+ * issue is exactly what makes Paperclip re-schedule the employee. `assigneeAgentId`
+ * exists in the API and is not offered here.
+ */
+export interface CreateIssueInput {
+  title: string;
+  description: string;
+  status: IssueStatus;
+  priority: IssuePriority;
+}
+
+export interface ListIssuesQuery {
+  /** Free-text search. Paperclip matches it against the title, among others. */
+  q?: string;
+  /** Comma-separated status filter, e.g. "backlog". */
+  status?: string;
+  limit?: number;
 }
 
 /** Per-call identity: which agent key to present, and which run to attribute. */
@@ -66,6 +108,16 @@ export interface PaperclipApi {
   ): Promise<void>;
   getAgentBudget(agentId: string, call: PaperclipCall): Promise<AgentBudget>;
   pauseAgent(agentId: string, call: PaperclipCall): Promise<void>;
+  listIssues(
+    companyId: string,
+    query: ListIssuesQuery,
+    call: PaperclipCall,
+  ): Promise<IssueSummary[]>;
+  createIssue(
+    companyId: string,
+    input: CreateIssueInput,
+    call: PaperclipCall,
+  ): Promise<IssueSummary>;
 }
 
 export interface HttpPaperclipApiOptions {
@@ -110,9 +162,11 @@ export class HttpPaperclipApi implements PaperclipApi {
     path: string,
     body: unknown,
     call: PaperclipCall,
+    /** Parse and return the response body. Implied for GET. */
+    wantsJson = false,
   ): Promise<unknown> {
     try {
-      return await this.attempt(method, path, body, call, true);
+      return await this.attempt(method, path, body, call, true, wantsJson);
     } catch (err) {
       const retryWithoutRunId =
         err instanceof PaperclipApiError &&
@@ -120,7 +174,7 @@ export class HttpPaperclipApi implements PaperclipApi {
         call.runId !== null &&
         call.runId.length > 0;
       if (!retryWithoutRunId) throw err;
-      return await this.attempt(method, path, body, call, false);
+      return await this.attempt(method, path, body, call, false, wantsJson);
     }
   }
 
@@ -130,6 +184,7 @@ export class HttpPaperclipApi implements PaperclipApi {
     body: unknown,
     call: PaperclipCall,
     includeRunId: boolean,
+    wantsJson = false,
   ): Promise<unknown> {
     const controller = new AbortController();
     let timedOut = false;
@@ -182,7 +237,7 @@ export class HttpPaperclipApi implements PaperclipApi {
       );
     }
 
-    if (method === "GET") {
+    if (method === "GET" || wantsJson) {
       try {
         return await response.json();
       } catch {
@@ -259,6 +314,108 @@ export class HttpPaperclipApi implements PaperclipApi {
       call,
     );
   }
+
+  async listIssues(
+    companyId: string,
+    query: ListIssuesQuery,
+    call: PaperclipCall,
+  ): Promise<IssueSummary[]> {
+    const params = new URLSearchParams();
+    if (query.q !== undefined && query.q.length > 0) params.set("q", query.q);
+    if (query.status !== undefined && query.status.length > 0) {
+      params.set("status", query.status);
+    }
+    if (query.limit !== undefined) params.set("limit", String(query.limit));
+    const queryString = params.toString();
+    const suffix = queryString.length > 0 ? `?${queryString}` : "";
+    const payload = await this.request(
+      "GET",
+      `/api/companies/${encodeURIComponent(companyId)}/issues${suffix}`,
+      undefined,
+      call,
+    );
+    return parseIssueList(payload);
+  }
+
+  async createIssue(
+    companyId: string,
+    input: CreateIssueInput,
+    call: PaperclipCall,
+  ): Promise<IssueSummary> {
+    const payload = await this.request(
+      "POST",
+      `/api/companies/${encodeURIComponent(companyId)}/issues`,
+      {
+        title: input.title,
+        description: input.description,
+        status: input.status,
+        priority: input.priority,
+      },
+      call,
+      true,
+    );
+    const issue = parseIssueSummary(payload);
+    if (issue === null) {
+      // A 2xx with no readable issue id is worse than an error: the caller
+      // would have to guess which issue it just made. Refuse instead.
+      throw new PaperclipApiError(
+        "issue create returned no readable issue id",
+        null,
+        false,
+      );
+    }
+    return issue;
+  }
+}
+
+/**
+ * Read one issue out of a Paperclip payload.
+ *
+ * Tolerant about the envelope (bare object, or wrapped in `issue`/`data`) and
+ * strict about the one field that matters: without a non-empty string `id` this
+ * returns null and the caller fails loudly rather than acting on a guess.
+ */
+export function parseIssueSummary(payload: unknown): IssueSummary | null {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    return null;
+  }
+  const record = payload as Record<string, unknown>;
+  const inner =
+    typeof record["issue"] === "object" && record["issue"] !== null
+      ? (record["issue"] as Record<string, unknown>)
+      : typeof record["data"] === "object" && record["data"] !== null
+        ? (record["data"] as Record<string, unknown>)
+        : record;
+  const id = inner["id"];
+  if (typeof id !== "string" || id.length === 0) return null;
+  return {
+    id,
+    title: typeof inner["title"] === "string" ? inner["title"] : "",
+    status: typeof inner["status"] === "string" ? inner["status"] : null,
+  };
+}
+
+/** The list endpoint returns a bare array; accept the common envelopes too. */
+export function parseIssueList(payload: unknown): IssueSummary[] {
+  const array = Array.isArray(payload)
+    ? payload
+    : typeof payload === "object" && payload !== null
+      ? (() => {
+          const record = payload as Record<string, unknown>;
+          for (const key of ["issues", "data", "items", "results"]) {
+            const value = record[key];
+            if (Array.isArray(value)) return value;
+          }
+          return null;
+        })()
+      : null;
+  if (array === null) return [];
+  const out: IssueSummary[] = [];
+  for (const entry of array) {
+    const issue = parseIssueSummary(entry);
+    if (issue !== null) out.push(issue);
+  }
+  return out;
 }
 
 export function createPaperclipApi(args: {

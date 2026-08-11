@@ -346,6 +346,65 @@ There is deliberately no "first element of the `issues` array" rule.
 runtime logs `outcome:"no_issue_context"`, and the HTTP status is still whatever
 the model outcome earned.
 
+### 4.1 Conversation-scoped persistence
+
+> Fixes the defect where **the PUBLIC employee answered a Chatwoot customer
+> correctly and the run then failed** with
+> `PAPERCLIP_RECORD_PATH requires issueId but the run context did not supply it`
+> → `persistence_failed`, `502`, `answerText: null`. The gateway correctly
+> escalated to a human rather than replying, so the customer was never answered.
+
+`PAPERCLIP_RECORD_PATH` is issue-driven, which is right for INTERNAL work and
+impossible for a customer conversation: a Chatwoot conversation has no Paperclip
+issue, so the PUBLIC path could never persist, never reach `completed` and never
+return an answer.
+
+When a run carries a **conversation reference but no issue id**, the runtime
+creates-or-gets a Paperclip issue that represents that conversation and then uses
+the existing write-back path unchanged. Paperclip is the AI Company OS and is
+meant to hold the employee's work, so a customer conversation becoming a tracked
+issue is the natural mapping and gives operators a real trace. **The gateway is
+not given Paperclip write access** — it is the only publicly-exposed component
+and its blast radius stays minimal.
+
+The invariant is not weakened: `completed` still means Paperclip accepted the
+output. An issue that cannot be created or found is `persistence_failed` with
+`answerText: null`, never a silent success.
+
+**Resolving the reference.** Only explicit fields, exactly as for the issue id:
+`conversationRef`, `conversationId`, `chatwootConversationId`, `conversation.id`,
+`chatwoot.conversationId`; combined with `chatwootAccountId`, `account.id` or
+`chatwoot.accountId` into the stable external key
+`chatwoot:<accountId|none>:<conversationId>`. A reference already in that form is
+passed through verbatim. With no conversation reference **and** no issue id the
+behaviour is unchanged from before this feature existed.
+
+**Create-or-get.** `createIssueSchema` has no free-form `metadata` field, so the
+key is carried in a title marker — `[isola-conv:chatwoot:1:9012]` — and the issue
+is titled `Chatwoot conversation #9012 (account 1) [isola-conv:chatwoot:1:9012]`.
+Paperclip is searched for that marker (`GET /api/companies/{companyId}/issues?q=`)
+before anything is created; a lookup that *fails* is never read as "absent",
+because creating on an unproven absence is how one conversation ends up with two
+issues. The resolved issue id is cached in the durable state store under the
+conversation key, so later messages reuse it with no round trip, and create-or-get
+is serialised per key with a re-check after acquiring, so two messages arriving
+at once still yield exactly one issue.
+
+**Nothing about the conversation issue is actionable.** It is created in
+`backlog`, `low` priority, with **no assignee of any kind** — the combination
+Paperclip's scheduler does not pick up — and `PAPERCLIP_SUCCESS_STATUS` /
+`PAPERCLIP_FAILURE_STATUS` are **not** applied to it. Those exist to close an
+issue-driven work item and hand it to a human; doing that per customer message
+would both bury the operator and recreate the actionable-assigned-issue condition
+that produced the 53-run loop. Transitions remain for issue-driven runs only.
+
+**No customer content reaches the issue.** The title carries the conversation
+reference; the description states the tenant, the reference and that this is an
+AI-handled customer conversation. Message bodies and replies live only in the
+comments, exactly as for an issue-driven run.
+
+`RUNTIME_CONVERSATION_ISSUES=false` restores the previous behaviour exactly.
+
 ### Idempotency
 
 Keyed by `(companyId, agentId, runId)`; with no run id, by
@@ -478,6 +537,7 @@ spending more money nobody is counting.
 | `PAPERCLIP_SUCCESS_STATUS` | no | `in_review` | Issue status on success. An unrecognised value falls back to the default rather than PATCHing something Paperclip would reject |
 | `PAPERCLIP_FAILURE_STATUS` | no | `blocked` | Issue status on failure |
 | `PAPERCLIP_FAILURE_OWNER` | no | `the EPIC operations on-call engineer` | Named owner in the failure comment |
+| `RUNTIME_CONVERSATION_ISSUES` | no | `true` | Create-or-get a Paperclip issue for a run that carries a conversation reference but no issue id, so the PUBLIC path can persist and reach `completed` (§4.1). Off ⇒ such a run is `persistence_failed` with no answer, as before |
 | `EGRESS_ALLOWLIST` | no | hostnames of `MODEL_BASE_URL` + `PAPERCLIP_BASE_URL` | Comma-separated hostnames. Exact match only — no suffix widening. Setting it **replaces** the derived list |
 | `PORT` | no | `3000` | Listen port |
 | `RUNTIME_MAX_REQUEST_BYTES` | no | `1048576` | Inbound body cap |

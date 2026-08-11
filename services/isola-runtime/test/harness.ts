@@ -12,7 +12,10 @@ import { createLogger, type Logger } from "../src/log.js";
 import type { ModelClient, ModelRequest, ModelResponse } from "../src/model.js";
 import type {
   AgentBudget,
+  CreateIssueInput,
   IssueStatus,
+  IssueSummary,
+  ListIssuesQuery,
   PaperclipApi,
   PaperclipCall,
 } from "../src/paperclip.js";
@@ -114,7 +117,14 @@ export class RecordingRecorder implements RunRecorder {
  * whenever the caller has not supplied its own.
  */
 export interface RecordedCall {
-  kind: "comment" | "transition" | "cost_event" | "budget_read" | "pause";
+  kind:
+    | "comment"
+    | "transition"
+    | "cost_event"
+    | "budget_read"
+    | "pause"
+    | "issue_list"
+    | "issue_create";
   issueId?: string;
   body?: string;
   status?: IssueStatus;
@@ -125,6 +135,9 @@ export interface RecordedCall {
   runId: string | null;
   /** Extra PATCH fields sent alongside a transition, e.g. the review assignee. */
   extra?: Record<string, unknown> | null;
+  /** Issue list query, and issue create payload. */
+  query?: ListIssuesQuery;
+  input?: CreateIssueInput;
 }
 
 export class StubPaperclipApi implements PaperclipApi {
@@ -137,12 +150,35 @@ export class StubPaperclipApi implements PaperclipApi {
   transitionFailure: PaperclipApiError | null = null;
   budgetFailure: PaperclipApiError | null = null;
   pauseFailure: PaperclipApiError | null = null;
+  listIssuesFailure: PaperclipApiError | null = null;
+  createIssueFailure: PaperclipApiError | null = null;
+
+  /**
+   * Issues this stub holds, as `listIssues` would return them. `companyId` is
+   * how the real API scopes the list; an entry seeded without one is visible to
+   * every company, which keeps the simple fixtures short.
+   */
+  readonly issues: Array<IssueSummary & { companyId?: string }> = [];
+  /** Bodies of the issues this stub created, for content assertions. */
+  readonly createdIssues: CreateIssueInput[] = [];
+  /**
+   * Awaited inside `createIssue` before the issue is minted. Lets a test hold a
+   * creation open long enough for a genuine concurrent second run to arrive.
+   */
+  beforeCreateIssue: (() => Promise<void>) | null = null;
+  private issueSeq = 0;
 
   get comments(): RecordedCall[] {
     return this.calls.filter((c) => c.kind === "comment");
   }
   get transitions(): RecordedCall[] {
     return this.calls.filter((c) => c.kind === "transition");
+  }
+  get issueLists(): RecordedCall[] {
+    return this.calls.filter((c) => c.kind === "issue_list");
+  }
+  get issueCreates(): RecordedCall[] {
+    return this.calls.filter((c) => c.kind === "issue_create");
   }
   get costEvents(): CostEventPayload[] {
     return this.calls
@@ -205,6 +241,53 @@ export class StubPaperclipApi implements PaperclipApi {
   async pauseAgent(agentId: string, call: PaperclipCall): Promise<void> {
     this.calls.push({ kind: "pause", agentId, apiKey: call.apiKey, runId: call.runId });
     if (this.pauseFailure) throw this.pauseFailure;
+  }
+
+  async listIssues(
+    companyId: string,
+    query: ListIssuesQuery,
+    call: PaperclipCall,
+  ): Promise<IssueSummary[]> {
+    this.calls.push({
+      kind: "issue_list",
+      companyId,
+      query,
+      apiKey: call.apiKey,
+      runId: call.runId,
+    });
+    if (this.listIssuesFailure) throw this.listIssuesFailure;
+    // Mirrors Paperclip: `q` is a case-insensitive title CONTAINS match.
+    const needle = (query.q ?? "").toLowerCase();
+    return this.issues
+      .filter((issue) => (issue.companyId ?? companyId) === companyId)
+      .filter((issue) => issue.title.toLowerCase().includes(needle))
+      .map(({ id, title, status }) => ({ id, title, status }))
+      .slice(0, query.limit ?? this.issues.length);
+  }
+
+  async createIssue(
+    companyId: string,
+    input: CreateIssueInput,
+    call: PaperclipCall,
+  ): Promise<IssueSummary> {
+    this.calls.push({
+      kind: "issue_create",
+      companyId,
+      input,
+      apiKey: call.apiKey,
+      runId: call.runId,
+    });
+    if (this.beforeCreateIssue) await this.beforeCreateIssue();
+    if (this.createIssueFailure) throw this.createIssueFailure;
+    this.issueSeq += 1;
+    const issue: IssueSummary = {
+      id: `issue-${this.issueSeq}`,
+      title: input.title,
+      status: input.status,
+    };
+    this.issues.push({ ...issue, companyId });
+    this.createdIssues.push(input);
+    return issue;
   }
 }
 

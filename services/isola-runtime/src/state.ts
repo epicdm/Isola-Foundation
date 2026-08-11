@@ -190,6 +190,25 @@ export interface AlertRecord {
   pausedInPeriod: boolean;
 }
 
+/**
+ * The Paperclip issue that represents one customer conversation.
+ *
+ * Cached here so the second and every later message in the same conversation
+ * reuses the same issue with no API round trip, and so a restart does not
+ * produce a second issue for a conversation that already has one. The key is
+ * the stable external reference (`chatwoot:<accountId>:<conversationId>`), never
+ * anything derived from a customer's message.
+ */
+export interface ConversationIssueRecord {
+  key: string;
+  /** The company the issue belongs to. A different company never reuses it. */
+  companyId: string;
+  issueId: string;
+  /** True when this runtime created the issue rather than finding an existing one. */
+  created: boolean;
+  createdAtMs: number;
+}
+
 export interface RuntimeState {
   version: number;
   idempotency: Record<string, IdempotencyRecord>;
@@ -198,6 +217,8 @@ export interface RuntimeState {
   reservations: Record<string, Reservation>;
   budgets: Record<string, BudgetSnapshot>;
   alerts: Record<string, AlertRecord>;
+  /** Conversation key -> the issue that holds that conversation's work. */
+  conversationIssues: Record<string, ConversationIssueRecord>;
 }
 
 export function emptyState(): RuntimeState {
@@ -209,6 +230,7 @@ export function emptyState(): RuntimeState {
     reservations: {},
     budgets: {},
     alerts: {},
+    conversationIssues: {},
   };
 }
 
@@ -379,6 +401,26 @@ export function sanitiseState(parsed: unknown): RuntimeState {
         pausedInPeriod: v["pausedInPeriod"] === true,
       };
     }),
+    // Strict on purpose: a half-read record here would either resurrect the
+    // duplicate-issue defect or point a conversation at somebody else's issue.
+    // A record we cannot fully prove is dropped, and the next message simply
+    // looks the issue up in Paperclip again.
+    conversationIssues: objectOf(
+      parsed["conversationIssues"],
+      (v): ConversationIssueRecord | null => {
+        if (!isRecord(v)) return null;
+        if (typeof v["key"] !== "string" || v["key"].length === 0) return null;
+        if (typeof v["issueId"] !== "string" || v["issueId"].length === 0) return null;
+        if (typeof v["companyId"] !== "string" || v["companyId"].length === 0) return null;
+        return {
+          key: v["key"],
+          companyId: v["companyId"],
+          issueId: v["issueId"],
+          created: v["created"] === true,
+          createdAtMs: num(v["createdAtMs"], 0),
+        };
+      },
+    ),
   };
 }
 

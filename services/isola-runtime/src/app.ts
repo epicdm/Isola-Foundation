@@ -24,8 +24,16 @@ import {
   renderBudgetExhaustedComment,
   statusForRun,
   transitionIssue,
+  transitionNotAttempted,
 } from "./callbacks.js";
 import { buildUserMessage, renderContext } from "./context.js";
+import {
+  ConversationIssues,
+  asContextString,
+  extractConversationRef,
+  extractTenantId,
+  readContextPath,
+} from "./conversation.js";
 import { createSafeFetch, type SafeFetch } from "./egress.js";
 import {
   ModelInvalidOutputError,
@@ -188,23 +196,10 @@ function readBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
   });
 }
 
-function asString(value: unknown): string | null {
-  if (typeof value === "string" && value.trim().length > 0) return value.trim();
-  if (typeof value === "number" && Number.isFinite(value)) return String(value);
-  return null;
-}
-
-function nested(context: unknown, path: readonly string[]): string | null {
-  let cursor: unknown = context;
-  for (const key of path.slice(0, -1)) {
-    if (typeof cursor !== "object" || cursor === null) return null;
-    cursor = (cursor as Record<string, unknown>)[key];
-  }
-  if (typeof cursor !== "object" || cursor === null) return null;
-  const last = path[path.length - 1];
-  if (last === undefined) return null;
-  return asString((cursor as Record<string, unknown>)[last]);
-}
+// One implementation of the context-reading semantics, shared with the
+// conversation reference resolver so the two cannot drift apart.
+const asString = asContextString;
+const nested = readContextPath;
 
 /**
  * Resolve the issue id from the run context.
@@ -419,6 +414,17 @@ export function createRuntime(deps: AppDeps): Runtime {
     options: meteringOptions,
     logger,
     now,
+  });
+
+  // A customer conversation has no Paperclip issue. This gives it one, so the
+  // PUBLIC path can persist its output through the unchanged write-back and can
+  // therefore reach `completed`. See src/conversation.ts.
+  const conversationIssues = new ConversationIssues({
+    api: paperclipApi,
+    store: stateStore,
+    logger,
+    now,
+    enabled: config.conversationIssues,
   });
 
   async function handleInvoke(
@@ -746,6 +752,10 @@ export function createRuntime(deps: AppDeps): Runtime {
     const userMessage = buildUserMessage(rendered);
 
     const issueId = extractIssueId(body.context);
+    // Resolved (not acted on) here so it can be logged even when it is unused.
+    // The issue is only created after the model has answered — see below.
+    const conversationRef =
+      issueId === null ? extractConversationRef(body.context) : null;
     const companyId = extractCompanyId(body.context) ?? config.paperclipCompanyId;
     const agentKey = agentKeyFor(exposure);
     // Every callback authenticates as the employee's own agent and carries the
@@ -1107,12 +1117,43 @@ export function createRuntime(deps: AppDeps): Runtime {
       });
       reservationId = null;
 
+      // ---- where this run's output is persisted ----------------------------
+      // An issue-driven run already knows. A conversation-driven run does not:
+      // create-or-get the issue that represents the conversation, so the
+      // unchanged write-back below has somewhere to write. Deliberately AFTER
+      // the model call, so a run that never produced anything never opens an
+      // issue, and so a Paperclip refusal lands as `persistence_failed` — the
+      // truthful state — rather than as a pre-flight rejection.
+      let recordIssueId = issueId;
+      let conversationScoped = false;
+      let conversationFailure: string | null = null;
+      if (conversationRef !== null) {
+        const resolution = await conversationIssues.resolve({
+          ref: conversationRef,
+          companyId,
+          call,
+          tenantId: extractTenantId(body.context),
+          correlationId,
+          runId,
+          agentId,
+        });
+        if (resolution.kind === "resolved") {
+          recordIssueId = resolution.issueId;
+          conversationScoped = true;
+        } else if (resolution.kind === "failed") {
+          conversationFailure = resolution.detail;
+        }
+        // `not_attempted` is not a failure: the feature is off, Paperclip is not
+        // configured, or no company owns the issue. Everything below then behaves
+        // exactly as it did before conversation issues existed.
+      }
+
       const durationMs = now() - startedAt;
       const runOutcome: RunOutcome = {
         correlationId,
         agentId,
         runId,
-        issueId,
+        issueId: recordIssueId,
         templateId: template.id,
         templateVersion: template.version,
         exposure,
@@ -1132,13 +1173,12 @@ export function createRuntime(deps: AppDeps): Runtime {
       // HTTP status. It is logged and surfaced as `recorded:false`.
       let recorded = false;
       let recorderError: string | null = null;
-      try {
-        await recorder.record(runOutcome);
-        recorded = recorder.kind !== "null";
-        if (recorder.kind === "null") recorderError = "no recorder configured";
-      } catch (err) {
+      if (conversationFailure !== null) {
+        // There is no issue to write to. The recorder is not called: it would
+        // fail on the missing {issueId} anyway, and reporting the real reason is
+        // more useful than reporting the symptom.
         recorded = false;
-        recorderError = err instanceof Error ? err.message : "unknown recorder failure";
+        recorderError = conversationFailure;
         logger.error({
           event: "recorder_failed",
           correlationId,
@@ -1149,20 +1189,56 @@ export function createRuntime(deps: AppDeps): Runtime {
           durationMs: now() - startedAt,
           detail: recorderError,
         });
+      } else {
+        try {
+          await recorder.record(runOutcome);
+          recorded = recorder.kind !== "null";
+          if (recorder.kind === "null") recorderError = "no recorder configured";
+        } catch (err) {
+          recorded = false;
+          recorderError = err instanceof Error ? err.message : "unknown recorder failure";
+          logger.error({
+            event: "recorder_failed",
+            correlationId,
+            runId,
+            agentId,
+            templateId: template.id,
+            outcome: "recorder_failed",
+            durationMs: now() - startedAt,
+            detail: recorderError,
+          });
+        }
       }
 
       // ---- callback 2: the issue transition (this is the loop fix) ---------
-      const transition = await transitionIssue({
-        api: paperclipApi,
-        issueId,
-        status: statusForRun(status, config.handoff),
-        call,
-        logger,
-        correlationId,
-        runId,
-        agentId,
-        reviewAssigneeUserId: config.handoff.reviewAssigneeUserId,
-      });
+      // Only for a genuinely issue-driven run. A conversation issue must never
+      // be transitioned: those statuses close a work item and hand it to a
+      // human, and doing that per customer message would bury the operator.
+      if (conversationScoped) {
+        logger.info({
+          event: "transition",
+          outcome: "conversation_issue_not_transitioned",
+          correlationId,
+          runId,
+          agentId,
+          issueId: recordIssueId,
+          detail:
+            "this run is conversation-scoped; the conversation's issue is a record, not a work item, so no status transition was attempted",
+        });
+      }
+      const transition = conversationScoped
+        ? transitionNotAttempted()
+        : await transitionIssue({
+            api: paperclipApi,
+            issueId,
+            status: statusForRun(status, config.handoff),
+            call,
+            logger,
+            correlationId,
+            runId,
+            agentId,
+            reviewAssigneeUserId: config.handoff.reviewAssigneeUserId,
+          });
 
       // ---- the one and only answer -----------------------------------------
       // `runOutcome.content` is the exact string the recorder was handed and
@@ -1258,7 +1334,12 @@ export function createRuntime(deps: AppDeps): Runtime {
         contextEmittedBytes: rendered.emittedBytes,
         recorded,
         recorderKind: recorder.kind,
-        issueId,
+        // For an issue-driven run this is the extracted id, exactly as before.
+        // For a conversation-driven run it is the conversation's own issue.
+        issueId: recordIssueId,
+        ...(conversationScoped
+          ? { conversationScoped: true, conversationKey: conversationRef?.key ?? null }
+          : {}),
         issueTransitioned: transition.transitioned,
         issueStatus: transition.status,
         costOutcome: settlement.kind,
