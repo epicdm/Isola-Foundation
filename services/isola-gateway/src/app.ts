@@ -41,7 +41,7 @@ import {
 } from "./idempotency.js";
 import { constantTimeEquals } from "./signature.js";
 import { createLogger, type Logger } from "./log.js";
-import { processDelivery, type DeliveryJob } from "./pipeline.js";
+import { processDelivery, type DeliveryJob, type DeliveryMode } from "./pipeline.js";
 import { createAgentRuntime, type AgentRuntime } from "./runtime.js";
 import {
   DELIVERY_HEADER,
@@ -56,6 +56,7 @@ import {
   evaluateSuppression,
   parseRouting,
   parseWebhookPayload,
+  type NoTextClassification,
   type SuppressionReason,
   type WebhookPayload,
 } from "./webhook.js";
@@ -153,7 +154,21 @@ function readBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
 // ---------------------------------------------------------------------------
 
 export type DeliveryDecision =
-  | { kind: "accept"; binding: Binding; payload: WebhookPayload; conversationId: number }
+  | {
+      kind: "accept";
+      binding: Binding;
+      payload: WebhookPayload;
+      conversationId: number;
+      /**
+       * `answer` invokes the model. `handoff` never does: the message carried
+       * no usable text, so the conversation is opened, assigned, noted and
+       * acknowledged instead. See `src/handoff.ts`.
+       */
+      mode: DeliveryMode;
+      classification: NoTextClassification | null;
+      /** The key this delivery was claimed under; every write is claimed beneath it. */
+      idempotencyKey: string;
+    }
   | { kind: "reject"; reason: RejectionReason }
   | { kind: "duplicate" }
   | { kind: "not_deduplicable" }
@@ -275,9 +290,9 @@ export function decideDelivery(args: DecideArgs): DecideResult {
       return at({ kind: "binding_refused", outcome: "binding_not_found", detail: {} });
   }
 
-  const suppression = evaluateSuppression(payload);
-  if (!suppression.reply) {
-    return at({ kind: "suppressed", reason: suppression.reason, payload });
+  const verdict = evaluateSuppression(payload);
+  if (verdict.action === "suppress") {
+    return at({ kind: "suppressed", reason: verdict.reason, payload });
   }
 
   return at({
@@ -286,6 +301,9 @@ export function decideDelivery(args: DecideArgs): DecideResult {
     payload,
     // The suppression predicate has already refused a null display id.
     conversationId: payload.conversationDisplayId as number,
+    mode: verdict.action === "handoff" ? "handoff" : "answer",
+    classification: verdict.action === "handoff" ? verdict.classification : null,
+    idempotencyKey: key,
   });
 }
 
@@ -473,22 +491,35 @@ export function createGateway(deps: GatewayDeps): Gateway {
     const job: DeliveryJob = {
       correlationId,
       deliveryId,
+      idempotencyKey: decision.idempotencyKey,
       binding: decision.binding,
       payload: decision.payload,
       conversationId: decision.conversationId,
       startedAtMs: startedAt,
+      mode: decision.mode,
+      classification: decision.classification,
     };
 
     // ---- ACK FIRST. Everything below this line is asynchronous. ------------
+    // The handoff is on the asynchronous side too: opening, assigning, noting
+    // and acknowledging are four Chatwoot round trips, and none of them may be
+    // inside Chatwoot's 5s webhook deadline.
     finish(200, "accepted", {
       accountId: decision.binding.chatwootAccountId,
       inboxId: decision.binding.chatwootInboxId,
       conversationId: decision.conversationId,
       tenantId: decision.binding.tenantId,
+      mode: decision.mode,
+      ...(decision.classification === null
+        ? {}
+        : {
+            handoffReason: decision.classification.reason,
+            attachmentCount: decision.classification.attachmentCount,
+          }),
     });
 
     track(
-      processDelivery({ config, chatwoot, runtime, logger, now }, job).catch(
+      processDelivery({ config, chatwoot, runtime, logger, idempotency, now }, job).catch(
         (err: unknown) => {
           logger.error({
             event: "delivery",

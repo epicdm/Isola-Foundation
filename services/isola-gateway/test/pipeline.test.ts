@@ -262,6 +262,8 @@ describe("pure helpers", () => {
       conversationStatus: "pending",
       assignee: null,
       customAttributes: {},
+      attachmentTypes: [],
+      contentType: "text",
     });
     expect(context["tenantId"]).toBe(TENANT_ID);
     expect(context["companyId"]).toBe("company-1");

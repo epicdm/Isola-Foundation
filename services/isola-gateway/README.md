@@ -53,6 +53,8 @@ failure all result in *nothing being sent to the customer*.
 | Only one module speaks the Chatwoot API | `api_access_token` and `/api/v1/accounts` appear only in `src/chatwoot.ts` | source scan |
 | Every inbound delivery is authenticated | HMAC-SHA256 over `` `${timestamp}.${rawBody}` `` with the AgentBot's own secret | `test/signature.test.ts`, `test/webhook-http.test.ts` |
 | A failed run is never dressed up as an answer | on any failure the customer message count is zero; a private note plus an escalation is the only output | `test/pipeline.test.ts` |
+| A handoff is never claimed unless it happened | the customer message is sent only after `toggle_status` and the assignment succeed | `test/handoff.test.ts` |
+| An attachment is never opened, fetched or described | only `file_type` is parsed, mapped onto a closed vocabulary; `data_url` is never read | `test/handoff.test.ts` — real clients over a recording egress, attachment host absent |
 | No secret and no message content ever reaches a log | call sites pass identifiers, `redact()` strips credential-shaped keys, and a test drives a full delivery and scans every line | `test/no-content-logged.test.ts` |
 
 ---
@@ -113,7 +115,7 @@ that difference explicitly.
 
 | Result | Status | What is sent |
 |---|---|---|
-| Verified, bound, not suppressed | `200 accepted` | processed asynchronously |
+| Verified, bound, not suppressed | `200 accepted` | processed asynchronously — the AI answer, or the §4.1 handoff when there is no usable text |
 | Bad/missing/stale/future signature; unparseable body; inbox with no binding secret | `401 unauthorized` | nothing — and the response never says which half failed |
 | Body over `GATEWAY_MAX_REQUEST_BYTES` | `413 payload_too_large` | nothing |
 | Duplicate delivery | `200 duplicate_suppressed` | nothing |
@@ -146,6 +148,9 @@ nor assignee** before dispatching `message_created` to the bot, and delivery
 provably continues to a conversation a human has taken over. Without the
 predicate below, the bot talks over a live agent.
 
+`evaluateSuppression` is a pure function over a verified payload and returns one
+of three actions: **reply**, **handoff** (§4.1) or **suppress**.
+
 A reply is sent only when **all** of these hold:
 
 ```
@@ -161,25 +166,94 @@ Otherwise: `200`, nothing sent, and the reason is logged as
 
 `not_message_created` · `no_conversation_id` · `message_type_not_incoming` ·
 `private_note` · `private_flag_absent` · `sender_is_agent_bot` ·
-`status_not_pending` · `human_assigned` · `empty_content`
+`status_not_pending` · `human_assigned`
 
-Two of those go beyond the five conditions, both fail-closed:
+One of those goes beyond the five conditions, and it is fail-closed:
 
 - **`private_flag_absent`** — a payload with no boolean `private` is treated as
   private. Guessing "public" on a malformed payload risks answering a private
   note in the customer's channel.
-- **`empty_content`** — there is nothing to answer, so the model is not called.
-
-> **Known gap.** An attachment-only message (`content: null`) lands in
-> `empty_content`: the gateway acknowledges, sends nothing, and — because it
-> answered 200 — Chatwoot's native auto-open does not fire either. The customer
-> is left waiting for a human who has not been summoned. Closing this means
-> deciding whether an unanswerable inbound should escalate; that is a product
-> decision, not a code one, so it is documented rather than guessed.
 
 `conversation.id` in the payload is the **`display_id`** — the value the
 conversation API path expects, **not** the database primary key. Using the pk
 would 404 on every reply.
+
+### 4.1 No usable text ⇒ hand over to a human, and say so
+
+A message that passes **every** check above but carries no text the model can
+read is **not** suppressed. It used to be (`empty_content`), and that was the
+documented gap: the gateway acknowledged, sent nothing, and — because it
+answered 200 — Chatwoot's native auto-open did not fire either, so the customer
+waited for a human nobody had summoned.
+
+Two cases, one shared handoff. **The model is not invoked on either.**
+
+| Case | Trigger | Customer message, verbatim |
+|---|---|---|
+| **A** — attachment / unsupported content | one or more `attachments`, or a `content_type` other than `text`, and no usable text | `Thanks — I received your attachment and passed this conversation to a team member for review.` |
+| **B** — truly empty | no attachments, no unsupported content type, no usable text | `I couldn't read that message, so I passed the conversation to a team member.` |
+
+The handoff runs in this exact order, all of it **after** the ACK:
+
+1. `toggle_status` → `open`
+2. `assignments` with `team_id`, when the binding configures `escalationTeamId`
+3. the AI is now suppressed for that conversation **by the predicate above** —
+   an `open` conversation with an assignee is refused by `status_not_pending`
+   and `human_assigned`, which are evaluated *before* the no-text branch. There
+   is deliberately **no second suppression mechanism**; `test/handoff.test.ts`
+   asserts the first one holds rather than assuming it.
+4. exactly **one** private note, carrying the reason plus the attachment **type
+   and count only**
+5. and only then, exactly **one** customer-visible message
+
+**The attachment is never opened, downloaded, inspected, inferred from or
+described.** The parser reads `file_type` and nothing else — never `data_url`,
+never `thumb_url`, never `file_name` — so no URL and no filename exists anywhere
+downstream to be logged or fetched. Every `file_type` is mapped onto a closed
+vocabulary (`image`, `audio`, `video`, `file`, `location`, `fallback`, `share`,
+`story_mention`, `contact`, `ig_reel`, else `other`), so what reaches a note or
+a log line can never be caller-controlled text. `test/handoff.test.ts` drives a
+delivery through the **real** Chatwoot and runtime clients over a recording
+egress primitive and asserts the complete set of hosts contacted is Chatwoot
+alone — the attachment host and the runtime are both absent.
+
+#### If the handoff fails, the customer is told nothing
+
+**`toggle_status` or the assignment failing means no customer message.** Telling
+a customer their conversation is with a team member when it is not is a lie they
+cannot check. On that path the gateway:
+
+- records the outcome **`handoff_blocked`** and logs it at **error** level with
+  `failedStep`, `customerMessageSent: false` and `needsRetry: true`, for
+  operator alerting;
+- leaves the conversation **open** where that step did succeed — no rollback,
+  because hiding the half-done state helps nobody;
+- posts the one private note, saying plainly that no message was sent to the
+  customer and the conversation needs picking up by hand;
+- writes `isola_last_outcome: handoff_blocked` and the escalated label, so it is
+  findable in Chatwoot.
+
+A failed **note** does not block the acknowledgement: the conversation genuinely
+is open and assigned, so the sentence is still true. It is logged at error level
+as `handoff_note_failed`. A failed **acknowledgement** is never re-sent (§11.7)
+and is logged as `handoff_ack_failed` with `needsRetry: true`.
+
+#### Every write is idempotent by the delivery id
+
+A duplicate delivery produces no second note, no second assignment and no second
+customer message. Two lines of defence, both on the **same** store:
+
+1. `X-Chatwoot-Delivery` gates the whole pipeline — a repeat is
+   `duplicate_suppressed` at the ACK and never reaches the asynchronous half;
+2. each individual write is additionally claimed under
+   `` `<deliveryKey>#<write>` `` — `handoff_toggle_status`,
+   `handoff_assignment`, `handoff_note`, `handoff_customer_message`, `reply`,
+   `failure_note`, `escalate_toggle_status`, `escalate_assignment`, `labels`,
+   `custom_attributes`.
+
+Because entries evict oldest-first and the delivery key is always claimed before
+its own write keys, the delivery key is evicted first — so a retry landing in
+that gap re-enters the pipeline and then finds every write already claimed.
 
 ---
 
@@ -249,7 +323,7 @@ time even though boot validation already rejects them.
 | `GATEWAY_MAX_REQUEST_BYTES` | `1048576` | Hard ceiling on a webhook body. |
 | `GATEWAY_REPLAY_WINDOW_SEC` | `300` | Signature timestamp skew allowed, **past and future**. |
 | `GATEWAY_IDEMPOTENCY_TTL_MS` | `86400000` | How long a delivery id is remembered. |
-| `GATEWAY_IDEMPOTENCY_MAX_ENTRIES` | `50000` | Cap on the in-memory de-duplication window; oldest evicted first. |
+| `GATEWAY_IDEMPOTENCY_MAX_ENTRIES` | `50000` | Cap on the in-memory de-duplication window; oldest evicted first. A delivery occupies the delivery key plus one key per write it performs (§4.1), so budget roughly six entries per delivery. |
 | `GATEWAY_APPLY_LABELS` | `true` | Apply the outcome label (read-modify-write). |
 | `GATEWAY_APPLY_CUSTOM_ATTRIBUTES` | `true` | Apply the outcome attributes (read-modify-write). |
 | `GATEWAY_LABEL_ANSWERED` | `isola-ai-answered` | Label applied on a successful reply. Set to empty to disable. |
@@ -282,6 +356,14 @@ idempotent at the runtime too), otherwise the gateway correlation id.
 The private note states the failure plainly, names the correlation id and the
 tenant, and says explicitly that no message was sent to the customer. It never
 contains customer content.
+
+The runtime is **not called at all** on the no-usable-text path (§4.1), which is
+recorded as `runtimeOutcome: not_invoked`:
+
+| Handoff result | Customer message | Private note | `toggle_status: open` | Assign |
+|---|---|---|---|---|
+| `handed_off` | the verbatim string for the case | yes | yes | if `escalationTeamId` |
+| `handoff_blocked` | **none** | yes | attempted | attempted |
 
 ### Labels and custom attributes are read-modify-write
 
@@ -325,9 +407,10 @@ ts · level · service · version · correlationId · deliveryId ·
 accountId · inboxId · conversationId · tenantId · outcome · durationMs
 ```
 
-**Never logged:** any secret, and any message content — neither the customer's
-message nor the AI's answer. The success line reports `answerChars`, a length,
-not the text. `redact()` additionally strips any credential-shaped key and any
+**Never logged:** any secret, any message content — neither the customer's
+message nor the AI's answer — and no attachment filename or URL. The success
+line reports `answerChars`, a length, not the text. The handoff line reports
+`attachmentCount` and the closed-vocabulary `attachmentTypes`, never a name. `redact()` additionally strips any credential-shaped key and any
 bearer-shaped value as a backstop, and `test/no-content-logged.test.ts` drives a
 full delivery and scans every emitted line.
 
@@ -395,9 +478,10 @@ not a second webhook.
 3. **The replay window is symmetric.** 300 seconds of tolerance in both
    directions, since clock skew has no preferred sign.
 
-4. **`private` absent ⇒ treated as private** (`private_flag_absent`), and
-   **empty content ⇒ not answered** (`empty_content`). Both are fail-closed
-   additions to the five stated conditions. See the known gap in §4.
+4. **`private` absent ⇒ treated as private** (`private_flag_absent`) — a
+   fail-closed addition to the five stated conditions. **No usable text ⇒ not
+   answered but not dropped either**: it is the §4.1 handoff, which was
+   previously the `empty_content` suppression branch and the documented gap.
 
 5. **`message_type` is accepted as a string or as the enum ordinal.** Chatwoot
    has shipped both; mis-classifying an outgoing message as "unknown" and then
@@ -420,3 +504,32 @@ not a second webhook.
 10. **`/healthz` omits the base URLs.** They are not secrets, but the endpoint is
     unauthenticated and the runtime hostname is internal. They are on
     `/v1/bindings` instead.
+
+11. **Case A covers attachments *and* an unsupported `content_type`.** The owner
+    specified them as one case with one wording, and from the customer's side
+    they are the same event — something arrived that could not be read. A
+    `content_type` of `location`, `sticker`, `voice` and so on therefore gets
+    the attachment sentence even with zero attachments.
+
+12. **A failed private note does not block the acknowledgement.** The stated
+    blocking rule names `toggle_status` and the assignment. If both of those
+    succeeded, the conversation genuinely is open and with a human, so the
+    sentence the customer reads is true whether or not the internal note
+    landed. The note failure is logged at error level as `handoff_note_failed`.
+
+13. **The blocked path still posts its one private note.** It is the only way an
+    operator sees the failure inside Chatwoot rather than only in a log, and a
+    private note is not a customer message, so it cannot make the gateway
+    dishonest to the customer.
+
+14. **`needsRetry` is a flag on the result and the log line, not a queue.** This
+    service has no persistence by design (§8), so "surfaced for retry" means an
+    error-level log line plus `isola_last_outcome: handoff_blocked` on the
+    conversation — both of which an operator can alert and filter on. Building
+    a durable retry queue would mean giving the only publicly-exposed component
+    a database.
+
+15. **An unsupported `content_type` is mapped to `other`, not carried.** Same
+    reasoning as `file_type`: anything that can reach a private note or a log
+    line has to come from a closed vocabulary, or the payload author chooses
+    what operators read.

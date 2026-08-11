@@ -98,40 +98,40 @@ describe("hasAssignee", () => {
 
 describe("the suppression predicate", () => {
   it("replies when all five conditions hold", () => {
-    expect(evaluateSuppression(payloadFrom())).toEqual({ reply: true });
+    expect(evaluateSuppression(payloadFrom())).toEqual({ action: "reply" });
   });
 
   it("suppresses an event that is not message_created", () => {
     expect(evaluateSuppression(payloadFrom({ event: "conversation_created" }))).toEqual({
-      reply: false,
+      action: "suppress",
       reason: "not_message_created",
     });
   });
 
   it("suppresses an outgoing message", () => {
     expect(evaluateSuppression(payloadFrom({ message_type: "outgoing" }))).toEqual({
-      reply: false,
+      action: "suppress",
       reason: "message_type_not_incoming",
     });
   });
 
   it("suppresses an activity message", () => {
     expect(evaluateSuppression(payloadFrom({ message_type: "activity" }))).toEqual({
-      reply: false,
+      action: "suppress",
       reason: "message_type_not_incoming",
     });
   });
 
   it("suppresses a private note", () => {
     expect(evaluateSuppression(payloadFrom({ private: true }))).toEqual({
-      reply: false,
+      action: "suppress",
       reason: "private_note",
     });
   });
 
   it("suppresses a payload with no boolean `private` rather than guessing public", () => {
     expect(evaluateSuppression(payloadFrom({ private: undefined }))).toEqual({
-      reply: false,
+      action: "suppress",
       reason: "private_flag_absent",
     });
   });
@@ -139,7 +139,7 @@ describe("the suppression predicate", () => {
   it("suppresses a message the bot itself sent", () => {
     expect(
       evaluateSuppression(payloadFrom({ sender: { type: "agent_bot", id: 3 } })),
-    ).toEqual({ reply: false, reason: "sender_is_agent_bot" });
+    ).toEqual({ action: "suppress", reason: "sender_is_agent_bot" });
   });
 
   it("suppresses a conversation whose status is not pending", () => {
@@ -155,7 +155,7 @@ describe("the suppression predicate", () => {
             },
           }),
         ),
-      ).toEqual({ reply: false, reason: "status_not_pending" });
+      ).toEqual({ action: "suppress", reason: "status_not_pending" });
     }
   });
 
@@ -173,7 +173,7 @@ describe("the suppression predicate", () => {
           },
         }),
       ),
-    ).toEqual({ reply: false, reason: "human_assigned" });
+    ).toEqual({ action: "suppress", reason: "human_assigned" });
   });
 
   it("suppresses a message with no conversation id", () => {
@@ -181,17 +181,35 @@ describe("the suppression predicate", () => {
       evaluateSuppression(
         payloadFrom({ conversation: { status: "pending", meta: { assignee: null } } }),
       ),
-    ).toEqual({ reply: false, reason: "no_conversation_id" });
+    ).toEqual({ action: "suppress", reason: "no_conversation_id" });
   });
 
-  it("suppresses an empty or attachment-only message", () => {
-    expect(evaluateSuppression(payloadFrom({ content: null }))).toEqual({
-      reply: false,
-      reason: "empty_content",
-    });
-    expect(evaluateSuppression(payloadFrom({ content: "   " }))).toEqual({
-      reply: false,
-      reason: "empty_content",
-    });
+  it("hands off — rather than suppressing — a message with no usable text", () => {
+    // This is the behaviour change. It used to be `empty_content`: acknowledged,
+    // nothing sent, nobody summoned.
+    for (const content of [null, "   ", ""]) {
+      const verdict = evaluateSuppression(payloadFrom({ content }));
+      expect(verdict.action).toBe("handoff");
+    }
+  });
+
+  it("still evaluates status and assignee BEFORE the no-text branch", () => {
+    // This ordering is what suppresses the AI after a handoff has opened and
+    // assigned the conversation: a second attachment is suppressed, not handed
+    // off a second time. No second mechanism exists, and none is needed.
+    expect(
+      evaluateSuppression(
+        payloadFrom({
+          content: null,
+          attachments: [{ file_type: "image" }],
+          conversation: {
+            id: CONVERSATION_DISPLAY_ID,
+            status: "open",
+            meta: { assignee: { id: 12 } },
+            custom_attributes: {},
+          },
+        }),
+      ),
+    ).toEqual({ action: "suppress", reason: "status_not_pending" });
   });
 });

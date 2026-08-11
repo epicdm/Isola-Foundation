@@ -7,11 +7,14 @@
  * ever run on the webhook request path. The handler ACKs first and then calls
  * `processDelivery`.
  *
- * Two invariants:
+ * Three invariants:
  *  1. A customer-facing message is sent ONLY when the runtime returned real
- *     answer text. Every failure path posts a PRIVATE note and escalates.
+ *     answer text, OR when a human handoff has actually been recorded. Every
+ *     failure path posts a PRIVATE note and escalates.
  *  2. No reply is ever invented. `runtime_no_text` is treated as a failure, not
  *     as an empty answer.
+ *  3. The gateway never claims something happened that did not. If the handoff
+ *     could not be recorded, the customer is told nothing at all.
  */
 import type { Binding } from "./bindings.js";
 import type { ChatwootApi, ChatwootTarget } from "./chatwoot.js";
@@ -22,15 +25,52 @@ import {
   mergeLabels,
 } from "./chatwoot.js";
 import { approvedLabels, type GatewayConfig } from "./config.js";
+import {
+  customerAcknowledgement,
+  renderHandoffBlockedNote,
+  renderHandoffNote,
+  type HandoffFailedStep,
+} from "./handoff.js";
+import { createWriteGuard, type IdempotencyStore, type WriteGuard } from "./idempotency.js";
 import type { Logger } from "./log.js";
 import type { AgentRuntime } from "./runtime.js";
-import type { WebhookPayload } from "./webhook.js";
+import type { NoTextClassification, WebhookPayload } from "./webhook.js";
 
 export type DeliveryOutcome =
   /** The customer received the AI answer. */
   | "replied"
   /** No customer message was sent; a human now owns the conversation. */
-  | "escalated";
+  | "escalated"
+  /** No usable text: the conversation was handed to a human and acknowledged. */
+  | "handed_off"
+  /** The handoff itself failed. NOTHING was said to the customer. */
+  | "handoff_blocked";
+
+/**
+ * `answer` invokes the model. `handoff` never does — not once, not to describe
+ * the attachment, not to summarise anything.
+ */
+export type DeliveryMode = "answer" | "handoff";
+
+/** The runtime outcome recorded on a path that deliberately never called it. */
+export const RUNTIME_NOT_INVOKED = "not_invoked";
+
+/**
+ * Write names for the per-delivery idempotency guard. One constant per write so
+ * a rename cannot silently create a second, unguarded write.
+ */
+const WRITE = {
+  reply: "reply",
+  failureNote: "failure_note",
+  escalateStatus: "escalate_toggle_status",
+  escalateAssignment: "escalate_assignment",
+  handoffStatus: "handoff_toggle_status",
+  handoffAssignment: "handoff_assignment",
+  handoffNote: "handoff_note",
+  handoffAck: "handoff_customer_message",
+  labels: "labels",
+  customAttributes: "custom_attributes",
+} as const;
 
 /**
  * Why a delivery failed. `runtime_no_text` is the contract violation described
@@ -104,11 +144,20 @@ export function buildRuntimeContext(
 export interface DeliveryJob {
   correlationId: string;
   deliveryId: string | null;
+  /**
+   * The key this delivery was claimed under. Every write below is claimed
+   * beneath it, so a duplicate cannot produce a second note, a second
+   * assignment or a second customer message.
+   */
+  idempotencyKey: string;
   binding: Binding;
   payload: WebhookPayload;
   /** display_id, already known to be non-null by the suppression predicate. */
   conversationId: number;
   startedAtMs: number;
+  mode: DeliveryMode;
+  /** Present iff `mode === "handoff"`. */
+  classification: NoTextClassification | null;
 }
 
 export interface PipelineDeps {
@@ -116,6 +165,8 @@ export interface PipelineDeps {
   chatwoot: ChatwootApi;
   runtime: AgentRuntime;
   logger: Logger;
+  /** The same store the webhook path claims delivery ids in. */
+  idempotency: IdempotencyStore;
   now: () => number;
 }
 
@@ -124,6 +175,10 @@ export interface DeliveryResult {
   runtimeOutcome: string;
   customerMessageSent: boolean;
   escalated: boolean;
+  /** True when the handoff could not be recorded and the customer was told nothing. */
+  handoffBlocked: boolean;
+  /** True when an operator has to pick this up by hand. Surfaced for retry. */
+  needsRetry: boolean;
 }
 
 export async function processDelivery(
@@ -145,6 +200,17 @@ export async function processDelivery(
     conversationId: job.conversationId,
     tenantId: binding.tenantId,
   };
+
+  const writes = createWriteGuard({
+    store: deps.idempotency,
+    deliveryKey: job.idempotencyKey,
+    now: deps.now,
+  });
+
+  // No usable text: hand over to a human, and never call the model.
+  if (job.mode === "handoff") {
+    return processHandoff(deps, job, target, writes, base);
+  }
 
   // Chatwoot retries the same delivery id, so reusing it as the run id makes
   // the runtime call idempotent across those retries too.
@@ -169,7 +235,7 @@ export async function processDelivery(
   if (failureOutcome === null) {
     const answer = result.text as string;
     try {
-      await deps.chatwoot.postMessage(target, answer, false);
+      await writes.once(WRITE.reply, () => deps.chatwoot.postMessage(target, answer, false));
     } catch (err) {
       // We cannot know whether the message landed, so it is never re-sent.
       deps.logger.error({
@@ -181,16 +247,18 @@ export async function processDelivery(
         durationMs: deps.now() - job.startedAtMs,
         detail: err instanceof Error ? err.message : "unknown chatwoot failure",
       });
-      await escalate(deps, job, target, "reply_failed");
+      await escalate(deps, job, target, writes, "reply_failed");
       return {
         outcome: "escalated",
         runtimeOutcome: "reply_failed",
         customerMessageSent: false,
         escalated: true,
+        handoffBlocked: false,
+        needsRetry: false,
       };
     }
 
-    await annotate(deps, job, target, "replied");
+    await annotate(deps, job, target, writes, "replied");
     deps.logger.info({
       ...base,
       event: "delivery",
@@ -205,6 +273,8 @@ export async function processDelivery(
       runtimeOutcome: result.outcome,
       customerMessageSent: true,
       escalated: false,
+      handoffBlocked: false,
+      needsRetry: false,
     };
   }
 
@@ -217,12 +287,219 @@ export async function processDelivery(
     customerMessageSent: false,
     durationMs: deps.now() - job.startedAtMs,
   });
-  await escalate(deps, job, target, failureOutcome);
+  await escalate(deps, job, target, writes, failureOutcome);
   return {
     outcome: "escalated",
     runtimeOutcome: failureOutcome,
     customerMessageSent: false,
     escalated: true,
+    handoffBlocked: false,
+    needsRetry: false,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The no-usable-text handoff
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical order, exactly as specified:
+ *
+ *   1. open the conversation
+ *   2. assign the escalation team, when one is configured
+ *   3. the AI is now suppressed for this conversation BY THE EXISTING
+ *      PREDICATE — `status_not_pending` and `human_assigned` are evaluated
+ *      before the no-text branch, so the next delivery on this conversation is
+ *      suppressed rather than handed off again. No second mechanism is added,
+ *      and `test/handoff.test.ts` asserts it rather than assuming it.
+ *   4. exactly ONE private note, with the attachment type and count only
+ *   5. and only then, exactly ONE customer-visible message
+ *
+ * Steps 1 and 2 are the handoff. If either fails, step 5 does not happen: the
+ * customer is never told a human has it when no human has it.
+ *
+ * The model is not called anywhere in here, and no attachment URL is read,
+ * fetched or logged.
+ */
+async function processHandoff(
+  deps: PipelineDeps,
+  job: DeliveryJob,
+  target: ChatwootTarget,
+  writes: WriteGuard,
+  base: Record<string, unknown>,
+): Promise<DeliveryResult> {
+  // `mode === "handoff"` always carries a classification; this keeps the
+  // function total rather than asserting.
+  const classification: NoTextClassification = job.classification ?? {
+    reason: "empty_message",
+    attachmentCount: 0,
+    attachmentTypes: [],
+    contentType: null,
+  };
+  const teamId = job.binding.escalationTeamId ?? null;
+
+  const context = {
+    ...base,
+    handoffReason: classification.reason,
+    attachmentCount: classification.attachmentCount,
+    // Closed-vocabulary types only: never a filename, never a URL.
+    attachmentTypes: classification.attachmentTypes,
+    contentType: classification.contentType,
+    runtimeInvoked: false,
+  };
+
+  // ---- 1. open -----------------------------------------------------------
+  try {
+    await writes.once(WRITE.handoffStatus, () => deps.chatwoot.openConversation(target));
+  } catch (err) {
+    return blockHandoff(deps, job, target, writes, context, classification, teamId, {
+      failedStep: "toggle_status",
+      detail: err instanceof Error ? err.message : "unknown chatwoot failure",
+    });
+  }
+
+  // ---- 2. assign ---------------------------------------------------------
+  if (teamId !== null) {
+    try {
+      await writes.once(WRITE.handoffAssignment, () =>
+        deps.chatwoot.assignTeam(target, teamId),
+      );
+    } catch (err) {
+      // The conversation stays open — that half succeeded and undoing it would
+      // only hide the problem from the human who has to pick this up.
+      return blockHandoff(deps, job, target, writes, context, classification, teamId, {
+        failedStep: "assignment",
+        detail: err instanceof Error ? err.message : "unknown chatwoot failure",
+      });
+    }
+  }
+
+  // ---- 3. AI suppression is now the existing predicate's job. -------------
+
+  // ---- 4. exactly one private note ---------------------------------------
+  const note = renderHandoffNote({
+    classification,
+    correlationId: job.correlationId,
+    tenantId: job.binding.tenantId,
+    assignedTeamId: teamId,
+  });
+  let noteRecorded = true;
+  try {
+    await writes.once(WRITE.handoffNote, () => deps.chatwoot.postMessage(target, note, true));
+  } catch (err) {
+    // A missing note does not make the acknowledgement untrue — the
+    // conversation IS open and assigned — so it does not block step 5. It is
+    // still an operator-visible error.
+    noteRecorded = false;
+    deps.logger.error({
+      ...context,
+      event: "handoff",
+      outcome: "handoff_note_failed",
+      detail: err instanceof Error ? err.message : "unknown chatwoot failure",
+    });
+  }
+
+  // ---- 5. exactly one customer-visible message ---------------------------
+  const acknowledgement = customerAcknowledgement(classification.reason);
+  try {
+    await writes.once(WRITE.handoffAck, () =>
+      deps.chatwoot.postMessage(target, acknowledgement, false),
+    );
+  } catch (err) {
+    // Never re-sent: we cannot know whether it landed, and a duplicate is worse.
+    deps.logger.error({
+      ...context,
+      event: "handoff",
+      outcome: "handoff_ack_failed",
+      customerMessageSent: false,
+      noteRecorded,
+      needsRetry: true,
+      durationMs: deps.now() - job.startedAtMs,
+      detail: err instanceof Error ? err.message : "unknown chatwoot failure",
+    });
+    await annotate(deps, job, target, writes, "handed_off");
+    return {
+      outcome: "handed_off",
+      runtimeOutcome: RUNTIME_NOT_INVOKED,
+      customerMessageSent: false,
+      escalated: true,
+      handoffBlocked: false,
+      needsRetry: true,
+    };
+  }
+
+  deps.logger.warn({
+    ...context,
+    event: "delivery",
+    outcome: "handed_off",
+    customerMessageSent: true,
+    noteRecorded,
+    assignedTeamId: teamId,
+    durationMs: deps.now() - job.startedAtMs,
+  });
+  await annotate(deps, job, target, writes, "handed_off");
+  return {
+    outcome: "handed_off",
+    runtimeOutcome: RUNTIME_NOT_INVOKED,
+    customerMessageSent: true,
+    escalated: true,
+    handoffBlocked: false,
+    needsRetry: false,
+  };
+}
+
+/**
+ * The handoff could not be recorded. Log at ERROR for operator alerting, post
+ * the one private note saying so plainly, and send the customer NOTHING.
+ */
+async function blockHandoff(
+  deps: PipelineDeps,
+  job: DeliveryJob,
+  target: ChatwootTarget,
+  writes: WriteGuard,
+  context: Record<string, unknown>,
+  classification: NoTextClassification,
+  teamId: number | null,
+  failure: { failedStep: HandoffFailedStep; detail: string },
+): Promise<DeliveryResult> {
+  deps.logger.error({
+    ...context,
+    event: "delivery",
+    outcome: "handoff_blocked",
+    failedStep: failure.failedStep,
+    customerMessageSent: false,
+    // Surfaced so an operator can pick this conversation up by hand.
+    needsRetry: true,
+    durationMs: deps.now() - job.startedAtMs,
+    detail: failure.detail,
+  });
+
+  const note = renderHandoffBlockedNote({
+    classification,
+    correlationId: job.correlationId,
+    tenantId: job.binding.tenantId,
+    assignedTeamId: teamId,
+    failedStep: failure.failedStep,
+  });
+  try {
+    await writes.once(WRITE.handoffNote, () => deps.chatwoot.postMessage(target, note, true));
+  } catch (err) {
+    deps.logger.error({
+      ...context,
+      event: "handoff",
+      outcome: "handoff_note_failed",
+      detail: err instanceof Error ? err.message : "unknown chatwoot failure",
+    });
+  }
+
+  await annotate(deps, job, target, writes, "handoff_blocked");
+  return {
+    outcome: "handoff_blocked",
+    runtimeOutcome: RUNTIME_NOT_INVOKED,
+    customerMessageSent: false,
+    escalated: false,
+    handoffBlocked: true,
+    needsRetry: true,
   };
 }
 
@@ -235,6 +512,7 @@ async function escalate(
   deps: PipelineDeps,
   job: DeliveryJob,
   target: ChatwootTarget,
+  writes: WriteGuard,
   outcome: string,
 ): Promise<void> {
   const base = {
@@ -253,7 +531,7 @@ async function escalate(
   });
 
   try {
-    await deps.chatwoot.postMessage(target, note, true);
+    await writes.once(WRITE.failureNote, () => deps.chatwoot.postMessage(target, note, true));
   } catch (err) {
     deps.logger.error({
       ...base,
@@ -264,7 +542,7 @@ async function escalate(
   }
 
   try {
-    await deps.chatwoot.openConversation(target);
+    await writes.once(WRITE.escalateStatus, () => deps.chatwoot.openConversation(target));
   } catch (err) {
     deps.logger.error({
       ...base,
@@ -277,7 +555,9 @@ async function escalate(
   const teamId = job.binding.escalationTeamId;
   if (teamId !== undefined) {
     try {
-      await deps.chatwoot.assignTeam(target, teamId);
+      await writes.once(WRITE.escalateAssignment, () =>
+        deps.chatwoot.assignTeam(target, teamId),
+      );
     } catch (err) {
       deps.logger.error({
         ...base,
@@ -290,7 +570,7 @@ async function escalate(
   }
 
   deps.logger.warn({ ...base, event: "escalate", outcome: "escalated", failure: outcome });
-  await annotate(deps, job, target, outcome);
+  await annotate(deps, job, target, writes, outcome);
 }
 
 /**
@@ -304,6 +584,7 @@ async function annotate(
   deps: PipelineDeps,
   job: DeliveryJob,
   target: ChatwootTarget,
+  writes: WriteGuard,
   outcome: string,
 ): Promise<void> {
   const base = {
@@ -340,7 +621,7 @@ async function annotate(
         // is a full replacement, so a no-op write is still a write.
         if (merged.length !== existing.length) {
           try {
-            await deps.chatwoot.setLabels(target, merged);
+            await writes.once(WRITE.labels, () => deps.chatwoot.setLabels(target, merged));
           } catch (err) {
             deps.logger.warn({
               ...base,
@@ -374,10 +655,10 @@ async function annotate(
       });
     }
     if (existing !== null) {
+      const merged = mergeCustomAttributes(existing, additions);
       try {
-        await deps.chatwoot.setCustomAttributes(
-          target,
-          mergeCustomAttributes(existing, additions),
+        await writes.once(WRITE.customAttributes, () =>
+          deps.chatwoot.setCustomAttributes(target, merged),
         );
       } catch (err) {
         deps.logger.warn({

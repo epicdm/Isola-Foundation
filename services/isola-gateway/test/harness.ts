@@ -9,6 +9,7 @@ import type { AddressInfo } from "node:net";
 import { createGateway, type Gateway, type GatewayDeps } from "../src/app.js";
 import type { Binding } from "../src/bindings.js";
 import type { ChatwootApi, ChatwootTarget } from "../src/chatwoot.js";
+import type { SafeFetch } from "../src/egress.js";
 import { ChatwootApiError } from "../src/errors.js";
 import { loadConfig, type EnvRecord, type GatewayConfig } from "../src/config.js";
 import { createLogger, type Logger } from "../src/log.js";
@@ -37,6 +38,30 @@ export const TEMPLATE_ID = "isola-ai-sales-front-desk-agent@v1";
 
 /** The one string that must never appear in a log line. */
 export const CUSTOMER_MESSAGE = "my invoice 348 says unpaid but I paid it on tuesday";
+
+/**
+ * Attachment material that must never be read, never be logged and never be
+ * fetched. The host is deliberately NOT on any egress allowlist, so a request
+ * for it would be blocked — but the tests assert it was never even attempted.
+ */
+export const ATTACHMENT_HOST = "attachments.chatwoot.example.test";
+export const ATTACHMENT_URL = `https://${ATTACHMENT_HOST}/uploads/invoice-348-scan.pdf`;
+export const ATTACHMENT_FILE_NAME = "invoice-348-scan.pdf";
+
+/** A Chatwoot attachment node, complete with the fields we must ignore. */
+export function attachment(fileType: string, id = 1): Record<string, unknown> {
+  return {
+    id,
+    message_id: MESSAGE_ID,
+    file_type: fileType,
+    account_id: ACCOUNT_ID,
+    extension: null,
+    data_url: ATTACHMENT_URL,
+    thumb_url: ATTACHMENT_URL,
+    file_name: ATTACHMENT_FILE_NAME,
+    file_size: 91_234,
+  };
+}
 
 export function makeBinding(overrides: Partial<Binding> = {}): Binding {
   return {
@@ -79,12 +104,36 @@ export interface PayloadOverrides {
   event?: unknown;
   id?: unknown;
   content?: unknown;
+  content_type?: unknown;
+  attachments?: unknown;
   message_type?: unknown;
   private?: unknown;
   sender?: unknown;
   account?: unknown;
   inbox?: unknown;
   conversation?: unknown;
+}
+
+/**
+ * An attachment-only inbound message: no text, one or more attachments, and the
+ * `data_url` / `file_name` fields the gateway must never read.
+ */
+export function attachmentOnlyPayload(
+  fileTypes: string[] = ["image"],
+  overrides: PayloadOverrides = {},
+): Record<string, unknown> {
+  return messageCreatedPayload({
+    content: null,
+    attachments: fileTypes.map((type, index) => attachment(type, index + 1)),
+    ...overrides,
+  });
+}
+
+/** A truly empty inbound message: no text, no attachments, nothing. */
+export function emptyMessagePayload(
+  overrides: PayloadOverrides = {},
+): Record<string, unknown> {
+  return messageCreatedPayload({ content: "   ", ...overrides });
 }
 
 export function messageCreatedPayload(
@@ -94,6 +143,7 @@ export function messageCreatedPayload(
     event: "message_created",
     id: MESSAGE_ID,
     content: CUSTOMER_MESSAGE,
+    content_type: "text",
     message_type: "incoming",
     private: false,
     sender: { type: "contact", id: 55 },
@@ -199,8 +249,21 @@ export class StubChatwootApi implements ChatwootApi {
   customAttributes: Record<string, unknown> = {};
 
   postMessageFailure: ChatwootApiError | null = null;
+  /** Fails a PRIVATE note specifically. */
+  privateNoteFailure: ChatwootApiError | null = null;
+  openConversationFailure: ChatwootApiError | null = null;
+  assignTeamFailure: ChatwootApiError | null = null;
   labelReadFailure: ChatwootApiError | null = null;
   attributeReadFailure: ChatwootApiError | null = null;
+
+  /** Delay applied to every call, so the ACK path can be proved non-blocking. */
+  callDelayMs = 0;
+
+  private async pause(): Promise<void> {
+    if (this.callDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.callDelayMs));
+    }
+  }
 
   get messages(): RecordedChatwootCall[] {
     return this.calls.filter((c) => c.kind === "message");
@@ -229,6 +292,7 @@ export class StubChatwootApi implements ChatwootApi {
     content: string,
     isPrivate: boolean,
   ): Promise<void> {
+    await this.pause();
     this.calls.push({
       kind: "message",
       accountId: target.accountId,
@@ -238,18 +302,22 @@ export class StubChatwootApi implements ChatwootApi {
       private: isPrivate,
     });
     if (this.postMessageFailure && !isPrivate) throw this.postMessageFailure;
+    if (this.privateNoteFailure && isPrivate) throw this.privateNoteFailure;
   }
 
   async openConversation(target: ChatwootTarget): Promise<void> {
+    await this.pause();
     this.calls.push({
       kind: "toggle_status",
       accountId: target.accountId,
       conversationId: target.conversationId,
       accessToken: target.accessToken,
     });
+    if (this.openConversationFailure) throw this.openConversationFailure;
   }
 
   async assignTeam(target: ChatwootTarget, teamId: number): Promise<void> {
+    await this.pause();
     this.calls.push({
       kind: "assignment",
       accountId: target.accountId,
@@ -257,6 +325,7 @@ export class StubChatwootApi implements ChatwootApi {
       accessToken: target.accessToken,
       teamId,
     });
+    if (this.assignTeamFailure) throw this.assignTeamFailure;
   }
 
   async getLabels(target: ChatwootTarget): Promise<string[]> {
@@ -358,6 +427,47 @@ export class StubAgentRuntime implements AgentRuntime {
 }
 
 // ---------------------------------------------------------------------------
+// Egress recorder — for proving what was NEVER contacted
+// ---------------------------------------------------------------------------
+
+export interface EgressRecorder {
+  /** Every hostname a real client asked for, in order. */
+  readonly hosts: string[];
+  /** Every full URL, so a test can assert on paths as well as hosts. */
+  readonly urls: string[];
+  safeFetch: SafeFetch;
+}
+
+/**
+ * A `SafeFetch` that records and answers 200 `{}` instead of opening a socket.
+ *
+ * Deliberately NOT allowlist-enforcing: it records everything the service tries
+ * to reach, so "the attachment host was never contacted" is proved by absence
+ * from a complete list rather than by a block that might not have been hit.
+ */
+export function recordingEgress(): EgressRecorder {
+  const hosts: string[] = [];
+  const urls: string[] = [];
+  return {
+    hosts,
+    urls,
+    safeFetch: async (input) => {
+      const raw = typeof input === "string" ? input : input.toString();
+      urls.push(raw);
+      try {
+        hosts.push(new URL(raw).hostname.toLowerCase());
+      } catch {
+        hosts.push("<unparseable>");
+      }
+      return new Response("{}", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
 
@@ -395,6 +505,44 @@ export async function startServer(args: StartArgs = {}): Promise<TestServer> {
     gateway,
     chatwoot,
     runtime,
+    close: async () => {
+      await gateway.drain();
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve())),
+      );
+    },
+  };
+}
+
+export interface RealClientServer {
+  url: string;
+  gateway: Gateway;
+  egress: EgressRecorder;
+  close(): Promise<void>;
+}
+
+/**
+ * A gateway wired to the REAL Chatwoot and isola-runtime clients, over a
+ * recording `SafeFetch`. No stubs stand between the pipeline and the network
+ * primitive, so the recorded host list is the complete set of hosts this
+ * service tried to reach for a delivery.
+ */
+export async function startRealClientServer(
+  args: { config?: GatewayConfig; logger?: Logger } = {},
+): Promise<RealClientServer> {
+  const egress = recordingEgress();
+  const gateway = createGateway({
+    config: args.config ?? envConfig(),
+    ...(args.logger === undefined ? {} : { logger: args.logger }),
+    safeFetch: egress.safeFetch,
+  });
+  const server: Server = createServer(gateway.handler);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    gateway,
+    egress,
     close: async () => {
       await gateway.drain();
       await new Promise<void>((resolve, reject) =>

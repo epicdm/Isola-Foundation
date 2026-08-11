@@ -9,10 +9,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   ACCOUNT_ID,
+  attachmentOnlyPayload,
   BOT_SECRET,
   CapturingLogger,
   CONVERSATION_DISPLAY_ID,
   bindingsJson,
+  StubChatwootApi,
   envConfig,
   makeBinding,
   messageCreatedPayload,
@@ -306,6 +308,111 @@ describe("POST /v1/chatwoot/agent-bot — the 5 second rule", () => {
       await server.close();
     }
   }, 10_000);
+
+  it("ACKs with zero Chatwoot calls made on the handoff path too", async () => {
+    // The handoff is four Chatwoot round trips — open, assign, note, ack. None
+    // of them may happen before the 200 is written.
+    const chatwoot = new StubChatwootApi();
+    chatwoot.callDelayMs = 400;
+    const config = envConfig({
+      GATEWAY_BINDINGS_JSON: bindingsJson([makeBinding({ escalationTeamId: 5 })]),
+    });
+    const server = await startServer({ chatwoot, config });
+    try {
+      const res = await postWebhook(
+        server.url,
+        signRequest({ body: attachmentOnlyPayload(["image"]) }),
+      );
+      expect(res.status).toBe(200);
+      expect(res.json["outcome"]).toBe("accepted");
+      expect(res.latencyMs).toBeLessThan(1000);
+      expect(server.chatwoot.calls).toEqual([]);
+      expect((server.runtime as StubAgentRuntime).requests).toEqual([]);
+
+      await server.gateway.drain();
+      expect(server.chatwoot.customerMessages).toHaveLength(1);
+      // Still never invoked, even after the whole handoff has run.
+      expect((server.runtime as StubAgentRuntime).requests).toEqual([]);
+    } finally {
+      await server.close();
+    }
+  }, 15_000);
+});
+
+describe("the binding rules are unchanged on the handoff path", () => {
+  it("an unknown inbox is still 401, even for an attachment-only message", async () => {
+    const server = await startServer();
+    try {
+      const res = await postWebhook(
+        server.url,
+        signRequest({ body: attachmentOnlyPayload(["image"], { inbox: { id: 999 } }) }),
+      );
+      expect(res.status).toBe(401);
+      expect(res.json["outcome"]).toBe("unauthorized");
+      await server.gateway.drain();
+      expect(server.chatwoot.calls).toEqual([]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("a retired binding is still 200-and-nothing, even for an attachment-only message", async () => {
+    const config = envConfig({
+      GATEWAY_BINDINGS_JSON: bindingsJson([makeBinding({ status: "retired" })]),
+    });
+    const server = await startServer({ config });
+    try {
+      const res = await postWebhook(
+        server.url,
+        signRequest({ body: attachmentOnlyPayload(["image"]) }),
+      );
+      expect(res.status).toBe(200);
+      expect(res.json["outcome"]).toBe("binding_retired");
+      await server.gateway.drain();
+      expect(server.chatwoot.calls).toEqual([]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("an INTERNAL binding is still 200-and-nothing, even for an attachment-only message", async () => {
+    const { StaticBindingStore } = await import("../src/bindings.js");
+    const server = await startServer({
+      bindingStore: new StaticBindingStore([
+        { ...makeBinding(), exposure: "INTERNAL" as const },
+      ]),
+    });
+    try {
+      const res = await postWebhook(
+        server.url,
+        signRequest({ body: attachmentOnlyPayload(["image"]) }),
+      );
+      expect(res.status).toBe(200);
+      expect(res.json["outcome"]).toBe("binding_not_public");
+      await server.gateway.drain();
+      expect(server.chatwoot.calls).toEqual([]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("a bad signature on an attachment-only message is still 401", async () => {
+    const server = await startServer();
+    try {
+      const res = await postWebhook(
+        server.url,
+        signRequest({
+          body: attachmentOnlyPayload(["image"]),
+          secret: placeholder("wrong-secret"),
+        }),
+      );
+      expect(res.status).toBe(401);
+      await server.gateway.drain();
+      expect(server.chatwoot.calls).toEqual([]);
+    } finally {
+      await server.close();
+    }
+  });
 });
 
 describe("routing", () => {

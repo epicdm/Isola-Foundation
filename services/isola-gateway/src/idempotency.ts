@@ -94,3 +94,70 @@ export function idempotencyKey(parts: IdempotencyKeyParts): string | null {
   }
   return `msg:${parts.accountId}:${parts.conversationId}:${parts.messageId}:${parts.event}`;
 }
+
+// ---------------------------------------------------------------------------
+// Per-write idempotency, on the SAME store and the SAME delivery key
+// ---------------------------------------------------------------------------
+
+/**
+ * `X-Chatwoot-Delivery` already gates the whole pipeline: a repeated delivery
+ * is refused at the ACK and never reaches the asynchronous half at all. That is
+ * the first line of defence and it is unchanged.
+ *
+ * This is the second: every individual Chatwoot WRITE — the note, the status
+ * change, the assignment, the labels, the attributes, the customer message — is
+ * additionally claimed under `<deliveryKey>#<write>` in the same store, so a
+ * duplicate that ever did reach the pipeline still cannot produce a second
+ * note, a second assignment or a second customer message.
+ *
+ * Deliberately the same `IdempotencyStore`, not a parallel mechanism: one TTL,
+ * one cap, one eviction policy, one thing to make durable if that judgement
+ * ever changes.
+ *
+ * Two consequences of sharing the store, both deliberate:
+ *
+ *  - a delivery now occupies roughly six entries rather than one, so
+ *    `GATEWAY_IDEMPOTENCY_MAX_ENTRIES` buys proportionally fewer deliveries of
+ *    de-duplication window. Raise it if that matters more than the memory.
+ *  - eviction is oldest-first, and the delivery key is always claimed BEFORE
+ *    its own write keys, so the delivery key is evicted first. A retry landing
+ *    in that gap re-enters the pipeline and then finds every write already
+ *    claimed — no second note, no second assignment, no second customer
+ *    message. The write guard deliberately outlives the delivery guard.
+ */
+export const WRITE_KEY_SEPARATOR = "#";
+
+export function writeKey(deliveryKey: string, write: string): string {
+  return `${deliveryKey}${WRITE_KEY_SEPARATOR}${write}`;
+}
+
+export interface WriteGuard {
+  /**
+   * Run `fn` only the first time this (delivery, write) pair is seen.
+   *
+   * Returns true when `fn` ran, false when the write was already claimed.
+   * Errors from `fn` propagate to the caller; the claim is NOT released,
+   * because a failed customer-facing write must never be retried blind — a
+   * duplicate answer to a customer is worse than a missing one.
+   */
+  once(write: string, fn: () => Promise<void>): Promise<boolean>;
+}
+
+export interface WriteGuardOptions {
+  store: IdempotencyStore;
+  /** The delivery key this pipeline run is operating under. */
+  deliveryKey: string;
+  now: () => number;
+}
+
+export function createWriteGuard(options: WriteGuardOptions): WriteGuard {
+  return {
+    async once(write: string, fn: () => Promise<void>): Promise<boolean> {
+      if (!options.store.claim(writeKey(options.deliveryKey, write), options.now())) {
+        return false;
+      }
+      await fn();
+      return true;
+    },
+  };
+}
