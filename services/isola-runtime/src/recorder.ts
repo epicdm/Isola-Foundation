@@ -37,6 +37,14 @@ export interface RunOutcome {
    */
   failureCategory: string | null;
   contextTruncated: boolean;
+  /**
+   * Who picks this up when the run failed, and what they should do.
+   *
+   * A blocked issue with no named owner and no next action is how work goes
+   * quiet, so the failure comment always carries both. Optional only so the
+   * existing callers and tests that predate the handoff contract still compile.
+   */
+  handoff?: { owner: string; nextAction: string } | null;
 }
 
 export interface RunRecorder {
@@ -76,12 +84,21 @@ export function renderOutcomeBody(outcome: RunOutcome): string {
       .trimEnd();
   }
 
+  const handoff = outcome.handoff
+    ? [
+        "",
+        `**Owner:** ${outcome.handoff.owner}`,
+        `**Next action:** ${outcome.handoff.nextAction}`,
+      ]
+    : [];
+
   return [
     header,
     "",
     FAILURE_HEADLINE[outcome.status],
     "",
     `Failure category: \`${outcome.failureCategory ?? "unknown"}\``,
+    ...handoff,
     "",
     "No answer was produced. Nothing in this run was inferred, guessed or filled in.",
     "No external system was contacted and no record was changed by this runtime.",
@@ -99,6 +116,13 @@ export class NullRunRecorder implements RunRecorder {
 export interface PaperclipRunRecorderOptions {
   baseUrl: string;
   apiKey: string;
+  /**
+   * The employee's own agent API key, per exposure class. Paperclip
+   * authenticates callbacks as the agent, and a cost event is rejected unless
+   * the calling agent matches — so the agent key, not a shared board key, is
+   * the right credential for the comment too. Falls back to `apiKey`.
+   */
+  apiKeyByExposure?: Readonly<Partial<Record<Exposure, string | null>>>;
   /** e.g. "/api/issues/{issueId}/comments" */
   pathTemplate: string;
   safeFetch: SafeFetch;
@@ -157,15 +181,25 @@ export class PaperclipRunRecorder implements RunRecorder {
     }, this.options.timeoutMs ?? 15_000);
     if (typeof timer.unref === "function") timer.unref();
 
+    const apiKey =
+      this.options.apiKeyByExposure?.[outcome.exposure] ?? this.options.apiKey;
+
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      accept: "application/json",
+      authorization: `Bearer ${apiKey}`,
+    };
+    // Paperclip reads this in its auth middleware and its own agent guidance
+    // says to send it on every mutating call.
+    if (outcome.runId !== null && outcome.runId.length > 0) {
+      headers["x-paperclip-run-id"] = outcome.runId;
+    }
+
     let response: Response;
     try {
       response = await this.options.safeFetch(url, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: "application/json",
-          authorization: `Bearer ${this.options.apiKey}`,
-        },
+        headers,
         body: JSON.stringify({ body: renderOutcomeBody(outcome) }),
         signal: controller.signal,
       });
@@ -190,6 +224,7 @@ export class PaperclipRunRecorder implements RunRecorder {
 export function createRecorder(args: {
   baseUrl: string | null;
   apiKey: string | null;
+  apiKeyByExposure?: Readonly<Partial<Record<Exposure, string | null>>>;
   pathTemplate: string;
   safeFetch: SafeFetch;
 }): RunRecorder {
@@ -197,6 +232,9 @@ export function createRecorder(args: {
   return new PaperclipRunRecorder({
     baseUrl: args.baseUrl,
     apiKey: args.apiKey,
+    ...(args.apiKeyByExposure === undefined
+      ? {}
+      : { apiKeyByExposure: args.apiKeyByExposure }),
     pathTemplate: args.pathTemplate,
     safeFetch: args.safeFetch,
   });

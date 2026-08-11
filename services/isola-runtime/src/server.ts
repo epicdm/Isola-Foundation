@@ -5,7 +5,7 @@
  */
 import { createServer } from "node:http";
 
-import { createApp } from "./app.js";
+import { createRuntime } from "./app.js";
 import { bootWarnings, loadConfig } from "./config.js";
 import { createLogger } from "./log.js";
 import { healthTemplateSummary } from "./registry.js";
@@ -33,14 +33,43 @@ logger.info({
   configuredExposures: (["INTERNAL", "PUBLIC"] as const).filter(
     (exposure) => config.secrets[exposure] !== null,
   ),
-  toolPolicy: "no shell, no filesystem, no web tools, no mcp, no custom tools",
+  toolPolicy:
+    "no shell, no web tools, no mcp, no custom tools; the only filesystem path is RUNTIME_STATE_DIR",
+  stateBackend: config.stateBackend,
+  stateDir: config.stateDir,
+  budgetEnforcement: config.budgetEnforcement,
+  budgetAlertPct: config.budgetAlertPct,
+  maxUndeliveredCostCents: config.maxUndeliveredCostCents,
+  syntheticPricing: config.syntheticPricing,
 });
 
-const server = createServer(createApp({ config, logger }));
+const runtime = createRuntime({ config, logger });
+const server = createServer(runtime.handler);
 
 server.listen(config.port, "0.0.0.0", () => {
   logger.info({ event: "listening", outcome: "listening", port: config.port });
+
+  // Reconcile on startup: whatever the state store still holds as pending is
+  // measured spend that never reached the ledger, so re-deliver it before
+  // anything else happens. `/tmp` does not survive a container replacement —
+  // see the README — so this recovers a restart, not a redeploy.
+  void runtime.metering.reconcile().catch(() => {
+    logger.error({
+      event: "reconcile",
+      outcome: "reconcile_failed",
+      detail: "startup outbox reconciliation did not complete",
+    });
+  });
 });
+
+// Low-frequency sweep so a transient delivery failure heals even if no further
+// invocation arrives. Unref'd: it never keeps the process alive.
+if (config.outboxSweepMs > 0) {
+  const sweep = setInterval(() => {
+    void runtime.metering.flush("sweep").catch(() => undefined);
+  }, config.outboxSweepMs);
+  if (typeof sweep.unref === "function") sweep.unref();
+}
 
 function shutdown(signal: string): void {
   logger.info({ event: "shutdown", outcome: "shutdown", signal });

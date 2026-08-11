@@ -3,7 +3,9 @@
  *
  * Security posture, restated because it is the reason this service exists:
  *  - no shell, no child processes  (nothing imports node:child_process)
- *  - no filesystem writes, no reads outside the app dir (nothing imports node:fs)
+ *  - no filesystem access except the durable state store: `src/state.ts` is the ONLY
+ *    module permitted to import node:fs, it may touch only RUNTIME_STATE_DIR, and
+ *    test/no-direct-network.test.ts asserts both by source scan
  *  - no MCP, no plugins, no custom tools — there is no extension point at all
  *  - outbound network only via src/egress.ts, against an explicit host allowlist
  *  - templates are hardcoded; the request may select one, never define one
@@ -15,11 +17,23 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { RuntimeConfig } from "./config.js";
 import { hasAnyCredential } from "./config.js";
 import { resolveCredential } from "./auth.js";
+import {
+  nextActionFor,
+  postNoticeComment,
+  renderBudgetAlertComment,
+  renderBudgetExhaustedComment,
+  statusForRun,
+  transitionIssue,
+} from "./callbacks.js";
 import { buildUserMessage, renderContext } from "./context.js";
 import { createSafeFetch, type SafeFetch } from "./egress.js";
 import { ModelProviderError, ModelTimeoutError } from "./errors.js";
 import { createLogger, type Logger } from "./log.js";
+import { buildIdempotencyKey, MeteringService, type MeteringOptions } from "./metering.js";
 import { createOpenAiCompatibleClient, type ModelClient } from "./model.js";
+import type { TokenUsage } from "./money.js";
+import { createPaperclipApi, type PaperclipApi, type PaperclipCall } from "./paperclip.js";
+import { createStateStore, type StateStore } from "./state.js";
 import {
   allTemplates,
   findTemplate,
@@ -48,7 +62,13 @@ export type Outcome =
   | "model_timeout"
   | "provider_error"
   | "internal_error"
-  | "not_found";
+  | "not_found"
+  /** 402: the monthly budget is committed in full. The provider was NOT called. */
+  | "budget_exhausted"
+  /** 503: measured spend has not reached the ledger. Fail closed, do not run. */
+  | "cost_delivery_unconfirmed"
+  /** A duplicate of a run that is still in flight. Nothing was done twice. */
+  | "duplicate_run_suppressed";
 
 export interface AppDeps {
   config: RuntimeConfig;
@@ -57,6 +77,10 @@ export interface AppDeps {
   modelClient?: ModelClient;
   /** Injected in tests; defaults to Paperclip-or-Null based on config. */
   recorder?: RunRecorder;
+  /** Injected in tests; defaults to the real Paperclip REST client, or null. */
+  paperclipApi?: PaperclipApi | null;
+  /** Injected in tests; defaults to the configured file or in-memory store. */
+  stateStore?: StateStore;
   safeFetch?: SafeFetch;
   now?: () => number;
   newCorrelationId?: () => string;
@@ -140,15 +164,60 @@ function asString(value: unknown): string | null {
   return null;
 }
 
-/** Best-effort issue id, used only for the write-back path template. */
+function nested(context: unknown, path: readonly string[]): string | null {
+  let cursor: unknown = context;
+  for (const key of path.slice(0, -1)) {
+    if (typeof cursor !== "object" || cursor === null) return null;
+    cursor = (cursor as Record<string, unknown>)[key];
+  }
+  if (typeof cursor !== "object" || cursor === null) return null;
+  const last = path[path.length - 1];
+  if (last === undefined) return null;
+  return asString((cursor as Record<string, unknown>)[last]);
+}
+
+/**
+ * Resolve the issue id from the run context.
+ *
+ * ONLY explicit, unambiguous fields are accepted. There is deliberately no
+ * "first element of an array" or "any key ending in Id" rule: transitioning the
+ * wrong issue is worse than transitioning none, and the contract is that a run
+ * with no resolvable issue is logged as `no_issue_context` and left alone.
+ */
+const ISSUE_ID_PATHS: readonly (readonly string[])[] = [
+  ["issueId"],
+  ["issue_id"],
+  ["issue", "id"],
+  ["task", "issueId"],
+  ["task", "issue_id"],
+  ["task", "issue", "id"],
+  ["assignedIssue", "id"],
+  ["paperclip", "issueId"],
+  ["run", "issueId"],
+];
+
 export function extractIssueId(context: unknown): string | null {
   if (typeof context !== "object" || context === null) return null;
-  const ctx = context as Record<string, unknown>;
-  const direct = asString(ctx["issueId"]) ?? asString(ctx["issue_id"]);
-  if (direct !== null) return direct;
-  const issue = ctx["issue"];
-  if (typeof issue === "object" && issue !== null) {
-    return asString((issue as Record<string, unknown>)["id"]);
+  for (const path of ISSUE_ID_PATHS) {
+    const value = nested(context, path);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+const COMPANY_ID_PATHS: readonly (readonly string[])[] = [
+  ["companyId"],
+  ["company_id"],
+  ["company", "id"],
+  ["paperclip", "companyId"],
+];
+
+/** Company that owns the cost events. Falls back to PAPERCLIP_COMPANY_ID. */
+export function extractCompanyId(context: unknown): string | null {
+  if (typeof context !== "object" || context === null) return null;
+  for (const path of COMPANY_ID_PATHS) {
+    const value = nested(context, path);
+    if (value !== null) return value;
   }
   return null;
 }
@@ -225,7 +294,21 @@ export function decideExposure(args: {
   return { kind: "allow", exposure: templateExposure };
 }
 
+/**
+ * The assembled runtime. `server.ts` needs the metering service as well as the
+ * handler so it can reconcile the outbox on startup and sweep it periodically.
+ */
+export interface Runtime {
+  handler: Handler;
+  metering: MeteringService;
+  stateStore: StateStore;
+}
+
 export function createApp(deps: AppDeps): Handler {
+  return createRuntime(deps).handler;
+}
+
+export function createRuntime(deps: AppDeps): Runtime {
   const { config } = deps;
   const logger = deps.logger ?? createLogger();
   const now = deps.now ?? (() => Date.now());
@@ -247,9 +330,59 @@ export function createApp(deps: AppDeps): Handler {
     createRecorder({
       baseUrl: config.paperclipBaseUrl,
       apiKey: config.paperclipApiKey,
+      apiKeyByExposure: config.paperclipAgentKeys,
       pathTemplate: config.paperclipRecordPath,
       safeFetch,
     });
+
+  const paperclipApi =
+    deps.paperclipApi !== undefined
+      ? deps.paperclipApi
+      : createPaperclipApi({ baseUrl: config.paperclipBaseUrl, safeFetch });
+
+  const stateStore =
+    deps.stateStore ??
+    createStateStore({
+      backend: config.stateBackend,
+      dir: config.stateDir,
+      onWarn: (detail) =>
+        logger.warn({ event: "state_store", outcome: "state_store_degraded", detail }),
+    });
+
+  const agentKeyFor = (exposure: string): string | null =>
+    exposure === "PUBLIC"
+      ? config.paperclipAgentKeys.PUBLIC
+      : config.paperclipAgentKeys.INTERNAL;
+
+  const meteringOptions: MeteringOptions = {
+    companyIdDefault: config.paperclipCompanyId,
+    provider: config.modelProvider,
+    rateOverrides: config.rateOverrides,
+    syntheticEnabled: config.syntheticPricing,
+    alertPct: config.budgetAlertPct,
+    budgetRefreshMs: config.budgetRefreshMs,
+    budgetEnforcement: config.budgetEnforcement,
+    pauseOnExhausted: config.pauseOnExhausted,
+    maxUndeliveredCents: config.maxUndeliveredCostCents,
+    maxUndeliveredAgeMs: config.maxUndeliveredAgeMs,
+    reservationTtlMs: config.reservationTtlMs,
+    idempotencyTtlMs: config.idempotencyTtlMs,
+    estimatedOutputTokens: config.estimatedOutputTokens,
+    outboxMaxAttempts: config.outboxMaxAttempts,
+    outboxBaseBackoffMs: config.outboxBaseBackoffMs,
+    outboxMaxBackoffMs: config.outboxMaxBackoffMs,
+    outboxRetentionMs: config.outboxRetentionMs,
+    outboxFlushLimit: config.outboxFlushLimit,
+  };
+
+  const metering = new MeteringService({
+    store: stateStore,
+    api: paperclipApi,
+    agentKeyFor,
+    options: meteringOptions,
+    logger,
+    now,
+  });
 
   async function handleInvoke(
     req: IncomingMessage,
@@ -374,116 +507,394 @@ export function createApp(deps: AppDeps): Handler {
     }
 
     // ---- authorised: do the work synchronously ----------------------------
+    const exposure = decision.exposure;
     const rendered = renderContext(body.context, template.maxContextBytes);
     const model = config.modelNameOverride ?? template.model;
     // The tighter of the template deadline and the operator deadline wins.
     const timeoutMs = Math.min(template.timeoutMs, config.modelTimeoutMs);
+    const userMessage = buildUserMessage(rendered);
 
-    let status: RunStatus;
-    let content: string | null = null;
-    let failureCategory: string | null = null;
-    let httpStatus: number;
-    let outcome: Outcome;
+    const issueId = extractIssueId(body.context);
+    const companyId = extractCompanyId(body.context) ?? config.paperclipCompanyId;
+    const agentKey = agentKeyFor(exposure);
+    // Every callback authenticates as the employee's own agent and carries the
+    // run id header Paperclip reads.
+    const call: PaperclipCall | null =
+      agentKey === null ? null : { apiKey: agentKey, runId };
 
-    try {
-      const result = await modelClient.complete({
-        model,
-        timeoutMs,
-        messages: [
-          { role: "system", content: template.systemPrompt },
-          { role: "user", content: buildUserMessage(rendered) },
-        ],
-      });
-      status = "succeeded";
-      content = result.content;
-      httpStatus = 200;
-      outcome = "ok";
-    } catch (err) {
-      // NEVER fabricate an answer here. The write-back says the run failed.
-      if (err instanceof ModelTimeoutError) {
-        status = "timed_out";
-        failureCategory = `model_timeout_after_${timeoutMs}ms`;
-        httpStatus = 504;
-        outcome = "model_timeout";
-      } else if (err instanceof ModelProviderError) {
-        status = "provider_error";
-        failureCategory = err.message;
-        httpStatus = 502;
-        outcome = "provider_error";
-      } else {
-        status = "internal_error";
-        failureCategory = `internal_error (${err instanceof Error ? err.name : "unknown"})`;
-        httpStatus = 500;
-        outcome = "internal_error";
-      }
-    }
-
-    const durationMs = now() - startedAt;
-    const runOutcome: RunOutcome = {
-      correlationId,
+    const idemKey = buildIdempotencyKey({
+      companyId,
       agentId,
       runId,
-      issueId: extractIssueId(body.context),
-      templateId: template.id,
-      templateVersion: template.version,
-      exposure: decision.exposure,
-      status,
-      durationMs,
-      content,
-      failureCategory,
-      contextTruncated: rendered.truncated,
-    };
+      issueId,
+      contextText: rendered.text,
+    });
 
-    // A recorder failure must never flip a successful model run into a failed
-    // HTTP status. It is logged and surfaced as `recorded:false`.
-    let recorded = false;
-    let recorderError: string | null = null;
-    try {
-      await recorder.record(runOutcome);
-      recorded = recorder.kind !== "null";
-      if (recorder.kind === "null") recorderError = "no recorder configured";
-    } catch (err) {
-      recorded = false;
-      recorderError = err instanceof Error ? err.message : "unknown recorder failure";
-      logger.error({
-        event: "recorder_failed",
+    // ---- idempotency gate: a replay never reaches the provider -------------
+    const claim = await metering.claimOrReplay({
+      key: idemKey,
+      companyId,
+      agentId,
+      runId,
+      issueId,
+    });
+
+    if (claim.kind === "replay" && claim.record.result !== null) {
+      const prior = claim.record.result;
+      logger.warn({
+        event: "invoke",
         correlationId,
         runId,
         agentId,
         templateId: template.id,
-        outcome: "recorder_failed",
+        outcome: "duplicate_run_suppressed",
         durationMs: now() - startedAt,
-        detail: recorderError,
+        httpStatus: prior.httpStatus,
+        idempotencyKey: idemKey,
+        replayedOutcome: prior.outcome,
+        detail:
+          "this run id has already been executed; the original result was replayed and nothing was written a second time",
       });
+      sendJson(res, prior.httpStatus, correlationId, {
+        ok: prior.outcome === "ok",
+        outcome: prior.outcome,
+        replay: true,
+        recorded: prior.recorded,
+        recorderError: prior.recorderError,
+        transitioned: prior.transitioned,
+        issueStatus: prior.transitionStatus,
+        durationMs: now() - startedAt,
+      });
+      return;
     }
 
-    logger.log(outcome === "ok" ? "info" : "error", {
-      event: "invoke",
-      correlationId,
-      runId,
-      agentId,
-      templateId: template.id,
-      outcome,
-      durationMs: now() - startedAt,
-      httpStatus,
-      exposure: decision.exposure,
-      model,
-      contextTruncated: rendered.truncated,
-      contextOriginalBytes: rendered.originalBytes,
-      contextEmittedBytes: rendered.emittedBytes,
-      recorded,
-      recorderKind: recorder.kind,
-      failureCategory,
-    });
+    if (claim.kind === "in_flight" || claim.kind === "replay") {
+      // A duplicate arriving while the original is still running. Reporting 2xx
+      // stops Paperclip re-scheduling; the original run owns the write-backs.
+      logger.warn({
+        event: "invoke",
+        correlationId,
+        runId,
+        agentId,
+        templateId: template.id,
+        outcome: "duplicate_run_suppressed",
+        durationMs: now() - startedAt,
+        httpStatus: 200,
+        idempotencyKey: idemKey,
+        detail: "a run with this id is already in flight; this duplicate did nothing",
+      });
+      sendJson(res, 200, correlationId, {
+        ok: true,
+        outcome: "duplicate_run_suppressed",
+        replay: true,
+        durationMs: now() - startedAt,
+      });
+      return;
+    }
 
-    sendJson(res, httpStatus, correlationId, {
-      ok: outcome === "ok",
-      outcome,
-      recorded,
-      recorderError,
-      durationMs,
-      ...(failureCategory !== null ? { error: failureCategory } : {}),
-    });
+    let reservationId: string | null = null;
+    let finalized = false;
+
+    try {
+      // ---- deliver anything the outbox still owes -------------------------
+      await metering.flush("invoke");
+
+      // ---- fail closed on undelivered spend -------------------------------
+      const gate = await metering.undeliveredGate();
+      if (gate.blocked) {
+        logger.error({
+          event: "invoke",
+          correlationId,
+          runId,
+          agentId,
+          templateId: template.id,
+          outcome: "cost_delivery_unconfirmed",
+          durationMs: now() - startedAt,
+          httpStatus: 503,
+          pendingCostCents: gate.pendingCents,
+          pendingEntries: gate.pendingEntries,
+          failedEntries: gate.failedEntries,
+          oldestPendingAgeMs: gate.oldestAgeMs,
+          failureCategory: gate.reason,
+        });
+        sendJson(res, 503, correlationId, {
+          ok: false,
+          outcome: "cost_delivery_unconfirmed",
+          error: gate.reason,
+          pendingCostCents: gate.pendingCents,
+          durationMs: now() - startedAt,
+        });
+        return;
+      }
+
+      // ---- budget preflight and reservation --------------------------------
+      const pre = await metering.preflight({
+        companyId,
+        agentId,
+        exposure,
+        runId,
+        model,
+        promptChars: template.systemPrompt.length + userMessage.length,
+      });
+
+      if (pre.kind === "exhausted") {
+        // The provider is NOT called. Nothing is spent on this run.
+        let paused = false;
+        if (pre.pause && agentId !== null) {
+          paused = await metering.pauseAgent(agentId, exposure, runId);
+        }
+        await postNoticeComment({
+          api: paperclipApi,
+          issueId,
+          body: renderBudgetExhaustedComment({
+            usedPct: pre.usedPct,
+            budgetCents: pre.budgetCents,
+            agentId,
+            owner: config.handoff.owner,
+            correlationId,
+            paused,
+          }),
+          call,
+          logger,
+          correlationId,
+          outcome: "budget_exhausted",
+        });
+        logger.error({
+          event: "invoke",
+          correlationId,
+          runId,
+          agentId,
+          templateId: template.id,
+          outcome: "budget_exhausted",
+          durationMs: now() - startedAt,
+          httpStatus: 402,
+          usedPct: pre.usedPct,
+          budgetCents: pre.budgetCents,
+          agentPaused: paused,
+          providerCalled: false,
+        });
+        sendJson(res, 402, correlationId, {
+          ok: false,
+          outcome: "budget_exhausted",
+          error: "monthly budget is fully committed; the model provider was not called",
+          usedPct: pre.usedPct,
+          agentPaused: paused,
+          durationMs: now() - startedAt,
+        });
+        return;
+      }
+
+      reservationId = pre.reservationId;
+
+      if (pre.alert && pre.verdict.kind !== "unlimited") {
+        logger.warn({
+          event: "budget",
+          correlationId,
+          runId,
+          agentId,
+          outcome: "budget_alert",
+          usedPct: pre.verdict.usedPct,
+          alertPct: config.budgetAlertPct,
+          budgetCents: pre.verdict.budgetCents,
+          detail: "budget alert threshold crossed; this fires once per crossing",
+        });
+        await postNoticeComment({
+          api: paperclipApi,
+          issueId,
+          body: renderBudgetAlertComment({
+            usedPct: pre.verdict.usedPct,
+            budgetCents: pre.verdict.budgetCents,
+            alertPct: config.budgetAlertPct,
+            agentId,
+            correlationId,
+          }),
+          call,
+          logger,
+          correlationId,
+          outcome: "budget_alert",
+        });
+      }
+
+      // ---- the model call --------------------------------------------------
+      let status: RunStatus;
+      let content: string | null = null;
+      let failureCategory: string | null = null;
+      let httpStatus: number;
+      let outcome: Outcome;
+      let usage: TokenUsage | null = null;
+
+      try {
+        const result = await modelClient.complete({
+          model,
+          timeoutMs,
+          messages: [
+            { role: "system", content: template.systemPrompt },
+            { role: "user", content: userMessage },
+          ],
+        });
+        status = "succeeded";
+        content = result.content;
+        httpStatus = 200;
+        outcome = "ok";
+        if (result.usage !== null) {
+          // `promptTokens` includes the cached subset; billing splits them.
+          const cached = result.usage.cachedPromptTokens ?? 0;
+          const prompt = result.usage.promptTokens ?? 0;
+          usage = {
+            inputTokens: Math.max(0, prompt - cached),
+            cachedInputTokens: cached,
+            outputTokens: result.usage.completionTokens ?? 0,
+          };
+        }
+      } catch (err) {
+        // NEVER fabricate an answer here. The write-back says the run failed.
+        if (err instanceof ModelTimeoutError) {
+          status = "timed_out";
+          failureCategory = `model_timeout_after_${timeoutMs}ms`;
+          httpStatus = 504;
+          outcome = "model_timeout";
+        } else if (err instanceof ModelProviderError) {
+          status = "provider_error";
+          failureCategory = err.message;
+          httpStatus = 502;
+          outcome = "provider_error";
+        } else {
+          status = "internal_error";
+          failureCategory = `internal_error (${err instanceof Error ? err.name : "unknown"})`;
+          httpStatus = 500;
+          outcome = "internal_error";
+        }
+      }
+
+      // ---- settle the reservation and meter the real cost ------------------
+      const settlement = await metering.settle({
+        reservationId,
+        companyId,
+        agentId,
+        exposure,
+        runId,
+        issueId,
+        model,
+        usage,
+        card: pre.card,
+      });
+      reservationId = null;
+
+      const durationMs = now() - startedAt;
+      const runOutcome: RunOutcome = {
+        correlationId,
+        agentId,
+        runId,
+        issueId,
+        templateId: template.id,
+        templateVersion: template.version,
+        exposure,
+        status,
+        durationMs,
+        content,
+        failureCategory,
+        contextTruncated: rendered.truncated,
+        handoff:
+          status === "succeeded"
+            ? null
+            : { owner: config.handoff.owner, nextAction: nextActionFor(status) },
+      };
+
+      // ---- callback 1: the comment -----------------------------------------
+      // A recorder failure must never flip a successful model run into a failed
+      // HTTP status. It is logged and surfaced as `recorded:false`.
+      let recorded = false;
+      let recorderError: string | null = null;
+      try {
+        await recorder.record(runOutcome);
+        recorded = recorder.kind !== "null";
+        if (recorder.kind === "null") recorderError = "no recorder configured";
+      } catch (err) {
+        recorded = false;
+        recorderError = err instanceof Error ? err.message : "unknown recorder failure";
+        logger.error({
+          event: "recorder_failed",
+          correlationId,
+          runId,
+          agentId,
+          templateId: template.id,
+          outcome: "recorder_failed",
+          durationMs: now() - startedAt,
+          detail: recorderError,
+        });
+      }
+
+      // ---- callback 2: the issue transition (this is the loop fix) ---------
+      const transition = await transitionIssue({
+        api: paperclipApi,
+        issueId,
+        status: statusForRun(status, config.handoff),
+        call,
+        logger,
+        correlationId,
+        runId,
+        agentId,
+      });
+
+      // ---- record the result so a replay is a no-op ------------------------
+      await metering.finalize(idemKey, {
+        httpStatus,
+        outcome,
+        recorded,
+        recorderError,
+        transitioned: transition.transitioned,
+        transitionStatus: transition.status,
+        costEventKey: settlement.costEventKey,
+        costKind: settlement.costKind,
+        accruedMicrocents:
+          settlement.kind === "skipped" ? 0 : settlement.accruedMicrocents,
+      });
+      finalized = true;
+
+      logger.log(outcome === "ok" ? "info" : "error", {
+        event: "invoke",
+        correlationId,
+        runId,
+        agentId,
+        templateId: template.id,
+        outcome,
+        durationMs: now() - startedAt,
+        httpStatus,
+        exposure,
+        model,
+        contextTruncated: rendered.truncated,
+        contextOriginalBytes: rendered.originalBytes,
+        contextEmittedBytes: rendered.emittedBytes,
+        recorded,
+        recorderKind: recorder.kind,
+        issueId,
+        issueTransitioned: transition.transitioned,
+        issueStatus: transition.status,
+        costOutcome: settlement.kind,
+        costKind: settlement.costKind,
+        costEventKey: settlement.costEventKey,
+        inputTokens: usage?.inputTokens ?? null,
+        cachedInputTokens: usage?.cachedInputTokens ?? null,
+        outputTokens: usage?.outputTokens ?? null,
+        failureCategory,
+      });
+
+      sendJson(res, httpStatus, correlationId, {
+        ok: outcome === "ok",
+        outcome,
+        recorded,
+        recorderError,
+        transitioned: transition.transitioned,
+        issueStatus: transition.status,
+        durationMs,
+        ...(failureCategory !== null ? { error: failureCategory } : {}),
+      });
+    } finally {
+      // A reservation must never outlive its run, and an unfinished claim must
+      // never permanently suppress a legitimate retry.
+      await metering.releaseReservation(reservationId);
+      if (!finalized) await metering.release(idemKey);
+    }
   }
 
   function handleHealth(res: ServerResponse, correlationId: string): void {
@@ -525,7 +936,10 @@ export function createApp(deps: AppDeps): Handler {
     });
   }
 
-  return function handler(req: IncomingMessage, res: ServerResponse): void {
+  const handler: Handler = function handler(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): void {
     const correlationId = newCorrelationId();
     let pathname = "/";
     try {
@@ -575,4 +989,6 @@ export function createApp(deps: AppDeps): Handler {
     }
     fail(404, "not_found", "not found");
   };
+
+  return { handler, metering, stateStore };
 }

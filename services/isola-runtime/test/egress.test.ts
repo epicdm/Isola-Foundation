@@ -173,7 +173,11 @@ describe("model client goes through safeFetch", () => {
       timeoutMs: 1000,
     });
     expect(result.content).toBe("hi");
-    expect(result.usage).toEqual({ promptTokens: 5, completionTokens: 2 });
+    expect(result.usage).toEqual({
+      promptTokens: 5,
+      completionTokens: 2,
+      cachedPromptTokens: null,
+    });
     expect(Object.keys(body).sort()).toEqual(["messages", "model", "stream"]);
     // No tool/function surface is ever offered to the provider.
     expect(body["tools"]).toBeUndefined();

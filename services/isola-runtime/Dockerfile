@@ -10,7 +10,12 @@
 #
 # Deliberately absent: any VOLUME, any bind of a Paperclip data directory, any
 # master key, any shell tooling in the runtime layer. The service has no shell
-# use, no filesystem writes and no tool surface.
+# use and no tool surface.
+#
+# The ONE writable path is RUNTIME_STATE_DIR under /tmp, which holds the
+# idempotency records, the cost-event outbox and the sub-cent accumulator. /app
+# stays read-only and there is still no volume — so /tmp survives a restart of
+# this container and NOT a container replacement. See README section 10.
 
 # ---------- build ----------
 FROM node:22-alpine AS build
@@ -29,7 +34,8 @@ RUN npx tsc -p tsconfig.build.json
 FROM node:22-alpine AS runtime
 ENV NODE_ENV=production \
     PORT=3000 \
-    NODE_OPTIONS=--disable-proto=throw
+    NODE_OPTIONS=--disable-proto=throw \
+    RUNTIME_STATE_DIR=/tmp/isola-runtime-state
 
 WORKDIR /app
 

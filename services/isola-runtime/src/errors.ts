@@ -46,3 +46,28 @@ export class RecorderError extends Error {
     this.detail = detail;
   }
 }
+
+/**
+ * A Paperclip REST call failed.
+ *
+ * `retryable` is the only thing the outbox needs to decide between backing off
+ * and giving up: a 5xx, a 408, a 429 or a transport fault can succeed later; a
+ * 400 or a 403 (for example a cost event whose `agentId` is not the calling
+ * agent) never will, and retrying it forever would hide real lost spend behind
+ * an endless queue.
+ *
+ * As everywhere else in this service, `detail` is a category string. Paperclip
+ * response bodies are never carried here — they can echo request content.
+ */
+export class PaperclipApiError extends Error {
+  readonly status: number | null;
+  readonly retryable: boolean;
+  readonly detail: string;
+  constructor(detail: string, status: number | null, retryable: boolean) {
+    super(`paperclip api error: ${detail}`);
+    this.name = "PaperclipApiError";
+    this.status = status;
+    this.retryable = retryable;
+    this.detail = detail;
+  }
+}

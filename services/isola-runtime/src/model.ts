@@ -18,11 +18,27 @@ export interface ModelRequest {
   timeoutMs: number;
 }
 
+/**
+ * Usage as the provider reported it. This is the ONLY source of billable
+ * quantities in this service — nothing downstream is allowed to estimate one.
+ *
+ * `promptTokens` is the provider's TOTAL input count and includes any cached
+ * tokens; `cachedPromptTokens` is the cached subset. Billing splits them,
+ * because a cache hit is charged at a different rate (DeepSeek reports the
+ * split as `prompt_cache_hit_tokens`, OpenAI as
+ * `prompt_tokens_details.cached_tokens`).
+ */
+export interface ModelUsage {
+  promptTokens: number | null;
+  completionTokens: number | null;
+  cachedPromptTokens: number | null;
+}
+
 export interface ModelResponse {
   content: string;
   model: string | null;
   finishReason: string | null;
-  usage: { promptTokens: number | null; completionTokens: number | null } | null;
+  usage: ModelUsage | null;
 }
 
 export interface ModelClient {
@@ -68,10 +84,24 @@ function extractContent(payload: unknown): {
   let usage: ModelResponse["usage"] = null;
   if (typeof usageRaw === "object" && usageRaw !== null) {
     const u = usageRaw as Record<string, unknown>;
+    const details = u["prompt_tokens_details"];
+    const detailCached =
+      typeof details === "object" && details !== null
+        ? (details as Record<string, unknown>)["cached_tokens"]
+        : undefined;
+    // DeepSeek reports the cache split directly; OpenAI nests it. Take
+    // whichever the provider actually sent, and never synthesise one.
+    const cached =
+      typeof u["prompt_cache_hit_tokens"] === "number"
+        ? u["prompt_cache_hit_tokens"]
+        : typeof detailCached === "number"
+          ? detailCached
+          : null;
     usage = {
       promptTokens: typeof u["prompt_tokens"] === "number" ? u["prompt_tokens"] : null,
       completionTokens:
         typeof u["completion_tokens"] === "number" ? u["completion_tokens"] : null,
+      cachedPromptTokens: cached,
     };
   }
 
