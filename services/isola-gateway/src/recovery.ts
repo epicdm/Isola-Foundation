@@ -91,20 +91,34 @@ export function rebuildPayload(
     ? record["custom_attributes"]
     : {};
 
-  const messages = Array.isArray(record["messages"]) ? record["messages"] : [];
-  const candidates = messages.filter(isRecord);
+  // An AgentBot token can see exactly two messages on a conversation record —
+  // `messages` (the single newest message, possibly an activity line) and
+  // `last_non_activity_message`. The messages INDEX is not bot-accessible; see
+  // the note in src/chatwoot.ts. So recovery works from these two and nothing
+  // more, which is enough: a delivery that never produced a reply leaves the
+  // customer's own message as the newest real one.
+  const candidates: Record<string, unknown>[] = [];
+  const list = record["messages"];
+  if (Array.isArray(list)) for (const entry of list) if (isRecord(entry)) candidates.push(entry);
+  const lastReal = record["last_non_activity_message"];
+  if (isRecord(lastReal)) candidates.push(lastReal);
+
+  const incoming = candidates.filter(
+    (m) => readMessageType(m["message_type"]) === "incoming",
+  );
 
   const message =
     row.messageId === null
-      ? // No recorded message id: fall back to the most recent incoming
-        // message, which is the only thing a `message_created` delivery for
-        // this conversation could have been about.
-        [...candidates]
-          .reverse()
-          .find((m) => readMessageType(m["message_type"]) === "incoming")
-      : candidates.find((m) => readInt(m["id"]) === row.messageId);
+      ? incoming[incoming.length - 1]
+      : (candidates.find((m) => readInt(m["id"]) === row.messageId) ??
+        // The recorded message is no longer the newest one. Only resume when
+        // the newest real message IS the one we recorded; otherwise the
+        // conversation has moved on and re-answering would be answering the
+        // wrong thing.
+        undefined);
 
   if (message === undefined) return null;
+  if (readMessageType(message["message_type"]) !== "incoming") return null;
 
   const sender = isRecord(message["sender"]) ? message["sender"] : null;
   const privateRaw = message["private"];
@@ -273,12 +287,6 @@ export function createSweeper(deps: RecoveryDeps): Sweeper {
       deliveryId: null,
       identity,
       digest: row.payloadDigest,
-      // Reconciliation must be able to see messages this delivery may already
-      // have posted, so the window opens well before the original reservation.
-      // Erring wide is the safe direction: too narrow a window would report
-      // `absent` for a message that IS there and produce the duplicate this
-      // whole mechanism exists to prevent.
-      reservedAtEpochSec: Math.floor((startedAt - RECOVERY_LOOKBACK_MS) / 1000),
       binding,
       payload,
       conversationId: row.conversationId,
@@ -366,10 +374,3 @@ export function createSweeper(deps: RecoveryDeps): Sweeper {
     },
   };
 }
-
-/**
- * How far back a recovered delivery's reconciliation scan may look. Generous on
- * purpose: an under-wide window would report `absent` for a message that IS
- * there and cause the duplicate this whole mechanism exists to prevent.
- */
-export const RECOVERY_LOOKBACK_MS = 24 * 60 * 60 * 1000;

@@ -356,7 +356,7 @@ export class StubChatwootApi implements ChatwootApi {
   async reconcileDeliveryRef(
     _target: ChatwootTarget,
     deliveryRef: string,
-    _reservedAtEpochSec: number,
+    _pivotMessageId: number | null,
   ): Promise<ReconcileResult> {
     this.calls.push({
       kind: "reconcile",

@@ -45,26 +45,34 @@ const IDENTITY = {
   eventId: "delivery:d-1",
 };
 
-/** A conversation record shaped like Chatwoot's, for the recovery path. */
+/**
+ * A conversation record shaped exactly like the deployed one: `messages` holds
+ * the SINGLE newest message (the partial builds it from
+ * `conversation.messages.last`, so it can be an activity line) and
+ * `last_non_activity_message` holds the newest real message. Those two fields
+ * are all an AgentBot token can see — the messages index is not bot-accessible.
+ */
 function conversationRecord(
   overrides: { status?: string; assignee?: unknown; content?: string } = {},
 ): Record<string, unknown> {
+  const inbound = {
+    id: MESSAGE_ID,
+    content: overrides.content ?? "what are your opening hours?",
+    content_type: "text",
+    message_type: 0,
+    private: false,
+    created_at: 1_786_459_000,
+    sender: { type: "contact", id: 55 },
+    attachments: [],
+    content_attributes: {},
+  };
   return {
     id: CONVERSATION_DISPLAY_ID,
     status: overrides.status ?? "pending",
     meta: { assignee: overrides.assignee ?? null },
     custom_attributes: {},
-    messages: [
-      {
-        id: MESSAGE_ID,
-        content: overrides.content ?? "what are your opening hours?",
-        content_type: "text",
-        message_type: "incoming",
-        private: false,
-        sender: { type: "contact", id: 55 },
-        attachments: [],
-      },
-    ],
+    messages: [inbound],
+    last_non_activity_message: inbound,
   };
 }
 

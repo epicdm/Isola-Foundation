@@ -534,7 +534,6 @@ export function createGateway(deps: GatewayDeps): Gateway {
       eventId: decision.eventId,
     };
     const digest = payloadDigest(raw);
-    const reservedAtMs = now();
 
     let reservation: ReserveResult;
     try {
@@ -612,7 +611,6 @@ export function createGateway(deps: GatewayDeps): Gateway {
       deliveryId,
       identity,
       digest,
-      reservedAtEpochSec: Math.floor(reservedAtMs / 1000),
       binding: decision.binding,
       payload: decision.payload,
       conversationId: decision.conversationId,

@@ -173,8 +173,6 @@ export interface DeliveryJob {
   identity: LedgerIdentity;
   /** sha256 of the raw signed body, as reserved. Carried onto every write row. */
   digest: string;
-  /** Epoch seconds at which the delivery was reserved. Bounds reconciliation. */
-  reservedAtEpochSec: number;
   binding: Binding;
   payload: WebhookPayload;
   /** display_id, already known to be non-null by the suppression predicate. */
@@ -236,7 +234,9 @@ export async function processDelivery(
     identity: job.identity,
     digest: job.digest,
     correlationId: job.correlationId,
-    reservedAtEpochSec: job.reservedAtEpochSec,
+    // The inbound message is the reconciliation pivot: anything at or before it
+    // predates any reply we could have sent for this delivery.
+    pivotMessageId: job.payload.messageId,
     base,
   };
 

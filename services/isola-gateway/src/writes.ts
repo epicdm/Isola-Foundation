@@ -39,8 +39,12 @@ export interface WriteContext {
   /** The signed-body digest this delivery was reserved under. */
   digest: string;
   correlationId: string;
-  /** Epoch seconds at which the delivery was reserved. Bounds reconciliation. */
-  reservedAtEpochSec: number;
+  /**
+   * The INBOUND Chatwoot message id this delivery is answering. Reconciliation
+   * pivots on it: message ids are monotonic within a conversation, so if the
+   * newest real message is at or before this one, nothing of ours was sent.
+   */
+  pivotMessageId: number | null;
   /** Structured fields carried onto every log line. Never customer content. */
   base: Record<string, unknown>;
 }
@@ -137,7 +141,7 @@ export async function sendGuardedMessage(
     const reconciled = await deps.chatwoot.reconcileDeliveryRef(
       target,
       ref,
-      context.reservedAtEpochSec,
+      context.pivotMessageId,
     );
     if (reconciled.kind === "found") {
       await settle(deps, context, action, reconciled.messageId);
@@ -165,7 +169,7 @@ export async function sendGuardedMessage(
     const reconciled = await deps.chatwoot.reconcileDeliveryRef(
       target,
       ref,
-      context.reservedAtEpochSec,
+      context.pivotMessageId,
     );
     if (reconciled.kind === "found") {
       await settle(deps, context, action, reconciled.messageId);

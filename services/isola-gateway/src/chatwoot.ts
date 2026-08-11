@@ -40,15 +40,16 @@ export interface ChatwootTarget {
 }
 
 /**
- * The outcome of a reconciliation scan for a deterministic delivery ref.
+ * The outcome of reconciling a deterministic delivery ref against Chatwoot.
  *
  *  - `found`        the message is already in Chatwoot. Never send it again.
- *  - `absent`       PROVEN absent: the scan reached back past the moment the
- *                   delivery was reserved without finding the ref, so the
- *                   message cannot have been sent by this delivery.
- *  - `inconclusive` the scan ran out of pages before it could prove absence, or
- *                   the read itself failed. The caller must FAIL CLOSED — an
- *                   unproven absence is not an absence.
+ *  - `absent`       PROVEN absent: the newest non-activity message in the
+ *                   conversation is at or before the inbound message this
+ *                   delivery is answering, so an outgoing message from this
+ *                   delivery cannot exist. Message ids are monotonic within a
+ *                   conversation, which is what makes this sound.
+ *  - `inconclusive` neither could be established. The caller must FAIL CLOSED —
+ *                   an unproven absence is not an absence.
  */
 export type ReconcileResult =
   | { kind: "found"; messageId: number }
@@ -67,14 +68,16 @@ export interface ChatwootApi {
     deliveryRef?: string,
   ): Promise<number | null>;
   /**
-   * Look for a message carrying `deliveryRef` in this conversation, scanning
-   * back until the scan is older than `reservedAtEpochSec` or the page budget
-   * is spent.
+   * Look for a message carrying `deliveryRef` in this conversation.
+   *
+   * `pivotMessageId` is the INBOUND message this delivery is answering. It is
+   * what makes a negative answer sound rather than merely unobserved — see
+   * `HttpChatwootApi.reconcileDeliveryRef`.
    */
   reconcileDeliveryRef(
     target: ChatwootTarget,
     deliveryRef: string,
-    reservedAtEpochSec: number,
+    pivotMessageId: number | null,
   ): Promise<ReconcileResult>;
   /**
    * The whole conversation record, verbatim. Used only by restart recovery,
@@ -170,13 +173,6 @@ export interface HttpChatwootApiOptions {
 
 const DEFAULT_CALL_TIMEOUT_MS = 15_000;
 
-/**
- * How far back a reconciliation scan will page before giving up. Reaching this
- * limit is `inconclusive`, never `absent`: the caller then fails closed rather
- * than risking a duplicate customer message.
- */
-export const RECONCILE_PAGE_BUDGET = 3;
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -191,30 +187,52 @@ export interface ScannedMessage {
   id: number;
   createdAt: number | null;
   deliveryRef: string | null;
+  /** Chatwoot `message_type` 2 is `activity` — a system line, not a real message. */
+  isActivity: boolean;
+}
+
+const ACTIVITY_MESSAGE_TYPE = 2;
+
+function readScannedMessage(entry: unknown): ScannedMessage | null {
+  if (!isRecord(entry)) return null;
+  const id = entry["id"];
+  if (typeof id !== "number" || !Number.isFinite(id)) return null;
+  const createdAt = entry["created_at"];
+  const attributes = entry["content_attributes"];
+  const ref = isRecord(attributes) ? attributes[DELIVERY_REF_ATTRIBUTE] : undefined;
+  return {
+    id,
+    createdAt: typeof createdAt === "number" ? createdAt : null,
+    deliveryRef: typeof ref === "string" && ref.length > 0 ? ref : null,
+    isActivity: entry["message_type"] === ACTIVITY_MESSAGE_TYPE,
+  };
 }
 
 /**
- * Pull `(id, created_at, content_attributes.isola_delivery_ref)` out of a
- * messages page. Deliberately reads nothing else — message content never enters
- * this path.
+ * The messages an AgentBot can actually see on a conversation record: the single
+ * newest message (`messages`, which the partial builds from
+ * `conversation.messages.last`, so it may be an activity line) and
+ * `last_non_activity_message` (the newest real message).
+ *
+ * Deliberately reads id, created_at, message_type and the delivery ref only —
+ * message content never enters this path.
  */
-export function readMessageList(payload: unknown): ScannedMessage[] {
-  const list = isRecord(payload) ? payload["payload"] : payload;
-  if (!Array.isArray(list)) return [];
+export function readVisibleMessages(record: unknown): ScannedMessage[] {
+  if (!isRecord(record)) return [];
   const out: ScannedMessage[] = [];
-  for (const entry of list) {
-    if (!isRecord(entry)) continue;
-    const id = entry["id"];
-    if (typeof id !== "number" || !Number.isFinite(id)) continue;
-    const createdAt = entry["created_at"];
-    const attributes = entry["content_attributes"];
-    const ref = isRecord(attributes) ? attributes[DELIVERY_REF_ATTRIBUTE] : undefined;
-    out.push({
-      id,
-      createdAt: typeof createdAt === "number" ? createdAt : null,
-      deliveryRef: typeof ref === "string" && ref.length > 0 ? ref : null,
-    });
-  }
+  const seen = new Set<number>();
+
+  const push = (entry: unknown): void => {
+    const parsed = readScannedMessage(entry);
+    if (parsed === null || seen.has(parsed.id)) return;
+    seen.add(parsed.id);
+    out.push(parsed);
+  };
+
+  const list = record["messages"];
+  if (Array.isArray(list)) for (const entry of list) push(entry);
+  push(record["last_non_activity_message"]);
+
   return out;
 }
 
@@ -323,61 +341,78 @@ export class HttpChatwootApi implements ChatwootApi {
     return readMessageId(payload);
   }
 
+  /**
+   * WHY THIS READS `conversations#show` AND NOT THE MESSAGES INDEX.
+   *
+   * An AgentBot token cannot list messages. From the deployed v4.16.1 source,
+   * `AccessTokenAuthHelper::BOT_ACCESSIBLE_ENDPOINTS`:
+   *
+   *   'api/v1/accounts/conversations'          => show, toggle_status,
+   *                                               toggle_typing_status,
+   *                                               toggle_priority, create,
+   *                                               update, custom_attributes
+   *   'api/v1/accounts/conversations/messages' => ['create']      <-- create ONLY
+   *   'api/v1/accounts/conversations/assignments' => ['create']
+   *   'api/v1/accounts/conversations/labels'   => index, create
+   *
+   * `GET .../messages` answers `401 {"error":"Access to this endpoint is not
+   * authorized for bots"}`. Verified live, not just read.
+   *
+   * `conversations#show` is allowed, and its partial exposes exactly two
+   * messages: `messages` (the single newest message, which may be an activity)
+   * and `last_non_activity_message` (the newest real message). Both carry
+   * `content_attributes`, so both can carry our delivery ref.
+   *
+   * SOUNDNESS OF A NEGATIVE. Message ids are monotonically increasing within a
+   * conversation. If the newest non-activity message is the inbound message we
+   * are answering — or older — then no outgoing message from this delivery can
+   * exist, and `absent` is proven rather than merely unobserved. If something
+   * newer exists that is not ours, we cannot rule out that ours is behind it,
+   * and the answer is `inconclusive` so the caller fails closed.
+   */
   async reconcileDeliveryRef(
     target: ChatwootTarget,
     deliveryRef: string,
-    reservedAtEpochSec: number,
+    pivotMessageId: number | null,
   ): Promise<ReconcileResult> {
-    let before: number | null = null;
-    for (let page = 0; page < RECONCILE_PAGE_BUDGET; page += 1) {
-      let payload: unknown;
-      try {
-        payload = await this.request(
-          "GET",
-          this.conversationPath(
-            target,
-            `/messages${before === null ? "" : `?before=${encodeURIComponent(String(before))}`}`,
-          ),
-          undefined,
-          target.accessToken,
-        );
-      } catch (err) {
-        return {
-          kind: "inconclusive",
-          detail: err instanceof Error ? err.message : "message read failed",
-        };
-      }
-
-      const messages = readMessageList(payload);
-      if (messages.length === 0) {
-        // No more history. Nothing older exists, so absence is proven.
-        return { kind: "absent" };
-      }
-
-      for (const message of messages) {
-        if (message.deliveryRef === deliveryRef) {
-          return { kind: "found", messageId: message.id };
-        }
-      }
-
-      const oldest = messages.reduce(
-        (min, m) => (m.createdAt !== null && m.createdAt < min ? m.createdAt : min),
-        Number.POSITIVE_INFINITY,
-      );
-      // The scan has reached back past the moment this delivery was reserved,
-      // so a message from this delivery cannot be hiding further back.
-      if (Number.isFinite(oldest) && oldest < reservedAtEpochSec) {
-        return { kind: "absent" };
-      }
-
-      const lowestId = messages.reduce((min, m) => (m.id < min ? m.id : min), Infinity);
-      if (!Number.isFinite(lowestId)) return { kind: "absent" };
-      before = lowestId;
+    let payload: unknown;
+    try {
+      payload = await this.getConversationRecord(target);
+    } catch (err) {
+      return {
+        kind: "inconclusive",
+        detail: err instanceof Error ? err.message : "conversation read failed",
+      };
     }
 
+    const visible = readVisibleMessages(payload);
+    for (const message of visible) {
+      if (message.deliveryRef === deliveryRef) {
+        return { kind: "found", messageId: message.id };
+      }
+    }
+
+    if (pivotMessageId === null) {
+      return {
+        kind: "inconclusive",
+        detail: "no inbound message id to pivot on, so absence cannot be proven",
+      };
+    }
+
+    const newestReal = visible
+      .filter((m) => !m.isActivity)
+      .reduce<number | null>((max, m) => (max === null || m.id > max ? m.id : max), null);
+
+    if (newestReal === null) {
+      // No real message at all, so ours certainly is not there.
+      return { kind: "absent" };
+    }
+    if (newestReal <= pivotMessageId) {
+      return { kind: "absent" };
+    }
     return {
       kind: "inconclusive",
-      detail: `scanned ${RECONCILE_PAGE_BUDGET} pages without reaching the reservation time`,
+      detail: `a newer message (${newestReal}) exists that is not ours; absence cannot be proven`,
     };
   }
 
