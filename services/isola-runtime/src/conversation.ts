@@ -87,11 +87,28 @@ export function readContextPath(
  * worse than commenting on none, so there is no "any key that looks like a
  * conversation" rule. A run with no match is left exactly as it is today.
  */
+/**
+ * Accepted locations for the conversation reference.
+ *
+ * `chatwoot.conversationDisplayId` is the one isola-gateway actually sends, and
+ * its name is the accurate one: Chatwoot's conversation API is addressed by
+ * `display_id`, not by the row's primary key. It is listed first so the precise
+ * field wins when a caller supplies several.
+ *
+ * A live end-to-end run failed on exactly this — the runtime accepted
+ * `chatwoot.conversationId`, the gateway sent `chatwoot.conversationDisplayId`,
+ * nothing resolved, and every PUBLIC run died as `persistence_failed`. Widening
+ * the accepted set is the fix; renaming the gateway's field would have made it
+ * less accurate.
+ */
 const CONVERSATION_ID_PATHS: readonly (readonly string[])[] = [
+  ["chatwoot", "conversationDisplayId"],
+  ["conversationDisplayId"],
   ["conversationRef"],
   ["conversationId"],
   ["chatwootConversationId"],
   ["conversation", "id"],
+  ["conversation", "display_id"],
   ["chatwoot", "conversationId"],
 ];
 

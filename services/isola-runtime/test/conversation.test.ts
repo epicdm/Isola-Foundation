@@ -732,3 +732,51 @@ describe("the INTERNAL issue-driven path is untouched", () => {
     expect(paperclip.transitions).toHaveLength(1);
   });
 });
+
+/**
+ * Cross-service contract regression.
+ *
+ * isola-gateway builds its run context as
+ *   { source, tenantId, companyId, chatwoot: { accountId, inboxId,
+ *     conversationDisplayId, conversationStatus, messageId, customAttributes }, message: {...} }
+ *
+ * The runtime originally accepted `chatwoot.conversationId`. Live, nothing
+ * resolved, so every PUBLIC run died as persistence_failed and the gateway
+ * escalated instead of replying. This pins the shape the gateway actually sends.
+ */
+describe("gateway context shape (cross-service contract)", () => {
+  const gatewayContext = (over: Record<string, unknown> = {}) => ({
+    source: "chatwoot",
+    tenantId: "isola-uat-a",
+    companyId: "3ed3869b-463c-4876-8e16-ddc058f06cd9",
+    chatwoot: {
+      accountId: 3,
+      inboxId: 4,
+      conversationDisplayId: 7,
+      conversationStatus: "pending",
+      messageId: 42,
+      customAttributes: {},
+      ...over,
+    },
+    message: { role: "customer", content: "hello" },
+  });
+
+  it("resolves a reference from the exact context isola-gateway sends", () => {
+    const ref = extractConversationRef(gatewayContext());
+    expect(ref).not.toBeNull();
+    expect(ref?.key).toBe("chatwoot:3:7");
+  });
+
+  it("prefers conversationDisplayId over conversationId when both are present", () => {
+    // display_id is what Chatwoot's conversation API is addressed by; the row
+    // primary key would build a key that points at the wrong conversation.
+    const ref = extractConversationRef(gatewayContext({ conversationId: 999 }));
+    expect(ref?.key).toBe("chatwoot:3:7");
+  });
+
+  it("still resolves the older accepted names", () => {
+    expect(extractConversationRef({ chatwoot: { accountId: 3, conversationId: 7 } })?.key)
+      .toBe("chatwoot:3:7");
+    expect(extractConversationRef({ conversationRef: "chatwoot:3:7" })?.key).toBe("chatwoot:3:7");
+  });
+});
