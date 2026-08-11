@@ -195,14 +195,29 @@ export class PaperclipRunRecorder implements RunRecorder {
       headers["x-paperclip-run-id"] = outcome.runId;
     }
 
+    const payload = JSON.stringify({ body: renderOutcomeBody(outcome) });
+
     let response: Response;
     try {
       response = await this.options.safeFetch(url, {
         method: "POST",
         headers,
-        body: JSON.stringify({ body: renderOutcomeBody(outcome) }),
+        body: payload,
         signal: controller.signal,
       });
+      // Paperclip 500s when X-Paperclip-Run-Id names a run it cannot resolve
+      // (verified live: no header 201, unknown run id 500). This is the employee's
+      // actual output — losing it to a correlation-header artefact is unacceptable,
+      // so retry once without the header. Mirrors HttpPaperclipApi.request.
+      if (response.status === 500 && "x-paperclip-run-id" in headers) {
+        const { "x-paperclip-run-id": _dropped, ...withoutRunId } = headers;
+        response = await this.options.safeFetch(url, {
+          method: "POST",
+          headers: withoutRunId,
+          body: payload,
+          signal: controller.signal,
+        });
+      }
     } catch (err) {
       if (timedOut) throw new RecorderError("write-back timed out");
       if (err instanceof EgressBlockedError) {
