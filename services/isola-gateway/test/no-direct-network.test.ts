@@ -84,6 +84,27 @@ describe("source scan: exactly one network primitive", () => {
     expect(importers).toEqual(["ledger.ts"]);
   });
 
+  /**
+   * `pg` is CommonJS. A NAMED runtime import of it type-checks and then throws
+   * `SyntaxError: Named export 'Pool' not found` under plain Node — which is
+   * what the container runs. Vitest interops CJS transparently, so this cannot
+   * be caught behaviourally here; it has to be a source assertion.
+   *
+   * This is not hypothetical: the first deploy of the ledger crash-looped on it.
+   */
+  it("imports pg via the interop-safe default form, never as a named runtime import", () => {
+    const ledger = FILES.find((f) => f.rel === "ledger.ts");
+    expect(ledger).toBeDefined();
+    const code = (ledger as { code: string }).code;
+
+    // A value import with braces is the broken form. `import type { … }` is
+    // erased at compile time and is fine.
+    const namedValueImport = /(^|\n)\s*import\s*\{[^}]*\}\s*from\s*["']pg["']/;
+    expect(namedValueImport.test(code)).toBe(false);
+
+    expect(code).toMatch(/import\s+\w+\s+from\s*["']pg["']/);
+  });
+
   it("no other database or queue driver is imported anywhere", () => {
     const pattern =
       /from\s+["'](postgres|mysql2?|ioredis|redis|mongodb|better-sqlite3|sqlite3|amqplib|kafkajs|bullmq)["']/;

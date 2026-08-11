@@ -43,7 +43,21 @@
  * absent from this service, and `src/ledger.ts` is the only module permitted to
  * import `pg` — `test/no-direct-network.test.ts` asserts both.
  */
-import { Pool, type PoolClient, type PoolConfig } from "pg";
+// `pg` is CommonJS. Under NodeNext a NAMED runtime import (`import { Pool }`)
+// type-checks — @types/pg declares named exports — and then throws
+// `SyntaxError: Named export 'Pool' not found` the moment plain Node loads the
+// built file. Vitest does not reproduce it because Vite interops CJS for you,
+// so the unit suite passes and only the deployed container fails. This did
+// happen: the first deploy of this module crash-looped on exactly that line.
+//
+// The default import is the interop-safe form, and `import type` is erased at
+// compile time so it adds no runtime named import.
+// `test/no-direct-network.test.ts` asserts the shape, and the Dockerfile loads
+// the built module graph under plain Node so the class cannot recur silently.
+import pgPkg from "pg";
+import type { Pool as PgPool, PoolClient, PoolConfig } from "pg";
+
+const { Pool } = pgPkg;
 
 import {
   DELIVERY_ACTION,
@@ -238,7 +252,7 @@ export interface PostgresLedgerOptions {
 }
 
 export class PostgresLedger implements Ledger {
-  private readonly pool: Pool;
+  private readonly pool: PgPool;
   private readonly instanceId: string;
 
   constructor(options: PostgresLedgerOptions) {

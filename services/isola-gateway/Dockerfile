@@ -33,6 +33,19 @@ RUN npx tsc -p tsconfig.build.json
 RUN npm ci --omit=dev --no-audit --no-fund --ignore-scripts \
  && npm prune --omit=dev
 
+# Load the built module graph under PLAIN NODE, with only the production
+# dependency tree present. tsc and vitest both accept things plain Node rejects
+# — `pg` is CommonJS, so a named ESM import of it type-checks, passes the unit
+# suite under Vite's interop, and then throws `SyntaxError: Named export 'Pool'
+# not found` in the container. That happened. This makes the build fail instead
+# of the deploy, and covers the whole class, not just that one import.
+RUN node --input-type=module -e "\
+  await import('file:///app/dist/ledger.js'); \
+  await import('file:///app/dist/app.js'); \
+  await import('file:///app/dist/recovery.js'); \
+  console.log('module graph loads under plain node'); \
+"
+
 # ---------- runtime ----------
 FROM node:22-alpine AS runtime
 ENV NODE_ENV=production \
