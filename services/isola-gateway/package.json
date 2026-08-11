@@ -1,0 +1,23 @@
+{
+  "name": "isola-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The signed bridge between Chatwoot and the Paperclip-backed AI employee. Verifies the AgentBot webhook, resolves the tenant binding, acknowledges inside Chatwoot's 5s deadline and drives the reply asynchronously through isola-runtime. No shell, no MCP, no filesystem, allowlisted egress only.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/server.js",
+    "test": "vitest run"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "~5.9.3",
+    "vitest": "^2.1.9"
+  }
+}

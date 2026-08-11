@@ -1,0 +1,648 @@
+/**
+ * The HTTP surface. Plain node:http — no framework, no runtime dependencies.
+ *
+ * This is the ONLY publicly-exposed Isola component, so it fails closed
+ * everywhere:
+ *
+ *  - no shell, no child processes  (nothing imports node:child_process)
+ *  - no filesystem access at all   (nothing imports node:fs)
+ *  - no MCP, no plugins, no custom tools — there is no extension point
+ *  - outbound network only via src/egress.ts, against an explicit host allowlist
+ *  - every inbound delivery must carry a valid Chatwoot HMAC over the RAW body
+ *  - an inbox with no binding, a duplicate binding, a retired binding or an
+ *    INTERNAL binding is refused; nothing is ever sent
+ *  - `test/no-direct-network.test.ts` asserts all of the structural half by
+ *    source scan
+ *
+ * THE 5-SECOND RULE. Chatwoot's webhook open/read timeout is 5s. This handler
+ * does signature verification, de-duplication, binding resolution and the
+ * suppression predicate synchronously — all pure, all in-memory — then ACKs
+ * 200 and does every network call asynchronously. Nothing on the request path
+ * may ever call the runtime or the Chatwoot API.
+ */
+import { randomUUID } from "node:crypto";
+import type { IncomingMessage, ServerResponse } from "node:http";
+
+import {
+  candidateSecrets,
+  redactBinding,
+  resolveBinding,
+  StaticBindingStore,
+  type Binding,
+  type BindingStore,
+} from "./bindings.js";
+import { createChatwootApi, type ChatwootApi } from "./chatwoot.js";
+import { configuredBindings, type GatewayConfig } from "./config.js";
+import { createSafeFetch, type SafeFetch } from "./egress.js";
+import {
+  idempotencyKey,
+  MemoryIdempotencyStore,
+  type IdempotencyStore,
+} from "./idempotency.js";
+import { constantTimeEquals } from "./signature.js";
+import { createLogger, type Logger } from "./log.js";
+import { processDelivery, type DeliveryJob } from "./pipeline.js";
+import { createAgentRuntime, type AgentRuntime } from "./runtime.js";
+import {
+  DELIVERY_HEADER,
+  parseDeliveryHeader,
+  SIGNATURE_HEADER,
+  TIMESTAMP_HEADER,
+  verifyChatwootSignature,
+  type SignatureFailureReason,
+} from "./signature.js";
+import { SERVICE_VERSION } from "./version.js";
+import {
+  evaluateSuppression,
+  parseRouting,
+  parseWebhookPayload,
+  type SuppressionReason,
+  type WebhookPayload,
+} from "./webhook.js";
+
+export type Outcome =
+  | "accepted"
+  | "unauthorized"
+  | "bad_request"
+  | "payload_too_large"
+  | "duplicate_suppressed"
+  | "not_deduplicable"
+  | "binding_not_found"
+  | "binding_duplicate"
+  | "binding_retired"
+  | "binding_not_public"
+  | "suppressed"
+  | "not_found"
+  | "method_not_allowed"
+  | "no_admin_token_configured";
+
+/** Server-side only. The HTTP response never says which half failed. */
+export type RejectionReason = SignatureFailureReason | "no_binding_secret" | "unparseable_body";
+
+export type Handler = (req: IncomingMessage, res: ServerResponse) => void;
+
+const CORRELATION_HEADER = "X-Isola-Correlation-Id";
+
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  correlationId: string,
+  body: Record<string, unknown>,
+): void {
+  const payload = JSON.stringify({ correlationId, ...body });
+  res.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "content-length": Buffer.byteLength(payload).toString(),
+    [CORRELATION_HEADER]: correlationId,
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+  });
+  res.end(payload);
+}
+
+class PayloadTooLargeError extends Error {}
+
+const DRAIN_MULTIPLIER = 8;
+const DRAIN_FLOOR_BYTES = 1024 * 1024;
+const DRAIN_CEILING_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Read the body as BYTES. The signature covers the raw octets, so this buffer
+ * is what gets verified — nothing re-serialises a parsed object.
+ */
+function readBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let overflowed = false;
+    const drainCeiling = Math.min(
+      Math.max(maxBytes * DRAIN_MULTIPLIER, DRAIN_FLOOR_BYTES),
+      DRAIN_CEILING_BYTES,
+    );
+
+    const fail = (): void => {
+      reject(new PayloadTooLargeError(`request body exceeded ${maxBytes} bytes`));
+    };
+
+    req.on("data", (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        overflowed = true;
+        chunks.length = 0;
+        if (total > drainCeiling) {
+          req.destroy();
+          fail();
+        }
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (overflowed) fail();
+      else resolve(Buffer.concat(chunks));
+    });
+    req.on("close", () => {
+      if (overflowed) fail();
+    });
+    req.on("error", (err) => reject(err));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The synchronous decision — pure except for the idempotency claim
+// ---------------------------------------------------------------------------
+
+export type DeliveryDecision =
+  | { kind: "accept"; binding: Binding; payload: WebhookPayload; conversationId: number }
+  | { kind: "reject"; reason: RejectionReason }
+  | { kind: "duplicate" }
+  | { kind: "not_deduplicable" }
+  | { kind: "bad_request" }
+  | { kind: "binding_refused"; outcome: Outcome; detail: Record<string, unknown> }
+  | { kind: "suppressed"; reason: SuppressionReason; payload: WebhookPayload };
+
+export interface DecideArgs {
+  raw: Buffer;
+  headers: IncomingMessage["headers"];
+  bindings: readonly Binding[];
+  idempotency: IdempotencyStore;
+  nowMs: number;
+  replayWindowSec: number;
+}
+
+export interface Routing {
+  accountId: number | null;
+  inboxId: number | null;
+}
+
+/**
+ * The decision, plus the routing identifiers it was made against — so every log
+ * line carries `accountId` and `inboxId` even on the branches that never reach
+ * a binding.
+ */
+export interface DecideResult {
+  decision: DeliveryDecision;
+  routing: Routing;
+}
+
+/**
+ * Decision order, and why:
+ *
+ *  1. Routing identifiers are read from the UNVERIFIED body — only to choose
+ *     which AgentBot secret to check against. Nothing else trusts them.
+ *  2. Signature. Every delivery addressed to this (account, inbox) pair is
+ *     checked against every secret registered for it, including retired and
+ *     (impossible-by-boot-validation) non-PUBLIC ones — so an authentic
+ *     delivery to a retired bot is reported as "retired", not as "unauthorized".
+ *  3. Idempotency, on `X-Chatwoot-Delivery`, falling back to
+ *     (account, conversation, message, event).
+ *  4. Binding resolution to exactly one active PUBLIC binding.
+ *  5. The suppression predicate.
+ *
+ * A body that cannot be parsed enough to select a secret is `unparseable_body`
+ * and is rejected with 401: an unverifiable request is not an authenticated one.
+ */
+export function decideDelivery(args: DecideArgs): DecideResult {
+  const routing = parseRouting(args.raw);
+  const at = (decision: DeliveryDecision): DecideResult => ({ decision, routing });
+
+  if (routing.accountId === null || routing.inboxId === null) {
+    return at({ kind: "reject", reason: "unparseable_body" });
+  }
+
+  const secrets = candidateSecrets(args.bindings, routing.accountId, routing.inboxId);
+  if (secrets.length === 0) {
+    return at({ kind: "reject", reason: "no_binding_secret" });
+  }
+
+  let firstFailure: SignatureFailureReason = "signature_mismatch";
+  let verified = false;
+  for (const [index, secret] of secrets.entries()) {
+    const verdict = verifyChatwootSignature({
+      raw: args.raw,
+      signatureHeader: args.headers[SIGNATURE_HEADER],
+      timestampHeader: args.headers[TIMESTAMP_HEADER],
+      secret,
+      nowMs: args.nowMs,
+      windowSec: args.replayWindowSec,
+    });
+    if (verdict.ok) {
+      verified = true;
+      break;
+    }
+    if (index === 0) firstFailure = verdict.reason;
+  }
+  if (!verified) return at({ kind: "reject", reason: firstFailure });
+
+  const payload = parseWebhookPayload(args.raw);
+  if (payload === null) return at({ kind: "bad_request" });
+
+  const key = idempotencyKey({
+    deliveryId: parseDeliveryHeader(args.headers[DELIVERY_HEADER]),
+    accountId: payload.accountId,
+    conversationId: payload.conversationDisplayId,
+    messageId: payload.messageId,
+    event: payload.event,
+  });
+  if (key === null) return at({ kind: "not_deduplicable" });
+  if (!args.idempotency.claim(key, args.nowMs)) return at({ kind: "duplicate" });
+
+  const resolution = resolveBinding(args.bindings, payload.accountId, payload.inboxId);
+  switch (resolution.kind) {
+    case "not_found":
+      return at({ kind: "binding_refused", outcome: "binding_not_found", detail: {} });
+    case "duplicate":
+      return at({
+        kind: "binding_refused",
+        outcome: "binding_duplicate",
+        detail: { matches: resolution.count },
+      });
+    case "retired":
+      return at({
+        kind: "binding_refused",
+        outcome: "binding_retired",
+        detail: { tenantId: resolution.tenantId },
+      });
+    case "not_public":
+      return at({
+        kind: "binding_refused",
+        outcome: "binding_not_public",
+        detail: { tenantId: resolution.tenantId, exposure: resolution.exposure },
+      });
+    case "ok":
+      break;
+    default:
+      return at({ kind: "binding_refused", outcome: "binding_not_found", detail: {} });
+  }
+
+  const suppression = evaluateSuppression(payload);
+  if (!suppression.reply) {
+    return at({ kind: "suppressed", reason: suppression.reason, payload });
+  }
+
+  return at({
+    kind: "accept",
+    binding: resolution.binding,
+    payload,
+    // The suppression predicate has already refused a null display id.
+    conversationId: payload.conversationDisplayId as number,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Assembly
+// ---------------------------------------------------------------------------
+
+export interface GatewayDeps {
+  config: GatewayConfig;
+  logger?: Logger;
+  /** Injected in tests; defaults to the env-configured static store. */
+  bindingStore?: BindingStore;
+  /** Injected in tests; defaults to the real allowlisted Chatwoot client. */
+  chatwoot?: ChatwootApi;
+  /** Injected in tests; defaults to the real allowlisted isola-runtime client. */
+  runtime?: AgentRuntime;
+  idempotency?: IdempotencyStore;
+  safeFetch?: SafeFetch;
+  now?: () => number;
+  newCorrelationId?: () => string;
+}
+
+export interface Gateway {
+  handler: Handler;
+  /** Await every delivery still being processed. Tests use this; so does shutdown. */
+  drain(): Promise<void>;
+  inflight(): number;
+  bindingStore: BindingStore;
+}
+
+export function createApp(deps: GatewayDeps): Handler {
+  return createGateway(deps).handler;
+}
+
+export function createGateway(deps: GatewayDeps): Gateway {
+  const { config } = deps;
+  const logger = deps.logger ?? createLogger();
+  const now = deps.now ?? (() => Date.now());
+  const newCorrelationId = deps.newCorrelationId ?? (() => randomUUID());
+
+  const safeFetch =
+    deps.safeFetch ?? createSafeFetch({ allowlist: config.egressAllowlist });
+
+  const bindingStore =
+    deps.bindingStore ?? new StaticBindingStore(configuredBindings(config));
+
+  const chatwoot =
+    deps.chatwoot ??
+    createChatwootApi({
+      baseUrl: config.chatwootBaseUrl,
+      safeFetch,
+      timeoutMs: config.chatwootTimeoutMs,
+    });
+
+  const runtime =
+    deps.runtime ??
+    createAgentRuntime({
+      baseUrl: config.runtimeBaseUrl,
+      invokePath: config.runtimeInvokePath,
+      bearer: config.runtimeSecret,
+      safeFetch,
+      timeoutMs: config.runtimeTimeoutMs,
+    });
+
+  const idempotency =
+    deps.idempotency ??
+    new MemoryIdempotencyStore({
+      ttlMs: config.idempotencyTtlMs,
+      maxEntries: config.idempotencyMaxEntries,
+    });
+
+  const inflight = new Set<Promise<unknown>>();
+
+  function track(work: Promise<unknown>): void {
+    inflight.add(work);
+    void work.finally(() => inflight.delete(work));
+  }
+
+  async function handleWebhook(
+    req: IncomingMessage,
+    res: ServerResponse,
+    correlationId: string,
+  ): Promise<void> {
+    const startedAt = now();
+    const deliveryId = parseDeliveryHeader(req.headers[DELIVERY_HEADER]);
+    // Filled in as soon as the body has been read, so every log line below
+    // carries the routing identifiers even on the branches that never reach a
+    // binding.
+    let routing: Routing = { accountId: null, inboxId: null };
+
+    const finish = (
+      status: number,
+      outcome: Outcome,
+      logFields: Record<string, unknown> = {},
+      body: Record<string, unknown> = {},
+    ): void => {
+      logger.log(status === 200 ? "info" : "warn", {
+        event: "webhook",
+        correlationId,
+        deliveryId,
+        accountId: routing.accountId,
+        inboxId: routing.inboxId,
+        outcome,
+        httpStatus: status,
+        durationMs: now() - startedAt,
+        ...logFields,
+      });
+      sendJson(res, status, correlationId, { ok: status === 200, outcome, ...body });
+    };
+
+    let raw: Buffer;
+    try {
+      raw = await readBody(req, config.maxRequestBytes);
+    } catch (err) {
+      if (err instanceof PayloadTooLargeError) {
+        finish(413, "payload_too_large", {}, { error: "request body too large" });
+        return;
+      }
+      finish(400, "bad_request", {}, { error: "could not read request body" });
+      return;
+    }
+
+    const evaluated = decideDelivery({
+      raw,
+      headers: req.headers,
+      bindings: bindingStore.list(),
+      idempotency,
+      nowMs: now(),
+      replayWindowSec: config.replayWindowSec,
+    });
+    routing = evaluated.routing;
+    const decision = evaluated.decision;
+
+    switch (decision.kind) {
+      case "reject":
+        // The reason is logged, never returned. Telling the caller which half
+        // failed turns this endpoint into an oracle for the replay window and
+        // for which inboxes exist.
+        finish(401, "unauthorized", { rejectionReason: decision.reason }, {
+          error: "unauthorized",
+        });
+        return;
+
+      case "bad_request":
+        finish(400, "bad_request", {}, { error: "body must be a JSON object" });
+        return;
+
+      case "not_deduplicable":
+        finish(200, "not_deduplicable", {
+          detail:
+            "no X-Chatwoot-Delivery header and no (account, conversation, message, event) key: this delivery cannot be de-duplicated, so nothing was done",
+        });
+        return;
+
+      case "duplicate":
+        // 200 and absolutely nothing else.
+        finish(200, "duplicate_suppressed");
+        return;
+
+      case "binding_refused":
+        // 200 so Chatwoot stops retrying; nothing is sent.
+        finish(200, decision.outcome, decision.detail);
+        return;
+
+      case "suppressed":
+        finish(
+          200,
+          "suppressed",
+          {
+            suppressionReason: decision.reason,
+            conversationId: decision.payload.conversationDisplayId,
+          },
+          { suppressionReason: decision.reason },
+        );
+        return;
+
+      case "accept":
+        break;
+
+      default:
+        finish(400, "bad_request", {}, { error: "unhandled decision" });
+        return;
+    }
+
+    const job: DeliveryJob = {
+      correlationId,
+      deliveryId,
+      binding: decision.binding,
+      payload: decision.payload,
+      conversationId: decision.conversationId,
+      startedAtMs: startedAt,
+    };
+
+    // ---- ACK FIRST. Everything below this line is asynchronous. ------------
+    finish(200, "accepted", {
+      accountId: decision.binding.chatwootAccountId,
+      inboxId: decision.binding.chatwootInboxId,
+      conversationId: decision.conversationId,
+      tenantId: decision.binding.tenantId,
+    });
+
+    track(
+      processDelivery({ config, chatwoot, runtime, logger, now }, job).catch(
+        (err: unknown) => {
+          logger.error({
+            event: "delivery",
+            correlationId,
+            deliveryId,
+            accountId: decision.binding.chatwootAccountId,
+            inboxId: decision.binding.chatwootInboxId,
+            conversationId: decision.conversationId,
+            tenantId: decision.binding.tenantId,
+            outcome: "pipeline_crashed",
+            durationMs: now() - startedAt,
+            detail: err instanceof Error ? err.name : "unknown",
+          });
+        },
+      ),
+    );
+  }
+
+  function handleHealth(res: ServerResponse, correlationId: string): void {
+    const bindings = bindingStore.list();
+    sendJson(res, 200, correlationId, {
+      status: "ok",
+      version: SERVICE_VERSION,
+      bindings: {
+        total: bindings.length,
+        active: bindings.filter((b) => b.status === "active").length,
+        retired: bindings.filter((b) => b.status !== "active").length,
+      },
+      egressAllowlist: config.egressAllowlist,
+      inflightDeliveries: inflight.size,
+    });
+  }
+
+  function handleBindings(
+    req: IncomingMessage,
+    res: ServerResponse,
+    correlationId: string,
+  ): void {
+    if (config.adminToken === null) {
+      logger.warn({
+        event: "bindings",
+        correlationId,
+        outcome: "no_admin_token_configured",
+        httpStatus: 503,
+      });
+      sendJson(res, 503, correlationId, {
+        ok: false,
+        outcome: "no_admin_token_configured",
+        error: "GATEWAY_ADMIN_TOKEN is not configured",
+      });
+      return;
+    }
+    const header = req.headers["authorization"];
+    const rawHeader = Array.isArray(header) ? header[0] : header;
+    const match =
+      typeof rawHeader === "string" ? /^Bearer[ ]+(.+)$/i.exec(rawHeader.trim()) : null;
+    const token = match === null ? null : (match[1] ?? "").trim();
+    if (token === null || token.length === 0 || !constantTimeEquals(token, config.adminToken)) {
+      logger.warn({
+        event: "bindings",
+        correlationId,
+        outcome: "unauthorized",
+        httpStatus: 401,
+      });
+      sendJson(res, 401, correlationId, {
+        ok: false,
+        outcome: "unauthorized",
+        error: "unauthorized",
+      });
+      return;
+    }
+    sendJson(res, 200, correlationId, {
+      ok: true,
+      outcome: "ok",
+      chatwootBaseUrl: config.chatwootBaseUrl,
+      runtimeBaseUrl: config.runtimeBaseUrl,
+      bindings: bindingStore.list().map(redactBinding),
+    });
+  }
+
+  const handler: Handler = function handler(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): void {
+    const correlationId = newCorrelationId();
+    let pathname = "/";
+    try {
+      pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+    } catch {
+      pathname = "/";
+    }
+    const method = (req.method ?? "GET").toUpperCase();
+
+    const fail = (status: number, outcome: Outcome, error: string): void => {
+      logger.warn({
+        event: "request",
+        correlationId,
+        outcome,
+        httpStatus: status,
+        pathname,
+        method,
+      });
+      sendJson(res, status, correlationId, { ok: false, outcome, error });
+    };
+
+    if (method === "GET" && pathname === "/healthz") {
+      handleHealth(res, correlationId);
+      return;
+    }
+    if (pathname === "/v1/bindings") {
+      if (method !== "GET") {
+        fail(405, "method_not_allowed", "method not allowed");
+        return;
+      }
+      handleBindings(req, res, correlationId);
+      return;
+    }
+    if (pathname === "/v1/chatwoot/agent-bot") {
+      if (method !== "POST") {
+        fail(405, "method_not_allowed", "method not allowed");
+        return;
+      }
+      handleWebhook(req, res, correlationId).catch((err: unknown) => {
+        logger.error({
+          event: "webhook",
+          correlationId,
+          outcome: "bad_request",
+          httpStatus: 500,
+          detail: err instanceof Error ? err.name : "unknown",
+        });
+        if (!res.headersSent) {
+          sendJson(res, 500, correlationId, {
+            ok: false,
+            outcome: "bad_request",
+            error: "internal error",
+          });
+        } else {
+          res.end();
+        }
+      });
+      return;
+    }
+    fail(404, "not_found", "not found");
+  };
+
+  return {
+    handler,
+    inflight: () => inflight.size,
+    bindingStore,
+    drain: async () => {
+      // Deliveries can be started while we wait, so loop until the set drains.
+      while (inflight.size > 0) {
+        await Promise.allSettled([...inflight]);
+      }
+    },
+  };
+}
