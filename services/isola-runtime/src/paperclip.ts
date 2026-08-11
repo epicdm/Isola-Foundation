@@ -97,11 +97,39 @@ export class HttpPaperclipApi implements PaperclipApi {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
   }
 
+  /**
+   * Paperclip returns a bare 500 whenever `X-Paperclip-Run-Id` names a run it cannot
+   * resolve — verified live: no header => 201, non-UUID => 500, well-formed but unknown
+   * UUID => 500. In normal operation Paperclip hands us a real run id and this never
+   * fires, but a stale or replayed run id would otherwise destroy the employee's output
+   * on every callback. Losing the work is far worse than losing the run attribution, so
+   * a 500 on a run-id-bearing call is retried once without the header.
+   */
   private async request(
     method: "GET" | "POST" | "PATCH",
     path: string,
     body: unknown,
     call: PaperclipCall,
+  ): Promise<unknown> {
+    try {
+      return await this.attempt(method, path, body, call, true);
+    } catch (err) {
+      const retryWithoutRunId =
+        err instanceof PaperclipApiError &&
+        err.status === 500 &&
+        call.runId !== null &&
+        call.runId.length > 0;
+      if (!retryWithoutRunId) throw err;
+      return await this.attempt(method, path, body, call, false);
+    }
+  }
+
+  private async attempt(
+    method: "GET" | "POST" | "PATCH",
+    path: string,
+    body: unknown,
+    call: PaperclipCall,
+    includeRunId: boolean,
   ): Promise<unknown> {
     const controller = new AbortController();
     let timedOut = false;
@@ -117,7 +145,7 @@ export class HttpPaperclipApi implements PaperclipApi {
     };
     // Paperclip's own agent guidance is to send this on every mutating call.
     // Sending it on reads too costs nothing and keeps the audit trail complete.
-    if (call.runId !== null && call.runId.length > 0) {
+    if (includeRunId && call.runId !== null && call.runId.length > 0) {
       headers["x-paperclip-run-id"] = call.runId;
     }
     if (body !== undefined) headers["content-type"] = "application/json";
