@@ -17,17 +17,20 @@
  *
  * WHERE IT LIVES
  * --------------
- * The container has no volume and a read-only app directory, and that is not
- * being changed — the absence of a mount is part of the security argument. So
- * the state goes to `RUNTIME_STATE_DIR` (default `/tmp/isola-runtime-state`),
- * the one writable path a read-only image still has.
+ * The state goes to `RUNTIME_STATE_DIR`, default `/data/isola-runtime-state` —
+ * a persistent volume mounted at `/data`. The app directory stays read-only and
+ * the image still declares no `VOLUME`; the mount is supplied by the platform.
  *
- * **`/tmp` does not survive a container replacement.** A redeploy, a
- * rescheduling or an OOM kill starts with an empty store: idempotency records
- * are gone (a replayed webhook could produce a second comment) and any
- * undelivered cost event is lost. A restart *of the same container* keeps it,
- * and the startup reconciler re-reads what is there and re-delivers anything
- * still pending. This is a deliberate, documented trade — see the README.
+ * A live test proved the previous `/tmp` default lost the idempotency records
+ * and the sub-cent carry every time the container was replaced. With the volume
+ * mounted, a redeploy, a reschedule and an OOM kill all keep the store, and the
+ * startup reconciler re-delivers anything still pending.
+ *
+ * If the configured directory cannot be created, or exists but cannot be
+ * written, the runtime does NOT stop: it degrades to an in-memory store, says
+ * so loudly, and keeps serving. That degraded mode is exactly the old `/tmp`
+ * behaviour — idempotency records and undelivered cost events do not survive a
+ * restart — so `state_store_degraded` in the log means durability is off.
  *
  * CONTAINMENT
  * -----------
@@ -50,13 +53,32 @@ export class StateStoreError extends Error {
   }
 }
 
-export const DEFAULT_STATE_DIR = "/tmp/isola-runtime-state";
+/**
+ * The persistent volume, not `/tmp`. Overridable with `RUNTIME_STATE_DIR`.
+ * Unwritable ⇒ in-memory fallback with a loud warning, never a crash.
+ */
+export const DEFAULT_STATE_DIR = "/data/isola-runtime-state";
 export const STATE_FILE_NAME = "state.json";
 export const STATE_VERSION = 1;
 
 // ---------------------------------------------------------------------------
 // Persisted record shapes
 // ---------------------------------------------------------------------------
+
+/**
+ * Safe usage metadata for a completed run, retained so a replayed inline
+ * request can report the original run's figures without re-measuring anything.
+ * Token counts are `null` when the provider reported none — never zero by
+ * assumption.
+ */
+export interface RunUsageRecord {
+  inputTokens: number | null;
+  cachedInputTokens: number | null;
+  outputTokens: number | null;
+  model: string | null;
+  provider: string;
+  durationMs: number;
+}
 
 /** The result a replay must return instead of doing the work a second time. */
 export interface RunResultRecord {
@@ -71,6 +93,22 @@ export interface RunResultRecord {
   costKind: CostKind | null;
   /** Microcents this run accrued. Kept for audit, not re-applied on replay. */
   accruedMicrocents: number;
+  /**
+   * The answer this run persisted to Paperclip, byte for byte.
+   *
+   * Retained for one reason only: a replayed `responseMode:"inline"` request
+   * must return the SAME text, and calling the provider again to get it would
+   * be a second model run and a second charge. Written only when the run
+   * actually completed — a failed run stores `null`, and there is no path that
+   * turns a stored answer into a response for a run that did not complete.
+   *
+   * This value is never logged. `redact()` also strips any log field named
+   * `answerText` as a second line of defence.
+   */
+  answerText: string | null;
+  /** The truthful end state, as `src/response.ts` defines it. */
+  completionState: string | null;
+  usage: RunUsageRecord | null;
 }
 
 export interface IdempotencyRecord {
@@ -205,6 +243,52 @@ function usageOf(value: unknown): TokenUsage {
   };
 }
 
+function optString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function optNum(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Parse a persisted run result.
+ *
+ * Tolerant on purpose: a record written by an older build has no `answerText`,
+ * no `completionState` and no `usage`, and dropping the whole record over that
+ * would resurrect the duplicate-run defect. Missing fields become `null`, and
+ * a `null` answer is handled explicitly at the replay site — it is never
+ * papered over with a regenerated one.
+ */
+function resultOf(value: unknown): RunResultRecord | null {
+  if (!isRecord(value)) return null;
+  const usageRaw = value["usage"];
+  const usage: RunUsageRecord | null = isRecord(usageRaw)
+    ? {
+        inputTokens: optNum(usageRaw["inputTokens"]),
+        cachedInputTokens: optNum(usageRaw["cachedInputTokens"]),
+        outputTokens: optNum(usageRaw["outputTokens"]),
+        model: optString(usageRaw["model"]),
+        provider: optString(usageRaw["provider"]) ?? "unknown",
+        durationMs: Math.max(0, num(usageRaw["durationMs"], 0)),
+      }
+    : null;
+  return {
+    httpStatus: num(value["httpStatus"], 500),
+    outcome: String(value["outcome"] ?? "internal_error"),
+    recorded: value["recorded"] === true,
+    recorderError: optString(value["recorderError"]),
+    transitioned: value["transitioned"] === true,
+    transitionStatus: optString(value["transitionStatus"]),
+    costEventKey: optString(value["costEventKey"]),
+    costKind: optString(value["costKind"]) as CostKind | null,
+    accruedMicrocents: num(value["accruedMicrocents"], 0),
+    answerText: optString(value["answerText"]),
+    completionState: optString(value["completionState"]),
+    usage,
+  };
+}
+
 /**
  * Accept only what we can prove the shape of. A record we cannot read is
  * dropped rather than half-trusted — but a dropped *outbox* record would be
@@ -219,34 +303,7 @@ export function sanitiseState(parsed: unknown): RuntimeState {
     idempotency: objectOf(parsed["idempotency"], (v): IdempotencyRecord | null => {
       if (!isRecord(v) || typeof v["key"] !== "string") return null;
       const state = v["state"] === "complete" ? "complete" : "in_flight";
-      const result = isRecord(v["result"])
-        ? {
-            httpStatus: num((v["result"] as Record<string, unknown>)["httpStatus"], 500),
-            outcome: String((v["result"] as Record<string, unknown>)["outcome"] ?? "internal_error"),
-            recorded: (v["result"] as Record<string, unknown>)["recorded"] === true,
-            recorderError:
-              typeof (v["result"] as Record<string, unknown>)["recorderError"] === "string"
-                ? ((v["result"] as Record<string, unknown>)["recorderError"] as string)
-                : null,
-            transitioned: (v["result"] as Record<string, unknown>)["transitioned"] === true,
-            transitionStatus:
-              typeof (v["result"] as Record<string, unknown>)["transitionStatus"] === "string"
-                ? ((v["result"] as Record<string, unknown>)["transitionStatus"] as string)
-                : null,
-            costEventKey:
-              typeof (v["result"] as Record<string, unknown>)["costEventKey"] === "string"
-                ? ((v["result"] as Record<string, unknown>)["costEventKey"] as string)
-                : null,
-            costKind:
-              typeof (v["result"] as Record<string, unknown>)["costKind"] === "string"
-                ? ((v["result"] as Record<string, unknown>)["costKind"] as CostKind)
-                : null,
-            accruedMicrocents: num(
-              (v["result"] as Record<string, unknown>)["accruedMicrocents"],
-              0,
-            ),
-          }
-        : null;
+      const result = resultOf(v["result"]);
       return {
         key: v["key"],
         state,
@@ -432,6 +489,10 @@ export class FileStateStore extends BaseStateStore {
     this.file = resolveStateFile(options.dir);
     this.tmpFile = resolveStateFile(options.dir, `${STATE_FILE_NAME}.tmp`);
     this.current = this.loadFromDisk(options.dir);
+    // Prove the path is writable NOW rather than discovering it on the first
+    // settled cost event. A read-only or wrong-owner mount is the realistic
+    // failure with a platform-supplied volume, and it must be loud at boot.
+    if (!this.degraded) this.probeWritable();
   }
 
   /** Absolute path of the state file. Exposed for logging and tests only. */
@@ -443,12 +504,37 @@ export class FileStateStore extends BaseStateStore {
     return this.degraded;
   }
 
+  /**
+   * Write the state we just loaded straight back, through the same atomic
+   * temp-file-then-rename path every later write uses. Succeeding proves the
+   * directory is writable; failing marks the store degraded at construction so
+   * `createStateStore` can fall back to an honest in-memory store instead of
+   * pretending to be durable.
+   */
+  private probeWritable(): void {
+    try {
+      writeFileSync(this.tmpFile, JSON.stringify(this.current), {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      renameSync(this.tmpFile, this.file);
+    } catch {
+      this.degraded = true;
+      this.warn(
+        "RUNTIME_STATE_DIR exists but is not writable; continuing in memory only — idempotency records, the cost-event outbox and the sub-cent carry will NOT survive a restart",
+      );
+    }
+  }
+
   private loadFromDisk(dir: string): RuntimeState {
     try {
+      // Create it if absent: a fresh volume is mounted empty.
       mkdirSync(resolve(dir.trim()), { recursive: true });
     } catch {
       this.degraded = true;
-      this.warn("could not create RUNTIME_STATE_DIR; continuing in memory only");
+      this.warn(
+        "could not create RUNTIME_STATE_DIR; continuing in memory only — idempotency records, the cost-event outbox and the sub-cent carry will NOT survive a restart",
+      );
       return emptyState();
     }
     let raw: string;
@@ -487,14 +573,19 @@ export interface CreateStateStoreArgs {
 }
 
 /**
- * Choose a store. The file backend degrades to in-memory behaviour if the path
- * is unusable — the runtime must keep serving, it just loses durability, and it
- * says so loudly.
+ * Choose a store.
+ *
+ * The file backend is durable when `RUNTIME_STATE_DIR` is a mounted volume. If
+ * the path cannot be created or cannot be written, this falls back to a real
+ * in-memory store — `kind` then reports `"memory"`, so nothing downstream and
+ * no operator reading a log line is told the state is durable when it is not.
+ * That degraded mode keeps the runtime serving; it only loses durability.
  */
 export function createStateStore(args: CreateStateStoreArgs): StateStore {
   if (args.backend === "memory") return new InMemoryStateStore();
+  let store: FileStateStore;
   try {
-    return new FileStateStore({ dir: args.dir, onWarn: args.onWarn });
+    store = new FileStateStore({ dir: args.dir, onWarn: args.onWarn });
   } catch (err) {
     args.onWarn?.(
       err instanceof StateStoreError
@@ -503,6 +594,8 @@ export function createStateStore(args: CreateStateStoreArgs): StateStore {
     );
     return new InMemoryStateStore();
   }
+  if (store.isDegraded) return new InMemoryStateStore();
+  return store;
 }
 
 /** Accumulator helper: read-or-create, so callers never handle `undefined`. */

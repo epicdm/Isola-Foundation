@@ -47,12 +47,22 @@ const runtime = createRuntime({ config, logger });
 const server = createServer(runtime.handler);
 
 server.listen(config.port, "0.0.0.0", () => {
-  logger.info({ event: "listening", outcome: "listening", port: config.port });
+  logger.info({
+    event: "listening",
+    outcome: "listening",
+    port: config.port,
+    // The RESOLVED backend, not the requested one: `file` here means the
+    // directory was created and proved writable at boot. `memory` after asking
+    // for `file` means the volume is missing or unwritable and durability is
+    // off — the `state_store_degraded` line above says which.
+    stateStoreKind: runtime.stateStore.kind,
+    stateDir: config.stateDir,
+  });
 
   // Reconcile on startup: whatever the state store still holds as pending is
   // measured spend that never reached the ledger, so re-deliver it before
-  // anything else happens. `/tmp` does not survive a container replacement —
-  // see the README — so this recovers a restart, not a redeploy.
+  // anything else happens. With the /data volume attached this now recovers a
+  // container replacement too, not just a restart — see the README.
   void runtime.metering.reconcile().catch(() => {
     logger.error({
       event: "reconcile",

@@ -327,6 +327,9 @@ describe("reconcileOutbox — the startup path", () => {
           costEventKey: null,
           costKind: "actual",
           accruedMicrocents: 0,
+          answerText: null,
+          completionState: "completed",
+          usage: null,
         },
       };
       draft.reservations["res"] = {

@@ -19,9 +19,11 @@ fail-closed tool-permission test, so this runtime exists specifically to have
 | No MCP | no MCP client, no transport, no import | source scan |
 | No plugin or custom-tool mechanism | there is no extension point; templates are compiled-in constants | `src/registry.ts`, `test/registry.test.ts` |
 | Outbound network restricted to an allowlist | every call goes through the single `safeFetch` in `src/egress.ts`; any other host throws `EgressBlockedError` | `test/egress.test.ts` + a source scan asserting `fetch(` appears only in `egress.ts` |
-| No Paperclip volume or master key | the container declares no `VOLUME` and mounts nothing; `src/` never names such a path | source scan |
+| No Paperclip volume or master key | the container declares no `VOLUME` and mounts nothing; the platform attaches one volume at `/data` holding this service's own state and nothing else; `src/` never names a Paperclip data path | source scan |
 | No tool is ever offered to the model | the provider request body carries only `model`, `messages`, `stream` | `test/egress.test.ts` |
-| A failed run is never dressed up as an answer | on timeout/provider error the content is `null` and the write-back says the run failed | `test/invoke.test.ts`, `test/recorder.test.ts` |
+| A failed run is never dressed up as an answer | on timeout/provider error the content is `null` and the write-back says the run failed; on the `inline` path `answerText` is structurally `null` on every failure — `inlineFailureBody` takes no answer argument | `test/invoke.test.ts`, `test/recorder.test.ts`, `test/inline.test.ts` |
+| The model's answer never reaches a log line | no call site logs it, and `redact()` strips any field named `answerText` | `test/inline.test.ts` |
+| An answer is never regenerated to satisfy a retry | the completed run's text is stored in the idempotency record and replayed from there; the provider stub's call count is asserted | `test/inline.test.ts` |
 
 `toolPolicy` on every template is `{shell:false, filesystem:false, web:false,
 mcp:false, customTools:false}` and a test asserts every field is false for every
@@ -91,23 +93,35 @@ Request body (everything is treated as untrusted):
   "exposure": "INTERNAL",
   "agentId": "<paperclip agent id>",
   "runId": "<paperclip run id>",
-  "context": { "...": "whatever Paperclip sends" }
+  "context": { "...": "whatever Paperclip sends" },
+  "responseMode": "none"
 }
 ```
 
-Responses — the status is the truth, because Paperclip discards the body:
+`responseMode` is **optional and versioned**. Absent or `"none"` is the original
+behaviour, unchanged in every observable respect. `"inline"` additionally
+returns the persisted answer — see section 3.1. Any other value, including a
+differently-cased spelling, an empty string or a future mode this build does not
+implement, is **`400 unsupported_response_mode`**; it is never silently
+downgraded, because a downgrade would hand the caller a `200` with no answer and
+no way to tell that apart from a run that genuinely produced nothing.
+
+Responses — for a `none` request the status is the truth, because Paperclip
+discards the body:
 
 | Status | `outcome` | Meaning |
 |---|---|---|
 | `200` | `ok` | Model answered; the result was written back (see `recorded`) and the issue was transitioned (see `transitioned` / `issueStatus`) |
 | `200` | `duplicate_run_suppressed` | A duplicate of a run already in flight. Nothing was done a second time |
 | `400` | `bad_request` / `unknown_template` | Malformed body, or a `templateId` not in the registry. Nothing recorded |
+| `400` | `unsupported_response_mode` | `responseMode` was present and is not a mode this build implements. Nothing was run |
 | `401` | `unauthorized` | Missing or unrecognised bearer |
 | `402` | `budget_exhausted` | The monthly budget is fully committed. **The provider was not called**, the employee was paused, nothing was spent |
 | `403` | `exposure_mismatch` | The credential is not authorised for this template's exposure class |
 | `413` | `payload_too_large` | Body over `RUNTIME_MAX_REQUEST_BYTES` |
 | `500` | `internal_error` | Unexpected runtime fault |
 | `502` | `provider_error` | The model provider errored |
+| `502` | `persistence_failed` | **`inline` only.** The model answered but Paperclip would not accept the write-back |
 | `503` | `no_credential_configured` | No credential configured for that exposure class |
 | `503` | `cost_delivery_unconfirmed` | Measured spend has not reached the ledger and is over the threshold. Fail closed rather than lose spend |
 | `504` | `model_timeout` | The model exceeded the hard deadline |
@@ -120,18 +134,158 @@ Every response carries `correlationId` in the JSON body **and** in the
 `X-Isola-Correlation-Id` header (Paperclip throws the body away, but curl-based
 acceptance tests need it).
 
-On `200` the body also carries `recorded: true|false` and `recorderError`.
-**A recorder failure never flips a successful model run into a failed status** —
-it is logged and reported as `recorded:false`.
+On a `none` `200` the body also carries `recorded: true|false` and
+`recorderError`. **A recorder failure never flips a successful model run into a
+failed status on the `none` path** — it is logged and reported as
+`recorded:false`. On the `inline` path it does, because there the body carries
+an answer and an unpersisted answer must not be presented as a completed run.
+
+---
+
+### 3.1 `responseMode: "inline"` — returning the persisted answer
+
+The Isola gateway replies to a customer in Chatwoot with this text. It therefore
+has to be the **same** text that was persisted, not a regeneration, and it has to
+be truthful about whether the run actually completed.
+
+Four guarantees, each pinned by a test in `test/inline.test.ts`:
+
+1. **Exactly one model invocation.** Inline never calls the provider a second
+   time — not to satisfy the response, and not on a replay.
+2. **Byte equality.** The response carries the identical string handed to the
+   recorder and embedded verbatim in the Paperclip comment. `app.ts` captures
+   the answer once and uses the same variable for the write-back and the
+   response; nothing re-renders, re-derives, trims or summarises it.
+3. **`completed` means persisted.** The state is only `completed` after Paperclip
+   has accepted the write-back. A write-back failure is `persistence_failed`,
+   and it returns no answer.
+4. **`answerText` is `null` on every failure path.** There is no code path that
+   can produce an invented, partial or regenerated answer: `inlineFailureBody`
+   in `src/response.ts` hardcodes `answerText: null` and takes no answer
+   argument at all.
+
+#### Success — `200`
+
+```json
+{
+  "correlationId": "3f7c…",
+  "ok": true,
+  "outcome": "ok",
+  "responseMode": "inline",
+  "contractVersion": 1,
+  "completionState": "completed",
+  "runId": "run-9",
+  "answerText": "…the exact text persisted to Paperclip…",
+  "failureCategory": null,
+  "recorded": true,
+  "recorderError": null,
+  "transitioned": true,
+  "issueStatus": "in_review",
+  "replay": false,
+  "inputTokens": 1000,
+  "cachedInputTokens": 200,
+  "outputTokens": 340,
+  "model": "deepseek-chat",
+  "provider": "deepseek",
+  "durationMs": 4213
+}
+```
+
+`inputTokens` is net of `cachedInputTokens`, exactly as the cost event bills it.
+When the provider reported no usage at all the three token counts are `null` —
+never zero, because zero would be an invented measurement.
+
+#### Failure — same shape, no answer
+
+```json
+{
+  "correlationId": "3f7c…",
+  "ok": false,
+  "outcome": "model_timeout",
+  "responseMode": "inline",
+  "contractVersion": 1,
+  "completionState": "timeout",
+  "runId": "run-9",
+  "answerText": null,
+  "failureCategory": "model_timeout_after_60000ms",
+  "error": "model_timeout_after_60000ms",
+  "recorded": true,
+  "recorderError": null,
+  "transitioned": true,
+  "issueStatus": "blocked",
+  "replay": false,
+  "inputTokens": null,
+  "cachedInputTokens": null,
+  "outputTokens": null,
+  "model": "deepseek-chat",
+  "provider": "deepseek",
+  "durationMs": 60021
+}
+```
+
+`failureCategory` is always a category string built by this service — never a
+secret, never a raw provider payload. Some failures add the fields the `none`
+body also carried (`usedPct` and `agentPaused` on a budget rejection,
+`pendingCostCents` on the fail-closed rejection); those extras can never
+override a contract field.
+
+#### `completionState`
+
+| `completionState` | Status | `answerText` | Meaning |
+|---|---|---|---|
+| `completed` | `200` | the answer | The model answered **and** Paperclip accepted the write-back. The only state that carries text |
+| `timeout` | `504` | `null` | The provider did not answer inside the deadline |
+| `provider_error` | `502` | `null` | The provider was reachable and errored |
+| `invalid_output` | `502` | `null` | The provider answered with no usable assistant text |
+| `persistence_failed` | `502` | `null` | The model answered but the Paperclip write-back was refused. **Not a success.** The run is spent; a human or the caller must decide what happens to the answer, which exists only in the log-free idempotency record |
+| `budget_exhausted` | `402` | `null` | Rejected before the provider was called |
+| `internal_error` | `500` | `null` | An unexpected fault inside this runtime |
+| `duplicate_in_flight` | `200` | `null` | A duplicate of a run that is still executing. The original owns the answer; this request has none yet |
+| `rejected` | `400`/`403`/`503` | `null` | Refused before the model was called — unknown template, exposure mismatch, no credential, or the undelivered-spend gate |
+
+> `401 unauthorized`, `413 payload_too_large` and a malformed body are answered
+> **before** the request body has been parsed, so they keep the original plain
+> shape. There is nothing to shape them from: the runtime has not yet read the
+> `responseMode` field.
+
+#### Replay
+
+A replayed `inline` request returns the **stored** answer out of the idempotency
+record. The provider is not called again, no second comment is posted, no second
+cost event is emitted. The record therefore retains the answer text — written
+only for a run that actually completed, never logged, and held in the same mode
+`0600` state file as everything else.
+
+The two modes are interchangeable across a replay: a run made with `none` can be
+replayed with `inline` and returns the stored answer; a run made with `inline`
+can be replayed with `none` and returns the original plain body. What each mode
+returns depends only on the mode of the request being answered.
+
+If a record written by a build older than this contract is replayed inline, it
+has no stored answer. That is reported as `invalid_output` with an explicit
+`failureCategory`. **It is not regenerated** — a second model run would be a
+second charge and, worse, a different answer to a customer who already has one.
+
+#### Deployment note
+
+`inline` reports `persistence_failed` whenever the write-back does not land,
+which includes the case where `PAPERCLIP_API_KEY` and the per-exposure agent
+keys are all unset (the `NullRunRecorder`). A runtime with no Paperclip
+credential can therefore never return `completed` on the inline path — by
+design: nothing was persisted, so there is no persisted answer to return.
 
 ### `GET /healthz`
 
-No auth, no secrets:
+No auth, no secrets. `responseModes` is contract discovery: a caller can tell
+whether this build implements inline responses without having to try one and
+interpret a `400`.
 
 ```json
 {
   "status": "ok",
-  "version": "1.0.0",
+  "version": "1.1.0",
+  "responseModes": ["none", "inline"],
+  "responseContractVersion": 1,
   "templates": [{ "id": "...", "version": "v1", "exposure": "INTERNAL" }],
   "egressAllowlist": ["api.deepseek.com", "paperclip.example.test"]
 }
@@ -328,7 +482,7 @@ spending more money nobody is counting.
 | `PORT` | no | `3000` | Listen port |
 | `RUNTIME_MAX_REQUEST_BYTES` | no | `1048576` | Inbound body cap |
 | **State** | | | |
-| `RUNTIME_STATE_DIR` | no | `/tmp/isola-runtime-state` | The one writable path. Holds the idempotency records, the outbox and the accumulator |
+| `RUNTIME_STATE_DIR` | no | `/data/isola-runtime-state` | The one writable path, on the persistent volume. Holds the idempotency records (including a completed run's answer text), the outbox and the accumulator. Created if absent; unwritable ⇒ loud in-memory fallback. Pointing it at `/tmp` warns at boot |
 | `RUNTIME_STATE_BACKEND` | no | `file` | `file` or `memory`. `memory` loses everything on restart |
 | **Pricing** | | | |
 | `MODEL_PRICE_INPUT_PER_MTOK_CENTS` | no | built-in card (`deepseek-chat` ⇒ `27`) | Cents per 1M fresh input tokens. Applies to every model |
@@ -450,14 +604,15 @@ Build context is **`services/isola-runtime/`** — nothing outside this director
 is referenced, and no monorepo workspace package is used.
 
 ```bash
-docker build -t isola-runtime:1.0.0 services/isola-runtime
+docker build -t isola-runtime:1.1.0 services/isola-runtime
 docker run --rm -p 3000:3000 \
+  -v isola-runtime-state:/data \
   -e RUNTIME_SECRET_INTERNAL=... \
   -e RUNTIME_SECRET_PUBLIC=... \
   -e MODEL_API_KEY=... \
   -e PAPERCLIP_BASE_URL=... \
   -e PAPERCLIP_API_KEY=... \
-  isola-runtime:1.0.0
+  isola-runtime:1.1.0
 ```
 
 In EasyPanel set the build path / context to `services/isola-runtime` and the
@@ -465,15 +620,27 @@ Dockerfile to `./Dockerfile`. Multi-stage, `node:22-alpine`, non-root `node`
 user, zero runtime dependencies (no `node_modules` in the final image at all),
 `/app` read-only, `EXPOSE 3000`, honours `PORT`.
 
-**Mount nothing.** The service needs no volume, and giving it one would remove a
-guarantee this design depends on.
+**Mount exactly one volume, at `/data`**, and nothing else. It holds this
+service's own state — the idempotency records, the cost-event outbox and the
+sub-cent carry — and no Paperclip data directory, no master key and no secret
+material. The image creates `/data/isola-runtime-state` owned by the `node` user
+so a fresh named volume is writable without any deploy-time `chown`; a bind
+mount must be writable by uid 1000. Without a usable mount the service still
+starts, warns `state_store_degraded`, and runs without durability.
+
+### Network exposure
+
+The runtime stays **private**, reachable only as
+`http://isola_isola-runtime:3000` on the internal network. It is not published,
+has no public hostname and no ingress route — `responseMode: "inline"` does not
+change that. The gateway is the only client.
 
 ### Local
 
 ```bash
 cd services/isola-runtime
 npm install
-npx vitest run     # 207 tests
+npx vitest run     # 258 tests
 npm run typecheck
 npm run build && npm start
 ```
@@ -496,6 +663,24 @@ curl -si -X POST localhost:3000/v1/invoke \
   -H 'content-type: application/json' \
   -d '{"templateId":"isola-ai-sales-front-desk-agent@v1","exposure":"PUBLIC",
        "agentId":"a1","runId":"r1","context":{}}'
+
+# inline -> 200 with completionState "completed" and answerText
+curl -si -X POST localhost:3000/v1/invoke \
+  -H "authorization: Bearer $RUNTIME_SECRET_INTERNAL" \
+  -H 'content-type: application/json' \
+  -d '{"templateId":"epic-staff-operations-coordinator@v1","exposure":"INTERNAL",
+       "agentId":"a1","runId":"r-inline-1","responseMode":"inline",
+       "context":{"issueId":"ISSUE-1","invoices":[]}}'
+
+# the SAME call again -> the same answerText, replay:true, no second model run
+# (the provider bill and the Paperclip comment count both stay at one)
+
+# an unrecognised mode -> 400 unsupported_response_mode, nothing run
+curl -si -X POST localhost:3000/v1/invoke \
+  -H "authorization: Bearer $RUNTIME_SECRET_INTERNAL" \
+  -H 'content-type: application/json' \
+  -d '{"templateId":"epic-staff-operations-coordinator@v1","exposure":"INTERNAL",
+       "agentId":"a1","runId":"r2","responseMode":"streaming","context":{}}'
 ```
 
 Read `X-Isola-Correlation-Id` from the response headers and use it to find the
@@ -503,51 +688,79 @@ matching structured log line.
 
 ---
 
-## 10. Persistence — and the honest limits of `/tmp`
+## 10. Persistence — the `/data` volume
 
-The runtime has to survive a restart with three things intact:
+The runtime has to survive a restart **and a container replacement** with four
+things intact:
 
 1. the **idempotency records**, so a duplicate webhook or an adapter retry does
    not produce a second comment, a second transition or a second charge;
 2. the **cost-event outbox**, so measured spend that has not reached Paperclip
    is re-delivered rather than silently lost;
 3. the **sub-cent accumulator**, so fractional cost is carried forward rather
-   than reset to zero on every deploy.
+   than reset to zero on every deploy;
+4. the **answer text of a completed run**, so a replayed `inline` request
+   returns the same answer instead of calling the provider again.
 
-The container has **no volume and a read-only app directory, and that has not
-been changed** — the absence of a mount is part of the security argument. So the
-state goes to `RUNTIME_STATE_DIR` (default `/tmp/isola-runtime-state`), the one
-writable path a read-only image still has. Writes are whole-file and atomic
-(temporary sibling, then rename), the file is mode `0600`, and every path is a
-fixed basename joined onto the configured directory — `resolveStateFile` refuses
-anything that would resolve outside it, and no path is ever derived from a
-request.
+State goes to `RUNTIME_STATE_DIR`, default **`/data/isola-runtime-state`**, on a
+persistent volume attached at `/data`. The app directory is still read-only, the
+image still declares no `VOLUME` and mounts nothing itself — the volume is
+supplied by the platform, and it holds this service's own state and nothing
+else. Writes are whole-file and atomic (temporary sibling, then rename), the
+file is mode `0600`, and every path is a fixed basename joined onto the
+configured directory — `resolveStateFile` refuses anything that would resolve
+outside it, and no path is ever derived from a request.
 
-> ### `/tmp` does not survive a container replacement
+> ### What changed, and why
 >
-> A **restart of the same container** keeps the state, and the startup
-> reconciler re-reads what is there and re-delivers anything still pending.
+> The default used to be `/tmp/isola-runtime-state`. A live test proved the
+> consequence: a container replacement lost the idempotency records and the
+> sub-cent carry every time. Attaching a volume and pointing the default at it
+> closes that. **With the volume mounted, a redeploy, a reschedule and an OOM
+> kill all keep the state**, and the startup reconciler re-reads what is there
+> and re-delivers anything still pending.
 >
-> A **redeploy, a reschedule or an OOM kill** starts with an empty store. The
-> consequences, stated plainly:
->
-> - idempotency records are gone, so a webhook replayed across the replacement
->   could produce a second comment and a second transition (the transition is
->   idempotent in effect — the issue is already `in_review` — but the comment is
->   not);
-> - any cost event still pending is lost. It was measured, it was never
->   delivered, and Paperclip will never learn about it. The fail-closed
->   threshold bounds that loss at `RUNTIME_MAX_UNDELIVERED_COST_CENTS`
->   (default 50 cents) rather than eliminating it;
-> - the sub-cent carry is lost — at most one cent per accumulator.
->
-> This is a deliberate, documented trade against the alternative of mounting a
-> volume. See section 11 for what a better durable option would cost.
+> `RUNTIME_STATE_DIR` still overrides the default, and pointing it back at
+> `/tmp` produces a boot warning saying exactly what will be lost.
 
-The store is an interface (`src/state.ts`) with a file-backed and an in-memory
-implementation, and the tests drive both through the same suite.
-`RUNTIME_STATE_BACKEND=memory` selects the in-memory one; the file backend
-degrades to in-memory behaviour, loudly, if the path turns out to be unwritable.
+### The directory, and the degraded mode
+
+At boot the store **creates the directory if it is absent** — a fresh volume is
+mounted empty — and then proves it is writable by performing one real atomic
+write through the same path every later write uses. Discovering an unwritable
+mount at boot is the point: the alternative is discovering it on the first
+settled cost event, hours later, with money already at stake.
+
+If the directory cannot be created, or exists but cannot be written, the runtime
+**does not fail to start**. It falls back to the in-memory store, and says so:
+
+- `outcome: "state_store_degraded"` on stdout, naming what will be lost;
+- the `listening` line reports `stateStoreKind: "memory"` — the **resolved**
+  backend, not the requested one, so nothing and nobody is told the state is
+  durable when it is not.
+
+**The in-memory fallback is a degraded mode, not a supported configuration.** In
+it the runtime behaves exactly as the old `/tmp` default did across a
+replacement: a replayed webhook can produce a second comment, an undelivered
+cost event is lost (bounded by `RUNTIME_MAX_UNDELIVERED_COST_CENTS`, default 50
+cents), the sub-cent carry resets, and a replayed `inline` request can no longer
+return the original answer. Treat `state_store_degraded` as an alert, not a
+notice.
+
+`RUNTIME_STATE_BACKEND=memory` selects the in-memory store deliberately, which
+is what the tests use. The store is an interface (`src/state.ts`) with a
+file-backed and an in-memory implementation, and the tests drive both through
+the same suite.
+
+### What the state file now contains
+
+The idempotency record retains the completed run's answer text, for one reason:
+a replayed `inline` request must return the same answer, and asking the provider
+again would be a second model run and a second charge. It is written only for a
+run that completed, it is never logged (`redact()` strips any log field named
+`answerText` as a second line of defence), and it lives in the same mode `0600`
+file as everything else. It expires with the record, after
+`RUNTIME_IDEMPOTENCY_TTL_MS`.
 
 ---
 
@@ -555,16 +768,36 @@ degrades to in-memory behaviour, loudly, if the path turns out to be unwritable.
 
 Places where the spec left room, and what was chosen:
 
-- **A better durable store.** Given no volume, the materially better option is
-  Paperclip itself: it already holds the cost ledger, and a delivered cost event
-  is durable proof that a run was charged. A store that reconstructed the outbox
-  by *reading back* `/api/companies/{id}/cost-events` on startup would survive a
-  container replacement, which `/tmp` does not. It was not built here because it
-  needs a Paperclip read contract (list/filter cost events by agent and period)
-  that is not in the verified set, and guessing an endpoint shape would be worse
-  than the documented `/tmp` limitation. **Recommended as the follow-up.** A
-  Postgres or Redis side-store would also work and would remove the limitation
-  entirely, at the cost of a dependency this service currently does not have.
+- **A volume, rather than reconstructing state from Paperclip.** The earlier
+  design had no mount and documented `/tmp` as a known limitation; a live test
+  turned that limitation into an observed loss. Attaching a volume at `/data`
+  fixes it directly and costs one mount. The alternative — rebuilding the outbox
+  by reading `/api/companies/{id}/cost-events` back on startup — still needs a
+  Paperclip read contract (list/filter cost events by agent and period) that is
+  not in the verified set, and it could never have restored the idempotency
+  records or a completed run's answer text at all.
+- **`persistence_failed` is a failure, `recorded:false` stays a success.** On
+  the `none` path a recorder failure keeps the `200`, because the caller is
+  Paperclip and flipping the status would make it re-schedule the run — which is
+  the 53-run defect. On the `inline` path the caller is the gateway and the body
+  carries text it will send to a customer, so an answer that was not persisted
+  must not be presented as a completed run. Same event, two truthful answers,
+  because the two callers are asking different questions.
+- **`internal_error`, `duplicate_in_flight` and `rejected` are completion states
+  the brief did not name.** The brief listed five failure states. Forcing an
+  internal runtime fault into `provider_error`, or a pre-flight refusal into
+  `budget_exhausted`, would have been a lie in a field the gateway will act on,
+  so the enum was widened instead. Every one of them still returns
+  `answerText: null`.
+- **The idempotency record retains the answer text.** Required by the contract:
+  a replayed inline request must return the same answer and must not re-run the
+  model. It is written only for a completed run, never logged, and expires with
+  the record. It is stored for `none` runs too, so that a `none` run replayed
+  with `inline` can be answered without a second model call.
+- **A legacy record with no stored answer replays as `invalid_output`,** not as
+  a success and not as a fresh run. Only reachable across an upgrade with a
+  surviving store; regenerating would mean a second charge and a different
+  answer to a customer who already has one.
 - **All non-success outcomes go to `blocked`,** not just "unrecoverable" ones.
   This runtime has no retry loop; leaving an issue actionable so Paperclip can
   retry is what produced the 53 runs. A human decides whether to retry.
@@ -622,4 +855,11 @@ Outcomes worth alerting on:
 | `issue_transitioned` / `issue_transition_failed` | The loop fix landing, or not |
 | `budget_read_failed` | The ledger could not be read; a stale snapshot may be in use |
 | `reconcile_complete` | Startup reconciliation finished |
-| `state_store_degraded` | The state file is not writable; durability is lost |
+| `state_store_degraded` | The state directory could not be created or is not writable. **Durability is off** — the runtime is serving from memory. Alert on this |
+| `unsupported_response_mode` | A caller asked for a `responseMode` this build does not implement. Nothing was run |
+| `persistence_failed` | `inline` only: the model answered but the Paperclip write-back was refused, so no answer was returned. The run is spent |
+
+Inline responses add `responseMode` and `completionState` to the `invoke` log
+line. **`answerText` is never logged**, on any path, including the replay path
+that reads it out of the store — `redact()` strips any field with that name as a
+second line of defence.

@@ -27,13 +27,22 @@ import {
 } from "./callbacks.js";
 import { buildUserMessage, renderContext } from "./context.js";
 import { createSafeFetch, type SafeFetch } from "./egress.js";
-import { ModelProviderError, ModelTimeoutError } from "./errors.js";
+import {
+  ModelInvalidOutputError,
+  ModelProviderError,
+  ModelTimeoutError,
+} from "./errors.js";
 import { createLogger, type Logger } from "./log.js";
 import { buildIdempotencyKey, MeteringService, type MeteringOptions } from "./metering.js";
 import { createOpenAiCompatibleClient, type ModelClient } from "./model.js";
 import type { TokenUsage } from "./money.js";
 import { createPaperclipApi, type PaperclipApi, type PaperclipCall } from "./paperclip.js";
-import { createStateStore, type StateStore } from "./state.js";
+import {
+  createStateStore,
+  type RunResultRecord,
+  type RunUsageRecord,
+  type StateStore,
+} from "./state.js";
 import {
   allTemplates,
   findTemplate,
@@ -49,6 +58,19 @@ import {
   type RunRecorder,
   type RunStatus,
 } from "./recorder.js";
+import {
+  RESPONSE_CONTRACT_VERSION,
+  RESPONSE_MODES,
+  completionStateForOutcome,
+  inlineFailureBody,
+  inlineHttpStatus,
+  inlineSuccessBody,
+  isCompletionState,
+  parseResponseMode,
+  type CompletionState,
+  type InlineUsage,
+  type ResponseMode,
+} from "./response.js";
 import { SERVICE_VERSION } from "./version.js";
 
 export type Outcome =
@@ -63,6 +85,14 @@ export type Outcome =
   | "provider_error"
   | "internal_error"
   | "not_found"
+  /** 400: `responseMode` was present but is not a mode this version implements. */
+  | "unsupported_response_mode"
+  /**
+   * 502, `responseMode:"inline"` only: the model answered but Paperclip would
+   * not accept the write-back. The answer was not persisted, so it is not
+   * returned and the run is NOT reported as completed.
+   */
+  | "persistence_failed"
   /** 402: the monthly budget is committed in full. The provider was NOT called. */
   | "budget_exhausted"
   /** 503: measured spend has not reached the ledger. Fail closed, do not run. */
@@ -228,6 +258,12 @@ export interface InvokeRequestShape {
   agentId: unknown;
   runId: unknown;
   context: unknown;
+  /**
+   * Optional and versioned. Absent or `"none"` is exactly today's behaviour;
+   * `"inline"` additionally returns the persisted answer. Anything else is a
+   * 400 — see `parseResponseMode`.
+   */
+  responseMode: unknown;
 }
 
 export function parseInvokeBody(raw: Buffer): InvokeRequestShape | null {
@@ -246,6 +282,7 @@ export function parseInvokeBody(raw: Buffer): InvokeRequestShape | null {
     agentId: body["agentId"],
     runId: body["runId"],
     context: body["context"],
+    responseMode: body["responseMode"],
   };
 }
 
@@ -390,11 +427,39 @@ export function createRuntime(deps: AppDeps): Runtime {
     correlationId: string,
   ): Promise<void> {
     const startedAt = now();
+
+    /**
+     * The response contract this request selected. Stays `"none"` until the
+     * body has been parsed AND the mode recognised, so every rejection that
+     * happens before that point keeps the original body shape exactly.
+     */
+    let responseMode: ResponseMode = "none";
+    /** Resolved model name, once a template is known. Never invented. */
+    let resolvedModel: string | null = null;
+    /** Run id as parsed, so an inline failure body can still name the run. */
+    let resolvedRunId: string | null = null;
+
+    /** Usage metadata carrying no measurements — used on the failure paths. */
+    const noUsage = (durationMs: number): InlineUsage => ({
+      inputTokens: null,
+      cachedInputTokens: null,
+      outputTokens: null,
+      model: resolvedModel,
+      provider: config.modelProvider,
+      durationMs,
+    });
+
     const finish = (
       status: number,
       outcome: Outcome,
       body: Record<string, unknown>,
       logFields: Record<string, unknown> = {},
+      /**
+       * Present ⇒ this outcome has an inline shape. When the request asked for
+       * `inline` the structured failure body is sent instead of the plain one;
+       * the plain body is byte-for-byte unchanged for every other request.
+       */
+      inlineFailure?: { completionState: Exclude<CompletionState, "completed">; failureCategory: string },
     ): void => {
       const durationMs = now() - startedAt;
       logger.log(outcome === "ok" ? "info" : "warn", {
@@ -403,9 +468,137 @@ export function createRuntime(deps: AppDeps): Runtime {
         outcome,
         durationMs,
         httpStatus: status,
+        ...(responseMode === "inline" ? { responseMode } : {}),
+        ...(inlineFailure !== undefined && responseMode === "inline"
+          ? { completionState: inlineFailure.completionState }
+          : {}),
         ...logFields,
       });
+      if (responseMode === "inline" && inlineFailure !== undefined) {
+        sendJson(
+          res,
+          status,
+          correlationId,
+          inlineFailureBody({
+            outcome,
+            completionState: inlineFailure.completionState,
+            failureCategory: inlineFailure.failureCategory,
+            runId: resolvedRunId,
+            recorded: false,
+            recorderError: null,
+            transitioned: false,
+            issueStatus: null,
+            replay: false,
+            usage: noUsage(durationMs),
+          }),
+        );
+        return;
+      }
       sendJson(res, status, correlationId, { ok: outcome === "ok", outcome, ...body });
+    };
+
+    /**
+     * Answer a replayed `inline` request from the stored idempotency record.
+     *
+     * NO model call happens here, ever. If the record holds a completed run the
+     * stored answer is returned verbatim; anything else is reported as the
+     * failure it was. The one case that can hold neither is a record written by
+     * a build older than this contract: it completed, but the answer was not
+     * retained. That is reported as `invalid_output` with an explicit category
+     * — regenerating it would be a second run and a different answer.
+     */
+    const sendInlineReplay = (
+      prior: RunResultRecord,
+      ctx: {
+        idempotencyKey: string;
+        runId: string | null;
+        agentId: string | null;
+        templateId: string;
+      },
+    ): void => {
+      const durationMs = now() - startedAt;
+      const usage: InlineUsage = prior.usage
+        ? {
+            inputTokens: prior.usage.inputTokens,
+            cachedInputTokens: prior.usage.cachedInputTokens,
+            outputTokens: prior.usage.outputTokens,
+            model: prior.usage.model,
+            provider: prior.usage.provider,
+            durationMs: prior.usage.durationMs,
+          }
+        : noUsage(durationMs);
+
+      const stored: CompletionState = isCompletionState(prior.completionState)
+        ? prior.completionState
+        : completionStateForOutcome(prior.outcome);
+
+      // A stored answer is the ONLY thing that can produce a replayed success.
+      const answerText = stored === "completed" ? prior.answerText : null;
+      // A record written before this contract completed but kept no answer.
+      // Reported as `invalid_output` — never regenerated, never guessed.
+      const failureState: Exclude<CompletionState, "completed"> =
+        stored === "completed" ? "invalid_output" : stored;
+      const state: CompletionState = answerText !== null ? "completed" : failureState;
+      const status = inlineHttpStatus(state, prior.httpStatus);
+
+      logger.warn({
+        event: "invoke",
+        correlationId,
+        runId: ctx.runId,
+        agentId: ctx.agentId,
+        templateId: ctx.templateId,
+        outcome: "duplicate_run_suppressed",
+        durationMs,
+        httpStatus: status,
+        idempotencyKey: ctx.idempotencyKey,
+        replayedOutcome: prior.outcome,
+        responseMode: "inline",
+        completionState: state,
+        detail:
+          "this run id has already been executed; the stored result was replayed, the model provider was NOT called again and nothing was written a second time",
+      });
+
+      if (answerText !== null) {
+        sendJson(
+          res,
+          status,
+          correlationId,
+          inlineSuccessBody({
+            runId: ctx.runId,
+            // The stored string, returned as stored. Never re-rendered.
+            answerText,
+            // A completed run is one Paperclip accepted, so there is no
+            // recorder error to carry.
+            recorderError: null,
+            transitioned: prior.transitioned,
+            issueStatus: prior.transitionStatus,
+            replay: true,
+            usage,
+          }),
+        );
+        return;
+      }
+
+      sendJson(
+        res,
+        status,
+        correlationId,
+        inlineFailureBody({
+          outcome: prior.outcome,
+          completionState: failureState,
+          failureCategory:
+            stored === "completed"
+              ? "the original run's answer text is not retained in the idempotency record; it was not regenerated"
+              : (prior.recorderError ?? `replayed_${prior.outcome}`),
+          runId: ctx.runId,
+          recorded: prior.recorded,
+          recorderError: prior.recorderError,
+          transitioned: prior.transitioned,
+          issueStatus: prior.transitionStatus,
+          replay: true,
+          usage,
+        }),
+      );
     };
 
     // Fail closed: no credential configured at all.
@@ -453,18 +646,45 @@ export function createRuntime(deps: AppDeps): Runtime {
       return;
     }
 
+    // ---- the versioned response contract ----------------------------------
+    // Reject an unrecognised mode rather than degrading to "no answer": a
+    // gateway that asked for the text and got a bare 200 would have no way to
+    // tell a silent downgrade from a run that genuinely produced nothing.
+    const modeDecision = parseResponseMode(body.responseMode);
+    if (modeDecision.kind === "unrecognised") {
+      finish(
+        400,
+        "unsupported_response_mode",
+        {
+          error: "unrecognised responseMode",
+          supportedResponseModes: [...RESPONSE_MODES],
+          contractVersion: RESPONSE_CONTRACT_VERSION,
+        },
+        { credentialExposure },
+      );
+      return;
+    }
+    responseMode = modeDecision.mode;
+
     const agentId = asString(body.agentId);
     const runId = asString(body.runId);
+    resolvedRunId = runId;
 
     // Unknown template: 400, and record nothing.
     const template = findTemplate(body.templateId);
     if (template === null) {
-      finish(400, "unknown_template", { error: "unknown templateId" }, {
-        agentId,
-        runId,
-        templateId: asString(body.templateId),
-        credentialExposure,
-      });
+      finish(
+        400,
+        "unknown_template",
+        { error: "unknown templateId" },
+        {
+          agentId,
+          runId,
+          templateId: asString(body.templateId),
+          credentialExposure,
+        },
+        { completionState: "rejected", failureCategory: "unknown_template" },
+      );
       return;
     }
 
@@ -490,19 +710,29 @@ export function createRuntime(deps: AppDeps): Runtime {
           templateExposure: template.exposure,
           credentialExposure,
         },
+        {
+          completionState: "rejected",
+          failureCategory: `no_credential_configured_for_${template.exposure}`,
+        },
       );
       return;
     }
 
     if (decision.kind === "mismatch") {
-      finish(403, "exposure_mismatch", { error: decision.reason }, {
-        agentId,
-        runId,
-        templateId: template.id,
-        templateExposure: template.exposure,
-        credentialExposure,
-        reason: decision.reason,
-      });
+      finish(
+        403,
+        "exposure_mismatch",
+        { error: decision.reason },
+        {
+          agentId,
+          runId,
+          templateId: template.id,
+          templateExposure: template.exposure,
+          credentialExposure,
+          reason: decision.reason,
+        },
+        { completionState: "rejected", failureCategory: "exposure_mismatch" },
+      );
       return;
     }
 
@@ -510,6 +740,7 @@ export function createRuntime(deps: AppDeps): Runtime {
     const exposure = decision.exposure;
     const rendered = renderContext(body.context, template.maxContextBytes);
     const model = config.modelNameOverride ?? template.model;
+    resolvedModel = model;
     // The tighter of the template deadline and the operator deadline wins.
     const timeoutMs = Math.min(template.timeoutMs, config.modelTimeoutMs);
     const userMessage = buildUserMessage(rendered);
@@ -541,6 +772,21 @@ export function createRuntime(deps: AppDeps): Runtime {
 
     if (claim.kind === "replay" && claim.record.result !== null) {
       const prior = claim.record.result;
+
+      // The replay of an inline run returns the STORED answer. The provider is
+      // not called a second time under any circumstance — that is the whole
+      // point of the record, and re-running the model would be a second charge
+      // and, worse, a different answer to a customer who already has one.
+      if (responseMode === "inline") {
+        sendInlineReplay(prior, {
+          idempotencyKey: idemKey,
+          runId,
+          agentId,
+          templateId: template.id,
+        });
+        return;
+      }
+
       logger.warn({
         event: "invoke",
         correlationId,
@@ -571,6 +817,7 @@ export function createRuntime(deps: AppDeps): Runtime {
     if (claim.kind === "in_flight" || claim.kind === "replay") {
       // A duplicate arriving while the original is still running. Reporting 2xx
       // stops Paperclip re-scheduling; the original run owns the write-backs.
+      const durationMs = now() - startedAt;
       logger.warn({
         event: "invoke",
         correlationId,
@@ -578,16 +825,39 @@ export function createRuntime(deps: AppDeps): Runtime {
         agentId,
         templateId: template.id,
         outcome: "duplicate_run_suppressed",
-        durationMs: now() - startedAt,
+        durationMs,
         httpStatus: 200,
         idempotencyKey: idemKey,
         detail: "a run with this id is already in flight; this duplicate did nothing",
       });
+      if (responseMode === "inline") {
+        // 200 keeps Paperclip from re-scheduling, but there is no answer to
+        // give: the original run has not finished. Say so, do not invent one.
+        sendJson(
+          res,
+          200,
+          correlationId,
+          inlineFailureBody({
+            outcome: "duplicate_run_suppressed",
+            completionState: "duplicate_in_flight",
+            failureCategory:
+              "a run with this id is already in flight; this duplicate produced no answer",
+            runId,
+            recorded: false,
+            recorderError: null,
+            transitioned: false,
+            issueStatus: null,
+            replay: true,
+            usage: noUsage(durationMs),
+          }),
+        );
+        return;
+      }
       sendJson(res, 200, correlationId, {
         ok: true,
         outcome: "duplicate_run_suppressed",
         replay: true,
-        durationMs: now() - startedAt,
+        durationMs,
       });
       return;
     }
@@ -616,7 +886,31 @@ export function createRuntime(deps: AppDeps): Runtime {
           failedEntries: gate.failedEntries,
           oldestPendingAgeMs: gate.oldestAgeMs,
           failureCategory: gate.reason,
+          ...(responseMode === "inline"
+            ? { responseMode, completionState: "rejected" }
+            : {}),
         });
+        if (responseMode === "inline") {
+          sendJson(
+            res,
+            503,
+            correlationId,
+            inlineFailureBody({
+              outcome: "cost_delivery_unconfirmed",
+              completionState: "rejected",
+              failureCategory: gate.reason ?? "cost_delivery_unconfirmed",
+              runId,
+              recorded: false,
+              recorderError: null,
+              transitioned: false,
+              issueStatus: null,
+              replay: false,
+              usage: noUsage(now() - startedAt),
+              extra: { pendingCostCents: gate.pendingCents },
+            }),
+          );
+          return;
+        }
         sendJson(res, 503, correlationId, {
           ok: false,
           outcome: "cost_delivery_unconfirmed",
@@ -672,7 +966,32 @@ export function createRuntime(deps: AppDeps): Runtime {
           budgetCents: pre.budgetCents,
           agentPaused: paused,
           providerCalled: false,
+          ...(responseMode === "inline"
+            ? { responseMode, completionState: "budget_exhausted" }
+            : {}),
         });
+        if (responseMode === "inline") {
+          sendJson(
+            res,
+            402,
+            correlationId,
+            inlineFailureBody({
+              outcome: "budget_exhausted",
+              completionState: "budget_exhausted",
+              failureCategory:
+                "monthly budget is fully committed; the model provider was not called",
+              runId,
+              recorded: false,
+              recorderError: null,
+              transitioned: false,
+              issueStatus: null,
+              replay: false,
+              usage: noUsage(now() - startedAt),
+              extra: { usedPct: pre.usedPct, agentPaused: paused },
+            }),
+          );
+          return;
+        }
         sendJson(res, 402, correlationId, {
           ok: false,
           outcome: "budget_exhausted",
@@ -722,6 +1041,12 @@ export function createRuntime(deps: AppDeps): Runtime {
       let httpStatus: number;
       let outcome: Outcome;
       let usage: TokenUsage | null = null;
+      /**
+       * True when the provider answered with nothing usable, as opposed to
+       * erroring. Both are `502 provider_error` on the wire — unchanged — but
+       * the inline contract reports them apart.
+       */
+      let invalidOutput = false;
 
       try {
         const result = await modelClient.complete({
@@ -758,6 +1083,8 @@ export function createRuntime(deps: AppDeps): Runtime {
           failureCategory = err.message;
           httpStatus = 502;
           outcome = "provider_error";
+          // Subclass of the above: same status, same outcome, same category.
+          invalidOutput = err instanceof ModelInvalidOutputError;
         } else {
           status = "internal_error";
           failureCategory = `internal_error (${err instanceof Error ? err.name : "unknown"})`;
@@ -837,7 +1164,51 @@ export function createRuntime(deps: AppDeps): Runtime {
         reviewAssigneeUserId: config.handoff.reviewAssigneeUserId,
       });
 
+      // ---- the one and only answer -----------------------------------------
+      // `runOutcome.content` is the exact string the recorder was handed and
+      // embedded verbatim in the Paperclip comment. The response reuses THIS
+      // reference. Nothing re-renders it, re-derives it, trims it or asks the
+      // provider again — byte equality with what was persisted is guaranteed by
+      // construction, and `test/inline.test.ts` pins it.
+      const persistedAnswer = runOutcome.content;
+
+      /**
+       * The truthful end state.
+       *
+       * `completed` requires BOTH that the model answered and that Paperclip
+       * accepted the write-back. A recorder failure is `persistence_failed`:
+       * the answer exists but was not persisted, so it is not handed out — the
+       * caller would otherwise reply to a customer with text that no record
+       * anywhere contains.
+       */
+      const completionState: CompletionState =
+        outcome === "ok"
+          ? !recorded
+            ? "persistence_failed"
+            : persistedAnswer === null || persistedAnswer.trim().length === 0
+              ? "invalid_output"
+              : "completed"
+          : outcome === "model_timeout"
+            ? "timeout"
+            : outcome === "provider_error"
+              ? invalidOutput
+                ? "invalid_output"
+                : "provider_error"
+              : "internal_error";
+
+      const usageRecord: RunUsageRecord = {
+        inputTokens: usage?.inputTokens ?? null,
+        cachedInputTokens: usage?.cachedInputTokens ?? null,
+        outputTokens: usage?.outputTokens ?? null,
+        model,
+        provider: config.modelProvider,
+        durationMs,
+      };
+
       // ---- record the result so a replay is a no-op ------------------------
+      // The stored `httpStatus`/`outcome` are the mode-independent ones, so a
+      // later replay in EITHER mode reproduces exactly what that mode would
+      // have returned. The answer is retained only for a run that completed.
       await metering.finalize(idemKey, {
         httpStatus,
         outcome,
@@ -849,19 +1220,38 @@ export function createRuntime(deps: AppDeps): Runtime {
         costKind: settlement.costKind,
         accruedMicrocents:
           settlement.kind === "skipped" ? 0 : settlement.accruedMicrocents,
+        answerText: completionState === "completed" ? persistedAnswer : null,
+        completionState,
+        usage: usageRecord,
       });
       finalized = true;
 
-      logger.log(outcome === "ok" ? "info" : "error", {
+      // The inline contract only ever changes the RESPONSE. A non-inline
+      // request's status, body and log line are byte-for-byte what they were.
+      const inline = responseMode === "inline";
+      const responseStatus = inline
+        ? inlineHttpStatus(completionState, httpStatus)
+        : httpStatus;
+      const responseOutcome: Outcome =
+        inline && outcome === "ok" && completionState !== "completed"
+          ? completionState === "persistence_failed"
+            ? "persistence_failed"
+            : "provider_error"
+          : outcome;
+
+      // NOTE: `answerText` is deliberately absent from every log field below,
+      // and `redact()` strips it by key name if anyone ever adds it.
+      logger.log(responseOutcome === "ok" ? "info" : "error", {
         event: "invoke",
         correlationId,
         runId,
         agentId,
         templateId: template.id,
-        outcome,
+        outcome: responseOutcome,
         durationMs: now() - startedAt,
-        httpStatus,
+        httpStatus: responseStatus,
         exposure,
+        ...(inline ? { responseMode, completionState } : {}),
         model,
         contextTruncated: rendered.truncated,
         contextOriginalBytes: rendered.originalBytes,
@@ -879,6 +1269,50 @@ export function createRuntime(deps: AppDeps): Runtime {
         outputTokens: usage?.outputTokens ?? null,
         failureCategory,
       });
+
+      if (inline) {
+        if (completionState === "completed") {
+          sendJson(
+            res,
+            responseStatus,
+            correlationId,
+            inlineSuccessBody({
+              runId,
+              // Same reference the recorder received. Not a copy of a copy.
+              answerText: persistedAnswer as string,
+              recorderError: null,
+              transitioned: transition.transitioned,
+              issueStatus: transition.status,
+              replay: false,
+              usage: usageRecord,
+            }),
+          );
+        } else {
+          sendJson(
+            res,
+            responseStatus,
+            correlationId,
+            inlineFailureBody({
+              outcome: responseOutcome,
+              completionState,
+              failureCategory:
+                failureCategory ??
+                recorderError ??
+                (completionState === "persistence_failed"
+                  ? "the answer was produced but Paperclip did not accept the write-back"
+                  : "the provider returned no usable assistant text"),
+              runId,
+              recorded,
+              recorderError,
+              transitioned: transition.transitioned,
+              issueStatus: transition.status,
+              replay: false,
+              usage: usageRecord,
+            }),
+          );
+        }
+        return;
+      }
 
       sendJson(res, httpStatus, correlationId, {
         ok: outcome === "ok",
@@ -902,6 +1336,10 @@ export function createRuntime(deps: AppDeps): Runtime {
     sendJson(res, 200, correlationId, {
       status: "ok",
       version: SERVICE_VERSION,
+      // Contract discovery: a caller can tell whether this build implements
+      // inline responses without having to try one and interpret a 400.
+      responseModes: [...RESPONSE_MODES],
+      responseContractVersion: RESPONSE_CONTRACT_VERSION,
       templates: healthTemplateSummary(),
       egressAllowlist: config.egressAllowlist,
     });

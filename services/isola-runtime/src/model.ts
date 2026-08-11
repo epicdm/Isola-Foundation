@@ -5,7 +5,12 @@
  * calls the platform network primitive directly.
  */
 import type { SafeFetch } from "./egress.js";
-import { EgressBlockedError, ModelProviderError, ModelTimeoutError } from "./errors.js";
+import {
+  EgressBlockedError,
+  ModelInvalidOutputError,
+  ModelProviderError,
+  ModelTimeoutError,
+} from "./errors.js";
 
 export interface ChatMessage {
   role: "system" | "user";
@@ -183,7 +188,9 @@ export function createOpenAiCompatibleClient(
 
       const parsed = extractContent(payload);
       if (parsed === null) {
-        throw new ModelProviderError(
+        // Same message, same status, same `provider_error` outcome as before —
+        // the subclass only lets the inline contract say `invalid_output`.
+        throw new ModelInvalidOutputError(
           "provider returned no usable completion content",
           response.status,
         );

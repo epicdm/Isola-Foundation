@@ -1,6 +1,6 @@
 {
   "name": "isola-runtime",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Isolated synchronous agent runtime for Isola Paperclip employees. No tools, no shell, no filesystem writes, no MCP, allowlisted egress only.",
   "license": "UNLICENSED",

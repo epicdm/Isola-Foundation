@@ -5,6 +5,10 @@
  *  1. Call sites pass categories, not values.
  *  2. `redact()` below strips any key whose name looks credential-bearing, and
  *     any string value that looks like a bearer token.
+ *
+ * The model's answer is treated the same way. No call site logs `answerText`,
+ * and `redact()` strips any field named that regardless — customer-facing reply
+ * text has no business in an operational log line.
  */
 import { SERVICE_NAME, SERVICE_VERSION } from "./version.js";
 
@@ -24,7 +28,7 @@ export interface LogFields {
 export type Sink = (line: string) => void;
 
 const SECRET_KEY_PATTERN =
-  /(secret|password|passwd|api[_-]?key|apikey|authorization|auth[_-]?header|bearer|token|credential)/i;
+  /(secret|password|passwd|api[_-]?key|apikey|authorization|auth[_-]?header|bearer|token|credential|answer[_-]?text)/i;
 
 const BEARER_VALUE_PATTERN = /^(bearer\s+\S+|sk-[A-Za-z0-9_-]{8,})$/i;
 

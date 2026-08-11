@@ -3,19 +3,22 @@
 # Build context MUST be services/isola-runtime/ — this image never reaches out
 # into the monorepo and depends on no workspace package.
 #
-#   docker build -t isola-runtime:1.0.0 services/isola-runtime
+#   docker build -t isola-runtime:1.1.0 services/isola-runtime
 #
 # In EasyPanel: set "Build context" / "Build path" to services/isola-runtime and
 # Dockerfile to ./Dockerfile.
 #
-# Deliberately absent: any VOLUME, any bind of a Paperclip data directory, any
-# master key, any shell tooling in the runtime layer. The service has no shell
-# use and no tool surface.
+# Deliberately absent: any VOLUME declaration, any bind of a Paperclip data
+# directory, any master key, any shell tooling in the runtime layer. The service
+# has no shell use and no tool surface.
 #
-# The ONE writable path is RUNTIME_STATE_DIR under /tmp, which holds the
-# idempotency records, the cost-event outbox and the sub-cent accumulator. /app
-# stays read-only and there is still no volume — so /tmp survives a restart of
-# this container and NOT a container replacement. See README section 10.
+# The ONE writable path is RUNTIME_STATE_DIR, now `/data/isola-runtime-state`,
+# which holds the idempotency records, the cost-event outbox and the sub-cent
+# accumulator. /app stays read-only. `/data` is a persistent volume attached by
+# the platform (EasyPanel), NOT declared here — a live test proved the previous
+# /tmp default lost all three every time the container was replaced. With no
+# volume attached the runtime still starts: it warns loudly and runs in the
+# degraded in-memory mode. See README section 10.
 
 # ---------- build ----------
 FROM node:22-alpine AS build
@@ -35,7 +38,7 @@ FROM node:22-alpine AS runtime
 ENV NODE_ENV=production \
     PORT=3000 \
     NODE_OPTIONS=--disable-proto=throw \
-    RUNTIME_STATE_DIR=/tmp/isola-runtime-state
+    RUNTIME_STATE_DIR=/data/isola-runtime-state
 
 WORKDIR /app
 
@@ -46,6 +49,14 @@ COPY --chown=node:node --from=build /app/dist ./dist
 # Non-root. The app directory is owned by root and only readable by the app
 # user, so the process cannot write to its own code either.
 RUN chown -R root:root /app && chmod -R a-w /app
+
+# The state directory, owned by the app user. Creating it here matters: when a
+# fresh named volume is mounted over /data, Docker seeds it with this
+# directory's ownership and mode, so the non-root process can write to it
+# without any chown at deploy time. A bind mount still has to be writable by
+# uid 1000 — if it is not, the runtime warns `state_store_degraded` and keeps
+# serving from memory rather than failing to start.
+RUN mkdir -p /data/isola-runtime-state && chown -R node:node /data
 
 USER node
 

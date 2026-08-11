@@ -37,6 +37,23 @@ export class ModelProviderError extends Error {
   }
 }
 
+/**
+ * The provider answered, but the response carried no usable assistant text.
+ *
+ * A subclass rather than a separate error on purpose: every existing caller
+ * catches `ModelProviderError` and maps it to `502 provider_error` with the
+ * message as the failure category, and that behaviour is unchanged byte for
+ * byte. The subclass exists only so the inline response contract can report the
+ * truthful `completionState: "invalid_output"` instead of a generic provider
+ * fault.
+ */
+export class ModelInvalidOutputError extends ModelProviderError {
+  constructor(detail: string, status: number | null = null) {
+    super(detail, status);
+    this.name = "ModelInvalidOutputError";
+  }
+}
+
 /** The run recorder could not write the outcome back into Paperclip. */
 export class RecorderError extends Error {
   readonly detail: string;

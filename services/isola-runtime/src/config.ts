@@ -327,5 +327,10 @@ export function bootWarnings(config: RuntimeConfig): string[] {
       "RUNTIME_STATE_BACKEND is memory: idempotency records, the cost-event outbox and the sub-cent accumulator are lost on restart.",
     );
   }
+  if (config.stateBackend === "file" && config.stateDir.startsWith("/tmp")) {
+    warnings.push(
+      "RUNTIME_STATE_DIR points at /tmp: that path does not survive a container replacement, so idempotency records, undelivered cost events and the sub-cent carry are lost on every redeploy. Point it at the persistent volume (/data/isola-runtime-state).",
+    );
+  }
   return warnings;
 }
