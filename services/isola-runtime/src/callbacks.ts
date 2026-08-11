@@ -35,12 +35,19 @@ export interface HandoffPolicy {
   failureStatus: IssueStatus;
   /** The human or team that picks a blocked issue up. Never invented. */
   owner: string;
+  /**
+   * Paperclip user id handed the issue on a successful `in_review` transition, to
+   * satisfy its `human_assignee_user_id` review path. Null means no reviewer is
+   * assigned, which makes an agent-driven `in_review` 422.
+   */
+  reviewAssigneeUserId?: string | null;
 }
 
 export const DEFAULT_HANDOFF: HandoffPolicy = Object.freeze({
   successStatus: "in_review",
   failureStatus: "blocked",
   owner: "the EPIC operations on-call engineer",
+  reviewAssigneeUserId: null,
 });
 
 export function statusForRun(run: RunStatus, policy: HandoffPolicy): IssueStatus {
@@ -93,6 +100,19 @@ export async function transitionIssue(args: {
   correlationId: string;
   runId: string | null;
   agentId: string | null;
+  /**
+   * Paperclip refuses an agent-driven move to `in_review` unless a real review path
+   * exists — `server/src/routes/issues.ts:872` throws `invalid_issue_disposition` with
+   * `validReviewPaths: [pending_issue_thread_interaction, linked_pending_approval,
+   * human_assignee_user_id, typed_execution_state_current_participant,
+   * scheduled_issue_monitor]`. That is a deliberate governance rule: an agent may not
+   * declare its own work "in review" with nobody to review it.
+   *
+   * We satisfy `human_assignee_user_id` by handing the issue to a named human in the
+   * same PATCH. Without this the transition 422s, the issue stays actionable, and the
+   * scheduler re-wakes the agent — which is exactly the loop this work exists to fix.
+   */
+  reviewAssigneeUserId?: string | null;
 }): Promise<TransitionOutcome> {
   if (args.api === null || args.call === null) return { ...NOT_ATTEMPTED };
   if (args.issueId === null || args.issueId.length === 0) {
@@ -108,8 +128,15 @@ export async function transitionIssue(args: {
     return { ...NOT_ATTEMPTED };
   }
 
+  // Only `in_review` needs a reviewer. `blocked` is already a human-attention state and
+  // Paperclip does not gate it, so we must not silently reassign a failed issue.
+  const extra =
+    args.status === "in_review" && args.reviewAssigneeUserId
+      ? { assigneeUserId: args.reviewAssigneeUserId }
+      : undefined;
+
   try {
-    await args.api.patchIssueStatus(args.issueId, args.status, args.call);
+    await args.api.patchIssueStatus(args.issueId, args.status, args.call, extra);
     args.logger.info({
       event: "transition",
       outcome: "issue_transitioned",

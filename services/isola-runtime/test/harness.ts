@@ -123,6 +123,8 @@ export interface RecordedCall {
   agentId?: string;
   apiKey: string;
   runId: string | null;
+  /** Extra PATCH fields sent alongside a transition, e.g. the review assignee. */
+  extra?: Record<string, unknown> | null;
 }
 
 export class StubPaperclipApi implements PaperclipApi {
@@ -160,6 +162,7 @@ export class StubPaperclipApi implements PaperclipApi {
     issueId: string,
     status: IssueStatus,
     call: PaperclipCall,
+    extra?: Record<string, unknown>,
   ): Promise<void> {
     this.calls.push({
       kind: "transition",
@@ -167,6 +170,7 @@ export class StubPaperclipApi implements PaperclipApi {
       status,
       apiKey: call.apiKey,
       runId: call.runId,
+      extra: extra ?? null,
     });
     if (this.transitionFailure) throw this.transitionFailure;
   }

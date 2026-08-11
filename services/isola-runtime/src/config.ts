@@ -212,6 +212,11 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
         ? failureStatusRaw
         : DEFAULT_HANDOFF.failureStatus,
       owner: str(env, "PAPERCLIP_FAILURE_OWNER") ?? DEFAULT_HANDOFF.owner,
+      // Paperclip refuses an agent-driven `in_review` unless a review path exists
+      // (routes/issues.ts:872). Assigning a named human satisfies
+      // `human_assignee_user_id`. Unset means the transition will 422 and the issue
+      // will stay actionable — so this is effectively required in production.
+      reviewAssigneeUserId: str(env, "PAPERCLIP_REVIEW_ASSIGNEE_USER_ID") ?? null,
     }),
 
     modelProvider: str(env, "MODEL_PROVIDER") ?? deriveProvider(modelBaseUrl),

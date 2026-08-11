@@ -13,8 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { ModelProviderError, ModelTimeoutError } from "../src/errors.js";
-import { nextActionFor, statusForRun, DEFAULT_HANDOFF } from "../src/callbacks.js";
+import { ModelProviderError, ModelTimeoutError, PaperclipApiError } from "../src/errors.js";
+import { nextActionFor, statusForRun, transitionIssue, DEFAULT_HANDOFF } from "../src/callbacks.js";
 import { buildIdempotencyKey } from "../src/metering.js";
 import { renderOutcomeBody } from "../src/recorder.js";
 import { FileStateStore, InMemoryStateStore, type StateStore } from "../src/state.js";
@@ -412,5 +412,65 @@ describe("idempotency", () => {
     expect(buildIdempotencyKey(noRun)).toContain("issue:i");
     // The fingerprint is a hash, never the context itself.
     expect(buildIdempotencyKey(noRun)).not.toContain("ctx\"");
+  });
+});
+
+/**
+ * Regression: Paperclip refuses an agent-driven move to `in_review` unless a review
+ * path exists (server/src/routes/issues.ts:872, `invalid_issue_disposition`). The
+ * first live run 422'd on exactly this, the issue stayed actionable, and the
+ * scheduler re-woke the agent — the very loop this work exists to close. We satisfy
+ * `human_assignee_user_id` by handing the issue to a named human in the same PATCH.
+ */
+const silentLogger = () => new CapturingLogger().logger;
+
+describe("in_review requires a review path", () => {
+  const call = { apiKey: "agent-key", runId: "run-1" };
+  const base = {
+    issueId: "issue-1",
+    call,
+    logger: silentLogger(),
+    correlationId: "corr-1",
+    runId: "run-1",
+    agentId: "agent-1",
+  };
+
+  it("assigns the configured human reviewer when moving to in_review", async () => {
+    const api = new StubPaperclipApi();
+    await transitionIssue({
+      ...base, api, status: "in_review", reviewAssigneeUserId: "user-42",
+    });
+    expect(api.transitions).toHaveLength(1);
+    expect(api.transitions[0]!.status).toBe("in_review");
+    expect(api.transitions[0]!.extra).toEqual({ assigneeUserId: "user-42" });
+  });
+
+  it("does not reassign a blocked issue — blocked is already a human-attention state", async () => {
+    const api = new StubPaperclipApi();
+    await transitionIssue({
+      ...base, api, status: "blocked", reviewAssigneeUserId: "user-42",
+    });
+    expect(api.transitions[0]!.status).toBe("blocked");
+    expect(api.transitions[0]!.extra ?? null).toBeNull();
+  });
+
+  it("still attempts in_review with no reviewer configured, and reports the failure honestly", async () => {
+    // Without a reviewer Paperclip 422s. We must surface that, not pretend it worked.
+    const api = new StubPaperclipApi();
+    api.transitionFailure = new PaperclipApiError("invalid_issue_disposition", 422, false);
+    const out = await transitionIssue({
+      ...base, api, status: "in_review", reviewAssigneeUserId: null,
+    });
+    expect(api.transitions[0]!.extra ?? null).toBeNull();
+    expect(out.transitioned).toBe(false);
+    expect(out.attempted).toBe(true);
+  });
+
+  it("never throws — a transition failure must not flip a successful run to failed", async () => {
+    const api = new StubPaperclipApi();
+    api.transitionFailure = new PaperclipApiError("boom", 500, true);
+    await expect(
+      transitionIssue({ ...base, api, status: "in_review", reviewAssigneeUserId: "user-42" }),
+    ).resolves.toMatchObject({ transitioned: false });
   });
 });

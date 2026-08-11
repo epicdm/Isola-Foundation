@@ -53,7 +53,12 @@ export interface AgentBudget {
 
 export interface PaperclipApi {
   postComment(issueId: string, body: string, call: PaperclipCall): Promise<void>;
-  patchIssueStatus(issueId: string, status: IssueStatus, call: PaperclipCall): Promise<void>;
+  patchIssueStatus(
+    issueId: string,
+    status: IssueStatus,
+    call: PaperclipCall,
+    extra?: Record<string, unknown>,
+  ): Promise<void>;
   postCostEvent(
     companyId: string,
     event: CostEventPayload,
@@ -172,11 +177,12 @@ export class HttpPaperclipApi implements PaperclipApi {
     issueId: string,
     status: IssueStatus,
     call: PaperclipCall,
+    extra?: Record<string, unknown>,
   ): Promise<void> {
     await this.request(
       "PATCH",
       `/api/issues/${encodeURIComponent(issueId)}`,
-      { status },
+      { status, ...(extra ?? {}) },
       call,
     );
   }

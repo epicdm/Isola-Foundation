@@ -834,6 +834,7 @@ export function createRuntime(deps: AppDeps): Runtime {
         correlationId,
         runId,
         agentId,
+        reviewAssigneeUserId: config.handoff.reviewAssigneeUserId,
       });
 
       // ---- record the result so a replay is a no-op ------------------------
