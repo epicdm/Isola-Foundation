@@ -380,7 +380,7 @@ function analyzeRequestTargets(cmd) {
     if (!disablesCurlrc(segment, inv.start)) result.curlrcReachable = true;
     const globOff = globbingDisabled(segment, inv.start);
 
-    const invocation = { client: inv.client, targets: [], multiTransfer: false, ambiguous: false };
+    const invocation = { client: inv.client, tokens: segment.slice(k), targets: [], multiTransfer: false, ambiguous: false };
     result.invocations.push(invocation);
     const push = (entry) => {
       invocation.targets.push(entry);
@@ -421,6 +421,128 @@ function analyzeRequestTargets(cmd) {
 }
 
 /**
+ * Anchored scheme. `indexOf('://')` is not good enough: in
+ * `attacker.example/#https://graph.facebook.com/...` the first `://` sits in the
+ * FRAGMENT, and reading a scheme from there is how an attacker target came to be
+ * described as a Graph target.
+ */
+const ANCHORED_SCHEME_RE = /^([A-Za-z][A-Za-z0-9+.\-]*):\/\//;
+
+/**
+ * Parse a request target's identity FROM ITS BEGINNING.
+ *
+ * Round 9: target identity was previously decided by scanning the whole command
+ * for a `graph.facebook.com` substring. That validated a Graph-looking string
+ * sitting in another target's path, query or fragment, or in a header, referer
+ * or user-agent value — while curl's actual destination was elsewhere and the
+ * bearer credential went with it.
+ *
+ * Identity now comes only from the operand curl will actually contact.
+ */
+function parseTargetIdentity(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  const m = ANCHORED_SCHEME_RE.exec(s);
+  const scheme = m ? m[1].toLowerCase() : null;
+  const rest = m ? s.slice(m[0].length) : s;
+
+  let end = rest.length;
+  for (let i = 0; i < rest.length; i++) {
+    const c = rest[i];
+    if (c === '/' || c === '?' || c === '#') {
+      end = i;
+      break;
+    }
+  }
+  let authority = rest.slice(0, end);
+
+  const at = authority.lastIndexOf('@');
+  const hadUserinfo = at !== -1;
+  if (hadUserinfo) authority = authority.slice(at + 1);
+
+  let port = '';
+  if (authority.startsWith('[')) {
+    const close = authority.indexOf(']');
+    if (close !== -1) {
+      if (authority[close + 1] === ':') port = authority.slice(close + 2);
+      authority = authority.slice(0, close + 1);
+    }
+  } else {
+    const colon = authority.lastIndexOf(':');
+    if (colon !== -1) {
+      port = authority.slice(colon + 1);
+      authority = authority.slice(0, colon);
+    }
+  }
+
+  return { scheme, host: authority.toLowerCase(), port, hadUserinfo, hadScheme: m !== null };
+}
+
+/** Exactly the Graph authority, over HTTPS, with nothing else in the authority. */
+function isExactGraphHttpsTarget(id) {
+  return id.scheme === 'https' && id.host === 'graph.facebook.com' && id.port === '' && !id.hadUserinfo;
+}
+
+/**
+ * The command mentions the Graph host, but is that where curl is actually going?
+ *
+ * Answered per curl invocation, from its own tokens — never from the whole
+ * command, so a Graph read chained after an ordinary request is not accused of
+ * something the other invocation did.
+ *
+ * @returns {{reason:string, remedy:string}|null}
+ */
+function metaTargetIdentityViolation(cmd) {
+  const { invocations } = analyzeRequestTargets(cmd);
+  for (const inv of invocations) {
+    if (inv.client !== 'curl') continue; // other clients have their own rules
+
+    let exact = 0;
+    for (const e of inv.targets) {
+      const id = parseTargetIdentity(e.raw);
+      if (id.host !== 'graph.facebook.com') continue;
+
+      if (isExactGraphHttpsTarget(id)) {
+        exact++;
+        continue;
+      }
+      if (id.scheme !== 'https') {
+        return {
+          reason:
+            'This Meta request is not HTTPS. curl defaults a scheme-less target to plaintext HTTP, so a missing scheme is ' +
+            'not a neutral omission — it sends the bearer credential in the clear. A sanctioned Meta request must name ' +
+            '`https` literally.',
+          remedy: 'write the target as `https://graph.facebook.com/...`.',
+        };
+      }
+      return {
+        reason:
+          'The target’s authority is not exactly `graph.facebook.com`. Userinfo, an explicit port, a hostname prefix or ' +
+          'suffix, or a trailing dot all make the host that will actually be contacted something other than Graph, while the ' +
+          'command still reads as a Graph request.',
+        remedy: 'use the bare authority `graph.facebook.com` with no userinfo and no port.',
+      };
+    }
+
+    if (exact > 0) continue;
+
+    // No authoritative Graph destination in this invocation — yet the Graph host
+    // appears in its text. It is in a path, query, fragment, header, referer,
+    // user-agent or some other option value, and the request is going somewhere
+    // else entirely.
+    if (inv.tokens.some((t) => META_HOST_RE.test(String(t || '')))) {
+      return {
+        reason:
+          'The Graph host appears in this command, but it is not the destination. curl will contact a different authority, ' +
+          'and every credential-bearing option applies to THAT request. A Graph URL embedded in a path, query, fragment, ' +
+          'header, referer or user-agent proves nothing about where the request goes.',
+        remedy: 'make the Graph URL the request target itself, as the single operand or a single `--url`.',
+      };
+    }
+  }
+  return null;
+}
+
+/**
  * A Meta curl must have exactly ONE destination.
  *
  * curl applies shared options — `-H`, and `-G` data parameters — to EVERY URL in
@@ -450,11 +572,18 @@ function singleDestinationViolation(cmd) {
     if (!touchesGraph) continue; // an ordinary multi-URL curl elsewhere is not ours to police
 
     if (inv.multiTransfer) {
+      // Accuracy note, verified against curl's own docs for --next: LOCAL
+      // options (-H, -d, …) are RESET for the subsequent URL; only global
+      // options persist. So the risk is not that the credential leaks forward
+      // automatically — it is that a second transfer in the same command can
+      // supply its own credential to a different destination, and that only the
+      // Graph transfer is examined by the rules below. One command, two
+      // requests, one of them unreviewed.
       return {
         reason:
-          'This curl performs more than one transfer (`--next` / `-:`) and one of them is a Graph request. Options that ' +
-          'carry a credential apply to the transfers that follow, so a second transfer can send the Meta token to another ' +
-          'destination while the Graph request itself looks correct. Multi-transfer Meta curl has no legitimate use here.',
+          'This curl performs more than one transfer (`--next` / `-:`) and one of them is a Graph request. Each transfer ' +
+          'can carry its own credential to its own destination, and only the Graph transfer is validated here. ' +
+          'Multi-transfer Meta curl has no legitimate use.',
         remedy: 'issue one curl per request, each with a single Graph URL.',
       };
     }
@@ -2044,6 +2173,21 @@ function evaluateMetaGraph(cmd) {
     };
   }
   if (multiDest) return unclassifiable(multiDest.reason, multiDest.remedy);
+
+  // Target identity, from the operand curl will actually contact. Runs before
+  // any path/field/credential rule, because those rules answer "is this Graph
+  // request acceptable" and are meaningless until "is this a Graph request at
+  // all" has been settled from the destination rather than from stray text.
+  let identity = null;
+  try {
+    identity = metaTargetIdentityViolation(whole);
+  } catch (_) {
+    identity = {
+      reason: 'The destination this command would contact could not be identified.',
+      remedy: REMEDY_LITERAL_URL,
+    };
+  }
+  if (identity) return unclassifiable(identity.reason, identity.remedy);
 
   if (resists) {
     return unclassifiable(
