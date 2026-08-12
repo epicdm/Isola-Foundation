@@ -62,8 +62,10 @@ export const CREDENTIAL_PATTERNS: Array<[string, RegExp]> = [
   ["a SIP password field", /\bsip_password\b|\bsipPassword\b|\bsipPass\b|\bsip_pass\b/],
   ["a SIP secret field", /\bsip_secret\b|\bsipSecret\b/],
   ["an auth password field", /\bauth_password\b|\bauthPassword\b|\bha1\b/],
-  // The Acrobits provisioning scheme, with any slash form: csc:, csc:/, csc://
-  ["the csc: provisioning scheme", /csc:\/{0,2}/i],
+  // The Acrobits provisioning scheme with ANY slash count — `\/*`, not a
+  // bounded range. A bounded {0,2} matched the examples but not the stated
+  // property, and would have missed `csc:///…`.
+  ["the csc: provisioning scheme", /csc:\/*/i],
   // scheme://user:password@host, including template-interpolated forms.
   [
     "a user:password@host URI",
@@ -156,6 +158,8 @@ describe("source scan: no credential ever reaches a personal-line response", () 
       ["a camelCase alias", `const sipPassword = upstream.secret;`],
       ["a csc: link build", 'const link = "csc:" + user + ":" + pass + "@EPIC";'],
       ["a csc:// link build", 'const link = "csc://" + user + ":" + pass + "@EPIC";'],
+      ["a csc:/// link build", 'const link = "csc:///" + user + ":" + pass + "@EPIC";'],
+      ["a csc://// link build", 'const link = "csc:////" + user + ":" + pass + "@EPIC";'],
       ["a user:password@host URI", 'const u = "sip://alice:hunter2000@voice00.epic.dm";'],
       ["an interpolated credential URI", "const u = `sip://${user}:${pass}@${host}`;"],
       ["a QR encoder import", 'import QRCode from "qrcode";'],

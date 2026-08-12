@@ -87,9 +87,11 @@ export const PROHIBITED_FIELDS = [
  * escape hatch, so there is no leading context requirement at all.
  *
  * Three shapes:
- *  1. the Acrobits `csc:` provisioning scheme, with any number of slashes;
+ *  1. the Acrobits `csc:` provisioning scheme, with ANY number of slashes —
+ *     `\/*`, not a bounded count. A previous revision matched only zero to two,
+ *     which is not the property claimed and would have missed `csc:///…`;
  *  2. any `scheme://user:password@host` userinfo pair;
  *  3. a `data:image/` URI, which is how a QR payload travels.
  */
 export const CREDENTIAL_SHAPED_VALUE =
-  /csc:\/{0,2}|[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@|data:image\//i;
+  /csc:\/*|[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@|data:image\//i;

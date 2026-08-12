@@ -16,12 +16,12 @@ import {
   normaliseMagnusRow,
   parseVoiceSeats,
   projectPersonalLine,
+  PROVISIONING_ERROR_CATEGORIES,
   resolveSeat,
   safeDecodeIdentifier,
   safeProvisioningError,
   selectExactSeatRow,
 } from "../src/voice.js";
-import { redactSecret, redactSecrets } from "../src/redact-secret.js";
 import { createLogger } from "../src/log.js";
 import { envConfig, get, placeholder, startServer } from "./harness.js";
 
@@ -131,47 +131,72 @@ describe("projection", () => {
   });
 });
 
-describe("provisioning_error redaction", () => {
-  it("passes through the established redactor", () => {
-    const out = projectPersonalLine(
-      hostileUpstream({ provisioning_error: `magnus rejected secret ${SIP_SECRET} for 9610` }),
-    );
-    expect(out.provisioning_error).toBeDefined();
-    expect(out.provisioning_error).not.toContain(SIP_SECRET);
-    expect(out.provisioning_error).toContain("[redacted]");
+/**
+ * `provisioning_error` is a FIXED, locally-generated category. No upstream
+ * prose is returned — not redacted, not truncated, not shape-checked.
+ *
+ * The previous revision redacted the upstream string and returned the
+ * remainder, which cannot be made safe in the general case: only top-level
+ * string values of known keys could be collected as secrets, so a credential
+ * nested inside `provider_config` — or one echoed in the prose and present in
+ * no separate field at all — survived.
+ */
+describe("provisioning_error is a fixed category, never upstream prose", () => {
+  const CATEGORY = PROVISIONING_ERROR_CATEGORIES.upstream_error;
+
+  it("reports the fixed category when upstream reported anything", () => {
+    expect(safeProvisioningError("anything at all")).toBe(CATEGORY);
+    expect(safeProvisioningError({ nested: "object" })).toBe(CATEGORY);
+    expect(safeProvisioningError(42)).toBe(CATEGORY);
   });
 
-  it("withholds the diagnostic entirely when it still looks credential-bearing", () => {
-    // A credential we never saw as its own field, so redaction cannot name it.
+  it("reports nothing when upstream reported nothing", () => {
+    expect(safeProvisioningError(undefined)).toBeUndefined();
+    expect(safeProvisioningError(null)).toBeUndefined();
+    expect(safeProvisioningError("")).toBeUndefined();
+    expect(safeProvisioningError("   ")).toBeUndefined();
+  });
+
+  it("never echoes ordinary upstream prose either", () => {
+    // Even a harmless-looking diagnostic is not propagated: the endpoint does
+    // not get to decide, per message, whether upstream text is safe.
+    expect(safeProvisioningError("DID not available in this region")).toBe(CATEGORY);
+  });
+
+  /** NEGATIVE CONTROL — a credential NESTED inside another object. */
+  it("cannot leak a secret nested in provider_config", () => {
     const out = projectPersonalLine({
       state: "error",
-      provisioning_error: "failed to apply csc:9610:zzzzzzzzzzzz@EPIC.VOICE.LITE",
+      provider_config: { password: SIP_SECRET },
+      provisioning_error: `registration rejected ${SIP_SECRET}`,
     });
-    expect(out.provisioning_error).toBe("provisioning failed; details withheld");
+    expect(out.provisioning_error).toBe(CATEGORY);
+    expect(JSON.stringify(out)).not.toContain(SIP_SECRET);
   });
 
-  it("withholds a user:password@host URI", () => {
-    expect(
-      safeProvisioningError("upstream said https://admin:hunter2000@magnus.example", []),
-    ).toBe("provisioning failed; details withheld");
+  /** NEGATIVE CONTROL — a plain secret echoed in the prose and in NO field. */
+  it("cannot leak a plain secret that appears in no separate field", () => {
+    const out = projectPersonalLine({
+      state: "error",
+      provisioning_error: "registration rejected long-secret-value-9999",
+    });
+    expect(out.provisioning_error).toBe(CATEGORY);
+    expect(JSON.stringify(out)).not.toContain("long-secret-value-9999");
   });
 
-  it("leaves an ordinary diagnostic intact", () => {
-    expect(safeProvisioningError("DID not available in this region", [SIP_SECRET])).toBe(
-      "DID not available in this region",
-    );
+  /** NEGATIVE CONTROL — a whole credential URI in the prose. */
+  it("cannot leak a credential URI in the prose", () => {
+    const out = projectPersonalLine({
+      provisioning_error: "failed to apply csc:///9610:zzzzzzzzzzzz@EPIC.VOICE.LITE",
+    });
+    expect(out.provisioning_error).toBe(CATEGORY);
+    expect(JSON.stringify(out)).not.toContain("csc:");
+    expect(JSON.stringify(out)).not.toContain("zzzzzzzzzzzz");
   });
 
-  /** Pins the ported redactor against the original's documented contract. */
-  it("matches the established redactor's semantics", () => {
-    expect(redactSecret(null, "abcdef")).toBeNull();
-    expect(redactSecret("hello", null)).toBe("hello");
-    expect(redactSecret("hello short", "short")).toBe("hello short"); // under 6 chars
-    expect(redactSecret("a SECRETVALUE b", "SECRETVALUE")).toBe("a [redacted] b");
-    expect(redactSecret("a secretvalue b", "SECRETVALUE")).toBe("a secretvalue b"); // case-sensitive
-    expect(redactSecrets("x AAAAAA y BBBBBB", ["AAAAAA", "BBBBBB"])).toBe(
-      "x [redacted] y [redacted]",
-    );
+  it("the category itself contains no interpolation and no credential", () => {
+    expect(CATEGORY).not.toMatch(/[${}]/);
+    expect(Object.values(PROVISIONING_ERROR_CATEGORIES)).toHaveLength(1);
   });
 });
 
@@ -506,13 +531,24 @@ describe("upstream row binding (blocker 2)", () => {
     expect(selectExactSeatRow(rows, SELECTOR, "9610")).toBeNull();
   });
 
-  it("accepts a numeric identifier that stringifies to the requested seat", () => {
-    expect(selectExactSeatRow([{ [SELECTOR]: 9610 }], SELECTOR, "9610")).not.toBeNull();
+  /**
+   * The live contract established `sip.name` as a STRING. Numeric coercion is
+   * how a row that is not the requested seat becomes one, so type and value
+   * must both match.
+   */
+  it("rejects a numeric 9610 against the string \"9610\"", () => {
+    expect(selectExactSeatRow([{ [SELECTOR]: 9610 }], SELECTOR, "9610")).toBeNull();
+  });
+
+  it("accepts only the string identifier", () => {
+    expect(selectExactSeatRow([{ [SELECTOR]: "9610" }], SELECTOR, "9610")).not.toBeNull();
   });
 
   it("does not match on a loose or padded identifier", () => {
     expect(selectExactSeatRow([{ [SELECTOR]: " 9610" }], SELECTOR, "9610")).toBeNull();
     expect(selectExactSeatRow([{ [SELECTOR]: "96100" }], SELECTOR, "9610")).toBeNull();
+    expect(selectExactSeatRow([{ [SELECTOR]: true }], SELECTOR, "true")).toBeNull();
+    expect(selectExactSeatRow([{ [SELECTOR]: null }], SELECTOR, "9610")).toBeNull();
   });
 
   it("ignores non-object rows", () => {
@@ -538,19 +574,62 @@ describe("upstream row binding (blocker 2)", () => {
       expect(projected).not.toHaveProperty("activation_state");
     });
 
-    it("never emits a credential column carried through for redaction", () => {
+    /**
+     * The correction: raw normalisation must NOT auto-adopt a Magnus column
+     * merely because it shares a contract field's name. Same name is not same
+     * meaning, and only `sip.name` has been evidenced.
+     */
+    it("does not auto-adopt same-named raw Magnus columns", () => {
+      const rawWithAllSeven: Record<string, unknown> = {
+        name: "9610",
+        // Every contract field, present on the RAW row under its own name.
+        state: "magnus-means-something-else",
+        sip_username: "not-the-mapped-value",
+        activation_state: "unverified",
+        did_number: "17678189999",
+        registration_server: "someone-elses.example",
+        forward_to_cell: true,
+        cell_number: "17678180000",
+      };
+
+      const mapped = normaliseMagnusRow(rawWithAllSeven);
+      // Only the explicitly evidenced mapping survives.
+      expect(Object.keys(mapped)).toEqual(["sip_username"]);
+      expect(mapped["sip_username"]).toBe("9610");
+
+      const projected = projectPersonalLine(mapped) as Record<string, unknown>;
+      expect(Object.keys(projected)).toEqual(["sip_username"]);
+      for (const unproven of [
+        "state",
+        "activation_state",
+        "did_number",
+        "registration_server",
+        "forward_to_cell",
+        "cell_number",
+      ]) {
+        expect(projected[unproven]).toBeUndefined();
+      }
+      // And specifically not the raw row's same-named values.
+      expect(JSON.stringify(projected)).not.toContain("magnus-means-something-else");
+      expect(JSON.stringify(projected)).not.toContain("someone-elses.example");
+    });
+
+    it("never carries a credential column off the raw row at all", () => {
       const mapped = normaliseMagnusRow({
         name: "9610",
         secret: SIP_SECRET,
+        provider_config: { password: SIP_SECRET },
         provisioning_error: `rejected ${SIP_SECRET}`,
       });
-      // Carried on the intermediate record so the redactor can see it...
-      expect(mapped["secret"]).toBe(SIP_SECRET);
-      // ...but never projected, and scrubbed out of the diagnostic.
+      // The credential columns are not even carried on the intermediate record.
+      expect(mapped["secret"]).toBeUndefined();
+      expect(mapped["provider_config"]).toBeUndefined();
+
       const projected = projectPersonalLine(mapped) as Record<string, unknown>;
-      expect(projected["secret"]).toBeUndefined();
       expect(JSON.stringify(projected)).not.toContain(SIP_SECRET);
-      expect(projected["provisioning_error"]).toContain("[redacted]");
+      expect(projected["provisioning_error"]).toBe(
+        PROVISIONING_ERROR_CATEGORIES.upstream_error,
+      );
     });
   });
 });
@@ -662,15 +741,33 @@ describe("credential detection is not defeated by punctuation", () => {
   ];
 
   for (const text of CASES) {
-    it(`withholds: ${text.slice(0, 34)}…`, () => {
-      expect(safeProvisioningError(text, [])).toBe("provisioning failed; details withheld");
+    it(`drops it from an allowlisted field: ${text.slice(0, 30)}…`, () => {
+      // The shape check still governs APPROVED fields — a credential-shaped
+      // value must not pass merely because it arrived under an allowed key.
+      const out = projectPersonalLine({ registration_server: text }) as Record<
+        string,
+        unknown
+      >;
+      expect(out["registration_server"]).toBeUndefined();
     });
   }
 
-  it("still lets an ordinary diagnostic through", () => {
-    expect(safeProvisioningError("DID not available (region: DM)", [])).toBe(
-      "DID not available (region: DM)",
-    );
+  it("covers csc: with any slash count", () => {
+    for (const link of ["csc:u:p@h", "csc:/u:p@h", "csc://u:p@h", "csc:///u:p@h", "csc:////u:p@h"]) {
+      const out = projectPersonalLine({ registration_server: link }) as Record<
+        string,
+        unknown
+      >;
+      expect(out["registration_server"]).toBeUndefined();
+    }
+  });
+
+  it("still lets an ordinary value through", () => {
+    const out = projectPersonalLine({ registration_server: "voice00.epic.dm" }) as Record<
+      string,
+      unknown
+    >;
+    expect(out["registration_server"]).toBe("voice00.epic.dm");
   });
 });
 

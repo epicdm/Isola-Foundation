@@ -21,7 +21,6 @@
 import { createHmac } from "node:crypto";
 
 import type { SafeFetch } from "./egress.js";
-import { redactSecrets } from "./redact-secret.js";
 import {
   CREDENTIAL_SHAPED_VALUE,
   PERSONAL_LINE_FIELDS,
@@ -38,40 +37,43 @@ export type PersonalLine = Partial<Record<PersonalLineField, string | boolean | 
 };
 
 /**
- * Values Magnus may echo back that are credentials. Collected from the RAW
- * upstream payload so `provisioning_error` can be scrubbed of them even though
- * they are never themselves projected.
+ * The complete set of `provisioning_error` values this endpoint can emit.
+ *
+ * UPSTREAM PROSE IS NEVER RETURNED. An earlier revision redacted the upstream
+ * string and returned what was left, which cannot be made safe in the general
+ * case: `candidateSecretsFrom` could only see top-level string values, so a
+ * credential nested inside `provider_config: { password: "…" }`, or one echoed
+ * in the error text but present in no separate field at all, survived unless it
+ * happened to match a URI or QR shape. That is the same nested-secret failure
+ * class this programme has hit repeatedly.
+ *
+ * So the diagnostic is now a fixed, locally-generated category. Nothing from
+ * the upstream body reaches the caller — not redacted, not truncated, not
+ * shape-checked. Absence is the only containment that does not depend on
+ * enumerating what a credential looks like.
+ *
+ * These strings are written here, in full, and contain no interpolation.
  */
-function candidateSecretsFrom(upstream: Record<string, unknown>): string[] {
-  const out: string[] = [];
-  for (const key of PROHIBITED_FIELDS) {
-    const v = upstream[key];
-    if (typeof v === "string" && v.length > 0) out.push(v);
-  }
-  return out;
-}
+export const PROVISIONING_ERROR_CATEGORIES = {
+  /** Upstream reported a provisioning problem. Deliberately non-specific. */
+  upstream_error: "Provisioning did not complete. Support has the details.",
+} as const;
+
+export type ProvisioningErrorCode = keyof typeof PROVISIONING_ERROR_CATEGORIES;
 
 /**
- * Scrub `provisioning_error` and refuse it entirely if it still looks
- * credential-bearing afterwards.
+ * Map "upstream reported something" onto a fixed category.
  *
- * Redaction removes the credentials we can name. The shape check catches the
- * ones we cannot — an upstream echoing a whole provisioning URI assembled from
- * a secret we never saw as its own field would survive redaction alone. When
- * that happens the diagnostic is dropped, because a diagnostic is worth less
- * than a credential is worth protecting.
+ * Takes only a presence decision from the upstream value; its content is never
+ * inspected for output and never propagated. The parameter is `unknown` because
+ * nothing about its shape is trusted.
  */
-export function safeProvisioningError(
-  raw: unknown,
-  secrets: readonly string[],
-): string | undefined {
-  if (typeof raw !== "string" || raw.trim().length === 0) return undefined;
-  const redacted = redactSecrets(raw, secrets);
-  if (redacted === null) return undefined;
-  if (CREDENTIAL_SHAPED_VALUE.test(redacted)) {
-    return "provisioning failed; details withheld";
-  }
-  return redacted;
+export function safeProvisioningError(raw: unknown): string | undefined {
+  const reported =
+    (typeof raw === "string" && raw.trim().length > 0) ||
+    (raw !== null && raw !== undefined && typeof raw !== "string");
+  if (!reported) return undefined;
+  return PROVISIONING_ERROR_CATEGORIES.upstream_error;
 }
 
 /**
@@ -98,10 +100,7 @@ export function projectPersonalLine(upstream: Record<string, unknown>): Personal
     // Numbers, objects and arrays are not part of this contract and are dropped.
   }
 
-  const error = safeProvisioningError(
-    upstream["provisioning_error"],
-    candidateSecretsFrom(upstream),
-  );
+  const error = safeProvisioningError(upstream["provisioning_error"]);
   if (error !== undefined) out.provisioning_error = error;
 
   return out;
@@ -285,20 +284,22 @@ export const MAGNUS_FIELD_MAP: ReadonlyArray<readonly [PersonalLineField, string
 export function normaliseMagnusRow(row: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
 
-  for (const field of PERSONAL_LINE_FIELDS) {
-    if (row[field] !== undefined) out[field] = row[field];
-  }
+  // ONLY the explicitly evidenced map. A previous revision first copied every
+  // contract-named key straight off the raw row and then applied the map, which
+  // silently re-adopted the six unproven fields the live check says are absent:
+  // a Magnus column that merely happens to be called `state` or `did_number`
+  // would have become browser-visible carrying whatever Magnus means by it.
+  // Same name is not same meaning, and this endpoint does not guess.
   for (const [field, column] of MAGNUS_FIELD_MAP) {
-    if (out[field] === undefined && row[column] !== undefined) out[field] = row[column];
+    const value = row[column];
+    if (value !== undefined) out[field] = value;
   }
+
+  // The diagnostic is governed separately: `projectPersonalLine` maps the mere
+  // PRESENCE of an upstream error onto a fixed local category and never
+  // propagates its content, so passing the raw value on here reveals nothing.
   if (row["provisioning_error"] !== undefined) {
     out["provisioning_error"] = row["provisioning_error"];
-  }
-  // Credential-bearing columns are carried through ONLY so that
-  // `projectPersonalLine` can scrub their values out of `provisioning_error`.
-  // The projection never emits them.
-  for (const key of PROHIBITED_FIELDS) {
-    if (row[key] !== undefined) out[key] = row[key];
   }
 
   return out;
@@ -335,12 +336,11 @@ export function selectExactSeatRow(
     if (typeof row !== "object" || row === null || Array.isArray(row)) continue;
     const record = row as Record<string, unknown>;
     const identifier = record[selectorField];
-    // String comparison only. A loose/numeric compare would let "9610 " or
-    // 9610 match a different row's identifier.
+    // STRING IDENTITY ONLY — type and value must both match. The live contract
+    // check established `sip.name` as a string, so a numeric row identifier is
+    // off-contract and must not be coerced into a match: coercion is how a row
+    // that is not the requested seat becomes one.
     if (typeof identifier === "string" && identifier === expected) matches.push(record);
-    else if (typeof identifier === "number" && String(identifier) === expected) {
-      matches.push(record);
-    }
   }
   if (matches.length !== 1) return null;
   return matches[0] ?? null;
