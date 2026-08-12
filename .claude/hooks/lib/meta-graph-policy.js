@@ -348,7 +348,11 @@ function splitTarget(raw) {
  * untouched — its operands are not request targets.
  */
 function analyzeRequestTargets(cmd) {
-  const result = { targets: [], opaqueConfig: false, sawRequestClient: false };
+  // `invocations` groups targets by curl invocation. The flat `targets` list is
+  // kept for callers that only ask "is any target undecidable"; anything that
+  // reasons about how many destinations ONE curl has must use `invocations`,
+  // because `a && b` is two invocations and must not be conflated.
+  const result = { targets: [], invocations: [], opaqueConfig: false, sawRequestClient: false };
   const toks = tokenize(cmd);
 
   let seg = [];
@@ -376,6 +380,13 @@ function analyzeRequestTargets(cmd) {
     if (!disablesCurlrc(segment, inv.start)) result.curlrcReachable = true;
     const globOff = globbingDisabled(segment, inv.start);
 
+    const invocation = { client: inv.client, targets: [], multiTransfer: false };
+    result.invocations.push(invocation);
+    const push = (entry) => {
+      invocation.targets.push(entry);
+      result.targets.push(entry);
+    };
+
     for (let i = k + 1; i < segment.length; i++) {
       const t = segment[i];
       if (t === '-K' || t === '--config') {
@@ -387,23 +398,76 @@ function analyzeRequestTargets(cmd) {
         result.opaqueConfig = true;
         continue;
       }
+      // curl's transfer separator, long and short form. A second transfer is a
+      // second destination, and it carries the same shell-visible options.
+      if (t === '--next' || t === '-:') {
+        invocation.multiTransfer = true;
+        continue;
+      }
       if (t === '--url') {
-        result.targets.push({ raw: segment[i + 1] == null ? '' : segment[i + 1], globOff, fromUrlFlag: true });
+        push({ raw: segment[i + 1] == null ? '' : segment[i + 1], globOff, fromUrlFlag: true });
         i++;
         continue;
       }
       if (t.startsWith('--url=')) {
-        result.targets.push({ raw: t.slice('--url='.length), globOff, fromUrlFlag: true });
+        push({ raw: t.slice('--url='.length), globOff, fromUrlFlag: true });
         continue;
       }
       if (t.startsWith('-')) {
         if (VALUE_TAKING.has(t)) i++;
         continue;
       }
-      if (looksLikeTarget(t)) result.targets.push({ raw: t, globOff });
+      if (looksLikeTarget(t)) push({ raw: t, globOff });
     }
   }
   return result;
+}
+
+/**
+ * A Meta curl must have exactly ONE destination.
+ *
+ * curl applies shared options — `-H`, and `-G` data parameters — to EVERY URL in
+ * a transfer, and `--next` starts another transfer with the options that follow.
+ * So a command could pass every rule this policy checks against its Graph URL
+ * and, in the same breath, send the same `Authorization: Bearer` header to a
+ * second, entirely literal, attacker-controlled destination. The Graph target
+ * was valid; the credential still left for somewhere else.
+ *
+ * Counted per INVOCATION, not per command: `curl A && curl B` is two separate
+ * single-destination requests and stays allowed.
+ *
+ * Checked before splitTransfers(), which discards non-Graph transfers and would
+ * therefore throw away the very evidence this rule needs.
+ *
+ * @returns {{reason:string, remedy:string}|null}
+ */
+function singleDestinationViolation(cmd) {
+  const { invocations } = analyzeRequestTargets(cmd);
+  for (const inv of invocations) {
+    const touchesGraph = inv.targets.some((e) => META_HOST_RE.test(String(e.raw || '')));
+    if (!touchesGraph) continue; // an ordinary multi-URL curl elsewhere is not ours to police
+
+    if (inv.multiTransfer) {
+      return {
+        reason:
+          'This curl performs more than one transfer (`--next` / `-:`) and one of them is a Graph request. Options that ' +
+          'carry a credential apply to the transfers that follow, so a second transfer can send the Meta token to another ' +
+          'destination while the Graph request itself looks correct. Multi-transfer Meta curl has no legitimate use here.',
+        remedy: 'issue one curl per request, each with a single Graph URL.',
+      };
+    }
+    if (inv.targets.length > 1) {
+      return {
+        reason:
+          'This curl has more than one request target and one of them is a Graph request. curl applies a shared ' +
+          '`-H` header and `-G` data parameters to EVERY URL in the transfer, so the Meta credential would be sent to each ' +
+          'destination in turn — including any that is not Meta. Only the Graph URL is validated by this policy; the others ' +
+          'are not, and need not be for the credential to leave.',
+        remedy: 'give this curl exactly one URL. Multiple Graph reads are separate curl commands.',
+      };
+    }
+  }
+  return null;
 }
 
 /**
@@ -1927,6 +1991,19 @@ function evaluateMetaGraph(cmd) {
     };
   }
   if (hygiene) return unclassifiable(hygiene.reason, hygiene.remedy);
+
+  // Single-destination contract. Deliberately BEFORE splitTransfers(), which
+  // keeps only the Graph transfers — exactly the information this rule needs.
+  let multiDest = null;
+  try {
+    multiDest = singleDestinationViolation(whole);
+  } catch (_) {
+    multiDest = {
+      reason: 'The set of destinations this curl would contact could not be determined.',
+      remedy: REMEDY_LITERAL_URL,
+    };
+  }
+  if (multiDest) return unclassifiable(multiDest.reason, multiDest.remedy);
 
   if (resists) {
     return unclassifiable(

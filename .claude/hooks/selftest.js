@@ -379,9 +379,16 @@ const cases = [
   },
   {
     // Adversarial review 2026-08-05, finding 2 (high).
+    //
+    // Round 7 (2026-08-12): still blocked, now by an EARLIER and broader rule.
+    // A Meta curl must have exactly one destination, so `--next` is refused
+    // outright whenever the invocation contains a Graph request — before method
+    // classification is reached. The original intent (a second transfer cannot
+    // POST behind a leading -G) is enforced a fortiori: no second transfer is
+    // permitted at all.
     name: 'curl -q --next second transfer cannot POST behind a leading -G',
     expect: BLOCK,
-    contains: 'meta-asset-mutation',
+    contains: 'unclassifiable-graph-request',
     payload: {
       session_id: SID,
       tool_name: 'Bash',
