@@ -1,8 +1,23 @@
 'use client';
 
+/**
+ * P0 CONTAINMENT 2026-08-12 — credential rendering removed (operator realm).
+ *
+ * This page carried the same defect as the consumer softphone page: it rendered
+ * the plaintext SIP password, built a `csc:<user>:<pass>@EPIC.VOICE.LITE` link
+ * from it, and encoded that credential-bearing string into a QR image.
+ *
+ * The mask/reveal toggle was never containment — the full secret arrived in the
+ * `/api/voice/line` JSON body and sat in the DOM whichever way the toggle was
+ * set. Masking hides a value from a glance, not from the page.
+ *
+ * `/api/voice/line` no longer returns the secret, so none of it can be
+ * reconstructed here. Existing registered devices are unaffected.
+ *
+ * See docs/isola/ACROBITS-PROVISIONING-AND-SECURITY-DESIGN.md.
+ */
 import { useState, useEffect } from 'react';
-import QRCode from 'qrcode';
-import { Phone, PhoneIncoming, PhoneOutgoing, PhoneOff, Smartphone, QrCode, ShieldAlert, Eye, EyeOff } from 'lucide-react';
+import { Phone, PhoneIncoming, PhoneOutgoing, PhoneOff, ShieldAlert, Eye, EyeOff } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -35,7 +50,8 @@ interface LineInfo {
   state: string;
   error: string | null;
   sip_username: string | null;
-  sip_password: string | null;
+  /** Deliberately no credential field. See the containment note above. */
+  activation_state: 'unavailable' | 'available';
   did_number: string | null;
   registration_server: string;
   forward_to_cell: boolean;
@@ -127,7 +143,6 @@ export default function VoicePage() {
 
   const [line, setLine] = useState<LineInfo | null>(null);
   const [lineLoading, setLineLoading] = useState(true);
-  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [cellNumber, setCellNumber] = useState('');
   const [revealSip, setRevealSip] = useState(false);
 
@@ -170,15 +185,6 @@ export default function VoicePage() {
       .finally(() => setRoutingLoading(false));
   }, []);
 
-  useEffect(() => {
-    if (line?.sip_username && line?.sip_password) {
-      const cscUrl = `csc:${line.sip_username}:${line.sip_password}@EPIC.VOICE.LITE`;
-      QRCode.toDataURL(cscUrl, { width: 220, margin: 1 })
-        .then(setQrDataUrl)
-        .catch(console.error);
-    }
-  }, [line?.sip_username, line?.sip_password]);
-
   async function setRoutingMode(mode: RoutingMode) {
     setRoutingResult(null);
     if (mode !== 'app' && !cellNumber.trim()) {
@@ -218,10 +224,6 @@ export default function VoicePage() {
     if (d === 'BUSY') return 'secondary';
     return 'destructive';
   };
-
-  const cscUrl = line?.sip_username && line?.sip_password
-    ? `csc:${line.sip_username}:${line.sip_password}@EPIC.VOICE.LITE`
-    : null;
 
   return (
     <div className="flex flex-col gap-6">
@@ -263,21 +265,21 @@ export default function VoicePage() {
                 <div className="grid gap-2">
                   <InfoRow label="Your number" value={line.did_number ? formatDid(line.did_number) : '—'} />
                   <InfoRow label="SIP username" value={line.sip_username ? (revealSip ? line.sip_username : maskSecret(line.sip_username)) : '—'} mono />
-                  <InfoRow label="SIP password" value={line.sip_password ? (revealSip ? line.sip_password : maskSecret(line.sip_password)) : '—'} mono />
                   <InfoRow label="Registration server" value={line.registration_server} mono />
                 </div>
                 <Button type="button" variant="ghost" size="sm" className="w-fit -mt-1 text-muted-foreground" onClick={() => setRevealSip((v) => !v)}>
-                  {revealSip ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />} {revealSip ? 'Hide' : 'Show'} SIP credentials
+                  {revealSip ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />} {revealSip ? 'Hide' : 'Show'} SIP username
                 </Button>
 
-                {cscUrl && (
-                  <Button asChild size="sm" className="self-start">
-                    <a href={cscUrl}>
-                      <Smartphone className="size-4" />
-                      Open in Acrobits softphone
-                    </a>
-                  </Button>
-                )}
+                <Alert>
+                  <ShieldAlert className="size-4" />
+                  <AlertTitle>Softphone setup is temporarily unavailable</AlertTitle>
+                  <AlertDescription>
+                    We no longer hand out calling credentials through this screen while a more secure
+                    delivery path is being verified. Lines already connected keep working. To set up a new
+                    device, raise it with EPIC support.
+                  </AlertDescription>
+                </Alert>
 
                 <Separator />
 
@@ -359,18 +361,8 @@ export default function VoicePage() {
                 </div>
               </div>
 
-              {/* QR code */}
-              {qrDataUrl && (
-                <div className="flex flex-col items-center gap-2">
-                  <div className="rounded-lg border bg-white p-3">
-                    <img src={qrDataUrl} alt="Scan to set up softphone" width={200} height={200} />
-                  </div>
-                  <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                    <QrCode className="size-3" />
-                    Scan with your phone to set up Acrobits
-                  </div>
-                </div>
-              )}
+              {/* QR code removed — it encoded `csc:<user>:<pass>@…`, i.e. the
+                  plaintext SIP secret in a photographable image. */}
             </div>
           )}
         </CardContent>
