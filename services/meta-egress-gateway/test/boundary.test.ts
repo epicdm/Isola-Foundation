@@ -12,6 +12,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { handle, __resetRateLimits } from '../src/app.js';
 import { __loadForTest, hashToken, authenticate, tenantOwnsAsset } from '../src/credentials.js';
+import { sign, canonicalString, bodyDigest, __resetNonces, MAX_SKEW_SECONDS } from '../src/signing.js';
 import { validateInput, buildPath, project } from '../src/policy.js';
 import { findOperation, OPERATIONS } from '../src/operations.js';
 import { assertNoSecret } from '../src/audit.js';
@@ -24,11 +25,14 @@ const TOKEN_B = 'workload-token-tenant-b';
 /** Shaped like a real Meta token so the redaction assertions are meaningful. */
 const FAKE_META_TOKEN = 'EAA' + 'S'.repeat(48) + 'SYNTHETICNOTREAL';
 
+const KEY_A = 'signing-key-a';
+const KEY_B = 'signing-key-b';
+
 function seed(): void {
   __loadForTest({
     workloads: {
-      [hashToken(TOKEN_A)]: { workload_id: 'foundation-notifier', tenant_id: 'tenant-a', roles: ['reader'] },
-      [hashToken(TOKEN_B)]: { workload_id: 'other-caller', tenant_id: 'tenant-b', roles: ['reader'] },
+      [hashToken(TOKEN_A)]: { workload_id: 'foundation-notifier', tenant_id: 'tenant-a', roles: ['reader'], signing_key: KEY_A },
+      [hashToken(TOKEN_B)]: { workload_id: 'other-caller', tenant_id: 'tenant-b', roles: ['reader'], signing_key: KEY_B },
     },
     tenants: {
       'tenant-a': {
@@ -49,6 +53,7 @@ let logged: string[];
 beforeEach(() => {
   seed();
   __resetRateLimits();
+  __resetNonces();
   delete process.env.META_GATEWAY_DISABLED;
   logged = [];
   vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
@@ -67,26 +72,72 @@ function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
 
+let nonceSeq = 0;
+
+/** Build a correctly signed request, the way a migrated caller will. */
+function signedRequest(
+  op: string,
+  body: unknown,
+  opts: { token?: string | null; key?: string; nonce?: string; timestamp?: string; tamperBody?: unknown } = {},
+) {
+  const token = opts.token === undefined ? TOKEN_A : opts.token;
+  const key = opts.key ?? KEY_A;
+  const path = `/v1/operations/${op}`;
+  const rawBody = body === undefined ? '' : JSON.stringify(body);
+  const timestamp = opts.timestamp ?? String(Math.floor(Date.now() / 1000));
+  const nonce = opts.nonce ?? `nonce-${Date.now()}-${nonceSeq++}`;
+  const signature = sign(key, canonicalString('POST', path, timestamp, nonce, bodyDigest(rawBody)));
+  return {
+    method: 'POST',
+    path,
+    authorization: token ? `Bearer ${token}` : null,
+    // tamperBody lets a test change what the gateway parses while leaving the
+    // signature over the original bytes.
+    body: opts.tamperBody !== undefined ? opts.tamperBody : body,
+    rawBody: opts.tamperBody !== undefined ? JSON.stringify(opts.tamperBody) : rawBody,
+    signing: { timestamp, nonce, signature },
+  };
+}
+
 const post = (op: string, body: unknown, token: string | null = TOKEN_A) =>
+  handle(signedRequest(op, body, { token }));
+
+const unsigned = (op: string, body: unknown, token: string | null = TOKEN_A) =>
   handle({
     method: 'POST',
     path: `/v1/operations/${op}`,
     authorization: token ? `Bearer ${token}` : null,
     body,
+    rawBody: body === undefined ? '' : JSON.stringify(body),
+    signing: { timestamp: null, nonce: null, signature: null },
   });
 
 // ---------------------------------------------------------------- routes
 describe('caller surface', () => {
   it('exposes no route that accepts a URL, path, header or token', async () => {
     for (const path of ['/v1/proxy', '/v1/graph', '/proxy', '/v1/operations', '/']) {
-      const r = await handle({ method: 'POST', path, authorization: `Bearer ${TOKEN_A}`, body: { url: 'https://graph.facebook.com/v23.0/me' } });
+      const r = await handle({
+        method: 'POST',
+        path,
+        authorization: `Bearer ${TOKEN_A}`,
+        body: { url: 'https://graph.facebook.com/v23.0/me' },
+        rawBody: '{}',
+        signing: { timestamp: null, nonce: null, signature: null },
+      });
       expect(r.status).toBe(404);
     }
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('healthz is unauthenticated and reveals no identities or values', async () => {
-    const r = await handle({ method: 'GET', path: '/healthz', authorization: null, body: undefined });
+    const r = await handle({
+      method: 'GET',
+      path: '/healthz',
+      authorization: null,
+      body: undefined,
+      rawBody: '',
+      signing: { timestamp: null, nonce: null, signature: null },
+    });
     expect(r.status).toBe(200);
     const s = JSON.stringify(r.body);
     expect(s).not.toContain(FAKE_META_TOKEN);
@@ -113,6 +164,75 @@ describe('authentication', () => {
   it('authenticate() resolves a known workload and nothing else', () => {
     expect(authenticate(TOKEN_A)?.tenant_id).toBe('tenant-a');
     expect(authenticate('x')).toBeNull();
+  });
+
+  it('never returns the workload signing key to any caller of authenticate()', () => {
+    const w = authenticate(TOKEN_A);
+    expect(JSON.stringify(w)).not.toContain(KEY_A);
+    expect(Object.keys(w!)).toEqual(['workload_id', 'tenant_id', 'roles']);
+  });
+});
+
+// ---------------------------------------------------------- request signing
+describe('request signing and replay protection', () => {
+  it('a valid bearer token WITHOUT a signature is refused', async () => {
+    const r = await unsigned('wa.webhook_ownership.read', { waba_id: WABA });
+    expect(r.status).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('replaying an identical signed request is refused', async () => {
+    const req = signedRequest('wa.webhook_ownership.read', { waba_id: WABA });
+    expect((await handle(req)).status).toBe(200);
+    expect((await handle(req)).status).toBe(401);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a signature is bound to the body, so it cannot be retargeted', async () => {
+    // Signed over {waba_id: WABA}; the parsed body says something else.
+    const r = await handle(
+      signedRequest('wa.webhook_ownership.read', { waba_id: WABA }, { tamperBody: { waba_id: OTHER_WABA } }),
+    );
+    expect(r.status).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('a signature is bound to the operation path', async () => {
+    const req = signedRequest('wa.webhook_ownership.read', { waba_id: WABA });
+    const moved = { ...req, path: '/v1/operations/wa.phone_numbers.list' };
+    expect((await handle(moved)).status).toBe(401);
+  });
+
+  it('refuses a stale or future timestamp', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    for (const ts of [String(now - MAX_SKEW_SECONDS - 60), String(now + MAX_SKEW_SECONDS + 60)]) {
+      const r = await handle(signedRequest('wa.webhook_ownership.read', { waba_id: WABA }, { timestamp: ts }));
+      expect(r.status).toBe(401);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a signature made with another workload's key", async () => {
+    const r = await handle(signedRequest('wa.webhook_ownership.read', { waba_id: WABA }, { key: KEY_B }));
+    expect(r.status).toBe(401);
+  });
+
+  it('every authentication failure returns the same body, revealing nothing', async () => {
+    const bodies = new Set<string>();
+    bodies.add(JSON.stringify((await unsigned('wa.webhook_ownership.read', { waba_id: WABA })).body).replace(/"correlation_id":"[^"]+"/, ''));
+    bodies.add(JSON.stringify((await handle(signedRequest('wa.webhook_ownership.read', { waba_id: WABA }, { key: KEY_B }))).body).replace(/"correlation_id":"[^"]+"/, ''));
+    bodies.add(JSON.stringify((await post('wa.webhook_ownership.read', { waba_id: WABA }, 'unknown-token')).body).replace(/"correlation_id":"[^"]+"/, ''));
+    expect(bodies.size).toBe(1);
+  });
+
+  it('a workload with no signing key cannot authenticate at all', async () => {
+    __loadForTest({
+      workloads: { [hashToken(TOKEN_A)]: { workload_id: 'legacy', tenant_id: 'tenant-a', roles: [] } },
+      tenants: { 'tenant-a': { assets: [{ kind: 'waba', id: WABA }], meta_token: FAKE_META_TOKEN } },
+    });
+    const r = await post('wa.webhook_ownership.read', { waba_id: WABA });
+    expect(r.status).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -326,7 +446,7 @@ describe('rate limiting and emergency shutdown', () => {
 
   it('a tenant with no provisioned credential fails closed rather than borrowing one', async () => {
     __loadForTest({
-      workloads: { [hashToken(TOKEN_A)]: { workload_id: 'w', tenant_id: 'tenant-unprovisioned', roles: [] } },
+      workloads: { [hashToken(TOKEN_A)]: { workload_id: 'w', tenant_id: 'tenant-unprovisioned', roles: [], signing_key: KEY_A } },
       tenants: { 'tenant-a': { assets: [{ kind: 'waba', id: WABA }], meta_token: FAKE_META_TOKEN } },
     });
     const r = await post('wa.webhook_ownership.read', { waba_id: WABA });

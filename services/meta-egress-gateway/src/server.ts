@@ -84,10 +84,14 @@ function boot(): void {
     req.on('end', () => {
       if (aborted) return;
       void (async () => {
+        // The EXACT bytes received are what the signature covers. Re-serialising
+        // a parsed object would change whitespace and key order and break every
+        // signature, so the digest is taken over the raw body.
+        const rawBody = chunks.length ? Buffer.concat(chunks).toString('utf8') : '';
         let body: unknown = undefined;
-        if (chunks.length) {
+        if (rawBody.length) {
           try {
-            body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+            body = JSON.parse(rawBody);
           } catch {
             res.writeHead(400, { 'content-type': 'application/json' });
             res.end(JSON.stringify({ error: 'body must be valid JSON' }));
@@ -97,11 +101,21 @@ function boot(): void {
 
         try {
           const url = new URL(req.url ?? '/', 'http://gateway.internal');
+          const hdr = (n: string): string | null => {
+            const v = req.headers[n];
+            return typeof v === 'string' ? v : null;
+          };
           const out = await handle({
             method: req.method ?? 'GET',
             path: url.pathname,
             authorization: req.headers.authorization ?? null,
             body,
+            rawBody,
+            signing: {
+              timestamp: hdr('x-isola-timestamp'),
+              nonce: hdr('x-isola-nonce'),
+              signature: hdr('x-isola-signature'),
+            },
           });
           res.writeHead(out.status, { 'content-type': 'application/json' });
           res.end(JSON.stringify(out.body));

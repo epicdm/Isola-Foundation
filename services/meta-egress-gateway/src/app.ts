@@ -13,7 +13,8 @@
 
 import { findOperation, operationIds, type Operation } from './operations.js';
 import { validateInput, buildPath, project } from './policy.js';
-import { authenticate, tenantOwnsAsset, withTenantCredential, custodySummary, type Workload } from './credentials.js';
+import { authenticateSigned, tenantOwnsAsset, withTenantCredential, custodySummary, type Workload } from './credentials.js';
+import type { SigningHeaders } from './signing.js';
 import { callGraph, describeTarget, graphVersion } from './graph.js';
 import { emit, newCorrelationId, type AuditEvent, type AuditOutcome } from './audit.js';
 
@@ -22,6 +23,9 @@ export interface HttpRequest {
   readonly path: string;
   readonly authorization: string | null;
   readonly body: unknown;
+  /** Exact bytes received, for the signature digest. */
+  readonly rawBody: string;
+  readonly signing: SigningHeaders;
 }
 export interface HttpResponse {
   readonly status: number;
@@ -117,12 +121,28 @@ export async function handle(req: HttpRequest): Promise<HttpResponse> {
     return { status: 404, body: { error: 'no such route' } };
   }
 
-  // ---- authentication ---------------------------------------------------
+  // ---- authentication: the caller AND the request -----------------------
+  //
+  // The operation route is reachable from the public internet through the
+  // reverse proxy, because Foundation runs on Replit and cannot join a private
+  // overlay. A bearer token proves who is calling; the signature proves THIS
+  // call, bound to its body and a moment in time, so a captured request cannot
+  // be resent or retargeted.
   const bearer = req.authorization?.startsWith('Bearer ') ? req.authorization.slice(7).trim() : null;
-  const workload = authenticate(bearer);
-  if (!workload) {
-    return finish(ctx, 'denied_auth', 401, { error: 'unauthenticated' });
+  const authed = authenticateSigned(bearer, {
+    method: req.method,
+    path: req.path,
+    rawBody: req.rawBody,
+    headers: req.signing,
+    nowMs: Date.now(),
+  });
+  if (!authed.ok) {
+    // One response for every authentication failure. Distinguishing "unknown
+    // caller" from "bad signature" from "replayed nonce" tells an attacker
+    // which half to work on.
+    return finish(ctx, 'denied_auth', 401, { error: 'unauthenticated' }, { failure: authed.failure });
   }
+  const workload = authed.workload;
   ctx.workload = workload;
 
   if (killSwitchEngaged()) {

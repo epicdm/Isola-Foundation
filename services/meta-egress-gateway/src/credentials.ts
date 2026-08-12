@@ -25,6 +25,7 @@
 
 import { readFileSync } from 'node:fs';
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { verify, type SigningFailure, type SigningHeaders } from './signing.js';
 
 export interface AssetRef {
   readonly kind: 'waba' | 'phone_number' | 'token';
@@ -44,11 +45,16 @@ interface TenantRecord {
 }
 
 interface SecretFile {
-  readonly workloads: Record<string, { workload_id: string; tenant_id: string; roles: string[] }>;
+  readonly workloads: Record<string, { workload_id: string; tenant_id: string; roles: string[]; signing_key?: string }>;
   readonly tenants: Record<string, { assets: AssetRef[]; meta_token: string }>;
 }
 
-let WORKLOADS = new Map<string, Workload>();
+/** The workload record as held internally — the signing key never leaves here. */
+interface WorkloadRecord extends Workload {
+  readonly signing_key: string | null;
+}
+
+let WORKLOADS = new Map<string, WorkloadRecord>();
 let TENANTS = new Map<string, TenantRecord>();
 let loadedAt = 0;
 
@@ -67,11 +73,16 @@ export function loadSecrets(path: string): { workloads: number; tenants: number 
     throw new Error('secret store is not valid JSON');
   }
 
-  const workloads = new Map<string, Workload>();
+  const workloads = new Map<string, WorkloadRecord>();
   for (const [hash, w] of Object.entries(parsed.workloads ?? {})) {
     if (!/^[0-9a-f]{64}$/.test(hash)) throw new Error('secret store workload key is not a sha256 hex digest');
     if (!w.workload_id || !w.tenant_id) throw new Error('secret store workload record is incomplete');
-    workloads.set(hash, { workload_id: w.workload_id, tenant_id: w.tenant_id, roles: w.roles ?? [] });
+    workloads.set(hash, {
+      workload_id: w.workload_id,
+      tenant_id: w.tenant_id,
+      roles: w.roles ?? [],
+      signing_key: w.signing_key ?? null,
+    });
   }
 
   const tenants = new Map<string, TenantRecord>();
@@ -97,10 +108,17 @@ export function secretsLoadedAt(): number {
  * timing-safe regardless of how long the presented token is.
  */
 export function authenticate(presented: string | null): Workload | null {
+  const rec = lookup(presented);
+  if (!rec) return null;
+  const { workload_id, tenant_id, roles } = rec;
+  return { workload_id, tenant_id, roles };
+}
+
+function lookup(presented: string | null): WorkloadRecord | null {
   if (!presented) return null;
   const digest = Buffer.from(hashToken(presented), 'utf8');
 
-  let found: Workload | null = null;
+  let found: WorkloadRecord | null = null;
   for (const [hash, workload] of WORKLOADS) {
     const candidate = Buffer.from(hash, 'utf8');
     if (candidate.length === digest.length && timingSafeEqual(candidate, digest)) {
@@ -109,6 +127,31 @@ export function authenticate(presented: string | null): Workload | null {
     }
   }
   return found;
+}
+
+/**
+ * Authenticate the CALLER and the REQUEST together.
+ *
+ * The signing key is looked up and used inside this module and never returned,
+ * so no other module can sign on a workload's behalf or log its key.
+ *
+ * A workload provisioned WITHOUT a signing key cannot be used over a signed
+ * route: this fails closed rather than silently degrading to bearer-only auth,
+ * which is how a public endpoint quietly loses replay protection.
+ */
+export function authenticateSigned(
+  presented: string | null,
+  args: { method: string; path: string; rawBody: string; headers: SigningHeaders; nowMs: number },
+): { ok: true; workload: Workload } | { ok: false; failure: SigningFailure | 'unauthenticated' | 'no_signing_key' } {
+  const rec = lookup(presented);
+  if (!rec) return { ok: false, failure: 'unauthenticated' };
+  if (!rec.signing_key) return { ok: false, failure: 'no_signing_key' };
+
+  const v = verify({ key: rec.signing_key, ...args });
+  if (!v.ok) return { ok: false, failure: v.failure };
+
+  const { workload_id, tenant_id, roles } = rec;
+  return { ok: true, workload: { workload_id, tenant_id, roles } };
 }
 
 /** Is this asset inside the authenticated tenant's declared scope? */
@@ -142,7 +185,10 @@ export function custodySummary(): { workloads: number; tenants: number; loadedAt
 /** Test seam. Never called in production. */
 export function __loadForTest(file: SecretFile): void {
   WORKLOADS = new Map(
-    Object.entries(file.workloads ?? {}).map(([h, w]) => [h, { workload_id: w.workload_id, tenant_id: w.tenant_id, roles: w.roles ?? [] }]),
+    Object.entries(file.workloads ?? {}).map(([h, w]) => [
+      h,
+      { workload_id: w.workload_id, tenant_id: w.tenant_id, roles: w.roles ?? [], signing_key: w.signing_key ?? null },
+    ]),
   );
   TENANTS = new Map(Object.entries(file.tenants ?? {}).map(([t, r]) => [t, { assets: r.assets ?? [], meta_token: r.meta_token }]));
   loadedAt = Date.now();
