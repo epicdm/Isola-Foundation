@@ -22,7 +22,11 @@
  * and the account supplied must be synthetic — see `assertSyntheticAccount`.
  */
 
-import { runBrowserChecks, type BrowserRunResult } from "./isola-browser-acceptance";
+import {
+  runBrowserChecks,
+  SyntheticGuardRefusal,
+  type BrowserRunResult,
+} from "./isola-browser-acceptance";
 
 export type CheckStatus = "PASS" | "FAIL" | "NOT RUN" | "UNRESOLVED";
 
@@ -124,22 +128,40 @@ async function browserEvidence(ctx: CheckContext): Promise<BrowserRunResult> {
     portalApi: ctx.portalApi,
     credential: ctx.portalCredential,
     syntheticAccounts: ctx.syntheticAccounts,
+    syntheticTenants: ctx.syntheticTenants,
     tenantId: ctx.browserTenantId,
-  }).catch(
-    (err): BrowserRunResult => {
-      const detail = `NOT RUN — browser evidence could not be captured: ${
-        err instanceof Error ? err.message : String(err)
-      }`;
+  }).catch((err): BrowserRunResult => {
+    // A safety refusal is NOT a prerequisite gap. Letting it fall into the
+    // generic NOT RUN path would make "you pointed this at something real"
+    // look identical to "no Chromium installed", and would print the offending
+    // identifier through err.message. Surface it as a distinct, non-passing
+    // outcome carrying only a correlation reference.
+    if (err instanceof SyntheticGuardRefusal) {
+      const detail =
+        `REFUSED — the supplied ${err.kind} is not in the declared synthetic ${err.kind} list. ` +
+        `No browser was launched and no identifier is reproduced here. Correlation ref ${err.ref}.`;
       return {
-        check11: { status: "NOT RUN", method: "", detail },
-        check16: { status: "NOT RUN", method: "", detail },
+        check11: { status: "FAIL", method: "synthetic-target guard", detail },
+        check16: { status: "FAIL", method: "synthetic-target guard", detail },
         artifacts: [],
         browser: "none",
-        renderedValues: {},
-        apiComparison: {},
+        check11Evidence: null,
+        check16Evidence: null,
+        guardRefusal: { kind: err.kind, ref: err.ref },
       };
-    },
-  );
+    }
+    const detail = `NOT RUN — browser evidence could not be captured: ${
+      err instanceof Error ? err.message : String(err)
+    }`;
+    return {
+      check11: { status: "NOT RUN", method: "", detail },
+      check16: { status: "NOT RUN", method: "", detail },
+      artifacts: [],
+      browser: "none",
+      check11Evidence: null,
+      check16Evidence: null,
+    };
+  });
   browserCache.set(ctx, run);
   return run;
 }
@@ -667,7 +689,7 @@ export const DEFAULT_CONTEXT: Omit<CheckContext, "fetch"> = {
   portalApp: "https://isola-app.saas00.epic.dm",
   chatwoot: "https://isola-chat.saas00.epic.dm",
   gateway: "https://isola-gw.saas00.epic.dm",
-  syntheticTenants: ["isola-uat-a"],
+  syntheticTenants: ["AVQLG3L"],
   syntheticAccounts: ["customer-zero@epic.dm", "isola-uat-a@epic.dm", "isola-uat-b@epic.dm"],
   browserTenantId: "AVQLG3L",
 };
