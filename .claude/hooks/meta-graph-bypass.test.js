@@ -140,7 +140,84 @@ test('opaque path variable with a token-exchange parameter', () => {
   deny('curl -sG "https://$H/$OPAQUE" --data-urlencode "grant_type=fb_exchange_token"');
 });
 
+// ---- round-3 review: shell parameter expansions in the authority -------
+// Matching `$HOST` and `${HOST}` by pattern missed every other valid expansion.
+// Detection is now structural: brace depth is tracked so a `/` inside an
+// expansion does not end the authority early, and ANY `$` in the authority
+// makes the destination indeterminate.
+const EXPANSIONS = [
+  '${HOST:?required}',
+  '${HOST:-fallback.example}',
+  '${HOST:+alternate.example}',
+  '${HOST%/}',
+  '${HOST%%suffix}',
+  '${HOST#prefix}',
+  '${HOST##prefix}',
+  '$HOST',
+  '${HOST}',
+];
+for (const h of EXPANSIONS) {
+  test(`expansion ${h} + /subscribed_apps is denied`, () => {
+    deny(`curl -s -X POST "https://${h}/123456/subscribed_apps"`);
+  });
+}
+test('expansion with an explicit port is denied', () => {
+  deny('curl -s -X POST "https://${HOST:?required}:443/123456/subscribed_apps"');
+});
+test('a slash inside an expansion does not end the authority early', () => {
+  deny('curl -s -X POST "https://${HOST%/}:443/123456/subscribed_apps"');
+});
+test('expansion + /messages is denied', () => {
+  deny('curl -s -X POST "https://${HOST:-fallback.example}/123456/messages"');
+});
+
+// ---- round-3 review: percent-encoded protected paths -------------------
+test('percent-encoded subscribed_apps is denied', () => {
+  deny('curl -s -X POST "https://$HOST/123456/%73ubscribed_apps"');
+});
+test('percent-encoded messages is denied', () => {
+  deny('curl -s -X POST "https://$HOST/123456/m%65ssages"');
+});
+test('percent-encoded access_token edge is denied', () => {
+  deny('curl -s "https://$HOST/123456/%61ccess_token"');
+});
+test('percent-encoded oauth/access_token root is denied', () => {
+  deny('curl -s "https://$HOST/oauth/%61ccess_token"');
+});
+test('percent-encoded request_code is denied', () => {
+  deny('curl -s "https://$HOST/123456/request%5Fcode"');
+});
+test('encoded path separator still yields real segments', () => {
+  deny('curl -s -X POST "https://$HOST/123456%2Fsubscribed_apps"');
+});
+test('malformed percent escape fails closed', () => {
+  deny('curl -s "https://$HOST/123456/%zzsubscribed"');
+});
+
+// ---- round-3 review: curl file-backed query forms ----------------------
+test('--data-urlencode name@file exposes the name', () => {
+  deny('curl -sG "https://$HOST/$EDGE" --data-urlencode "client_secret@params.txt"');
+});
+test('--data-urlencode code_verifier@file', () => {
+  deny('curl -sG "https://$HOST/$EDGE" --data-urlencode "code_verifier@params.txt"');
+});
+test('bare @file is opaque and fails closed', () => {
+  deny('curl -sG "https://$HOST/$EDGE" --data-urlencode "@params.txt"');
+});
+test('--url-query name@file exposes the name', () => {
+  deny('curl -sG "https://$HOST/$EDGE" --url-query "client_secret@params.txt"');
+});
+test('attached --data-urlencode=name@file form', () => {
+  deny('curl -sG "https://$HOST/$EDGE" --data-urlencode=client_secret@params.txt');
+});
+test('bare @file via --url-query is opaque', () => {
+  deny('curl -sG "https://$HOST/$EDGE" --url-query "@params.txt"');
+});
+
 // ---- the fix must not over-block ordinary work -------------------------
+test('ordinary internal host with a file-backed param stays allowed', () => {
+  allow('curl -sG "https://svc.internal.example/search" --data-urlencode "q@query.txt"');
+});
 test('variable host with ordinary query parameters stays allowed', () => {
   allow('curl -sG "https://$SVC_HOST/search" --data-urlencode "q=hello"');
 });

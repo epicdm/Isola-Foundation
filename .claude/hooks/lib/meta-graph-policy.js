@@ -53,12 +53,57 @@ const META_HOST_RE = /graph\.facebook\.com/i;
 /** A parseable Graph URL. Stops at shell metacharacters and quotes. */
 const GRAPH_URL_RE = /(?:https?:\/\/)?graph\.facebook\.com\/[^\s'"`|;&<>()]*/gi;
 
+const URL_TERMINATOR_RE = /[\s"'`|;&<>()]/;
+
 /**
- * A URL whose host is a shell variable — `https://$HOST/...`, `https://${H}/...`.
- * Group 1 is the path, so its SHAPE can be tested.
+ * Split every `scheme://…` URL in a command into its AUTHORITY and the rest.
+ *
+ * Structural, not an enumeration. Round 3 found that matching `$HOST` and
+ * `${HOST}` by pattern missed every other valid shell expansion —
+ * `${HOST:?required}`, `${HOST:-fallback}`, `${HOST%/}`, `${HOST##p}` … — each
+ * of which hides the authority while keeping a protected literal path. Listing
+ * expansion syntaxes is the same drift that rounds 1 and 2 already punished, so
+ * this walks the string instead: brace depth is tracked, so a `/` INSIDE an
+ * expansion (as in `${HOST%/}`) does not end the authority, and the authority is
+ * simply "everything before the first unbraced `/` or `?`".
+ *
+ * The authority is then indeterminate if it contains `$` at all — any runtime
+ * expansion, in any form, present or future.
  */
-const VARIABLE_HOST_URL_RE =
-  /https?:\/\/[^\s"'/]*\$\{?[A-Za-z_][A-Za-z0-9_]*\}?([^\s"'`|;&<>()]*)/g;
+function splitUrls(cmd) {
+  const s = String(cmd || '');
+  const out = [];
+  const schemeRe = /https?:\/\//gi;
+  let m;
+  while ((m = schemeRe.exec(s)) !== null) {
+    let i = m.index + m[0].length;
+    let depth = 0;
+    let authority = '';
+    for (; i < s.length; i++) {
+      const ch = s[i];
+      if (ch === '{') depth++;
+      else if (ch === '}') depth = depth > 0 ? depth - 1 : 0;
+      if (depth === 0 && (ch === '/' || ch === '?')) break;
+      if (depth === 0 && URL_TERMINATOR_RE.test(ch)) break;
+      authority += ch;
+    }
+    let rest = '';
+    for (; i < s.length; i++) {
+      const ch = s[i];
+      if (ch === '{') depth++;
+      else if (ch === '}') depth = depth > 0 ? depth - 1 : 0;
+      if (depth === 0 && URL_TERMINATOR_RE.test(ch)) break;
+      rest += ch;
+    }
+    out.push({ authority, rest });
+  }
+  return out;
+}
+
+/** Any runtime expansion in the authority makes the destination unknowable. */
+function authorityIsIndeterminate(authority) {
+  return String(authority || '').includes('$');
+}
 
 /**
  * `/v21.0/...` — a Graph version segment. The decimal is REQUIRED: Graph
@@ -113,13 +158,36 @@ const LEADING_PORT_RE = /^:\d{1,5}/;
  * `/{id}/accounts` and `/me/accounts`; requiring two segments keeps an ordinary
  * internal `https://$SVC/accounts` working.
  */
+/**
+ * Percent-decode ONCE for comparison purposes.
+ *
+ * Round 3: the classifier lowercased raw segments but never decoded them, so
+ * `/123/%73ubscribed_apps` and `/123/m%65ssages` compared unequal to the
+ * protected edges while curl sent the decoded path — the same live mutation.
+ *
+ * Exactly one pass, never a loop: repeated decoding invents attacks that curl
+ * would not perform and has no natural stopping point. A malformed escape
+ * returns `null`, which callers treat as fail-closed — decoding is a
+ * comparison aid, and input that cannot be normalised cannot be cleared.
+ */
+function decodeOnceForCompare(s) {
+  const raw = String(s || '');
+  if (!raw.includes('%')) return raw;
+  if (/%(?![0-9a-fA-F]{2})/.test(raw)) return null; // malformed escape
+  try {
+    return decodeURIComponent(raw);
+  } catch (_) {
+    return null; // e.g. a lone surrogate escape
+  }
+}
+
 function isGraphShapedPath(rawPath) {
   let raw = String(rawPath || '');
   raw = raw.replace(LEADING_PORT_RE, '');
   if (!raw.startsWith('/')) return false;
 
   const qIndex = raw.indexOf('?');
-  const pathPart = qIndex === -1 ? raw : raw.slice(0, qIndex);
+  const pathPartRaw = qIndex === -1 ? raw : raw.slice(0, qIndex);
   const queryPart = qIndex === -1 ? '' : raw.slice(qIndex + 1);
 
   // A credential exchange is identifiable from its query alone — checked
@@ -128,8 +196,13 @@ function isGraphShapedPath(rawPath) {
   if (hasTokenExchangeParam(splitQuery(queryPart))) return true;
 
   // Versioned Graph URL — nothing else uses this shape.
+  if (VERSION_SEGMENT_RE.test(pathPartRaw)) return true;
+
+  const pathPart = decodeOnceForCompare(pathPartRaw);
+  if (pathPart === null) return true; // malformed escape → classify → fail closed
   if (VERSION_SEGMENT_RE.test(pathPart)) return true;
 
+  // Split AFTER decoding, so an encoded separator (%2F) yields real segments.
   const segs = pathPart.split('/').filter(Boolean).map((x) => x.toLowerCase());
   if (segs.length === 0) return false;
   const joined = segs.join('/');
@@ -164,13 +237,14 @@ function isMetaGraphCommand(cmd) {
   // Classify on the PATH instead when it is unmistakably Graph-shaped. The
   // request is then denied as unclassifiable, which is the correct outcome: an
   // endpoint that cannot be identified cannot be allowlisted.
-  VARIABLE_HOST_URL_RE.lastIndex = 0;
-  let m;
-  let sawVariableHost = false;
-  while ((m = VARIABLE_HOST_URL_RE.exec(s)) !== null) {
-    sawVariableHost = true;
-    if (isGraphShapedPath(m[1] || '')) return true;
+  let sawIndeterminateAuthority = false;
+  for (const u of splitUrls(s)) {
+    if (!authorityIsIndeterminate(u.authority)) continue;
+    sawIndeterminateAuthority = true;
+    if (isGraphShapedPath(u.rest || '')) return true;
   }
+
+  if (!sawIndeterminateAuthority) return false;
 
   // The path can be a variable too, so its shape proves nothing:
   //   curl -sG "https://$HOST/$EDGE" --data-urlencode "client_secret=$VALUE"
@@ -179,7 +253,14 @@ function isMetaGraphCommand(cmd) {
   // the rest of the policy uses, so flag-supplied query parameters
   // (-G --data-urlencode, --url-query, -d, --json …) are seen exactly as
   // classifyFields() sees them, and cannot disagree about what a cluster meant.
-  if (sawVariableHost && hasTokenExchangeParam(collectDataParams(s))) return true;
+  const params = collectDataParams(s);
+  if (hasTokenExchangeParam(params)) return true;
+
+  // A file-sourced parameter set (`--data-urlencode "@params.txt"`) makes the
+  // effective query unknowable. Combined with an authority that is already
+  // indeterminate, nothing about this request can be verified before it runs,
+  // so it must be classified and denied rather than waved through.
+  if (params.some((p) => p && p.opaque)) return true;
 
   return false;
 }
@@ -749,9 +830,22 @@ function splitQuery(qs) {
   for (const pair of String(qs || '').split('&')) {
     if (!pair) continue;
     const eq = pair.indexOf('=');
-    const key = eq === -1 ? pair : pair.slice(0, eq);
-    const value = eq === -1 ? '' : pair.slice(eq + 1);
-    params.push({ key: safeDecode(key.trim()), value });
+    if (eq !== -1) {
+      params.push({ key: safeDecode(pair.slice(0, eq).trim()), value: pair.slice(eq + 1) });
+      continue;
+    }
+    // No '='. curl's file-backed forms live here, and reading the whole string
+    // as the key is what let `client_secret@params.txt` miss TOKEN_EXCHANGE_PARAMS.
+    //   name@file  -> a NAMED parameter whose value is read from a file
+    //   @file      -> an entirely file-sourced parameter set: opaque
+    const at = pair.indexOf('@');
+    if (at > 0) {
+      params.push({ key: safeDecode(pair.slice(0, at).trim()), value: pair.slice(at), fileSourced: true });
+    } else if (at === 0) {
+      params.push({ key: '', value: pair, fileSourced: true, opaque: true });
+    } else {
+      params.push({ key: safeDecode(pair.trim()), value: '' });
+    }
   }
   return params;
 }
