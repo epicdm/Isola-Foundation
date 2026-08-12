@@ -59,7 +59,11 @@ function stripControl(input) {
   let out = '';
   for (const ch of input) {
     const c = ch.codePointAt(0);
-    if (c >= 0x20 && c !== 0x7f) out += ch;
+    // C0, DEL, C1 NEL, and the Unicode line/paragraph separators. U+2028 and
+    // U+2029 are >= 0x20, so a codepoint floor alone would let them through and
+    // a log reader that honours them would see a forged second record.
+    if (c < 0x20 || c === 0x7f || c === 0x85 || c === 0x2028 || c === 0x2029) continue;
+    out += ch;
   }
   return out;
 }
@@ -73,17 +77,31 @@ function safeLabel(v, max = 48) {
 }
 
 /**
- * A well-formed identifier or key path is safe to echo verbatim and is far more
- * useful to a developer than a hash. Anything else is WITHHELD entirely rather
- * than scrubbed: scrubbing a hostile label still reproduces its substrings, and
- * a key name is as attacker-controlled as a value. Returns the label only when
- * it needs no repair.
+ * NO INPUT-DERIVED LABEL IS EVER ECHOED.
+ *
+ * ROUND-2 CORRECTION. The previous version echoed any label that LOOKED clean
+ * (`^[A-Za-z0-9_.[\]-]+$`). Review showed that is not a safety property at all:
+ * a key can be named `ZZQQ_NOTATOKEN_7731_XYZ_CANARY`, or a secret can sit
+ * under a path whose components are all syntactically valid, and the denial
+ * reason reproduced it verbatim. Syntactic cleanliness says nothing about
+ * whether a value is attacker-controlled.
+ *
+ * So no input-derived label is echoed at all. A denial names WHAT was wrong and
+ * gives a bounded correlator; it never quotes the offending text. Only schema
+ * constants — tool names and action names already matched against an allowlist
+ * — appear verbatim.
  */
-const CLEAN_LABEL_RE = /^[A-Za-z0-9_.[\]-]{1,64}$/;
-function identLabel(v) {
-  const s = String(v === null || v === undefined ? '' : v);
-  if (CLEAN_LABEL_RE.test(s)) return { shown: true, text: '`' + s + '`' };
-  return { shown: false, text: `a malformed key (ref ${shortHash(s)}, value withheld)` };
+function keyRef(v) {
+  return `(ref ${shortHash(v)})`;
+}
+
+/** A tool name is only echoed when it is a known constant of this policy. */
+function toolLabel(short) {
+  const known =
+    Object.prototype.hasOwnProperty.call(ALLOWED, short) || MUTATING_TOOLS.has(short);
+  return known
+    ? { known: true, text: '`' + short + '`', audit: short }
+    : { known: false, text: `an unrecognised tool ${keyRef(short)}`, audit: 'unknown-tool' };
 }
 
 /** Bounded, non-reversible. Enough to correlate a denial with a report. */
@@ -230,9 +248,8 @@ function evaluateMetaMcp(toolName, toolInput) {
     }
   });
   if (credentialHit) {
-    const at = identLabel(credentialHit);
     return deny(short, null, 'meta-mcp-credential-input',
-      `Input key ${at.text} carries credential-shaped material. Credentials must never be passed through an agent session. The value is neither echoed nor recorded.`,
+      `An input field ${keyRef(credentialHit)} carries credential-shaped material. Credentials must never be passed through an agent session. Neither the field path nor its value is echoed or recorded — a path can itself carry the secret.`,
       'the Meta DevTools MCP authenticates through its own owner-authorized session. No token belongs in the tool input.');
   }
 
@@ -246,7 +263,7 @@ function evaluateMetaMcp(toolName, toolInput) {
   const spec = ALLOWED[short];
   if (!spec) {
     return deny(short, ti.action, 'meta-mcp-unknown-tool',
-      `\`${short}\` is not in the Meta DevTools MCP allowlist. Unknown tools fail closed: an unclassified capability cannot be assumed read-only.`,
+      `${toolLabel(short).text} is not in the Meta DevTools MCP allowlist. Unknown tools fail closed: an unclassified capability cannot be assumed read-only. The tool suffix is withheld because it is attacker-controlled text.`,
       'if this tool is genuinely metadata-only, add it to ALLOWED in meta-mcp-policy.js with its exact actions and input keys, with schema evidence.');
   }
 
@@ -279,9 +296,8 @@ function evaluateMetaMcp(toolName, toolInput) {
   // rawAction is allowlisted from here on, so echoing it is safe.
   for (const k of Object.keys(ti)) {
     if (spec.keys.has(k) || UNIVERSAL_OPTIONAL_KEYS.has(k)) continue;
-    const key = identLabel(k);
     return deny(short, rawAction, 'meta-mcp-unexpected-key',
-      `Input key ${key.text} is not part of the verified schema for \`${short}:${rawAction}\`. Unrecognised keys fail closed because their effect on the request cannot be predicted.`,
+      `An input key ${keyRef(k)} is not part of the verified schema for \`${short}:${rawAction}\`. Unrecognised keys fail closed because their effect on the request cannot be predicted. The key name is withheld: a name is as attacker-controlled as a value.`,
       `permitted keys: ${[...spec.keys, ...UNIVERSAL_OPTIONAL_KEYS].join(', ')}`);
   }
 
@@ -293,9 +309,8 @@ function evaluateMetaMcp(toolName, toolInput) {
     if (/^action$/i.test(k)) nestedAction = p;
   });
   if (nestedAction) {
-    const at = identLabel(nestedAction);
     return deny(short, rawAction, 'meta-mcp-nested-action',
-      `A second \`action\` appears at ${at.text}. Only a single top-level action is verifiable; a nested one may be the operation actually executed. Its value is withheld.`,
+      `A second \`action\` appears in a nested field ${keyRef(nestedAction)}. Only a single top-level action is verifiable; a nested one may be the operation actually executed. Neither the field path nor its value is echoed.`,
       'send exactly one top-level action.');
   }
   const freeText = [ti.query, ti.product, ti.endpoint, ti.skill_name]
@@ -338,12 +353,15 @@ function deny(tool, action, code, reason, remedy) {
  * for reconstructing the input.
  */
 function auditLine(toolName, verdict) {
-  const short = safeLabel(shortToolName(toolName) || toolName, 64).value;
+  const rawShort = shortToolName(toolName) || String(toolName || '');
+  const tool = toolLabel(rawShort);
+  // An unknown tool suffix is attacker-controlled text and is never persisted.
+  const short = tool.audit;
   const v = verdict || {};
   const isDeny = v.decision === 'deny';
 
   let actionField = 'unknown';
-  if (!isDeny && typeof v.action === 'string' && isAllowlistedAction(short, v.action)) {
+  if (!isDeny && typeof v.action === 'string' && isAllowlistedAction(rawShort, v.action)) {
     actionField = v.action;
   }
 
@@ -354,6 +372,7 @@ function auditLine(toolName, verdict) {
     isDeny ? `DENY:${safeLabel(v.code, 48).value}` : 'ALLOW',
   ];
   if (isDeny && v.actionRef) parts.push(`ref=${safeLabel(v.actionRef, 16).value}`);
+  if (!tool.known) parts.push(`toolref=${shortHash(rawShort)}`);
 
   // Belt and braces: even the assembled line is stripped, so no component can
   // introduce a second audit record.

@@ -86,7 +86,67 @@ test('versioned variable host + unversioned-style edge still denied', () => {
   deny('curl -s "https://$H/v21.0/me/accounts"');
 });
 
+// ---- round-2 review: PROTECTED EDGES beyond token minting --------------
+// Deriving from the token-minting sets alone still left the MUTATION edges
+// outside classification. With HOST=graph.facebook.com exported earlier, these
+// are real Meta mutations that the guard was treating as ordinary Bash.
+// Classification now derives from TOKEN_MINTING_EDGES + ALLOWED_EDGES +
+// SIDE_EFFECTING_EDGES together.
+test('POST /<id>/subscribed_apps on a variable host', () => {
+  deny('curl -s -X POST "https://$HOST/123456/subscribed_apps"');
+});
+test('DELETE /<id>/subscribed_apps on a braced variable host', () => {
+  deny('curl -s -X DELETE "https://${HOST}/123456/subscribed_apps"');
+});
+test('POST /<id>/messages on a variable host', () => {
+  deny('curl -s -X POST "https://$HOST/123456/messages" --json \'{"to":"x"}\'');
+});
+test('GET /<id>/request_code on a variable host', () => {
+  deny('curl -s "https://$H/123456/request_code"');
+});
+test('GET /<id>/phone_numbers on a variable host', () => {
+  deny('curl -s "https://$H/123456/phone_numbers"');
+});
+test('explicit :443 port does not defeat classification', () => {
+  deny('curl -s -X POST "https://$HOST:443/123456/subscribed_apps"');
+});
+test('explicit :443 port with a braced host', () => {
+  deny('curl -s -X DELETE "https://${HOST}:443/123456/subscribed_apps"');
+});
+
+// ---- round-2 review: token-exchange PARAMETERS, derived --------------
+// TOKEN_EXCHANGE_PARAMS is now the single source. Both inline query and
+// curl-flag-supplied parameters are inspected, so a fully-variable URL whose
+// only literal element is the parameter is still classified.
+test('inline client_secret on a variable host', () => {
+  deny('curl -s "https://$H/$EDGE?client_secret=abc"');
+});
+test('inline code_verifier on a variable host', () => {
+  deny('curl -s "https://$H/$EDGE?code_verifier=abc"');
+});
+test('percent-encoded client_secret key', () => {
+  deny('curl -s "https://$H/$EDGE?client%5Fsecret=abc"');
+});
+test('grant_type with an unanticipated value', () => {
+  deny('curl -s "https://$H/$EDGE?grant_type=some_new_flow_2027"');
+});
+test('-G --data-urlencode client_secret', () => {
+  deny('curl -sG "https://$HOST/$EDGE" --data-urlencode "client_secret=$VALUE"');
+});
+test('--url-query client_secret', () => {
+  deny('curl -s "https://$HOST/$EDGE" --url-query "client_secret=$VALUE"');
+});
+test('opaque path variable with a token-exchange parameter', () => {
+  deny('curl -sG "https://$H/$OPAQUE" --data-urlencode "grant_type=fb_exchange_token"');
+});
+
 // ---- the fix must not over-block ordinary work -------------------------
+test('variable host with ordinary query parameters stays allowed', () => {
+  allow('curl -sG "https://$SVC_HOST/search" --data-urlencode "q=hello"');
+});
+test('variable host with no protected parameter stays allowed', () => {
+  allow('curl -s "https://$SVC_HOST/items?page=2&limit=50"');
+});
 test('single-segment /accounts on an internal host is NOT a Meta shape', () => {
   allow('curl -s "https://$SVC_HOST/accounts"');
 });

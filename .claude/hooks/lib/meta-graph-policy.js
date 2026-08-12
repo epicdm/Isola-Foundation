@@ -68,37 +68,64 @@ const VARIABLE_HOST_URL_RE =
  */
 const VERSION_SEGMENT_RE = /^\/v\d+\.\d+(?:\/|$)/i;
 
-/** Query shapes that only appear on a credential exchange. */
-const TOKEN_EXCHANGE_QUERY_RE =
-  /(?:^|[?&])(?:grant_type=(?:fb_exchange_token|client_credentials|authorization_code)|fb_exchange_token=|client_code=)/i;
+/**
+ * Every edge the policy models, in one derived set.
+ *
+ * Round-2 review found the previous version derived from the token-minting sets
+ * ONLY, which left the mutation edges outside classification: with
+ * HOST=graph.facebook.com exported earlier, `POST https://$HOST/{id}/messages`
+ * and `POST|DELETE https://$HOST/{id}/subscribed_apps` are real Meta mutations,
+ * and the guard treated them as ordinary Bash. ALLOWED_EDGES and
+ * SIDE_EFFECTING_EDGES are just as protected as the minting ones — an edge the
+ * policy bothers to name is an edge that must be classified.
+ *
+ * Built lazily so it always reflects the sets as declared, and can never be a
+ * stale copy of them.
+ */
+let _protectedEdges = null;
+function protectedEdges() {
+  if (!_protectedEdges) {
+    _protectedEdges = new Set([...TOKEN_MINTING_EDGES, ...ALLOWED_EDGES, ...SIDE_EFFECTING_EDGES]);
+  }
+  return _protectedEdges;
+}
+
+let _protectedRootPaths = null;
+function protectedRootPaths() {
+  if (!_protectedRootPaths) {
+    _protectedRootPaths = new Set([...TOKEN_MINTING_PATHS, ...ALLOWED_ROOT_PATHS]);
+  }
+  return _protectedRootPaths;
+}
+
+/** `https://$HOST:443/...` — strip an explicit port before the path is read. */
+const LEADING_PORT_RE = /^:\d{1,5}/;
 
 /**
  * Is this URL path Graph-shaped enough to classify, when the host is hidden
  * behind a shell variable?
  *
- * DERIVED from the authoritative deny sets below — TOKEN_MINTING_PATHS,
- * TOKEN_MINTING_EDGES, ALLOWED_ROOT_PATHS — rather than from a second hand-kept
- * list. The first version of this fix DID keep a second list, and independent
- * review found it had already drifted: it recognised versioned URLs and a few
- * roots, but missed the unversioned token-minting EDGES the policy already
- * models, so `https://$H/me/accounts` (which mints a page token per page) was
- * still classified as "not a Graph command" and skipped the policy entirely.
- * Deriving here means widening a deny set widens classification automatically.
+ * DERIVED from the authoritative sets — never a second hand-kept list. Two
+ * successive reviews caught drift in exactly that pattern, so the lists are
+ * gone: widening any protected set now widens classification automatically.
  *
  * Deliberately NOT matched: a single-segment `/accounts`. The Meta shapes are
  * `/{id}/accounts` and `/me/accounts`; requiring two segments keeps an ordinary
  * internal `https://$SVC/accounts` working.
  */
 function isGraphShapedPath(rawPath) {
-  const raw = String(rawPath || '');
+  let raw = String(rawPath || '');
+  raw = raw.replace(LEADING_PORT_RE, '');
   if (!raw.startsWith('/')) return false;
 
   const qIndex = raw.indexOf('?');
   const pathPart = qIndex === -1 ? raw : raw.slice(0, qIndex);
-  const queryPart = qIndex === -1 ? '' : raw.slice(qIndex);
+  const queryPart = qIndex === -1 ? '' : raw.slice(qIndex + 1);
 
-  // A credential exchange is identifiable from its query alone.
-  if (TOKEN_EXCHANGE_QUERY_RE.test(queryPart)) return true;
+  // A credential exchange is identifiable from its query alone — checked
+  // against the authoritative parameter set, with keys percent-decoded by
+  // splitQuery(), so `client%5Fsecret` cannot slip past a literal match.
+  if (hasTokenExchangeParam(splitQuery(queryPart))) return true;
 
   // Versioned Graph URL — nothing else uses this shape.
   if (VERSION_SEGMENT_RE.test(pathPart)) return true;
@@ -107,11 +134,19 @@ function isGraphShapedPath(rawPath) {
   if (segs.length === 0) return false;
   const joined = segs.join('/');
 
-  if (TOKEN_MINTING_PATHS.has(joined)) return true; // oauth/access_token, device/login, …
-  if (ALLOWED_ROOT_PATHS.has(joined)) return true; // debug_token
-  // /{id}/accounts, /{id}/access_token, /{id}/app_access_token, /{id}/client_code
-  if (segs.length >= 2 && TOKEN_MINTING_EDGES.has(segs[segs.length - 1])) return true;
+  if (protectedRootPaths().has(joined)) return true; // oauth/access_token, device/login, debug_token …
+  // /{id}/messages, /{id}/subscribed_apps, /{id}/accounts, /{id}/request_code …
+  if (segs.length >= 2 && protectedEdges().has(segs[segs.length - 1])) return true;
 
+  return false;
+}
+
+/** True when any parameter key is one the policy already treats as an exchange. */
+function hasTokenExchangeParam(params) {
+  for (const p of params || []) {
+    if (!p || typeof p.key !== 'string') continue;
+    if (TOKEN_EXCHANGE_PARAMS.has(p.key.trim().toLowerCase())) return true;
+  }
   return false;
 }
 
@@ -131,9 +166,21 @@ function isMetaGraphCommand(cmd) {
   // endpoint that cannot be identified cannot be allowlisted.
   VARIABLE_HOST_URL_RE.lastIndex = 0;
   let m;
+  let sawVariableHost = false;
   while ((m = VARIABLE_HOST_URL_RE.exec(s)) !== null) {
+    sawVariableHost = true;
     if (isGraphShapedPath(m[1] || '')) return true;
   }
+
+  // The path can be a variable too, so its shape proves nothing:
+  //   curl -sG "https://$HOST/$EDGE" --data-urlencode "client_secret=$VALUE"
+  // Nothing here is literal except the PARAMETER, and a client_secret exchange
+  // is a Graph operation whatever the path spells. Reuse the same curl parser
+  // the rest of the policy uses, so flag-supplied query parameters
+  // (-G --data-urlencode, --url-query, -d, --json …) are seen exactly as
+  // classifyFields() sees them, and cannot disagree about what a cluster meant.
+  if (sawVariableHost && hasTokenExchangeParam(collectDataParams(s))) return true;
+
   return false;
 }
 
