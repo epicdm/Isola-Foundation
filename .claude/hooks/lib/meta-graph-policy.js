@@ -952,6 +952,91 @@ function hasTokenExchangeParam(params) {
   return false;
 }
 
+/**
+ * Query parameters carried by the operands a curl invocation will ACTUALLY
+ * contact — the same authoritative representation round 10 introduced for F1.
+ *
+ * Round 11, P0-A: credential classification of an indeterminate authority was
+ * fed from `collectDataParams()` alone, which reads flag-supplied parameters.
+ * The operand's own query string was never merged in, so the identical
+ * credential moved from a flag into the URL escaped classification entirely:
+ *
+ *   curl -sG "https://$HOST/me" --data-urlencode "access_token=$T"  -> denied
+ *   curl -sG "https://$HOST/me?access_token=$T"                     -> ALLOWED
+ *
+ * A FRAGMENT is not a query. `…/subscribed_apps#access_token=x` sends nothing
+ * after the `#`, and treating it as a parameter would refuse a request that
+ * carries no credential at all — the mirror image of the bug being fixed.
+ */
+function operandQueryParams(cmd) {
+  const out = [];
+  const { invocations } = analyzeRequestTargets(cmd);
+  for (const inv of invocations) {
+    if (inv.client !== 'curl') continue;
+    for (const e of inv.targets) {
+      const q = splitTarget(String(e.raw || '')).query;
+      if (!q) continue;
+      const frag = q.indexOf('#');
+      for (const p of splitQuery(frag === -1 ? q : q.slice(0, frag))) out.push(p);
+    }
+  }
+  return out;
+}
+
+/**
+ * Every parameter this request will carry, from BOTH sources, in order and with
+ * repeats preserved — a benign first occurrence must never vouch for a later
+ * credential occurrence. Keys arrive percent-decoded from splitQuery(), so
+ * `access%5Ftoken` is the same carrier as `access_token`.
+ */
+function requestParams(cmd) {
+  return [...operandQueryParams(cmd), ...collectDataParams(cmd)];
+}
+
+/**
+ * Is the destination of this authoritative operand decidable before it runs?
+ *
+ * Round 11, P0-B: indeterminacy was detected by `splitUrls()`, which anchors on
+ * a LITERAL `http://` or `https://`. An operand whose scheme is variable-composed
+ * or absent therefore never produced an indeterminate authority — it was treated
+ * as "not a URL" and left the policy, credential and all:
+ *
+ *   curl -sG "${SCHEME}://${HOST}/me" --data-urlencode "access_token=$T"
+ *   curl -sG "$HOST/me"               --data-urlencode "access_token=$T"
+ *
+ * curl contacts something in both cases; what it contacts is simply unknown. An
+ * absent scheme is also not benign — curl defaults it to plaintext HTTP.
+ *
+ * Sanctioned Meta access requires a literal scheme AND a literal authority. This
+ * reports only decidability; whether indeterminacy MATTERS is the caller's
+ * question, and the caller requires a credential or a Graph-shaped operation
+ * before refusing anything. Ordinary variable-host curl stays unaffected.
+ */
+function targetDestinationIsIndeterminate(raw) {
+  const s = String(raw || '').trim();
+  if (s === '') return false;
+  const t = splitTarget(s);
+  // A scheme that is absent, partially literal or wholly expanded is not a
+  // decided scheme. Only a complete literal scheme token counts.
+  if (!/^[A-Za-z][A-Za-z0-9+.\-]*$/.test(t.scheme)) return true;
+  if (t.authority === '') return true;
+  return EXPANSION_MARKER_RE.test(t.authority);
+}
+
+/** The authoritative operands whose destination cannot be decided. */
+function indeterminateTargets(cmd) {
+  const out = [];
+  const { invocations } = analyzeRequestTargets(cmd);
+  for (const inv of invocations) {
+    if (inv.client !== 'curl') continue;
+    for (const e of inv.targets) {
+      const raw = String(e.raw || '');
+      if (targetDestinationIsIndeterminate(raw)) out.push(raw);
+    }
+  }
+  return out;
+}
+
 function isMetaGraphCommand(cmd) {
   const s = String(cmd || '');
   if (META_HOST_RE.test(s)) return true;
@@ -982,6 +1067,21 @@ function isMetaGraphCommand(cmd) {
     if (isGraphShapedPath(u.rest || '')) return true;
   }
 
+  // Round 11, P0-B. The scan above needs a literal scheme to find a URL at all,
+  // so a variable-composed or absent scheme hid the authority from it. Ask the
+  // authoritative operands directly. A parsing fault here must fail CLOSED: the
+  // command is request-shaped, and an unreadable destination is exactly the
+  // condition this branch exists to refuse.
+  try {
+    for (const raw of indeterminateTargets(s)) {
+      sawIndeterminateAuthority = true;
+      const t = splitTarget(raw);
+      if (isGraphShapedPath((t.path || '') + (t.query ? '?' + t.query : ''))) return true;
+    }
+  } catch (_) {
+    return true;
+  }
+
   if (!sawIndeterminateAuthority) return false;
 
   // The path can be a variable too, so its shape proves nothing:
@@ -991,7 +1091,17 @@ function isMetaGraphCommand(cmd) {
   // the rest of the policy uses, so flag-supplied query parameters
   // (-G --data-urlencode, --url-query, -d, --json …) are seen exactly as
   // classifyFields() sees them, and cannot disagree about what a cluster meant.
-  const params = collectDataParams(s);
+  //
+  // Round 11, P0-A: the operand's OWN query joins them. One request has one
+  // parameter set, and the two places it can be written must not disagree about
+  // whether it carries a credential. A parsing fault fails CLOSED, for the same
+  // reason as above.
+  let params;
+  try {
+    params = requestParams(s);
+  } catch (_) {
+    return true;
+  }
   if (hasTokenExchangeParam(params)) return true;
 
   // A credential on the wire, going somewhere that cannot be identified before
@@ -2418,13 +2528,30 @@ function evaluateMetaGraph(cmd) {
   const segments = splitTransfers(whole);
   const parsedAnywhere = segments.some((s) => parseGraphUrls(s).length > 0);
 
+  // Round 11, P0-B. The gate below required a LITERAL `http(s)://` before it
+  // would refuse an unclassifiable Meta request. An operand whose scheme is
+  // absent or variable-composed offers no literal scheme to find, so the least
+  // decidable requests of all took the "nothing to gate" exit and were allowed —
+  // even carrying a credential, which is what classified them in the first
+  // place. Ask the authoritative operands whether the destination is decidable.
+  // An inspection fault counts as indeterminate: this branch is reached only for
+  // a command already classified as Meta.
+  let indeterminate;
+  try {
+    indeterminate = indeterminateTargets(whole).length > 0;
+  } catch (_) {
+    indeterminate = true;
+  }
+
   if (!parsedAnywhere) {
     // The host is named but no Graph URL could be parsed. Prose, a grep, or a
     // string literal in a script — nothing to gate — UNLESS the command really
     // is issuing a request, in which case refusing is the only honest answer.
-    if (/https?:\/\//i.test(whole) && REQUEST_CLIENT_RE.test(whole)) {
+    if (REQUEST_CLIENT_RE.test(whole) && (/https?:\/\//i.test(whole) || indeterminate)) {
       return unclassifiable(
-        'This command issues a Meta Graph request whose URL cannot be statically classified.',
+        'This command issues a Meta Graph request whose URL cannot be statically classified. ' +
+          'Sanctioned Meta access requires a literal https scheme and the exact approved Graph ' +
+          'authority, both readable before the command runs.',
         REMEDY_LITERAL_URL
       );
     }
