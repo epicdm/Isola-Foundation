@@ -30,7 +30,75 @@
  * denied until a server-side metadata-only projection exists.
  */
 
+const crypto = require('crypto');
+
 const META_MCP_TOOL_RE = /^mcp__meta[_-]developer[_-]tools__(.+)$/i;
+
+/**
+ * UNTRUSTED-INPUT DISCIPLINE
+ * --------------------------
+ * Independent review of b2ecf20 found raw denied `action` reaching two sinks:
+ * the persistent `meta-mcp.log` line, and the denial reason echoed to
+ * transcript-visible stderr. Both are wrong for the same reason — a DENIED
+ * value is attacker-shaped by definition, so it can carry a newline (forging a
+ * second audit line), or credential material that no pattern list anticipates.
+ * Pattern-based redaction is the wrong control here: it can only remove shapes
+ * it already knows.
+ *
+ * The rule applied instead: a value that failed validation is NEVER reproduced.
+ * Only allowlisted CONSTANTS are echoed verbatim. Everything derived from input
+ * is either charset-filtered and length-capped (for key paths, which must stay
+ * legible to be useful) or reduced to a bounded non-reversible hash (for the
+ * denied action, where only correlation matters).
+ */
+
+/** Identifier-ish charset. Anything else is dropped, not escaped. */
+const LABEL_UNSAFE_RE = /[^A-Za-z0-9_.[\]-]/g;
+/** Control characters are removed by codepoint, not by a literal regex class. */
+function stripControl(input) {
+  let out = '';
+  for (const ch of input) {
+    const c = ch.codePointAt(0);
+    if (c >= 0x20 && c !== 0x7f) out += ch;
+  }
+  return out;
+}
+
+/** Charset-filtered, length-capped, newline-free. Never round-trips a secret. */
+function safeLabel(v, max = 48) {
+  const original = String(v === null || v === undefined ? '' : v);
+  const cleaned = stripControl(original).replace(LABEL_UNSAFE_RE, '');
+  const capped = cleaned.slice(0, max);
+  return { value: capped === '' ? '<empty>' : capped, altered: capped !== original };
+}
+
+/**
+ * A well-formed identifier or key path is safe to echo verbatim and is far more
+ * useful to a developer than a hash. Anything else is WITHHELD entirely rather
+ * than scrubbed: scrubbing a hostile label still reproduces its substrings, and
+ * a key name is as attacker-controlled as a value. Returns the label only when
+ * it needs no repair.
+ */
+const CLEAN_LABEL_RE = /^[A-Za-z0-9_.[\]-]{1,64}$/;
+function identLabel(v) {
+  const s = String(v === null || v === undefined ? '' : v);
+  if (CLEAN_LABEL_RE.test(s)) return { shown: true, text: '`' + s + '`' };
+  return { shown: false, text: `a malformed key (ref ${shortHash(s)}, value withheld)` };
+}
+
+/** Bounded, non-reversible. Enough to correlate a denial with a report. */
+function shortHash(v) {
+  return crypto
+    .createHash('sha256')
+    .update(String(v === null || v === undefined ? '' : v))
+    .digest('hex')
+    .slice(0, 8);
+}
+
+function isAllowlistedAction(shortTool, action) {
+  const spec = ALLOWED[shortTool];
+  return !!(spec && typeof action === 'string' && spec.actions.has(action));
+}
 
 /** Optional telemetry keys the provider documents on every tool. */
 const UNIVERSAL_OPTIONAL_KEYS = new Set(['model_name', 'skill_name']);
@@ -162,8 +230,9 @@ function evaluateMetaMcp(toolName, toolInput) {
     }
   });
   if (credentialHit) {
+    const at = identLabel(credentialHit);
     return deny(short, null, 'meta-mcp-credential-input',
-      `Input key \`${credentialHit}\` carries credential-shaped material. Credentials must never be passed through an agent session, and a denied call still records its metadata.`,
+      `Input key ${at.text} carries credential-shaped material. Credentials must never be passed through an agent session. The value is neither echoed nor recorded.`,
       'the Meta DevTools MCP authenticates through its own owner-authorized session. No token belongs in the tool input.');
   }
 
@@ -195,18 +264,24 @@ function evaluateMetaMcp(toolName, toolInput) {
       'use basic_settings / advanced_settings / restrictions, which are metadata-only. Re-evaluate this action only once a server-side metadata-only projection exists.');
   }
   if (!spec.actions.has(rawAction)) {
+    // The supplied action FAILED validation, so it is never reproduced — not in
+    // this reason, not in the audit line. Only the allowlisted constants below
+    // are echoed. `ref` is a bounded, non-reversible correlator.
     const casing = [...spec.actions].find((a) => a.toLowerCase() === rawAction.toLowerCase());
     return deny(short, rawAction, 'meta-mcp-unknown-action',
-      `\`${rawAction}\` is not an allowlisted action for \`${short}\`.` +
-        (casing ? ` Actions are matched exactly; \`${casing}\` is the allowlisted spelling.` : ''),
+      `The supplied \`action\` is not allowlisted for \`${short}\` (ref ${shortHash(rawAction)}).` +
+        (casing ? ` Actions match exactly; \`${casing}\` is the allowlisted spelling.` : '') +
+        ' The value itself is withheld because it failed validation.',
       `allowed actions: ${[...spec.actions].join(', ')}`);
   }
 
   // --- unexpected top-level keys ------------------------------------------
+  // rawAction is allowlisted from here on, so echoing it is safe.
   for (const k of Object.keys(ti)) {
     if (spec.keys.has(k) || UNIVERSAL_OPTIONAL_KEYS.has(k)) continue;
+    const key = identLabel(k);
     return deny(short, rawAction, 'meta-mcp-unexpected-key',
-      `Input key \`${k}\` is not part of the verified schema for \`${short}:${rawAction}\`. Unrecognised keys fail closed because their effect on the request cannot be predicted.`,
+      `Input key ${key.text} is not part of the verified schema for \`${short}:${rawAction}\`. Unrecognised keys fail closed because their effect on the request cannot be predicted.`,
       `permitted keys: ${[...spec.keys, ...UNIVERSAL_OPTIONAL_KEYS].join(', ')}`);
   }
 
@@ -218,8 +293,9 @@ function evaluateMetaMcp(toolName, toolInput) {
     if (/^action$/i.test(k)) nestedAction = p;
   });
   if (nestedAction) {
+    const at = identLabel(nestedAction);
     return deny(short, rawAction, 'meta-mcp-nested-action',
-      `A second \`action\` appears at \`${nestedAction}\`. Only a single top-level action is verifiable; a nested one may be the operation actually executed.`,
+      `A second \`action\` appears at ${at.text}. Only a single top-level action is verifiable; a nested one may be the operation actually executed. Its value is withheld.`,
       'send exactly one top-level action.');
   }
   const freeText = [ti.query, ti.product, ti.endpoint, ti.skill_name]
@@ -234,16 +310,54 @@ function evaluateMetaMcp(toolName, toolInput) {
   return { decision: 'allow', tool: short, action: rawAction, reason: 'allowlisted metadata read' };
 }
 
+/**
+ * A denied verdict carries NO raw action — only a bounded correlator. Storing
+ * the raw value on the verdict object at all is what let it reach the audit
+ * ledger at b2ecf20; removing it here makes that class of mistake structurally
+ * hard to repeat, rather than relying on every call site to remember.
+ */
 function deny(tool, action, code, reason, remedy) {
-  return { decision: 'deny', tool, action: action || null, code, reason, remedy };
+  return {
+    decision: 'deny',
+    tool,
+    action: null,
+    actionRef: action === undefined || action === null ? null : shortHash(action),
+    code,
+    reason,
+    remedy,
+  };
 }
 
-/** Metadata-only audit line. Never includes raw input values. */
+/**
+ * Metadata-only audit line. Exactly one line, always.
+ *
+ * An ALLOWED action is echoed verbatim only because it has already matched an
+ * allowlist constant by exact string equality — the value written is the
+ * constant, not the input. A DENIED action is never written; `ref` is a bounded
+ * non-reversible hash, enough to correlate a denial with a report and useless
+ * for reconstructing the input.
+ */
 function auditLine(toolName, verdict) {
-  const short = shortToolName(toolName) || String(toolName || '?');
-  const action = verdict && verdict.action ? verdict.action : '-';
-  const outcome = verdict && verdict.decision === 'deny' ? `DENY:${verdict.code}` : 'ALLOW';
-  return `meta-mcp ${short} action=${action} ${outcome}`;
+  const short = safeLabel(shortToolName(toolName) || toolName, 64).value;
+  const v = verdict || {};
+  const isDeny = v.decision === 'deny';
+
+  let actionField = 'unknown';
+  if (!isDeny && typeof v.action === 'string' && isAllowlistedAction(short, v.action)) {
+    actionField = v.action;
+  }
+
+  const parts = [
+    'meta-mcp',
+    short,
+    `action=${actionField}`,
+    isDeny ? `DENY:${safeLabel(v.code, 48).value}` : 'ALLOW',
+  ];
+  if (isDeny && v.actionRef) parts.push(`ref=${safeLabel(v.actionRef, 16).value}`);
+
+  // Belt and braces: even the assembled line is stripped, so no component can
+  // introduce a second audit record.
+  return stripControl(parts.join(' '));
 }
 
 module.exports = {

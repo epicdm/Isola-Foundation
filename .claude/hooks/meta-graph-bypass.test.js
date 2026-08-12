@@ -55,7 +55,44 @@ test('variable host + device/login, literal host absent', () => {
   deny('curl -s "https://$H/device/login?scope=whatsapp_business_management"');
 });
 
+// ---- residual bypass found by independent review of b2ecf20 ------------
+// The first fix kept its own list of "Graph-shaped" paths and it had already
+// drifted: it knew versioned URLs and a few roots, but not the UNVERSIONED
+// token-minting EDGES the policy already models. Classification is now derived
+// from TOKEN_MINTING_PATHS / TOKEN_MINTING_EDGES / ALLOWED_ROOT_PATHS, so
+// widening a deny set widens classification automatically.
+test('variable host + /me/accounts (mints a page token per page)', () => {
+  deny('curl -s "https://$HOST/me/accounts?fields=id,name"');
+});
+test('braced variable host + /me/accounts', () => {
+  deny('curl -s "https://${META_HOST}/me/accounts"');
+});
+test('variable host + /<id>/access_token', () => {
+  deny('curl -s "https://$H/123456789/access_token"');
+});
+test('variable host + /<id>/app_access_token', () => {
+  deny('curl -s "https://$H/123456789/app_access_token"');
+});
+test('variable host + /oauth/client_code', () => {
+  deny('curl -s "https://$H/oauth/client_code?access_token=x"');
+});
+test('variable host + /device/login_status', () => {
+  deny('curl -s "https://$H/device/login_status?code=x"');
+});
+test('token-exchange query shape alone is enough to classify', () => {
+  deny('curl -s "https://$H/some/opaque/path?grant_type=fb_exchange_token&fb_exchange_token=x"');
+});
+test('versioned variable host + unversioned-style edge still denied', () => {
+  deny('curl -s "https://$H/v21.0/me/accounts"');
+});
+
 // ---- the fix must not over-block ordinary work -------------------------
+test('single-segment /accounts on an internal host is NOT a Meta shape', () => {
+  allow('curl -s "https://$SVC_HOST/accounts"');
+});
+test('ordinary internal path containing the word token is unaffected', () => {
+  allow('curl -s "https://$SVC_HOST/v2/session/refresh"');
+});
 test('ordinary internal API on a variable host is unaffected', () => {
   allow('curl -s "$API_URL/health"');
 });

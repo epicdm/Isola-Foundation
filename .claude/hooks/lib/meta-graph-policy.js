@@ -61,11 +61,59 @@ const VARIABLE_HOST_URL_RE =
   /https?:\/\/[^\s"'/]*\$\{?[A-Za-z_][A-Za-z0-9_]*\}?([^\s"'`|;&<>()]*)/g;
 
 /**
- * Path shapes only a Graph call has: a version segment, or one of the Meta root
- * paths. Deliberately narrow — an ordinary `curl "$API_URL/health"` must not
- * match, or every variable-host request in the repo starts failing closed.
+ * `/v21.0/...` — a Graph version segment. The decimal is REQUIRED: Graph
+ * versions are always `v<major>.<minor>`, whereas plain `/v1/`, `/v2/` are the
+ * commonest internal-API convention there is. Matching those would fail-closed
+ * every versioned internal request on a variable host.
  */
-const GRAPH_SHAPED_PATH_RE = /^\/(?:v\d+\.\d+\/|oauth\/|device\/login|debug_token)/i;
+const VERSION_SEGMENT_RE = /^\/v\d+\.\d+(?:\/|$)/i;
+
+/** Query shapes that only appear on a credential exchange. */
+const TOKEN_EXCHANGE_QUERY_RE =
+  /(?:^|[?&])(?:grant_type=(?:fb_exchange_token|client_credentials|authorization_code)|fb_exchange_token=|client_code=)/i;
+
+/**
+ * Is this URL path Graph-shaped enough to classify, when the host is hidden
+ * behind a shell variable?
+ *
+ * DERIVED from the authoritative deny sets below — TOKEN_MINTING_PATHS,
+ * TOKEN_MINTING_EDGES, ALLOWED_ROOT_PATHS — rather than from a second hand-kept
+ * list. The first version of this fix DID keep a second list, and independent
+ * review found it had already drifted: it recognised versioned URLs and a few
+ * roots, but missed the unversioned token-minting EDGES the policy already
+ * models, so `https://$H/me/accounts` (which mints a page token per page) was
+ * still classified as "not a Graph command" and skipped the policy entirely.
+ * Deriving here means widening a deny set widens classification automatically.
+ *
+ * Deliberately NOT matched: a single-segment `/accounts`. The Meta shapes are
+ * `/{id}/accounts` and `/me/accounts`; requiring two segments keeps an ordinary
+ * internal `https://$SVC/accounts` working.
+ */
+function isGraphShapedPath(rawPath) {
+  const raw = String(rawPath || '');
+  if (!raw.startsWith('/')) return false;
+
+  const qIndex = raw.indexOf('?');
+  const pathPart = qIndex === -1 ? raw : raw.slice(0, qIndex);
+  const queryPart = qIndex === -1 ? '' : raw.slice(qIndex);
+
+  // A credential exchange is identifiable from its query alone.
+  if (TOKEN_EXCHANGE_QUERY_RE.test(queryPart)) return true;
+
+  // Versioned Graph URL — nothing else uses this shape.
+  if (VERSION_SEGMENT_RE.test(pathPart)) return true;
+
+  const segs = pathPart.split('/').filter(Boolean).map((x) => x.toLowerCase());
+  if (segs.length === 0) return false;
+  const joined = segs.join('/');
+
+  if (TOKEN_MINTING_PATHS.has(joined)) return true; // oauth/access_token, device/login, …
+  if (ALLOWED_ROOT_PATHS.has(joined)) return true; // debug_token
+  // /{id}/accounts, /{id}/access_token, /{id}/app_access_token, /{id}/client_code
+  if (segs.length >= 2 && TOKEN_MINTING_EDGES.has(segs[segs.length - 1])) return true;
+
+  return false;
+}
 
 function isMetaGraphCommand(cmd) {
   const s = String(cmd || '');
@@ -84,7 +132,7 @@ function isMetaGraphCommand(cmd) {
   VARIABLE_HOST_URL_RE.lastIndex = 0;
   let m;
   while ((m = VARIABLE_HOST_URL_RE.exec(s)) !== null) {
-    if (GRAPH_SHAPED_PATH_RE.test(m[1] || '')) return true;
+    if (isGraphShapedPath(m[1] || '')) return true;
   }
   return false;
 }
