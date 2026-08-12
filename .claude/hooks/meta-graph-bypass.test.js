@@ -214,7 +214,85 @@ test('bare @file via --url-query is opaque', () => {
   deny('curl -sG "https://$HOST/$EDGE" --url-query "@params.txt"');
 });
 
+// ---- round-4 review: the classifier's ENTRY BOUNDARY --------------------
+// Scanning raw contiguous URL text only classified an indeterminate authority
+// when a protected LITERAL survived. A target that becomes Meta only after
+// expansion never entered the policy at all. One shared analysis now decides
+// both classification and denial.
+test('variable host, object and protected edge', () => {
+  deny('curl -s -X POST "https://$HOST/$WABA_ID/$EDGE" -H "Authorization: Bearer $META_BUSINESS_TOKEN"');
+});
+test('fully variable POST URL', () => {
+  deny('curl -s -X POST "$META_SUBSCRIBE_URL" -H "Authorization: Bearer $META_BUSINESS_TOKEN"');
+});
+test('fully variable token-minting GET URL', () => {
+  deny('curl -s "$META_ACCOUNTS_URL" -H "Authorization: Bearer $META_BUSINESS_TOKEN"');
+});
+test('braced variable host, object and edge', () => {
+  deny('curl -s -X DELETE "https://${HOST}/${WABA_ID}/${EDGE}"');
+});
+test('variable protected final edge only', () => {
+  deny('curl -s -X POST "https://$HOST/123456/$EDGE"');
+});
+test('partially constructed edge', () => {
+  deny('curl -s -X POST "https://$HOST/123456/mess${AGES}"');
+});
+test('dynamically constructed parameter NAME', () => {
+  deny('curl -sG "https://$HOST/$EDGE" --data-urlencode "client_${KEY}=x"');
+});
+test('variable scheme and authority', () => {
+  deny('curl -s -X POST "${SCHEME}://${HOST}/123456/messages"');
+});
+test('quote-concatenated authority', () => {
+  deny('curl -s -X POST https://"$HOST"/123456/messages');
+});
+test('command substitution authority', () => {
+  deny('curl -s -X POST "https://$(get_meta_host)/123456/messages"');
+});
+test('backtick authority substitution', () => {
+  deny('curl -s -X POST "https://`get_meta_host`/123456/messages"');
+});
+test('--url with a variable value', () => {
+  deny('curl -s --url "$META_URL" -X POST');
+});
+test('attached --url=$VAR form', () => {
+  deny('curl -s --url=$META_URL -X DELETE');
+});
+test('-K config file', () => {
+  deny('curl -K meta-request.conf');
+});
+test('--config file', () => {
+  deny('curl --config meta-request.conf');
+});
+test('-K reading from stdin', () => {
+  deny('curl -K -');
+});
+test('curl-native --expand-url with an environment-backed authority', () => {
+  deny('curl --variable %HOST --expand-url "https://{{HOST}}/123456/subscribed_apps" -X POST');
+});
+test('curl-native fully expanded target', () => {
+  deny('curl --variable %TARGET --expand-url "{{TARGET}}" -X POST');
+});
+test('a second indeterminate transfer after --next', () => {
+  deny('curl -s https://svc.internal.example/health --next -X POST "https://$HOST/$WABA/$EDGE"');
+});
+test('malformed target input fails closed without crashing', () => {
+  deny('curl -s -X POST "https://${UNCLOSED/123456/messages"');
+});
+
 // ---- the fix must not over-block ordinary work -------------------------
+test('literal internal host, ordinary GET, stays allowed', () => {
+  allow('curl -s https://svc.internal.example/health');
+});
+test('literal internal host, ordinary POST, stays allowed', () => {
+  allow('curl -s -X POST https://svc.internal.example/internal/reindex');
+});
+test('dynamic parameter VALUE under a fixed ordinary key stays allowed', () => {
+  allow('curl -sG "https://$SVC_HOST/search" --data-urlencode "q=$USER_QUERY"');
+});
+test('non-request command with variables is untouched', () => {
+  allow('cd $WORKTREE && git status --short');
+});
 test('ordinary internal host with a file-backed param stays allowed', () => {
   allow('curl -sG "https://svc.internal.example/search" --data-urlencode "q@query.txt"');
 });

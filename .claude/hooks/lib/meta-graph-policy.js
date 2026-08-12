@@ -105,6 +105,191 @@ function authorityIsIndeterminate(authority) {
   return String(authority || '').includes('$');
 }
 
+// ------------------------------------------------- shared request-target analysis
+//
+// Round 4 found the classifier's ENTRY BOUNDARY was the remaining hole. Scanning
+// raw contiguous `http(s)://…` text only classified an indeterminate authority
+// when a protected LITERAL path or parameter still happened to be visible. So a
+// target that becomes Meta only after expansion — `"https://$HOST/$WABA/$EDGE"`,
+// a bare `"$META_URL"`, `"${SCHEME}://${HOST}/…"`, `https://"$HOST"/…`,
+// `$(get_meta_host)`, backticks, `--url`, `-K file`, curl's own `{{…}}` — never
+// entered evaluateMetaGraph() at all.
+//
+// This is ONE analysis, used by both classification and evaluation, built on the
+// existing quote-aware tokenizer. It deliberately contains no list of variable
+// names: a name carries no provenance, and `$HOST` is not more suspicious than
+// `$X`. What matters is whether a component of the request target is decidable
+// before the command runs.
+
+/** `$VAR`, `${…}`, `$(…)`, backticks, and curl's own `{{…}}` expansion. */
+const EXPANSION_MARKER_RE = /\$\{|\$\(|\$[A-Za-z_{(]|`|\{\{/;
+
+/** Shell separators that start a new command segment. */
+const SEGMENT_SEPARATORS = new Set([';', '&&', '||', '|', '&']);
+
+/** Binaries whose operands are request targets. */
+const CURL_FAMILY_RE = /^(curl|wget|xh|http|https|httpie)$/i;
+
+function hasExpansion(s) {
+  return EXPANSION_MARKER_RE.test(String(s || ''));
+}
+
+/**
+ * Is this operand plausibly a request TARGET rather than a data pair?
+ *
+ * Not every non-flag token is a URL. `-d "access_token=$APP"` puts a data pair
+ * in operand position whenever the short flag is not in VALUE_TAKING, and
+ * treating that as a fully-variable target denied the sanctioned debug_token
+ * read — caught by the existing 95-assertion suite before this shipped.
+ *
+ * A target either carries a scheme, IS an expansion, or has a path whose first
+ * separator is not preceded by a `=` or `@` (which would make it a data pair or
+ * a file-sourced parameter).
+ */
+function looksLikeTarget(tok) {
+  const t = String(tok || '');
+  if (t === '') return false;
+  if (t.includes('://')) return true;
+  if (/^(\$|`|\{\{)/.test(t)) return true;
+  const slash = t.indexOf('/');
+  if (slash === -1) return false;
+  const head = t.slice(0, slash);
+  return !head.includes('=') && !head.includes('@');
+}
+
+/**
+ * Split a request target into scheme / authority / path / query, treating
+ * `${…}`, `$(…)` and `{{…}}` as atomic so a separator inside an expansion does
+ * not end a component early.
+ */
+function splitTarget(raw) {
+  const s = String(raw || '');
+  let scheme = '';
+  let rest = s;
+  const sep = s.indexOf('://');
+  if (sep !== -1) {
+    scheme = s.slice(0, sep);
+    rest = s.slice(sep + 3);
+  }
+
+  let depth = 0;
+  let i = 0;
+  let authority = '';
+  for (; i < rest.length; i++) {
+    const two = rest.slice(i, i + 2);
+    if (two === '${' || two === '$(' || two === '{{') {
+      depth++;
+      authority += two;
+      i++;
+      continue;
+    }
+    const ch = rest[i];
+    if (ch === '}' || ch === ')') {
+      if (depth > 0) depth--;
+      authority += ch;
+      continue;
+    }
+    if (depth === 0 && (ch === '/' || ch === '?')) break;
+    authority += ch;
+  }
+
+  const tail = rest.slice(i);
+  const q = tail.indexOf('?');
+  return {
+    scheme,
+    authority,
+    path: q === -1 ? tail : tail.slice(0, q),
+    query: q === -1 ? '' : tail.slice(q + 1),
+  };
+}
+
+/**
+ * Collect request targets and opaque sources from the curl-family segments of a
+ * command. Only those segments are analysed, so an ordinary `cd $DIR && …` is
+ * untouched — its operands are not request targets.
+ */
+function analyzeRequestTargets(cmd) {
+  const result = { targets: [], opaqueConfig: false, sawRequestClient: false };
+  const toks = tokenize(cmd);
+
+  let seg = [];
+  const segments = [];
+  for (const t of toks) {
+    if (SEGMENT_SEPARATORS.has(t)) {
+      segments.push(seg);
+      seg = [];
+      continue;
+    }
+    seg.push(t);
+  }
+  segments.push(seg);
+
+  for (const segment of segments) {
+    let k = 0;
+    while (k < segment.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(segment[k])) k++;
+    if (k >= segment.length) continue;
+    if (!CURL_FAMILY_RE.test(segment[k])) continue;
+    result.sawRequestClient = true;
+
+    for (let i = k + 1; i < segment.length; i++) {
+      const t = segment[i];
+      if (t === '-K' || t === '--config') {
+        result.opaqueConfig = true;
+        i++; // its value, whatever it is
+        continue;
+      }
+      if (/^(--config|-K)=/.test(t)) {
+        result.opaqueConfig = true;
+        continue;
+      }
+      if (t === '--url') {
+        result.targets.push(segment[i + 1] == null ? '' : segment[i + 1]);
+        i++;
+        continue;
+      }
+      if (t.startsWith('--url=')) {
+        result.targets.push(t.slice('--url='.length));
+        continue;
+      }
+      if (t.startsWith('-')) {
+        if (VALUE_TAKING.has(t)) i++;
+        continue;
+      }
+      if (looksLikeTarget(t)) result.targets.push(t);
+    }
+  }
+  return result;
+}
+
+/**
+ * Does anything about this command's request target resist decision before it
+ * runs? Fail-closed by construction: an undecidable target is classified so
+ * evaluateMetaGraph() can deny it, rather than skipped because no protected
+ * literal happened to survive.
+ */
+function targetsResistDecision(cmd) {
+  const { targets, opaqueConfig } = analyzeRequestTargets(cmd);
+
+  // A config source can set the URL, method, headers and data. Whatever it
+  // contains is unknown here, and reading it is not this guard's job.
+  if (opaqueConfig) return true;
+
+  for (const raw of targets) {
+    const t = splitTarget(raw);
+    const authorityUnknown = hasExpansion(t.authority) || hasExpansion(t.scheme);
+    if (!authorityUnknown) continue; // a literal non-Meta authority is provably not Meta
+
+    // Nothing literal follows the authority: the whole destination is a variable.
+    if (t.path === '' && t.query === '') return true;
+
+    if (hasExpansion(t.path)) return true;
+    if (splitQuery(t.query).some((p) => hasExpansion(p.key))) return true;
+
+    if (isGraphShapedPath(t.path + (t.query ? '?' + t.query : ''))) return true;
+  }
+  return false;
+}
+
 /**
  * `/v21.0/...` — a Graph version segment. The decimal is REQUIRED: Graph
  * versions are always `v<major>.<minor>`, whereas plain `/v1/`, `/v2/` are the
@@ -237,6 +422,15 @@ function isMetaGraphCommand(cmd) {
   // Classify on the PATH instead when it is unmistakably Graph-shaped. The
   // request is then denied as unclassifiable, which is the correct outcome: an
   // endpoint that cannot be identified cannot be allowlisted.
+  // Shared request-target analysis. Wrapped: a parsing fault inside the guard
+  // must fail CLOSED for a request-shaped command, never escape to the outer
+  // fail-open handler and let an unexamined request through.
+  try {
+    if (targetsResistDecision(s)) return true;
+  } catch (_) {
+    if (REQUEST_CLIENT_RE.test(s)) return true;
+  }
+
   let sawIndeterminateAuthority = false;
   for (const u of splitUrls(s)) {
     if (!authorityIsIndeterminate(u.authority)) continue;
@@ -1486,6 +1680,25 @@ function evaluateMetaGraph(cmd) {
     return unclassifiable(
       'This command builds the Graph host from a shell variable, so the endpoint it will actually reach is not knowable ' +
         'before it runs. An endpoint that cannot be identified cannot be allowlisted.',
+      REMEDY_LITERAL_URL
+    );
+  }
+
+  // The SAME analysis classification used. Sharing it is the point: a target
+  // that was classified because it resists decision must also be denied here,
+  // rather than falling through to per-URL rules that need a literal URL to
+  // examine and would find none.
+  let resists = false;
+  try {
+    resists = targetsResistDecision(whole);
+  } catch (_) {
+    resists = true; // an inspection fault on a request-shaped command fails closed
+  }
+  if (resists) {
+    return unclassifiable(
+      'The request target cannot be decided before this command runs: its scheme, authority, path, protected edge, ' +
+        'query-key provenance or configuration source is supplied at runtime. A destination that cannot be identified ' +
+        'cannot be allowlisted, and a Meta mutation is indistinguishable from an ordinary request until it has already happened.',
       REMEDY_LITERAL_URL
     );
   }
