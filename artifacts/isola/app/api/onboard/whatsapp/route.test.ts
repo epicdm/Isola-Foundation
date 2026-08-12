@@ -115,14 +115,21 @@ function getRequest(): NextRequest {
   });
 }
 
+/**
+ * The onboarding contract as of 2026-08-12: an ASSET MAPPING, not a credential.
+ * `access_token` is deliberately absent — see LEGACY_BODY_WITH_TOKEN below for
+ * the assertion that it is now refused rather than ignored.
+ */
 const VALID_BODY = {
   phone_number_id: '278390858690809',
   waba_id: '227366173803234',
   phone_number: '+17672956737',
-  access_token: SYNTHETIC.access_token,
   display_name: 'EPIC Front Desk',
   coex_mode: true,
 };
+
+/** What an unmigrated caller still sends. It must fail loudly. */
+const LEGACY_BODY_WITH_TOKEN = { ...VALID_BODY, access_token: SYNTHETIC.access_token };
 
 /** Assert no synthetic secret survives anywhere in the serialised payload. */
 function expectNoSecretsInText(raw: string) {
@@ -191,18 +198,48 @@ describe('POST /api/onboard/whatsapp — credential containment', () => {
     expect(findArgs.select).toEqual({ tenant_id: true });
   });
 
-  it('still persists the token and still writes the audit record', async () => {
+  it('no longer persists a credential, and still writes the audit record', async () => {
     prismaMock.whatsAppNumber.findUnique.mockResolvedValue(null);
     prismaMock.whatsAppNumber.upsert.mockResolvedValue(PUBLIC_ROW);
 
     await POST(postRequest(VALID_BODY));
 
     const upsertArgs = prismaMock.whatsAppNumber.upsert.mock.calls[0][0];
-    expect(upsertArgs.create.access_token).toBe(SYNTHETIC.access_token);
-    expect(upsertArgs.update.access_token).toBe(SYNTHETIC.access_token);
+    // A new row writes an empty non-null placeholder, never a credential.
+    expect(upsertArgs.create.access_token).toBe('');
+    // An UPDATE does not touch the column at all: an existing row may still
+    // carry a legacy value a not-yet-migrated sender depends on, and blanking
+    // it here would break sending before the gateway path is proven.
+    expect(upsertArgs.update).not.toHaveProperty('access_token');
     expect(auditMock).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'whatsapp.connect', entityId: PUBLIC_ROW.id }),
     );
+  });
+
+  /* ---- credential intake is closed (2026-08-12) ---------------------- */
+
+  it('refuses a request that still carries access_token, rather than silently dropping it', async () => {
+    prismaMock.whatsAppNumber.findUnique.mockResolvedValue(null);
+    prismaMock.whatsAppNumber.upsert.mockResolvedValue(PUBLIC_ROW);
+
+    const res = await POST(postRequest(LEGACY_BODY_WITH_TOKEN));
+    const raw = await res.text();
+
+    expect(res.status).toBe(400);
+    // Nothing was written: a refused request must not half-onboard a number.
+    expect(prismaMock.whatsAppNumber.upsert).not.toHaveBeenCalled();
+    // The refusal must not echo the credential it refused.
+    expectNoSecretsInText(raw);
+    expect(JSON.parse(raw).error).toMatch(/no longer accepts credentials/i);
+  });
+
+  it('refuses every credential-reference shape, not just access_token', async () => {
+    for (const key of ['token_env', 'token', 'secret', 'secret_name', 'env_var', 'credential_ref']) {
+      prismaMock.whatsAppNumber.upsert.mockClear();
+      const res = await POST(postRequest({ ...VALID_BODY, [key]: 'META_SOMETHING' }));
+      expect(res.status).toBe(400);
+      expect(prismaMock.whatsAppNumber.upsert).not.toHaveBeenCalled();
+    }
   });
 
   it('preserves the public fields the onboarding UI and dashboard consume', async () => {
