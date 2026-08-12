@@ -145,10 +145,20 @@ export const OPERATIONS: readonly Operation[] = [
     pathTemplate: '/{phone_number_id}',
     query: { fields: 'id,webhook_configuration' },
     input: { phone_number_id: { kind: 'meta_id', required: true } },
-    // The callback URL is operational configuration, not a credential. The
-    // verify token is NOT projected and Meta does not return it here; if a
-    // future API version ever did, this allowlist would drop it.
-    projection: ['id', 'webhook_configuration.application'],
+    // Callback URLs are operational configuration, not credentials. The verify
+    // token is NOT projected and Meta does not return it here; if a future API
+    // version ever did, this allowlist would drop it.
+    //
+    // `whatsapp_business_account` is the PHONE-LEVEL override and is the field
+    // that actually decides which processor receives this number's inbound
+    // events. An earlier version of this projection declared only `application`
+    // and silently dropped it — which would have meant verifying a cutover while
+    // blind to the one value the cutover changes. Both are required.
+    projection: [
+      'id',
+      'webhook_configuration.application',
+      'webhook_configuration.whatsapp_business_account',
+    ],
     scopeField: 'phone_number_id',
     scopeKind: 'phone_number',
     requiresApproval: false,

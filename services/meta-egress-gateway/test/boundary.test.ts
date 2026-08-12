@@ -171,6 +171,10 @@ describe('operator inspection surface', () => {
     expect(r.status).toBe(200);
     const s = JSON.stringify(r.body);
     expect(s).toContain('https://bff.example/hook');
+    // The PHONE-LEVEL override must be returned. It is the field that decides
+    // which processor receives this number's inbound events, so a projection
+    // that drops it would make cutover verification meaningless.
+    expect(s).toContain('https://inbox.example/x');
     // Projection still applies: only declared fields survive.
     expect(s).not.toContain('should not be returned');
     const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
