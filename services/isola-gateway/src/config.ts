@@ -173,13 +173,22 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
   const magnusRaw = str(env, "MAGNUS_URL") ?? str(env, "MAGNUS_BASE_URL");
   const magnusBaseUrl = magnusRaw === null ? null : stripTrailingSlash(magnusRaw);
 
+  // Read the kill switch BEFORE the allowlist is derived: the allowlist depends
+  // on it, and the same parsed boolean is returned in the config below so the
+  // two decisions cannot drift apart.
+  const voiceReadEnabled = bool(env, "GATEWAY_VOICE_READ_ENABLED", false);
+
   const explicitAllowlist = parseAllowlist(env["EGRESS_ALLOWLIST"]);
   const derivedAllowlist = [
     hostOf(chatwootBaseUrl),
     hostOf(runtimeBaseUrl),
-    // Magnus is reached only when the voice read is enabled, but the host must
-    // be on the allowlist for that call to be possible at all.
-    hostOf(magnusBaseUrl),
+    // Magnus is derived into the allowlist ONLY while the personal-line read is
+    // enabled. Adding it unconditionally meant that merely LANDING this
+    // disabled feature widened the gateway's permitted outbound destinations
+    // wherever MAGNUS_URL was already set and EGRESS_ALLOWLIST was not — which
+    // contradicts "inert if landed". A disabled feature must expand no
+    // capability, egress included.
+    voiceReadEnabled ? hostOf(magnusBaseUrl) : null,
   ].filter((h): h is string => h !== null);
   const egressAllowlist =
     explicitAllowlist.length > 0
@@ -234,8 +243,8 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
 
     bindings: parseBindings(env["GATEWAY_BINDINGS_JSON"]),
 
-    // Default FALSE: the route ships inert and must be turned on deliberately.
-    voiceReadEnabled: bool(env, "GATEWAY_VOICE_READ_ENABLED", false),
+    // The SAME boolean the egress derivation above used. Do not re-read it.
+    voiceReadEnabled,
     voiceReadToken: str(env, "GATEWAY_VOICE_READ_TOKEN"),
     voiceRateLimit: int(env, "GATEWAY_VOICE_RATE_LIMIT", DEFAULT_VOICE_RATE_LIMIT),
     voiceRateWindowMs: int(env, "GATEWAY_VOICE_RATE_WINDOW_MS", DEFAULT_VOICE_RATE_WINDOW_MS),

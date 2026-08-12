@@ -277,9 +277,15 @@ export const MAGNUS_FIELD_MAP: ReadonlyArray<readonly [PersonalLineField, string
 /**
  * Translate a live Magnus row into the contract's field names.
  *
- * Contract-named keys already present on the row are preserved, so a future
- * upstream that speaks the contract directly needs no change here — and so the
- * injected test doubles exercise the same projection path as production.
+ * ONLY `MAGNUS_FIELD_MAP` populates contract output. A contract-named key
+ * present on the raw row is NOT preserved: a Magnus column that merely happens
+ * to be called `state` or `did_number` carries whatever Magnus means by it, and
+ * same name is not same meaning. Adopting it would make an unevidenced value
+ * browser-visible, which is precisely what the live contract check ruled out.
+ *
+ * Test doubles are unaffected — they return contract-shaped records at the
+ * injected `PersonalLineSource` boundary, downstream of this function, so they
+ * still exercise the same projection path as production.
  */
 export function normaliseMagnusRow(row: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
