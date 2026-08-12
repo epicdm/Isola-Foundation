@@ -1,6 +1,30 @@
 /**
  * Meta Graph API request policy — classification, allowlisting and redaction.
  *
+ * WHAT THIS IS, AND WHAT IT IS NOT
+ * --------------------------------
+ * **This hook is a defense-in-depth control for directly visible request
+ * commands. It is NOT the primary Meta egress security boundary.**
+ *
+ * Five rounds of independent review each found another way for a request to
+ * reach Meta without being classified. Each was fixed, and the pattern in the
+ * findings is the point: a shell-command parser is being asked to decide what a
+ * process will do at runtime, which it cannot do in general. It cannot reliably
+ * govern:
+ *
+ *   - executables named by a variable, or resolved through PATH;
+ *   - arbitrary wrappers beyond the small set modelled here;
+ *   - checked-in scripts whose URLs never appear in the command;
+ *   - other interpreters and HTTP libraries with runtime destinations;
+ *   - environment, user or machine-level curl configuration;
+ *   - direct IP access, and every alternate request client.
+ *
+ * Treating a passing guard as proof that Meta cannot be reached is the mistake
+ * this comment exists to prevent. The real boundary is a dedicated Meta gateway
+ * holding the credentials, with direct Graph egress denied to general agent
+ * workloads by network policy — see the Port architecture blocker
+ * `blocker-meta-egress-boundary-required-2026-08-12`.
+ *
  * WHY THIS EXISTS
  * ---------------
  * The previous rule was a single regex pair: match `graph.facebook.com`, then
@@ -127,8 +151,114 @@ const EXPANSION_MARKER_RE = /\$\{|\$\(|\$[A-Za-z_{(]|`|\{\{/;
 /** Shell separators that start a new command segment. */
 const SEGMENT_SEPARATORS = new Set([';', '&&', '||', '|', '&']);
 
-/** Binaries whose operands are request targets. */
+/** Binaries whose operands are request targets, matched on BASENAME. */
 const CURL_FAMILY_RE = /^(curl|wget|xh|http|https|httpie)$/i;
+
+/**
+ * Wrappers that run another program. Their own options must be parsed, not
+ * skipped by guesswork: `sudo -u root curl …` and `sudo -n docker ps` differ
+ * only in whether the option takes a value, and getting that wrong either
+ * blocks ordinary work or lets a request client through unexamined.
+ *
+ * Anything not listed makes the invocation UNDECIDABLE, which fails closed.
+ */
+const WRAPPERS = new Map([
+  ['env', { bool: new Set(['-i', '-0', '--ignore-environment', '--null']), value: new Set(['-u', '--unset', '-C', '--chdir', '-S', '--split-string']), assignments: true }],
+  ['command', { bool: new Set(['-p']), value: new Set() }],
+  ['sudo', { bool: new Set(['-n', '-E', '-H', '-b', '-k', '--non-interactive', '--preserve-env', '--set-home']), value: new Set(['-u', '--user', '-g', '--group', '-p', '--prompt', '-C', '--close-from', '-D', '--chdir', '-R', '--chroot']) }],
+  ['nohup', { bool: new Set(), value: new Set() }],
+  ['nice', { bool: new Set(), value: new Set(['-n', '--adjustment']) }],
+  ['timeout', { bool: new Set(['--preserve-status', '--foreground']), value: new Set(['-s', '--signal', '-k', '--kill-after']), positional: 1 }],
+  ['stdbuf', { bool: new Set(), value: new Set(['-i', '-o', '-e', '--input', '--output', '--error']) }],
+]);
+
+/** `/usr/bin/curl`, `./curl`, `curl.exe` all normalise to `curl`. */
+function basename(tok) {
+  const t = String(tok || '').replace(/\\/g, '/');
+  const last = t.slice(t.lastIndexOf('/') + 1);
+  return last.replace(/\.exe$/i, '');
+}
+
+/**
+ * Resolve the effective request client through any supported wrappers.
+ *
+ * @returns {{client:string|null, start:number, undecidable:boolean}}
+ */
+function resolveInvocation(tokens) {
+  let i = 0;
+  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i++;
+
+  for (let guard = 0; guard < 8; guard++) {
+    const tok = tokens[i];
+    if (tok == null) return { client: null, start: i, undecidable: false };
+
+    // A binary supplied at runtime cannot be identified before it runs.
+    if (hasExpansion(tok)) return { client: null, start: i, undecidable: true };
+
+    const base = basename(tok);
+    if (CURL_FAMILY_RE.test(base)) return { client: base.toLowerCase(), start: i + 1, undecidable: false };
+
+    const w = WRAPPERS.get(base.toLowerCase());
+    if (!w) return { client: null, start: i, undecidable: false };
+
+    i++;
+    if (w.assignments) while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i++;
+    let positionalsLeft = w.positional || 0;
+    while (i < tokens.length) {
+      const t = tokens[i];
+      if (t === '--') { i++; break; }
+      if (!t.startsWith('-')) {
+        if (positionalsLeft > 0) { positionalsLeft--; i++; continue; }
+        break; // the wrapped program
+      }
+      const eq = t.indexOf('=');
+      const name = eq === -1 ? t : t.slice(0, eq);
+      if (w.bool.has(name)) { i++; continue; }
+      if (w.value.has(name)) { i += eq === -1 ? 2 : 1; continue; }
+      // An option we cannot classify may or may not consume the next token, so
+      // the effective client is no longer determinable.
+      return { client: null, start: i, undecidable: true };
+    }
+  }
+  return { client: null, start: 0, undecidable: true };
+}
+
+/** Every curl config form. A config source can set URL, method, headers and data. */
+function hasOpaqueConfig(tokens, start) {
+  for (let i = start; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === '-K' || t === '--config') return true;
+    if (/^--config=/.test(t)) return true;
+    if (/^-K./.test(t)) return true; // -Kfile, -K-
+    if (/^-[A-Za-z]*K/.test(t)) return true; // clustered, attached or not
+  }
+  return false;
+}
+
+/** curl expands {a,b} and [1-9] in URLs unless -g/--globoff is given. */
+// A brace preceded by a dollar sign is shell expansion, not curl's {a,b}
+// sequence; that is classified elsewhere and must not be double-counted here.
+const CURL_GLOB_RE = /(^|[^$])[{[]/;
+function globbingDisabled(tokens, start) {
+  for (let i = start; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === '--globoff') return true;
+    if (/^-[A-Za-z]*g/.test(t) && !t.startsWith('--')) return true;
+  }
+  return false;
+}
+
+/** `-q` / `--disable` must be the FIRST curl option, or `.curlrc` is read. */
+function disablesCurlrc(tokens, start) {
+  for (let i = start; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (!t.startsWith('-')) continue; // an operand before any option
+    if (t === '-q' || t === '--disable') return true;
+    if (/^-[A-Za-z]/.test(t) && !t.startsWith('--')) return t[1] === 'q';
+    return false;
+  }
+  return false;
+}
 
 function hasExpansion(s) {
   return EXPANSION_MARKER_RE.test(String(s || ''));
@@ -225,11 +355,17 @@ function analyzeRequestTargets(cmd) {
   segments.push(seg);
 
   for (const segment of segments) {
-    let k = 0;
-    while (k < segment.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(segment[k])) k++;
-    if (k >= segment.length) continue;
-    if (!CURL_FAMILY_RE.test(segment[k])) continue;
+    const inv = resolveInvocation(segment);
+    if (inv.undecidable) {
+      result.undecidableInvocation = true;
+      continue;
+    }
+    if (!inv.client) continue;
+    const k = inv.start - 1;
     result.sawRequestClient = true;
+    if (hasOpaqueConfig(segment, inv.start)) result.opaqueConfig = true;
+    if (!disablesCurlrc(segment, inv.start)) result.curlrcReachable = true;
+    const globOff = globbingDisabled(segment, inv.start);
 
     for (let i = k + 1; i < segment.length; i++) {
       const t = segment[i];
@@ -243,22 +379,76 @@ function analyzeRequestTargets(cmd) {
         continue;
       }
       if (t === '--url') {
-        result.targets.push(segment[i + 1] == null ? '' : segment[i + 1]);
+        result.targets.push({ raw: segment[i + 1] == null ? '' : segment[i + 1], globOff });
         i++;
         continue;
       }
       if (t.startsWith('--url=')) {
-        result.targets.push(t.slice('--url='.length));
+        result.targets.push({ raw: t.slice('--url='.length), globOff });
         continue;
       }
       if (t.startsWith('-')) {
         if (VALUE_TAKING.has(t)) i++;
         continue;
       }
-      if (looksLikeTarget(t)) result.targets.push(t);
+      if (looksLikeTarget(t)) result.targets.push({ raw: t, globOff });
     }
   }
   return result;
+}
+
+/**
+ * Hygiene a Meta request must satisfy, beyond having a decidable target.
+ *
+ * Scoped to Meta-classified commands so ordinary non-Meta curl usage is not
+ * forced to adopt it.
+ *
+ * @returns {{reason:string, remedy:string}|null}
+ */
+function metaCurlHygieneViolation(cmd) {
+  const toks = tokenize(cmd);
+  const segments = [];
+  let seg = [];
+  for (const t of toks) {
+    if (SEGMENT_SEPARATORS.has(t)) { segments.push(seg); seg = []; continue; }
+    seg.push(t);
+  }
+  segments.push(seg);
+
+  for (const segment of segments) {
+    const inv = resolveInvocation(segment);
+    if (!inv.client || inv.client !== 'curl') continue;
+
+    // curl reads ~/.curlrc unless disabled FIRST. That file can add headers,
+    // a proxy, --resolve, --insecure — none of it visible in this command.
+    if (!disablesCurlrc(segment, inv.start)) {
+      return {
+        reason:
+          'curl reads its default configuration file unless `-q` (or `--disable`) is the FIRST option. That file can add ' +
+          'headers, a proxy, an address override or disable certificate verification, none of which appear in this command — ' +
+          'so the request that actually leaves the machine cannot be read from what is written here.',
+        remedy: 'put `-q` immediately after `curl`, before every other option.',
+      };
+    }
+
+    // A header value read from a file hides the credential and its destination.
+    for (let i = inv.start; i < segment.length; i++) {
+      const t = segment[i];
+      let value = null;
+      if (t === '-H' || t === '--header') value = segment[i + 1];
+      else if (/^--header=/.test(t)) value = t.slice('--header='.length);
+      else if (/^-H./.test(t)) value = t.slice(2);
+      if (value != null && /^@/.test(String(value).trim())) {
+        return {
+          reason:
+            'A request header is being read from a file. The header contents are not visible in the command, so neither the ' +
+            'credential being sent nor its destination can be verified before the request runs.',
+          remedy: 'write the header literally, keeping only the token as an environment reference.',
+        };
+      }
+    }
+  }
+  return null;
 }
 
 /**
@@ -268,14 +458,33 @@ function analyzeRequestTargets(cmd) {
  * literal happened to survive.
  */
 function targetsResistDecision(cmd) {
-  const { targets, opaqueConfig } = analyzeRequestTargets(cmd);
+  const { targets, opaqueConfig, undecidableInvocation } = analyzeRequestTargets(cmd);
+
+  // A wrapper option we cannot classify may or may not consume the next token,
+  // so the effective request client is no longer determinable.
+  if (undecidableInvocation) return true;
 
   // A config source can set the URL, method, headers and data. Whatever it
   // contains is unknown here, and reading it is not this guard's job.
   if (opaqueConfig) return true;
 
-  for (const raw of targets) {
+  for (const entry of targets) {
+    const raw = entry.raw;
     const t = splitTarget(raw);
+
+    // curl expands {a,b} and [1-9] in URLs by default. `graph.face{book,x}.com`
+    // constructs the Meta hostname from a literal that never contains it.
+    //
+    // Scoped to the components that decide WHERE the request goes: scheme,
+    // authority, path and query-KEY identity. A glob inside a query VALUE
+    // cannot change the destination, and Graph's own field-expansion syntax
+    // uses braces there — treating that as indeterminate would deny the
+    // credential-field assertions this policy exists to make.
+    if (!entry.globOff) {
+      const routing = [t.scheme, t.authority, t.path];
+      if (routing.some((c) => CURL_GLOB_RE.test(String(c || '')))) return true;
+      if (splitQuery(t.query).some((p) => CURL_GLOB_RE.test(String(p.key || '')))) return true;
+    }
     const authorityUnknown = hasExpansion(t.authority) || hasExpansion(t.scheme);
     if (!authorityUnknown) continue; // a literal non-Meta authority is provably not Meta
 
@@ -562,13 +771,12 @@ const SHORT_DATA_LETTERS = new Set(['d', 'F', 'T']);
 
 /** curl flags that take no value and cannot introduce a body or change method. */
 const SAFE_CURL_BOOLEAN_FLAGS = new Set([
+  '-q', '--disable',
   '-s', '--silent',
   '-S', '--show-error',
   '-v', '--verbose',
   '-i', '--include',
   '-I', '--head',
-  '-L', '--location',
-  '-k', '--insecure',
   '-f', '--fail',
   '--fail-with-body',
   '--compressed',
@@ -592,11 +800,10 @@ const SAFE_CURL_VALUE_FLAGS = new Set([
   '--connect-timeout', '--max-time', '-m',
   '--retry', '--retry-delay', '--retry-max-time',
   '--max-redirs',
-  '--resolve',
 ]);
 
 /** Short-cluster letters, split by whether they consume a value. */
-const SHORT_BOOLEAN_LETTERS = new Set(['s', 'S', 'v', 'i', 'I', 'L', 'k', 'f', 'g', 'G', '4', '6']);
+const SHORT_BOOLEAN_LETTERS = new Set(['q', 's', 'S', 'v', 'i', 'I', 'f', 'g', 'G', '4', '6']);
 const SHORT_VALUE_LETTERS = new Set(['H', 'o', 'w', 'A', 'e', 'X', 'd', 'm']);
 
 /**
@@ -1694,6 +1901,19 @@ function evaluateMetaGraph(cmd) {
   } catch (_) {
     resists = true; // an inspection fault on a request-shaped command fails closed
   }
+  // Hygiene required of a Meta request specifically. Scoped here so ordinary
+  // non-Meta curl usage elsewhere in the repo is unaffected.
+  let hygiene = null;
+  try {
+    hygiene = metaCurlHygieneViolation(whole);
+  } catch (_) {
+    hygiene = {
+      reason: 'This Meta request could not be inspected for configuration and header hygiene.',
+      remedy: REMEDY_LITERAL_URL,
+    };
+  }
+  if (hygiene) return unclassifiable(hygiene.reason, hygiene.remedy);
+
   if (resists) {
     return unclassifiable(
       'The request target cannot be decided before this command runs: its scheme, authority, path, protected edge, ' +
