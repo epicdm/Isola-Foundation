@@ -163,7 +163,7 @@ const CURL_FAMILY_RE = /^(curl|wget|xh|http|https|httpie)$/i;
  * Anything not listed makes the invocation UNDECIDABLE, which fails closed.
  */
 const WRAPPERS = new Map([
-  ['env', { bool: new Set(['-i', '-0', '--ignore-environment', '--null']), value: new Set(['-u', '--unset', '-C', '--chdir', '-S', '--split-string']), assignments: true }],
+  ['env', { bool: new Set(['-i', '-0', '--ignore-environment', '--null']), value: new Set(['-u', '--unset', '-C', '--chdir']), indeterminate: new Set(['-S', '--split-string']), assignments: true }],
   ['command', { bool: new Set(['-p']), value: new Set() }],
   ['sudo', { bool: new Set(['-n', '-E', '-H', '-b', '-k', '--non-interactive', '--preserve-env', '--set-home']), value: new Set(['-u', '--user', '-g', '--group', '-p', '--prompt', '-C', '--close-from', '-D', '--chdir', '-R', '--chroot']) }],
   ['nohup', { bool: new Set(), value: new Set() }],
@@ -213,6 +213,8 @@ function resolveInvocation(tokens) {
       }
       const eq = t.indexOf('=');
       const name = eq === -1 ? t : t.slice(0, eq);
+      // An option that re-parses its argument into a command hides the client.
+      if (w.indeterminate && w.indeterminate.has(name)) return { client: null, start: i, undecidable: true };
       if (w.bool.has(name)) { i++; continue; }
       if (w.value.has(name)) { i += eq === -1 ? 2 : 1; continue; }
       // An option we cannot classify may or may not consume the next token, so
@@ -248,16 +250,23 @@ function globbingDisabled(tokens, start) {
   return false;
 }
 
-/** `-q` / `--disable` must be the FIRST curl option, or `.curlrc` is read. */
+/**
+ * `-q` / `--disable` must be the FIRST curl PARAMETER, not merely the first
+ * option, or curl reads `.curlrc` before it gets there.
+ *
+ * The previous version skipped operands looking for the first flag, so
+ * `curl <url> -q` counted — but curl parses left to right and has already read
+ * its config file by the time it reaches `-q`. Position is the whole control
+ * here, so it is checked exactly: token[start] and nothing else.
+ *
+ * A short cluster whose FIRST letter is `q` (`-qsG`) is accepted: `q` is still
+ * the first parameter curl sees. `-sq` is not.
+ */
 function disablesCurlrc(tokens, start) {
-  for (let i = start; i < tokens.length; i++) {
-    const t = tokens[i];
-    if (!t.startsWith('-')) continue; // an operand before any option
-    if (t === '-q' || t === '--disable') return true;
-    if (/^-[A-Za-z]/.test(t) && !t.startsWith('--')) return t[1] === 'q';
-    return false;
-  }
-  return false;
+  const first = tokens[start];
+  if (first == null) return false;
+  if (first === '-q' || first === '--disable') return true;
+  return /^-q[A-Za-z0-9]*$/.test(first);
 }
 
 function hasExpansion(s) {
@@ -379,12 +388,12 @@ function analyzeRequestTargets(cmd) {
         continue;
       }
       if (t === '--url') {
-        result.targets.push({ raw: segment[i + 1] == null ? '' : segment[i + 1], globOff });
+        result.targets.push({ raw: segment[i + 1] == null ? '' : segment[i + 1], globOff, fromUrlFlag: true });
         i++;
         continue;
       }
       if (t.startsWith('--url=')) {
-        result.targets.push({ raw: t.slice('--url='.length), globOff });
+        result.targets.push({ raw: t.slice('--url='.length), globOff, fromUrlFlag: true });
         continue;
       }
       if (t.startsWith('-')) {
@@ -470,6 +479,13 @@ function targetsResistDecision(cmd) {
 
   for (const entry of targets) {
     const raw = entry.raw;
+
+    // `--url @file` / `--url=@file` / `--url @-` read the target from a file or
+    // from stdin. The destination is therefore not in the command at all, and
+    // reading the source to find out is not this guard's job — nor would it be
+    // sound, since the file can change between inspection and execution.
+    if (entry.fromUrlFlag && /^@/.test(String(raw || '').trim())) return true;
+
     const t = splitTarget(raw);
 
     // curl expands {a,b} and [1-9] in URLs by default. `graph.face{book,x}.com`
@@ -774,7 +790,6 @@ const SAFE_CURL_BOOLEAN_FLAGS = new Set([
   '-q', '--disable',
   '-s', '--silent',
   '-S', '--show-error',
-  '-v', '--verbose',
   '-i', '--include',
   '-I', '--head',
   '-f', '--fail',
@@ -790,7 +805,6 @@ const SAFE_CURL_BOOLEAN_FLAGS = new Set([
 const SAFE_CURL_VALUE_FLAGS = new Set([
   '-H', '--header',
   '-o', '--output',
-  '-w', '--write-out',
   '-A', '--user-agent',
   '-e', '--referer',
   '--url',
@@ -803,8 +817,8 @@ const SAFE_CURL_VALUE_FLAGS = new Set([
 ]);
 
 /** Short-cluster letters, split by whether they consume a value. */
-const SHORT_BOOLEAN_LETTERS = new Set(['q', 's', 'S', 'v', 'i', 'I', 'f', 'g', 'G', '4', '6']);
-const SHORT_VALUE_LETTERS = new Set(['H', 'o', 'w', 'A', 'e', 'X', 'd', 'm']);
+const SHORT_BOOLEAN_LETTERS = new Set(['q', 's', 'S', 'i', 'I', 'f', 'g', 'G', '4', '6']);
+const SHORT_VALUE_LETTERS = new Set(['H', 'o', 'A', 'e', 'X', 'd', 'm']);
 
 /**
  * A data value curl reads FROM A FILE rather than from the command line:

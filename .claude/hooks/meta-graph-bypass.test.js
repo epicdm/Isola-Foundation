@@ -374,6 +374,66 @@ test('header read from a file (--header @file)', () => {
   deny(`curl -q -sG --header @auth.txt "${G}/123456?fields=id,name"`);
 });
 
+// ---- round-6 review: -q must be the first PARAMETER, not the first flag ----
+// curl parses left to right, so it has already read .curlrc by the time it
+// reaches a -q placed after a URL or another option.
+test('-q after the URL does not disable .curlrc', () => {
+  deny(`curl "${G}/272252189309178/subscribed_apps" -q -sG --data-urlencode "access_token=$META_GRAPH_TOKEN"`);
+});
+test('-q after another option does not disable .curlrc', () => {
+  deny(`curl -s -q -G "${G}/272252189309178/subscribed_apps" --data-urlencode "access_token=$META_GRAPH_TOKEN"`);
+});
+test('--disable after the URL does not count', () => {
+  deny(`curl "${G}/272252189309178/subscribed_apps" --disable -sG --data-urlencode "access_token=$META_GRAPH_TOKEN"`);
+});
+test('a cluster whose FIRST letter is q is accepted', () => {
+  allow(`curl -qsG "${G}/272252189309178/subscribed_apps" --data-urlencode "access_token=$META_GRAPH_TOKEN"`);
+});
+test('a cluster with q NOT first is refused', () => {
+  deny(`curl -sqG "${G}/272252189309178/subscribed_apps" --data-urlencode "access_token=$META_GRAPH_TOKEN"`);
+});
+
+// ---- round-6 review: env -S re-parses its argument into a command ---------
+test('env -S hides the effective client', () => {
+  deny('env -S "curl -q -s -X POST https://graph.facebook.com/v21.0/123/messages"');
+});
+test('env --split-string hides the effective client', () => {
+  deny('env --split-string "curl -q -s -X POST https://graph.facebook.com/v21.0/123/messages"');
+});
+test('env -S with an ordinary internal command still fails closed', () => {
+  deny('env -S "curl -q -s https://graph.facebook.com/v21.0/123456"');
+});
+
+// ---- round-6 review: -v and -w leak credentials and responses ------------
+// -v writes request headers, including Authorization, to stderr. -w can direct
+// response data to a file through its format string.
+test('Graph read with -v', () => {
+  deny(`curl -q -vsG "${G}/123456?fields=id,name"`);
+});
+test('Graph read with --verbose', () => {
+  deny(`curl -q -sG --verbose "${G}/123456?fields=id,name"`);
+});
+test('Graph read with -w', () => {
+  deny(`curl -q -sG -w "%{http_code}" "${G}/123456?fields=id,name"`);
+});
+test('Graph read with --write-out', () => {
+  deny(`curl -q -sG --write-out "%{json}" "${G}/123456?fields=id,name"`);
+});
+test('-v inside a short cluster is still caught', () => {
+  deny(`curl -q -svG "${G}/123456?fields=id,name"`);
+});
+
+// ---- round-6 review: --url read from a file or stdin ----------------------
+test('--url @file', () => {
+  deny('curl -q -s --url @target.txt -X POST');
+});
+test('--url=@file', () => {
+  deny('curl -q -s --url=@target.txt -X DELETE');
+});
+test('--url @- reads the target from stdin', () => {
+  deny('curl -q -s --url @- -X POST');
+});
+
 // ---- the fix must not over-block ordinary work -------------------------
 test('sanctioned literal Graph metadata read with an env token stays allowed', () => {
   allow(`curl -q -sG "${G}/272252189309178/subscribed_apps" --data-urlencode "access_token=$META_GRAPH_TOKEN"`);
