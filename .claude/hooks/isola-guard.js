@@ -31,6 +31,7 @@ const path = require('path');
 const T = require('./lib/isola-topology.js');
 const S = require('./lib/isola-state.js');
 const M = require('./lib/meta-graph-policy.js');
+const MM = require('./lib/meta-mcp-policy.js');
 
 const STATE_DIR = path.join(__dirname, '..', 'state');
 const LOG = path.join(STATE_DIR, 'guard.log');
@@ -173,6 +174,41 @@ function evaluate(inp) {
           'getComposeDockerServices, or getMonitorTableData — none of which return secret material.'
       );
     }
+  }
+
+  // --------------------------------------------------------- meta-mcp-block
+  // The Meta DevTools MCP family classifies as 'other' and was therefore
+  // allowed unconditionally — no action check, no mutation denial, no audit.
+  // That family includes devtools_webhook_manage and devtools_webhook_test,
+  // and this environment holds `manage` on both EPIC apps, so a live Meta
+  // channel-ownership change sat one tool name away from an ordinary read.
+  //
+  // Checked BEFORE the tool-class branch, like the epic-portal block above,
+  // and fail-closed for Meta-MCP-shaped calls only: if inspection throws on a
+  // malformed payload, an unverifiable call to a mutation-capable family is
+  // denied rather than allowed. Non-Meta tools re-throw and keep the existing
+  // fail-open behavior.
+  if (MM.isMetaMcpTool(tool)) {
+    let verdict;
+    try {
+      verdict = MM.evaluateMetaMcp(tool, ti);
+    } catch (e) {
+      log('META-MCP-INSPECT-ERROR fail-closed: ' + (e && e.message));
+      verdict = {
+        decision: 'deny',
+        code: 'meta-mcp-unparseable-input',
+        reason:
+          'This Meta DevTools MCP payload could not be safely inspected, so the operation it would perform is unknown.',
+        remedy: 'send a plain structured input with a single top-level `action`.',
+      };
+    }
+    // Metadata only: tool, action, decision. Never the raw input, which may
+    // carry credential-shaped values — that is the case being denied.
+    record('meta-mcp.log', MM.auditLine(tool, verdict));
+    if (verdict.decision === 'deny') {
+      deny('meta-mcp:' + verdict.code, verdict.reason, verdict.remedy);
+    }
+    allow('meta-mcp allowlisted ' + (verdict.tool || '?') + ':' + (verdict.action || '-'));
   }
 
   // ---------------------------------------------------------------- other

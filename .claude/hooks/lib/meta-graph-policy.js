@@ -53,8 +53,40 @@ const META_HOST_RE = /graph\.facebook\.com/i;
 /** A parseable Graph URL. Stops at shell metacharacters and quotes. */
 const GRAPH_URL_RE = /(?:https?:\/\/)?graph\.facebook\.com\/[^\s'"`|;&<>()]*/gi;
 
+/**
+ * A URL whose host is a shell variable — `https://$HOST/...`, `https://${H}/...`.
+ * Group 1 is the path, so its SHAPE can be tested.
+ */
+const VARIABLE_HOST_URL_RE =
+  /https?:\/\/[^\s"'/]*\$\{?[A-Za-z_][A-Za-z0-9_]*\}?([^\s"'`|;&<>()]*)/g;
+
+/**
+ * Path shapes only a Graph call has: a version segment, or one of the Meta root
+ * paths. Deliberately narrow — an ordinary `curl "$API_URL/health"` must not
+ * match, or every variable-host request in the repo starts failing closed.
+ */
+const GRAPH_SHAPED_PATH_RE = /^\/(?:v\d+\.\d+\/|oauth\/|device\/login|debug_token)/i;
+
 function isMetaGraphCommand(cmd) {
-  return META_HOST_RE.test(String(cmd || ''));
+  const s = String(cmd || '');
+  if (META_HOST_RE.test(s)) return true;
+
+  // The literal host is absent. That alone used to end classification, which
+  // left a hole: `curl "https://$HOST/oauth/access_token"` — with HOST exported
+  // in an earlier turn, so the name never appears in THIS command — skipped the
+  // Meta policy entirely and reached a credential-minting endpoint. The
+  // VARIABLE_HOST_RE defence in evaluateMetaGraph() could not fire, because
+  // evaluateMetaGraph() was never entered.
+  //
+  // Classify on the PATH instead when it is unmistakably Graph-shaped. The
+  // request is then denied as unclassifiable, which is the correct outcome: an
+  // endpoint that cannot be identified cannot be allowlisted.
+  VARIABLE_HOST_URL_RE.lastIndex = 0;
+  let m;
+  while ((m = VARIABLE_HOST_URL_RE.exec(s)) !== null) {
+    if (GRAPH_SHAPED_PATH_RE.test(m[1] || '')) return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------- 1. tokenize
