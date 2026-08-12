@@ -47,6 +47,14 @@ import { createLogger, type Logger } from "./log.js";
 import { processDelivery, type DeliveryJob, type DeliveryMode } from "./pipeline.js";
 import { createAgentRuntime, type AgentRuntime } from "./runtime.js";
 import {
+  createMagnusPersonalLineSource,
+  createRateLimiter,
+  projectPersonalLine,
+  resolveSeat,
+  type PersonalLineSource,
+  type RateLimiter,
+} from "./voice.js";
+import {
   DELIVERY_HEADER,
   parseDeliveryHeader,
   SIGNATURE_HEADER,
@@ -98,7 +106,13 @@ export type Outcome =
   | "ledger_unavailable"
   | "not_found"
   | "method_not_allowed"
-  | "no_admin_token_configured";
+  | "no_admin_token_configured"
+  /** The personal-line read is enabled but has no bearer configured. */
+  | "no_voice_token_configured"
+  /** Magnus is unreachable or not configured; no seat state can be reported. */
+  | "voice_upstream_unavailable"
+  | "rate_limited"
+  | "ok";
 
 /** Server-side only. The HTTP response never says which half failed. */
 export type RejectionReason = SignatureFailureReason | "no_binding_secret" | "unparseable_body";
@@ -370,6 +384,10 @@ export interface GatewayDeps {
    */
   ledger: Ledger;
   safeFetch?: SafeFetch;
+  /** Injected in tests; defaults to the allowlisted signed Magnus client. */
+  personalLineSource?: PersonalLineSource;
+  /** Injected in tests; defaults to the env-configured fixed-window limiter. */
+  voiceRateLimiter?: RateLimiter;
   /**
    * Test-only. Defaults to the env-configured failpoint, which is DISARMED in
    * every production deployment.
@@ -760,6 +778,131 @@ export function createGateway(deps: GatewayDeps): Gateway {
     });
   }
 
+  const personalLineSource: PersonalLineSource | null =
+    deps.personalLineSource ??
+    (config.magnusBaseUrl !== null &&
+    config.magnusApiKey !== null &&
+    config.magnusApiSecret !== null
+      ? createMagnusPersonalLineSource({
+          baseUrl: config.magnusBaseUrl,
+          apiKey: config.magnusApiKey,
+          apiSecret: config.magnusApiSecret,
+          safeFetch,
+          timeoutMs: config.magnusTimeoutMs,
+        })
+      : null);
+
+  const voiceRateLimiter =
+    deps.voiceRateLimiter ??
+    createRateLimiter(config.voiceRateLimit, config.voiceRateWindowMs);
+
+  /**
+   * `GET /v1/tenants/{tenantId}/members/{memberId}/personal-line`
+   *
+   * A read. There is no write twin here and there must not be one — NocoBase
+   * owns the operator control plane. The browser never speaks to Magnus: the
+   * portal's server calls this, and this builds the signed Magnus request.
+   *
+   * Everything that is not an authenticated, in-scope, resolvable seat answers
+   * **404** — the same status as an unknown route. A 403 would confirm that the
+   * tenant exists, which is exactly the enumeration this must not permit.
+   */
+  async function handlePersonalLine(
+    req: IncomingMessage,
+    res: ServerResponse,
+    correlationId: string,
+    tenantId: string,
+    memberId: string,
+  ): Promise<void> {
+    const startedAt = now();
+
+    // Audit carries route, outcome and correlation id — and identifiers only.
+    // No seat field, no upstream body, no credential, ever.
+    const finish = (
+      status: number,
+      outcome: Outcome,
+      body: Record<string, unknown> = {},
+      extra: Record<string, unknown> = {},
+    ): void => {
+      logger.log(status === 200 ? "info" : "warn", {
+        event: "personal_line_read",
+        correlationId,
+        tenantId,
+        memberId,
+        route: "/v1/tenants/:tenantId/members/:memberId/personal-line",
+        outcome,
+        httpStatus: status,
+        durationMs: now() - startedAt,
+        ...extra,
+      });
+      sendJson(res, status, correlationId, { ok: status === 200, outcome, ...body });
+    };
+
+    if (config.voiceReadToken === null) {
+      finish(503, "no_voice_token_configured", {
+        error: "GATEWAY_VOICE_READ_TOKEN is not configured",
+      });
+      return;
+    }
+
+    const header = req.headers["authorization"];
+    const rawHeader = Array.isArray(header) ? header[0] : header;
+    const match =
+      typeof rawHeader === "string" ? /^Bearer[ ]+(.+)$/i.exec(rawHeader.trim()) : null;
+    const token = match === null ? null : (match[1] ?? "").trim();
+    if (
+      token === null ||
+      token.length === 0 ||
+      !constantTimeEquals(token, config.voiceReadToken)
+    ) {
+      finish(401, "unauthorized", { error: "unauthorized" });
+      return;
+    }
+
+    // Rate limit AFTER authentication, so an unauthenticated flood cannot
+    // exhaust a legitimate caller's budget, and keyed per seat so one tenant
+    // cannot starve another.
+    if (!voiceRateLimiter.take(`${tenantId} ${memberId}`, now())) {
+      finish(429, "rate_limited", { error: "too many requests" });
+      return;
+    }
+
+    const seat = resolveSeat(config.voiceSeats.seats, tenantId, memberId);
+    if (seat === null) {
+      // Unknown seat, wrong tenant and unparsed mapping are indistinguishable.
+      finish(404, "not_found", { error: "not found" });
+      return;
+    }
+
+    if (personalLineSource === null) {
+      finish(503, "voice_upstream_unavailable", {
+        error: "voice upstream is not configured",
+      });
+      return;
+    }
+
+    let upstream: Record<string, unknown> | null;
+    try {
+      upstream = await personalLineSource.fetchSeat(seat);
+    } catch (err) {
+      // Category only. A raw Magnus error may echo the credential it rejected.
+      finish(
+        503,
+        "voice_upstream_unavailable",
+        { error: "voice upstream unavailable" },
+        { detail: err instanceof Error ? err.name : "unknown" },
+      );
+      return;
+    }
+
+    if (upstream === null) {
+      finish(404, "not_found", { error: "not found" });
+      return;
+    }
+
+    finish(200, "ok", { personalLine: projectPersonalLine(upstream) });
+  }
+
   const handler: Handler = function handler(
     req: IncomingMessage,
     res: ServerResponse,
@@ -804,6 +947,43 @@ export function createGateway(deps: GatewayDeps): Gateway {
       }
       handleBindings(req, res, correlationId);
       return;
+    }
+    // KILL SWITCH. While disabled the route is not matched at all, so it 404s
+    // exactly like any unknown path — the endpoint's existence is not
+    // observable until it is deliberately turned on.
+    if (config.voiceReadEnabled) {
+      const seatRoute =
+        /^\/v1\/tenants\/([^/]+)\/members\/([^/]+)\/personal-line$/.exec(pathname);
+      if (seatRoute !== null) {
+        if (method !== "GET" && method !== "HEAD") {
+          // Read-only: every unsafe method is refused before anything is read.
+          fail(405, "method_not_allowed", "method not allowed");
+          return;
+        }
+        const tenantId = decodeURIComponent(seatRoute[1] ?? "");
+        const memberId = decodeURIComponent(seatRoute[2] ?? "");
+        void handlePersonalLine(req, res, correlationId, tenantId, memberId).catch(
+          (err: unknown) => {
+            logger.error({
+              event: "personal_line_read",
+              correlationId,
+              outcome: "voice_upstream_unavailable",
+              httpStatus: 503,
+              detail: err instanceof Error ? err.name : "unknown",
+            });
+            if (!res.headersSent) {
+              sendJson(res, 503, correlationId, {
+                ok: false,
+                outcome: "voice_upstream_unavailable",
+                error: "voice upstream unavailable",
+              });
+            } else {
+              res.end();
+            }
+          },
+        );
+        return;
+      }
     }
     if (pathname === "/v1/chatwoot/agent-bot") {
       if (method !== "POST") {
