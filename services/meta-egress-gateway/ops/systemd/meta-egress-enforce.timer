@@ -1,0 +1,11 @@
+[Unit]
+Description=Re-assert Isola Meta egress rules (Docker rebuilds DOCKER-USER on restart)
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=3min
+AccuracySec=15s
+Unit=meta-egress-enforce.service
+
+[Install]
+WantedBy=timers.target

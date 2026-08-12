@@ -1,0 +1,15 @@
+[Unit]
+Description=Isola Meta egress enforcement (DOCKER-USER default-deny for protected networks)
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/local/sbin/meta-egress-enforce.sh apply
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

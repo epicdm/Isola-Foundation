@@ -1,0 +1,10 @@
+[Unit]
+Description=Isola Meta egress topology verifier (fails closed)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/meta-topology-verify.sh
+StandardOutput=journal
+StandardError=journal

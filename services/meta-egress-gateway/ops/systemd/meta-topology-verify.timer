@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Isola Meta egress topology verifier
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=10min
+AccuracySec=30s
+Unit=meta-topology-verify.service
+
+[Install]
+WantedBy=timers.target
