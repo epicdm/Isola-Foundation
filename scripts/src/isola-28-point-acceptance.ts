@@ -720,8 +720,12 @@ async function main(): Promise<void> {
         .filter((n) => Number.isFinite(n))
     : undefined;
 
+  // Target override, so the same harness can be pointed at staging without
+  // editing it. Absent values keep the production defaults.
   const ctx: CheckContext = {
     ...DEFAULT_CONTEXT,
+    portalApp: process.env.ISOLA_PORTAL_APP?.trim() || DEFAULT_CONTEXT.portalApp,
+    portalApi: process.env.ISOLA_PORTAL_API?.trim() || DEFAULT_CONTEXT.portalApi,
     portalCredential: credentialFromEnv(process.env),
     fetch: globalThis.fetch,
   };

@@ -88,6 +88,14 @@ export interface BrowserRunInput {
   tenantId: string;
   chromiumPath?: string | null;
   artifactDir?: string;
+  /**
+   * Supplied ONLY when a genuinely pre-authorized operator session exists.
+   * The harness never creates or retrieves one.
+   */
+  operatorReply?: {
+    description: string;
+    send: (conversationRef: string, runMarker: string) => Promise<void>;
+  };
 }
 
 const NO_BROWSER =
@@ -407,26 +415,108 @@ export async function runBrowserChecks(input: BrowserRunInput): Promise<BrowserR
       `/en/${tenantGlobalId}/support`,
       `/en/${tenantGlobalId}/messages`,
     ];
-    const appRoutes: Check16Evidence["appRoutes"] = [];
+    const appRoutes: Array<Check16Evidence["appRoutes"][number] & { hasConversationSurface: boolean }> = [];
     for (const route of convRoutes) {
       await b.goto(`${input.portalApp}${route}`, { waitMs: 0 });
       const uiState = await waitForTerminalState(b);
-      appRoutes.push({ route, landedUrl: await b.currentUrl(), uiState });
+      // A route that merely loads is not a conversation surface; require the
+      // surface marker so a 200-rendering dashboard cannot be mistaken for one.
+      const hasConversationSurface = await b
+        .evaluate<boolean>(`Boolean(document.querySelector('[data-testid="isola-conversation"]'))`)
+        .catch(() => false);
+      appRoutes.push({ route, landedUrl: await b.currentUrl(), uiState, hasConversationSurface });
       if (route === convRoutes[0]) await shot(route, `Conversation route ${route} in terminal state "${uiState}"`);
     }
 
+    // Read whatever the conversation surface actually rendered. A surface that
+    // exists but shows nothing is still evidence, and must be captured as such.
+    let observedConversationRef: string | null = null;
+    let renderedReplies: Check16Evidence["renderedReplies"] = [];
+    const conversationRoute = appRoutes.find((r) => r.uiState === "loaded" && r.hasConversationSurface);
+    if (conversationRoute) {
+      await b.goto(`${input.portalApp}${conversationRoute.route}`, { waitMs: 0 });
+      await waitForTerminalState(b);
+      // Give the thread a moment to populate; the surface polls.
+      await new Promise((r) => setTimeout(r, 4000));
+      const read = await b.evaluate<{ ref: string | null; replies: Check16Evidence["renderedReplies"] }>(
+        `(() => { ${VISIBLE_TEXT_FN}
+          const refEl = __isolaVisibleText('[data-testid="isola-conversation-ref"]');
+          const out = [];
+          document.querySelectorAll('[data-testid^="isola-message-"][data-sender-kind]').forEach((li) => {
+            const id = (li.getAttribute('data-testid') || '').replace('isola-message-', '');
+            const text = li.querySelector('[data-testid="isola-message-' + id + '-text"]');
+            const label = li.querySelector('[data-testid="isola-message-' + id + '-sender-label"]');
+            const kind = li.getAttribute('data-sender-kind');
+            // Only messages the CUSTOMER can actually see count as delivered.
+            const style = window.getComputedStyle(li);
+            if (style.display === 'none' || style.visibility === 'hidden' || li.offsetParent === null) return;
+            out.push({
+              text: text ? text.textContent : '',
+              senderLabel: label ? (label.textContent || '').trim() : '',
+              senderKind: kind === 'human' || kind === 'ai' ? kind : 'unknown',
+              messageRef: id,
+            });
+          });
+          return { ref: refEl.found && refEl.visible ? (refEl.text || '').trim() : null, replies: out };
+        })()`,
+      );
+      observedConversationRef = read.ref;
+      renderedReplies = read.replies;
+      await shot(conversationRoute.route, `Customer conversation surface for conversation ${read.ref ?? "unknown"}`);
+    }
+
     const check16Evidence: Check16Evidence = {
-      appRoutes,
+      appRoutes: appRoutes.map(({ route, landedUrl, uiState }) => ({ route, landedUrl, uiState })),
       // Not probed in this run. Determining the inbox channel needs an inbox
       // identifier this harness deliberately does not carry, so these stay
       // unknown rather than being asserted from a previously-known constant.
       chatwoot: { widgetAvailable: null, inboxChannel: null, probe: null },
-      operatorSessionAvailable: false,
-      operatorSessionDescription: null,
+      // A human reply must come from a session that was ALREADY authorized for
+      // this Chatwoot. The harness never creates or retrieves one, so this is
+      // opt-in and absent by default — which the judge reports as NOT RUN
+      // rather than allowing anything else to stand in for a person.
+      operatorSessionAvailable: Boolean(input.operatorReply),
+      operatorSessionDescription: input.operatorReply?.description ?? null,
       replyAttempt: null,
-      renderedReplies: [],
-      observedConversationRef: null,
+      renderedReplies,
+      observedConversationRef,
     };
+
+    if (input.operatorReply && observedConversationRef) {
+      const runMarker = `isola-run-${crypto.randomBytes(6).toString("hex")}`;
+      await input.operatorReply.send(observedConversationRef, runMarker);
+      check16Evidence.replyAttempt = {
+        conversationRef: observedConversationRef,
+        runMarker,
+        submittedAt: new Date().toISOString(),
+      };
+      // Re-read the CUSTOMER's screen after the reply, which is the only place
+      // the claim "it reached the customer" can be settled.
+      await b.goto(`${input.portalApp}${conversationRoute!.route}`, { waitMs: 0 });
+      await waitForTerminalState(b);
+      await new Promise((r) => setTimeout(r, 6000));
+      const after = await b.evaluate<Check16Evidence["renderedReplies"]>(
+        `(() => {
+          const out = [];
+          document.querySelectorAll('[data-testid^="isola-message-"][data-sender-kind]').forEach((li) => {
+            const id = (li.getAttribute('data-testid') || '').replace('isola-message-', '');
+            const text = li.querySelector('[data-testid="isola-message-' + id + '-text"]');
+            const label = li.querySelector('[data-testid="isola-message-' + id + '-sender-label"]');
+            const kind = li.getAttribute('data-sender-kind');
+            if (li.offsetParent === null) return;
+            out.push({
+              text: text ? text.textContent : '',
+              senderLabel: label ? (label.textContent || '').trim() : '',
+              senderKind: kind === 'human' || kind === 'ai' ? kind : 'unknown',
+              messageRef: id,
+            });
+          });
+          return out;
+        })()`,
+      );
+      check16Evidence.renderedReplies = after;
+      await shot(conversationRoute!.route, "Customer conversation surface after the operator reply");
+    }
 
     return {
       check11: judgeCheck11(check11Evidence),
