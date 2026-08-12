@@ -132,6 +132,9 @@ function boot(): void {
             authorization: req.headers.authorization ?? null,
             body,
             rawBody,
+            // Read only by the operator inspection surface; every other route
+            // ignores it entirely.
+            inspectPhoneId: url.searchParams.get('phone_number_id') ?? undefined,
             signing: {
               timestamp: hdr('x-isola-timestamp'),
               nonce: hdr('x-isola-nonce'),

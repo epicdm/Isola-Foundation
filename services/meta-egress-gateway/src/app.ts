@@ -13,7 +13,7 @@
 
 import { findOperation, operationIds, type Operation } from './operations.js';
 import { validateInput, buildPath, project } from './policy.js';
-import { authenticateSigned, tenantOwnsAsset, withTenantCredential, custodySummary, type Workload } from './credentials.js';
+import { authenticate, authenticateSigned, tenantOwnsAsset, withTenantCredential, custodySummary, type Workload } from './credentials.js';
 import type { SigningHeaders } from './signing.js';
 import { callGraph, describeTarget, graphVersion } from './graph.js';
 import { emit, newCorrelationId, type AuditEvent, type AuditOutcome } from './audit.js';
@@ -26,6 +26,8 @@ export interface HttpRequest {
   /** Exact bytes received, for the signature digest. */
   readonly rawBody: string;
   readonly signing: SigningHeaders;
+  /** Only read by the operator inspection surface. */
+  readonly inspectPhoneId?: string;
 }
 export interface HttpResponse {
   readonly status: number;
@@ -115,6 +117,77 @@ export async function handle(req: HttpRequest): Promise<HttpResponse> {
 
   if (req.method === 'GET' && req.path === '/v1/operations') {
     return { status: 200, body: { operations: operationIds() } };
+  }
+
+  /**
+   * OPERATOR INSPECTION SURFACE — read-only, bearer-authenticated.
+   *
+   * A third, deliberately small surface. It exists because neither of the other
+   * two could serve an operator verifying a cutover:
+   *
+   *   - the operation API requires an HMAC signature, and the signing key lives
+   *     only inside the Swarm secret, so there is no practical operator path;
+   *   - the Chatwoot adapter implements only the Graph shapes Chatwoot emits,
+   *     and adding a non-Chatwoot shape there would muddy that contract.
+   *
+   * Bearer alone is proportionate here and nowhere else: this surface is
+   * internal-only (the service publishes no port), every route on it is a
+   * metadata READ, and it can express no mutation. It reuses the same tenant and
+   * asset scope check, the same server-constructed request, the same projection
+   * and the same audit record as everything else.
+   *
+   * Its purpose is capturing and verifying phone-level webhook ownership before
+   * and after a coordinated cutover — the evidence that proves exactly one
+   * processor owns an inbound event.
+   */
+  if (req.method === 'GET' && req.path === '/v1/inspect/phone-webhook-config') {
+    const op = findOperation('wa.phone.webhook_config.read');
+    if (!op) return { status: 500, body: { error: 'inspection operation is not registered' } };
+    ctx.op = op;
+
+    const bearer = req.authorization?.startsWith('Bearer ') ? req.authorization.slice(7).trim() : null;
+    const workload = authenticate(bearer);
+    if (!workload) return finish(ctx, 'denied_auth', 401, { error: 'unauthenticated' });
+    ctx.workload = workload;
+
+    if (killSwitchEngaged()) {
+      return finish(ctx, 'denied_kill_switch', 503, { error: 'Meta egress is administratively disabled' });
+    }
+
+    const phoneId = typeof req.inspectPhoneId === 'string' ? req.inspectPhoneId : '';
+    const validated = validateInput(op, { phone_number_id: phoneId });
+    if (!validated.ok) return finish(ctx, 'denied_schema', 400, { error: validated.reason });
+
+    ctx.assetKind = 'phone_number';
+    ctx.assetId = phoneId;
+    if (!tenantOwnsAsset(workload.tenant_id, 'phone_number', phoneId)) {
+      return finish(ctx, 'denied_scope', 403, { error: 'asset is not in scope for this tenant' });
+    }
+    if (rateLimited(workload.tenant_id, op, Date.now())) {
+      return finish(ctx, 'denied_rate', 429, { error: 'rate limit exceeded for this operation' });
+    }
+
+    const built = buildPath(op, validated.value);
+    if (!built.ok) return finish(ctx, 'denied_schema', 400, { error: built.reason });
+    ctx.target = describeTarget(op, built.path);
+
+    let outcome;
+    try {
+      outcome = await withTenantCredential(workload.tenant_id, (token) => callGraph(op, built.path, token));
+    } catch {
+      return finish(ctx, 'denied_no_credential', 503, { error: 'no credential is provisioned for this tenant' });
+    }
+    if (!outcome.ok) {
+      return finish(
+        ctx,
+        'upstream_failed',
+        outcome.failure === 'upstream_error' ? 502 : 504,
+        { error: 'the upstream request did not succeed', failure: outcome.failure },
+        { upstream: outcome.status, failure: outcome.failure },
+      );
+    }
+    const projected = project(outcome.body, op.projection) ?? {};
+    return finish(ctx, 'ok', 200, { operation_id: op.id, data: projected }, { upstream: outcome.status });
   }
 
   if (req.method !== 'POST' || !req.path.startsWith('/v1/operations/')) {

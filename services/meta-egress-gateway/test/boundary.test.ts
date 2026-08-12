@@ -146,6 +146,92 @@ describe('caller surface', () => {
   });
 });
 
+// ------------------------------------------------- operator inspection surface
+describe('operator inspection surface', () => {
+  const inspect = (phone: string | undefined, token: string | null = TOKEN_A) =>
+    handle({
+      method: 'GET',
+      path: '/v1/inspect/phone-webhook-config',
+      authorization: token ? `Bearer ${token}` : null,
+      body: undefined,
+      rawBody: '',
+      signing: { timestamp: null, nonce: null, signature: null },
+      ...(phone === undefined ? {} : { inspectPhoneId: phone }),
+    });
+
+  it('returns the projected webhook configuration for an in-scope phone', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: PHONE,
+        webhook_configuration: { application: 'https://bff.example/hook', whatsapp_business_account: 'https://inbox.example/x' },
+        verified_name: 'should not be returned',
+      }),
+    );
+    const r = await inspect(PHONE);
+    expect(r.status).toBe(200);
+    const s = JSON.stringify(r.body);
+    expect(s).toContain('https://bff.example/hook');
+    // Projection still applies: only declared fields survive.
+    expect(s).not.toContain('should not be returned');
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(init.method).toBe('GET');
+    expect(url.pathname).toBe(`/v23.0/${PHONE}`);
+    expect(url.searchParams.get('fields')).toBe('id,webhook_configuration');
+  });
+
+  it('requires authentication', async () => {
+    expect((await inspect(PHONE, null)).status).toBe(401);
+    expect((await inspect(PHONE, 'unknown')).status).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a phone outside the tenant scope', async () => {
+    const r = await inspect('111222333444555');
+    expect(r.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a malformed or missing phone id', async () => {
+    for (const bad of [undefined, '', 'me', '../oauth', `${PHONE}?x=1`]) {
+      const r = await inspect(bad as string | undefined);
+      expect(r.status).toBe(400);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('cannot be used to mutate: only GET is routed and the method is fixed', async () => {
+    const r = await handle({
+      method: 'POST',
+      path: '/v1/inspect/phone-webhook-config',
+      authorization: `Bearer ${TOKEN_A}`,
+      body: { phone_number_id: PHONE },
+      rawBody: '{}',
+      signing: { timestamp: null, nonce: null, signature: null },
+      inspectPhoneId: PHONE,
+    });
+    expect(r.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('honours the kill switch', async () => {
+    process.env.META_GATEWAY_DISABLED = 'true';
+    expect((await inspect(PHONE)).status).toBe(503);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('audits the read and leaks no credential', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: PHONE, webhook_configuration: { application: 'https://x/y' } }));
+    await inspect(PHONE);
+    const line = logged[logged.length - 1]!;
+    expect(line).not.toContain(FAKE_META_TOKEN);
+    expect(line).not.toContain(TOKEN_A);
+    const ev = JSON.parse(line);
+    expect(ev.operation_id).toBe('wa.phone.webhook_config.read');
+    expect(ev.asset_id).toBe(PHONE);
+    expect(ev.outcome).toBe('ok');
+  });
+});
+
 // ---------------------------------------------------------------- authn
 describe('authentication', () => {
   it('rejects a missing, malformed or unknown bearer token', async () => {
