@@ -10,6 +10,93 @@ import {
 } from "../src/config.js";
 import { bindingsJson, makeBinding } from "./harness.js";
 
+/**
+ * A DISABLED feature must expand no capability — egress included.
+ *
+ * `loadConfig` used to derive the Magnus host into the allowlist
+ * unconditionally, so merely LANDING the disabled personal-line read widened
+ * the gateway's permitted outbound destinations anywhere `MAGNUS_URL` was
+ * already set and `EGRESS_ALLOWLIST` was not. That contradicts "inert if
+ * landed".
+ */
+describe("Magnus egress is derived only while the personal-line read is enabled", () => {
+  const MAGNUS = "https://magnus.example.test";
+
+  it("disabled + MAGNUS_URL + no explicit allowlist → Magnus absent", () => {
+    const config = loadConfig({
+      MAGNUS_URL: MAGNUS,
+      GATEWAY_VOICE_READ_ENABLED: "false",
+    });
+    expect(config.voiceReadEnabled).toBe(false);
+    expect(config.egressAllowlist).not.toContain("magnus.example.test");
+    // The pre-existing destinations are untouched.
+    expect(config.egressAllowlist).toContain("isola-chat.saas00.epic.dm");
+    expect(config.egressAllowlist).toContain("isola_isola-runtime");
+  });
+
+  it("is absent when the switch is simply unset, which is the default", () => {
+    const config = loadConfig({ MAGNUS_URL: MAGNUS });
+    expect(config.voiceReadEnabled).toBe(false);
+    expect(config.egressAllowlist).not.toContain("magnus.example.test");
+  });
+
+  it("enabled + MAGNUS_URL → Magnus present", () => {
+    const config = loadConfig({
+      MAGNUS_URL: MAGNUS,
+      GATEWAY_VOICE_READ_ENABLED: "true",
+    });
+    expect(config.voiceReadEnabled).toBe(true);
+    expect(config.egressAllowlist).toContain("magnus.example.test");
+  });
+
+  it("an explicit allowlist stays authoritative in both states", () => {
+    const explicit = "only.example.test";
+
+    const disabled = loadConfig({
+      MAGNUS_URL: MAGNUS,
+      EGRESS_ALLOWLIST: explicit,
+      GATEWAY_VOICE_READ_ENABLED: "false",
+    });
+    expect(disabled.egressAllowlist).toEqual([explicit]);
+
+    const enabled = loadConfig({
+      MAGNUS_URL: MAGNUS,
+      EGRESS_ALLOWLIST: explicit,
+      GATEWAY_VOICE_READ_ENABLED: "true",
+    });
+    // An explicit allowlist is never widened by the feature either: the
+    // operator's list is the whole list.
+    expect(enabled.egressAllowlist).toEqual([explicit]);
+    expect(enabled.egressAllowlist).not.toContain("magnus.example.test");
+  });
+
+  it("honours the legacy MAGNUS_BASE_URL name the same way", () => {
+    expect(
+      loadConfig({ MAGNUS_BASE_URL: MAGNUS, GATEWAY_VOICE_READ_ENABLED: "false" })
+        .egressAllowlist,
+    ).not.toContain("magnus.example.test");
+    expect(
+      loadConfig({ MAGNUS_BASE_URL: MAGNUS, GATEWAY_VOICE_READ_ENABLED: "true" })
+        .egressAllowlist,
+    ).toContain("magnus.example.test");
+  });
+
+  it("the kill switch that gates egress is the one the config reports", () => {
+    // Guards against the two decisions drifting apart: the derivation and the
+    // returned field must come from the same parse.
+    for (const raw of ["true", "1", "on", "yes", "enabled"]) {
+      const config = loadConfig({ MAGNUS_URL: MAGNUS, GATEWAY_VOICE_READ_ENABLED: raw });
+      expect(config.voiceReadEnabled).toBe(true);
+      expect(config.egressAllowlist).toContain("magnus.example.test");
+    }
+    for (const raw of ["false", "0", "off", "no", "disabled", "nonsense", ""]) {
+      const config = loadConfig({ MAGNUS_URL: MAGNUS, GATEWAY_VOICE_READ_ENABLED: raw });
+      expect(config.voiceReadEnabled).toBe(false);
+      expect(config.egressAllowlist).not.toContain("magnus.example.test");
+    }
+  });
+});
+
 describe("loadConfig defaults", () => {
   it("uses the verified Chatwoot host and the private runtime host", () => {
     const config = loadConfig({});
