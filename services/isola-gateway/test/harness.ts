@@ -91,6 +91,11 @@ export function makeBinding(overrides: Partial<Binding> = {}): Binding {
     templateId: TEMPLATE_ID,
     exposure: "PUBLIC",
     status: "active",
+    // A servable fixture must be `accepted`; lifecycle is a routing precondition,
+    // not decoration. Tests that mean to exercise lifecycle override it explicitly
+    // (see bindings-lifecycle.test.ts) — everything else asserts status/exposure
+    // behaviour and needs this to be valid so lifecycle is not the reason it fails.
+    lifecycle: "accepted",
     ...overrides,
   };
 }

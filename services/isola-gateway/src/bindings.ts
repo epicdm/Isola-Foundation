@@ -22,6 +22,29 @@
 export type Exposure = "PUBLIC" | "INTERNAL";
 export type BindingStatus = "active" | "retired";
 
+/**
+ * The ONLY lifecycle value that may receive traffic.
+ *
+ * Lifecycle was previously carried as Paperclip metadata (`isolaLifecycle`) that
+ * nothing enforced, and a PUBLIC agent marked `staged-not-ready` woke and replied.
+ * It is now a routing precondition checked here, at the boundary, rather than a
+ * label read somewhere downstream.
+ */
+export const ROUTABLE_LIFECYCLE = "accepted";
+
+/**
+ * Fail-closed lifecycle predicate.
+ *
+ * Everything that is not the exact string "accepted" is non-routable: absent,
+ * null, "staged-not-ready", "rejected", a stale or unknown projection value, a
+ * number, an object, differing case, or surrounding whitespace. There is no
+ * normalisation and no coercion on purpose — a projection that cannot state
+ * `"accepted"` exactly is a projection we do not trust.
+ */
+export function isRoutableLifecycle(value: unknown): boolean {
+  return value === ROUTABLE_LIFECYCLE;
+}
+
 export interface Binding {
   tenantId: string;
   chatwootAccountId: number;
@@ -36,6 +59,15 @@ export interface Binding {
   templateId: string;
   exposure: Exposure;
   status: BindingStatus;
+  /**
+   * Lifecycle as supplied by the runtime projection, kept verbatim.
+   *
+   * Deliberately `string | null` and NOT a narrow union: an unknown or malformed
+   * projection value must be representable so it can be refused at resolution.
+   * Narrowing here would force a parse-time error, which would take the gateway
+   * down on a bad projection instead of refusing the one affected binding.
+   */
+  lifecycle: string | null;
   /** Team to assign on escalation. Absent means "escalate but do not assign". */
   escalationTeamId?: number;
   /** Extra approved labels for this tenant, on top of the configured defaults. */
@@ -66,7 +98,8 @@ export type BindingResolution =
   | { kind: "not_found" }
   | { kind: "duplicate"; count: number }
   | { kind: "retired"; tenantId: string }
-  | { kind: "not_public"; tenantId: string; exposure: Exposure };
+  | { kind: "not_public"; tenantId: string; exposure: Exposure }
+  | { kind: "not_accepted"; tenantId: string; lifecycle: string | null };
 
 /** Every binding addressed by this (account, inbox) pair, in declaration order. */
 export function matchBindings(
@@ -83,8 +116,28 @@ export function matchBindings(
 /**
  * Resolve to exactly one servable binding.
  *
- * Exposure is checked before status on purpose: a retired INTERNAL binding is
- * reported as `not_public`, because that is the alarming half.
+ * Precedence, deliberately ordered so the reported reason is the OPERATOR'S
+ * disposition first and the platform's judgement second:
+ *
+ *   match -> status -> exposure -> lifecycle
+ *
+ * **Status first.** A binding an operator deliberately retired must keep
+ * reporting `retired`. An earlier revision evaluated lifecycle first on the
+ * theory that "an unaccepted agent is wired to an inbox" is the more alarming
+ * half; that was wrong. It is routing-inert but not *operationally* inert — it
+ * rewrites audit evidence and masks the fact that a binding was intentionally
+ * removed. The retired disposition is a deliberate human act and outranks a
+ * derived platform state.
+ *
+ * Exposure before lifecycle: an INTERNAL employee on a public inbox is a
+ * containment failure, whereas a non-accepted lifecycle is a readiness failure.
+ * In practice this ordering is defensive only — `parseBindings` refuses any
+ * non-PUBLIC exposure at boot, so an INTERNAL binding cannot reach resolution
+ * through configuration at all.
+ *
+ * PUBLIC exposure grants nothing on its own — passing the exposure check does
+ * not short-circuit the lifecycle check. That is the whole point: PUBLIC means
+ * "eligible to be bound", never "accepted".
  */
 export function resolveBinding(
   bindings: readonly Binding[],
@@ -95,11 +148,14 @@ export function resolveBinding(
   if (matches.length === 0) return { kind: "not_found" };
   if (matches.length > 1) return { kind: "duplicate", count: matches.length };
   const binding = matches[0] as Binding;
+  if (binding.status !== "active") {
+    return { kind: "retired", tenantId: binding.tenantId };
+  }
   if (binding.exposure !== "PUBLIC") {
     return { kind: "not_public", tenantId: binding.tenantId, exposure: binding.exposure };
   }
-  if (binding.status !== "active") {
-    return { kind: "retired", tenantId: binding.tenantId };
+  if (!isRoutableLifecycle(binding.lifecycle)) {
+    return { kind: "not_accepted", tenantId: binding.tenantId, lifecycle: binding.lifecycle };
   }
   return { kind: "ok", binding };
 }
@@ -256,6 +312,16 @@ export function parseBindings(raw: string | null | undefined): BindingParseResul
       errors.push(`binding[${index}]: "status" must be "active" or "retired"`);
     }
 
+    // Lifecycle is deliberately NOT a boot-time error, in either direction.
+    //
+    // Absent or unknown is not rejected here, because a projection that omits or
+    // garbles lifecycle for one binding must not take the whole gateway down —
+    // it must cost exactly that one binding its routability. The refusal happens
+    // in resolveBinding(), which fails closed. Keeping the raw value lets the
+    // refusal say what it actually saw.
+    const lifecycleRaw = entry["lifecycle"];
+    const lifecycle = typeof lifecycleRaw === "string" ? lifecycleRaw : null;
+
     if (
       tenantId === null ||
       chatwootAccountId === null ||
@@ -284,6 +350,7 @@ export function parseBindings(raw: string | null | undefined): BindingParseResul
       templateId,
       exposure: "PUBLIC",
       status: statusRaw,
+      lifecycle,
       ...(escalationTeamId === undefined ? {} : { escalationTeamId }),
       ...(labels === undefined ? {} : { labels }),
     });
@@ -321,6 +388,10 @@ export function redactBinding(binding: Binding): Record<string, unknown> {
     templateId: binding.templateId,
     exposure: binding.exposure,
     status: binding.status,
+    lifecycle: binding.lifecycle,
+    // Explicit, so an operator reading GET /v1/bindings sees routability rather
+    // than having to infer it from a string they might mis-read.
+    lifecycleRoutable: isRoutableLifecycle(binding.lifecycle),
     escalationTeamId: binding.escalationTeamId ?? null,
     labels: binding.labels ?? [],
     // Presence, never the value.

@@ -574,3 +574,120 @@ describe("the payload digest", () => {
     expect(payloadDigest(Buffer.from('{"a":1}', "utf8"))).toBe(a);
   });
 });
+
+describe("9. lifecycle enforcement on the recovery path", () => {
+  // Recovery is a SECOND entry point into delivery. A message admitted while the
+  // agent was accepted must not be replayed after it stops being accepted, so
+  // the sweeper has to gate on lifecycle too — otherwise enforcing only the
+  // webhook path leaves the sweeper as a bypass.
+  async function sweepWith(binding: ReturnType<typeof makeBinding>) {
+    const ledger = new FakeLedger();
+    const chatwoot = new StubChatwootApi();
+    chatwoot.conversationRecord = conversationRecord();
+    const runtime = StubAgentRuntime.answering("should never be sent");
+    const logger = new CapturingLogger();
+
+    await ledger.reserve({
+      identity: IDENTITY,
+      digest: "digest-lifecycle",
+      correlationId: "corr-lifecycle",
+      conversationId: CONVERSATION_DISPLAY_ID,
+      messageId: MESSAGE_ID,
+      mode: "answer",
+      leaseMs: 60_000,
+    });
+    ledger.expireAllLeases();
+
+    const swept = await createSweeper({
+      config: envConfig(),
+      ledger,
+      bindingStore: { list: () => [binding] },
+      chatwoot,
+      runtime,
+      logger: logger.logger,
+      failpoint: DISARMED,
+      now: () => Date.now(),
+    }).sweep();
+
+    return { swept, runtime, chatwoot };
+  }
+
+  it("does not replay a queued delivery to a staged-not-ready agent", async () => {
+    const r = await sweepWith(makeBinding({ lifecycle: "staged-not-ready" }));
+    expect(r.swept).toBe(0);
+    expect(r.runtime.requests).toHaveLength(0);
+    expect(r.chatwoot.customerMessages).toHaveLength(0);
+  });
+
+  it("does not replay when lifecycle is absent", async () => {
+    const r = await sweepWith(makeBinding({ lifecycle: null }));
+    expect(r.swept).toBe(0);
+    expect(r.runtime.requests).toHaveLength(0);
+    expect(r.chatwoot.customerMessages).toHaveLength(0);
+  });
+
+  it("does not replay when lifecycle is an unknown value", async () => {
+    const r = await sweepWith(makeBinding({ lifecycle: "some-future-state" }));
+    expect(r.swept).toBe(0);
+    expect(r.chatwoot.customerMessages).toHaveLength(0);
+  });
+
+  // Positive control: the refusals above must be caused by lifecycle, not by a
+  // broken sweeper. Same fixture, accepted lifecycle, and the reply goes out.
+  it("positive control — an accepted agent IS replayed exactly once", async () => {
+    const r = await sweepWith(makeBinding({ lifecycle: "accepted" }));
+    expect(r.swept).toBe(1);
+    expect(r.runtime.requests).toHaveLength(1);
+    expect(r.chatwoot.customerMessages).toHaveLength(1);
+  });
+});
+
+describe("10. recovery sweeper applies the same precedence", () => {
+  // status -> lifecycle: a retired binding must keep reporting binding_retired,
+  // so an operator's deliberate removal is never masked by a derived state.
+  async function reasonFor(binding: ReturnType<typeof makeBinding>) {
+    const ledger = new FakeLedger();
+    const chatwoot = new StubChatwootApi();
+    chatwoot.conversationRecord = conversationRecord();
+    await ledger.reserve({
+      identity: IDENTITY,
+      digest: "digest-precedence",
+      correlationId: "corr-precedence",
+      conversationId: CONVERSATION_DISPLAY_ID,
+      messageId: MESSAGE_ID,
+      mode: "answer",
+      leaseMs: 60_000,
+    });
+    ledger.expireAllLeases();
+    const logger = new CapturingLogger();
+    const swept = await createSweeper({
+      config: envConfig(),
+      ledger,
+      bindingStore: { list: () => [binding] },
+      chatwoot,
+      runtime: StubAgentRuntime.answering("never"),
+      logger: logger.logger,
+      failpoint: DISARMED,
+      now: () => Date.now(),
+    }).sweep();
+    return { swept, chatwoot };
+  }
+
+  it("retired + missing lifecycle does not replay", async () => {
+    const r = await reasonFor(makeBinding({ status: "retired", lifecycle: null }));
+    expect(r.swept).toBe(0);
+    expect(r.chatwoot.customerMessages).toHaveLength(0);
+  });
+
+  it("retired + accepted does not replay", async () => {
+    const r = await reasonFor(makeBinding({ status: "retired", lifecycle: "accepted" }));
+    expect(r.swept).toBe(0);
+    expect(r.chatwoot.customerMessages).toHaveLength(0);
+  });
+
+  it("active + accepted DOES replay — the refusals above are lifecycle/status, not breakage", async () => {
+    const r = await reasonFor(makeBinding({ status: "active", lifecycle: "accepted" }));
+    expect(r.swept).toBe(1);
+    expect(r.chatwoot.customerMessages).toHaveLength(1);
+  });
+});

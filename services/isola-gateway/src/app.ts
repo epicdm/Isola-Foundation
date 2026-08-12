@@ -75,6 +75,11 @@ export type Outcome =
   | "binding_duplicate"
   | "binding_retired"
   | "binding_not_public"
+  /**
+   * The bound agent has not passed its versioned acceptance job. Refused before
+   * any runtime invocation, whatever the exposure or binding status says.
+   */
+  | "binding_not_accepted"
   | "suppressed"
   /**
    * The same event id re-presented with a different signed body. Refused with
@@ -303,6 +308,14 @@ export function decideDelivery(args: DecideArgs): DecideResult {
         kind: "binding_refused",
         outcome: "binding_not_public",
         detail: { tenantId: resolution.tenantId, exposure: resolution.exposure },
+      });
+    case "not_accepted":
+      // An agent that has not passed its versioned acceptance job never receives
+      // customer traffic, whatever its exposure or binding status says.
+      return at({
+        kind: "binding_refused",
+        outcome: "binding_not_accepted",
+        detail: { tenantId: resolution.tenantId, lifecycle: resolution.lifecycle },
       });
     case "ok":
       break;

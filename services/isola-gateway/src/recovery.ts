@@ -21,6 +21,7 @@
  * down, the delivery is closed out without an AI reply, which is the correct
  * outcome rather than a stale one.
  */
+import { isRoutableLifecycle } from "./bindings.js";
 import type { Binding, BindingStore } from "./bindings.js";
 import type { ChatwootApi } from "./chatwoot.js";
 import type { GatewayConfig } from "./config.js";
@@ -197,7 +198,12 @@ export function createSweeper(deps: RecoveryDeps): Sweeper {
       return false;
     }
 
-    if (binding.status !== "active" || row.conversationId === null) {
+    // Lifecycle is enforced here as well as in resolveBinding(). Recovery is a
+    // SECOND entry point into delivery: a message admitted while the agent was
+    // accepted could otherwise be replayed after it was un-accepted, so gating
+    // only the webhook path would leave the sweeper as a bypass.
+    const lifecycleBlocked = !isRoutableLifecycle(binding.lifecycle);
+    if (binding.status !== "active" || lifecycleBlocked || row.conversationId === null) {
       const identity: LedgerIdentity = {
         tenantId: row.tenantId,
         bindingId: row.bindingId,
@@ -208,7 +214,14 @@ export function createSweeper(deps: RecoveryDeps): Sweeper {
       await deps.ledger.fail(
         identity,
         DELIVERY_ACTION,
-        binding.status !== "active" ? "binding_retired" : "no_conversation",
+        // Same precedence as resolveBinding: status -> lifecycle -> conversation.
+        // A retired binding keeps reporting `binding_retired`, so an operator's
+        // deliberate disposition is never masked by a derived platform state.
+        binding.status !== "active"
+          ? "binding_retired"
+          : lifecycleBlocked
+            ? "binding_not_accepted"
+            : "no_conversation",
       );
       return false;
     }
