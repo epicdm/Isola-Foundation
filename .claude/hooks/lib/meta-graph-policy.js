@@ -380,44 +380,41 @@ function analyzeRequestTargets(cmd) {
     if (!disablesCurlrc(segment, inv.start)) result.curlrcReachable = true;
     const globOff = globbingDisabled(segment, inv.start);
 
-    const invocation = { client: inv.client, targets: [], multiTransfer: false };
+    const invocation = { client: inv.client, targets: [], multiTransfer: false, ambiguous: false };
     result.invocations.push(invocation);
     const push = (entry) => {
       invocation.targets.push(entry);
       result.targets.push(entry);
     };
 
-    for (let i = k + 1; i < segment.length; i++) {
-      const t = segment[i];
-      if (t === '-K' || t === '--config') {
-        result.opaqueConfig = true;
-        i++; // its value, whatever it is
-        continue;
-      }
-      if (/^(--config|-K)=/.test(t)) {
-        result.opaqueConfig = true;
-        continue;
-      }
-      // curl's transfer separator, long and short form. A second transfer is a
-      // second destination, and it carries the same shell-visible options.
-      if (t === '--next' || t === '-:') {
-        invocation.multiTransfer = true;
-        continue;
-      }
-      if (t === '--url') {
-        push({ raw: segment[i + 1] == null ? '' : segment[i + 1], globOff, fromUrlFlag: true });
-        i++;
-        continue;
-      }
-      if (t.startsWith('--url=')) {
-        push({ raw: t.slice('--url='.length), globOff, fromUrlFlag: true });
-        continue;
-      }
-      if (t.startsWith('-')) {
-        if (VALUE_TAKING.has(t)) i++;
-        continue;
-      }
-      if (looksLikeTarget(t)) push({ raw: t, globOff });
+    // AUTHORITATIVE PARSE, from the resolved executable. argv[0] is the curl
+    // binary itself so the shared parser sees the shape it expects.
+    const argv = segment.slice(k);
+    const parsed = parseCurlTokens(argv);
+
+    // curl's transfer separator, long and short form. A second transfer is a
+    // second destination, carrying the options that follow it.
+    if (argv.some((t) => t === '--next' || t === '-:')) invocation.multiTransfer = true;
+
+    // An option we cannot classify may or may not consume the next token, so
+    // which tokens are operands is no longer decidable.
+    if (parsed.unknown.length > 0) invocation.ambiguous = true;
+
+    for (const o of parsed.opts) {
+      if (o.flag === '--url' && o.value != null) push({ raw: o.value, globOff, fromUrlFlag: true });
+    }
+    // Everything curl did not consume as an option or an option value is a URL.
+    // Scheme-less hosts, host:port, bare IPv4/IPv6 and localhost all land here
+    // without any syntax being enumerated.
+    //
+    // Only for curl, though. The other clients in CURL_FAMILY_RE do not share
+    // curl's grammar — httpie's `key==value` is a query parameter, not a
+    // destination — so applying curl's operand rule to them would invent
+    // targets. They keep the older shape-based filter, and their own policy
+    // rules refuse them with more precise messages.
+    const isCurl = inv.client === 'curl';
+    for (const op of parsed.operands) {
+      if (isCurl || looksLikeTarget(op)) push({ raw: op, globOff });
     }
   }
   return result;
@@ -444,6 +441,11 @@ function analyzeRequestTargets(cmd) {
 function singleDestinationViolation(cmd) {
   const { invocations } = analyzeRequestTargets(cmd);
   for (const inv of invocations) {
+    // Scoped to curl: this rule exists because curl applies shared options to
+    // every URL in a transfer. Other clients are refused by their own rules,
+    // which name the offending construct more precisely than this one could.
+    if (inv.client !== 'curl') continue;
+
     const touchesGraph = inv.targets.some((e) => META_HOST_RE.test(String(e.raw || '')));
     if (!touchesGraph) continue; // an ordinary multi-URL curl elsewhere is not ours to police
 
@@ -456,6 +458,15 @@ function singleDestinationViolation(cmd) {
         remedy: 'issue one curl per request, each with a single Graph URL.',
       };
     }
+
+    // An unmodelled option is already refused downstream by a rule that NAMES
+    // it, so it can be added deliberately. Pre-empting that with a vaguer
+    // message would be a regression in the refusal, not an improvement in
+    // safety — the command is refused either way. Transfer separators are
+    // checked ABOVE this, because `--next` is itself unmodelled by the option
+    // tables and would otherwise be skipped here.
+    if (inv.ambiguous) continue;
+
     if (inv.targets.length > 1) {
       return {
         reason:
@@ -932,7 +943,25 @@ const VALUE_TAKING = new Set([
  * `ok` is false when the command is not a plain curl invocation.
  */
 function parseCurlArgs(cmd) {
-  const tokens = tokenize(cmd);
+  return parseCurlTokens(tokenize(cmd));
+}
+
+/**
+ * The same parser, over an already-tokenised argv whose first element is the
+ * curl executable.
+ *
+ * Split out in round 8 so destination counting can run the AUTHORITATIVE parse
+ * after a wrapper has been resolved, instead of a second heuristic scan. Round 7
+ * counted destinations with a `looksLikeTarget()` guess that required `://`, an
+ * expansion marker or a slash — so a scheme-less operand (`attacker.example`,
+ * `host:8443`, a bare IPv4, `localhost`) was discarded, and a curl carrying the
+ * Meta credential to a second host looked single-destination.
+ *
+ * curl's grammar is the only correct rule: options consume their values, and
+ * EVERYTHING that remains is a URL operand. No hostname, IP or domain syntax is
+ * enumerated anywhere, because curl does not enumerate it either.
+ */
+function parseCurlTokens(tokens) {
   const opts = [];
   const operands = [];
   const unknown = [];
@@ -947,10 +976,21 @@ function parseCurlArgs(cmd) {
     i++;
   }
 
+  // `--` is STATEFUL: it ends option parsing. Everything after it is an
+  // operand, including tokens that begin with a dash.
+  let endOfOptions = false;
+
   for (; i < tokens.length; i++) {
     const t = tokens[i];
 
-    if (t === '--') continue;
+    if (endOfOptions) {
+      operands.push(t);
+      continue;
+    }
+    if (t === '--') {
+      endOfOptions = true;
+      continue;
+    }
 
     if (/^--[a-z]/i.test(t)) {
       const eq = t.indexOf('=');
