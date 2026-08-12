@@ -22,6 +22,8 @@
  * and the account supplied must be synthetic — see `assertSyntheticAccount`.
  */
 
+import { runBrowserChecks, type BrowserRunResult } from "./isola-browser-acceptance";
+
 export type CheckStatus = "PASS" | "FAIL" | "NOT RUN" | "UNRESOLVED";
 
 export interface CheckResult {
@@ -47,6 +49,8 @@ export interface CheckContext {
   syntheticTenants: string[];
   /** Email addresses the harness accepts as synthetic portal accounts. */
   syntheticAccounts: string[];
+  /** Tenant the browser checks expect the customer UI to be about. */
+  browserTenantId: string;
   /** Supplied by the operator via the environment; absent by default. */
   portalCredential?: { email: string; password: string };
   fetch: typeof globalThis.fetch;
@@ -100,6 +104,44 @@ async function httpStatus(ctx: CheckContext, url: string, init?: RequestInit): P
   } catch {
     return 0;
   }
+}
+
+/**
+ * Browser evidence for checks 11 and 16, captured in THIS run.
+ *
+ * Memoised so one browser launch serves both checks. Deliberately not cached
+ * to disk: a file on disk could be stale, hand-edited, or left over from a
+ * previous deployment, and either check would then "pass" without a browser
+ * having rendered anything.
+ */
+const browserCache = new WeakMap<CheckContext, Promise<BrowserRunResult>>();
+
+async function browserEvidence(ctx: CheckContext): Promise<BrowserRunResult> {
+  const cached = browserCache.get(ctx);
+  if (cached) return cached;
+  const run = runBrowserChecks({
+    portalApp: ctx.portalApp,
+    portalApi: ctx.portalApi,
+    credential: ctx.portalCredential,
+    syntheticAccounts: ctx.syntheticAccounts,
+    tenantId: ctx.browserTenantId,
+  }).catch(
+    (err): BrowserRunResult => {
+      const detail = `NOT RUN — browser evidence could not be captured: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      return {
+        check11: { status: "NOT RUN", method: "", detail },
+        check16: { status: "NOT RUN", method: "", detail },
+        artifacts: [],
+        browser: "none",
+        renderedValues: {},
+        apiComparison: {},
+      };
+    },
+  );
+  browserCache.set(ctx, run);
+  return run;
 }
 
 const NO_CREDENTIAL =
@@ -383,7 +425,11 @@ export const CHECKS: Check[] = [
     title: "Exactly one Chatwoot account/user/team/inbox/AgentBot path",
     blocked: { status: "NOT RUN", reason: HELD_ACTIVEPIECES },
   },
-  { n: 11, title: "Portal displays correct real IDs/status", blocked: { status: "NOT RUN", reason: NEEDS_PORTAL_UI } },
+  {
+    n: 11,
+    title: "Portal displays correct real IDs/status",
+    run: async (ctx) => (await browserEvidence(ctx)).check11,
+  },
   {
     n: 12,
     title: "Test Agent creates a real Chatwoot conversation",
@@ -425,7 +471,11 @@ export const CHECKS: Check[] = [
       detail: "assigned to a human; a further customer message produced no AI reply",
     }),
   },
-  { n: 16, title: "Human reply reaches the test customer", blocked: { status: "NOT RUN", reason: NEEDS_PORTAL_UI } },
+  {
+    n: 16,
+    title: "Human reply reaches the test customer",
+    run: async (ctx) => (await browserEvidence(ctx)).check16,
+  },
   {
     n: 17,
     title: "Explicit handback resumes AI exactly once",
@@ -619,6 +669,7 @@ export const DEFAULT_CONTEXT: Omit<CheckContext, "fetch"> = {
   gateway: "https://isola-gw.saas00.epic.dm",
   syntheticTenants: ["isola-uat-a"],
   syntheticAccounts: ["customer-zero@epic.dm", "isola-uat-a@epic.dm", "isola-uat-b@epic.dm"],
+  browserTenantId: "AVQLG3L",
 };
 
 /**
