@@ -12,7 +12,9 @@
 
 import { createServer } from 'node:http';
 import { handle } from './app.js';
+import { handleAdapter, ADAPTER_PREFIX } from './adapter-handler.js';
 import { loadSecrets } from './credentials.js';
+import { setContinuationKey } from './continuation.js';
 
 const PORT = Number(process.env.PORT ?? 3000);
 const SECRETS_PATH = process.env.META_GATEWAY_SECRETS_PATH ?? '/run/secrets/meta_gateway';
@@ -52,6 +54,8 @@ function boot(): void {
     );
     process.exit(1);
   }
+
+  setContinuationKey(process.env.META_GATEWAY_CONTINUATION_KEY ?? null);
 
   console.log(
     JSON.stringify({
@@ -105,6 +109,23 @@ function boot(): void {
             const v = req.headers[n];
             return typeof v === 'string' ? v : null;
           };
+
+          // The Chatwoot compatibility surface, kept on its own prefix and its
+          // own handler so its query-token exception cannot reach the operation
+          // API. Nothing on this branch logs url.search.
+          if (url.pathname.startsWith(ADAPTER_PREFIX)) {
+            const out = await handleAdapter({
+              method: req.method ?? 'GET',
+              path: url.pathname,
+              query: url.searchParams,
+              authorization: req.headers.authorization ?? null,
+              body,
+            });
+            res.writeHead(out.status, { 'content-type': 'application/json' });
+            res.end(JSON.stringify(out.body));
+            return;
+          }
+
           const out = await handle({
             method: req.method ?? 'GET',
             path: url.pathname,

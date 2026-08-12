@@ -98,6 +98,73 @@ export async function callGraph(
   }
 }
 
+/**
+ * The Chatwoot adapter's upstream call.
+ *
+ * Same transport guarantees as callGraph(): pinned version, credential in a
+ * header, redirects refused, body capped, timeout enforced. The difference is
+ * only that the path and query come from a matched adapter route rather than an
+ * operation entry — both are server-constructed, and neither is caller-supplied.
+ */
+export async function callGraphAdapter(args: {
+  method: 'GET' | 'POST' | 'DELETE';
+  path: string;
+  query: Record<string, string>;
+  token: string;
+  timeoutMs: number;
+  maxResponseBytes: number;
+  body?: unknown;
+}): Promise<GraphOutcome> {
+  const url = new URL(`${GRAPH_ORIGIN}/${GRAPH_VERSION}${args.path}`);
+  for (const [k, v] of Object.entries(args.query)) url.searchParams.set(k, v);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), args.timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: args.method,
+      headers: {
+        Authorization: `Bearer ${args.token}`,
+        Accept: 'application/json',
+        ...(args.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: args.body !== undefined ? JSON.stringify(args.body) : undefined,
+      redirect: 'manual',
+      signal: controller.signal,
+    });
+
+    if (res.status >= 300 && res.status < 400) {
+      return { ok: false, status: res.status, body: null, failure: 'redirect_refused' };
+    }
+    const raw = await readCapped(res, args.maxResponseBytes);
+    if (raw === null) return { ok: false, status: res.status, body: null, failure: 'too_large' };
+
+    let parsed: unknown = null;
+    if (raw.length > 0) {
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return { ok: false, status: res.status, body: null, failure: 'bad_payload' };
+      }
+    }
+    // Unlike the operation surface, an upstream error body IS returned here,
+    // because Chatwoot reads `error.message` to decide whether a config is
+    // valid and what to log. It is passed through unaltered rather than
+    // replaced — see the adapter, which is where that decision is justified.
+    return { ok: res.ok, status: res.status, body: parsed, failure: res.ok ? undefined : 'upstream_error' };
+  } catch (err) {
+    const aborted = err instanceof Error && err.name === 'AbortError';
+    return { ok: false, status: 0, body: null, failure: aborted ? 'timeout' : 'transport' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The adapter's upstream URL without its query, for audit. Never logged with a query. */
+export function describeAdapterTarget(path: string): string {
+  return `${GRAPH_ORIGIN}/${GRAPH_VERSION}${path}`;
+}
+
 /** Read at most `limit` bytes; return null if the body exceeds it. */
 async function readCapped(res: Response, limit: number): Promise<string | null> {
   const declared = Number(res.headers.get('content-length') ?? '');
