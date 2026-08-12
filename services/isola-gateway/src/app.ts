@@ -51,6 +51,7 @@ import {
   createRateLimiter,
   projectPersonalLine,
   resolveSeat,
+  safeDecodeIdentifier,
   type PersonalLineSource,
   type RateLimiter,
 } from "./voice.js";
@@ -862,14 +863,17 @@ export function createGateway(deps: GatewayDeps): Gateway {
     // Rate limit AFTER authentication, so an unauthenticated flood cannot
     // exhaust a legitimate caller's budget, and keyed per seat so one tenant
     // cannot starve another.
-    if (!voiceRateLimiter.take(`${tenantId} ${memberId}`, now())) {
+    if (!voiceRateLimiter.take(`${tenantId}:${memberId}`, now())) {
       finish(429, "rate_limited", { error: "too many requests" });
       return;
     }
 
-    const seat = resolveSeat(config.voiceSeats.seats, tenantId, memberId);
+    // `resolveSeat` takes the whole parse RESULT and refuses anything whose
+    // `ok` is not literally true, so a partially-invalid mapping resolves
+    // nothing. Unknown seat, wrong tenant and rejected mapping are
+    // indistinguishable here, and the upstream is never called for any of them.
+    const seat = resolveSeat(config.voiceSeats, tenantId, memberId);
     if (seat === null) {
-      // Unknown seat, wrong tenant and unparsed mapping are indistinguishable.
       finish(404, "not_found", { error: "not found" });
       return;
     }
@@ -955,13 +959,23 @@ export function createGateway(deps: GatewayDeps): Gateway {
       const seatRoute =
         /^\/v1\/tenants\/([^/]+)\/members\/([^/]+)\/personal-line$/.exec(pathname);
       if (seatRoute !== null) {
-        if (method !== "GET" && method !== "HEAD") {
-          // Read-only: every unsafe method is refused before anything is read.
+        // GET only — the published contract is GET, so HEAD is refused too
+        // rather than silently taking the JSON response path. No method other
+        // than an authenticated GET can reach the upstream read.
+        if (method !== "GET") {
           fail(405, "method_not_allowed", "method not allowed");
           return;
         }
-        const tenantId = decodeURIComponent(seatRoute[1] ?? "");
-        const memberId = decodeURIComponent(seatRoute[2] ?? "");
+        // Decoding is guarded: `decodeURIComponent` throws URIError
+        // synchronously on malformed percent-encoding, which would escape the
+        // asynchronous handler's catch entirely. A bad identifier is the same
+        // 404 as an unknown route.
+        const tenantId = safeDecodeIdentifier(seatRoute[1] ?? "");
+        const memberId = safeDecodeIdentifier(seatRoute[2] ?? "");
+        if (tenantId === null || memberId === null) {
+          fail(404, "not_found", "not found");
+          return;
+        }
         void handlePersonalLine(req, res, correlationId, tenantId, memberId).catch(
           (err: unknown) => {
             logger.error({

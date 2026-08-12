@@ -9,10 +9,17 @@ import { describe, expect, it } from "vitest";
 
 import type { PersonalLineSource, VoiceSeat } from "../src/voice.js";
 import {
+  MAGNUS_FIELD_MAP,
+  MAGNUS_SIP_MODULE,
+  MAGNUS_SIP_READ_ACTION,
+  MAGNUS_SIP_SELECTOR_FIELD,
+  normaliseMagnusRow,
   parseVoiceSeats,
   projectPersonalLine,
   resolveSeat,
+  safeDecodeIdentifier,
   safeProvisioningError,
+  selectExactSeatRow,
 } from "../src/voice.js";
 import { redactSecret, redactSecrets } from "../src/redact-secret.js";
 import { createLogger } from "../src/log.js";
@@ -64,6 +71,20 @@ function hostileUpstream(overrides: Record<string, unknown> = {}): Record<string
 
 function stubSource(record: Record<string, unknown> | null): PersonalLineSource {
   return { fetchSeat: async (_seat: VoiceSeat) => record };
+}
+
+/** A source that records whether it was ever consulted. */
+function countingSource(record: Record<string, unknown> | null = null): PersonalLineSource & {
+  calls: number;
+} {
+  const source = {
+    calls: 0,
+    async fetchSeat(_seat: VoiceSeat) {
+      source.calls += 1;
+      return record;
+    },
+  };
+  return source;
 }
 
 const PATH = `/v1/tenants/${TENANT}/members/${MEMBER}/personal-line`;
@@ -158,30 +179,104 @@ describe("provisioning_error redaction", () => {
 // Seat mapping and scope
 // ---------------------------------------------------------------------------
 
-describe("seat mapping", () => {
-  it("fails closed on malformed JSON", () => {
-    const result = parseVoiceSeats("{not json");
-    expect(result.ok).toBe(false);
-    expect(result.seats).toEqual([]);
+/**
+ * BLOCKER 1. Validation is all-or-nothing: any invalid entry empties the whole
+ * usable list. The first revision returned `ok: false` while retaining the
+ * valid entries, and the request path read `.seats` directly — so a mapping
+ * advertised as failing closed still served seats.
+ */
+const INVALID_MAPPINGS: Array<[string, string | undefined]> = [
+  [
+    "duplicate (tenantId, memberId)",
+    JSON.stringify([
+      { tenantId: TENANT, memberId: MEMBER, magnusExtension: "9610" },
+      { tenantId: TENANT, memberId: MEMBER, magnusExtension: "9611" },
+    ]),
+  ],
+  [
+    "one valid entry plus one invalid entry",
+    JSON.stringify([
+      { tenantId: TENANT, memberId: MEMBER, magnusExtension: "9610" },
+      { tenantId: "t2", magnusExtension: "9611" },
+    ]),
+  ],
+  [
+    "one valid entry plus one duplicate",
+    JSON.stringify([
+      { tenantId: TENANT, memberId: MEMBER, magnusExtension: "9610" },
+      { tenantId: "t2", memberId: "m2", magnusExtension: "9612" },
+      { tenantId: "t2", memberId: "m2", magnusExtension: "9613" },
+    ]),
+  ],
+  [
+    "missing tenant",
+    JSON.stringify([{ memberId: MEMBER, magnusExtension: "9610" }]),
+  ],
+  [
+    "missing member",
+    JSON.stringify([{ tenantId: TENANT, magnusExtension: "9610" }]),
+  ],
+  [
+    "missing Magnus identifier",
+    JSON.stringify([{ tenantId: TENANT, memberId: MEMBER }]),
+  ],
+  ["malformed JSON", "{not json"],
+  ["non-array JSON", JSON.stringify({ tenantId: TENANT })],
+  ["empty mapping", undefined],
+];
+
+describe("seat mapping fails closed (blocker 1)", () => {
+  for (const [label, raw] of INVALID_MAPPINGS) {
+    it(`yields an empty usable seat list: ${label}`, () => {
+      const result = parseVoiceSeats(raw);
+      // Whatever `ok` says, nothing usable may survive.
+      expect(result.seats).toEqual([]);
+      expect(resolveSeat(result, TENANT, MEMBER)).toBeNull();
+    });
+  }
+
+  it("refuses to resolve against a result whose ok is not true, even if seats leak in", () => {
+    // Defensive: simulates a future caller reconstructing the result by hand.
+    const forged = {
+      ok: false,
+      errors: ["anything"],
+      seats: [{ tenantId: TENANT, memberId: MEMBER, magnusExtension: "9610" }],
+    };
+    expect(resolveSeat(forged, TENANT, MEMBER)).toBeNull();
   });
 
-  it("refuses an ambiguous (tenant, member) mapping", () => {
-    const dup = JSON.stringify([
-      { tenantId: TENANT, memberId: MEMBER, magnusExtension: "1" },
-      { tenantId: TENANT, memberId: MEMBER, magnusExtension: "2" },
-    ]);
-    const result = parseVoiceSeats(dup);
-    expect(result.ok).toBe(false);
-  });
-
-  it("resolves only an exact tenant AND member match", () => {
-    const seats = parseVoiceSeats(SEATS).seats;
-    expect(resolveSeat(seats, TENANT, MEMBER)?.magnusExtension).toBe("9610");
+  it("resolves only an exact tenant AND member match on a valid document", () => {
+    const parsed = parseVoiceSeats(SEATS);
+    expect(parsed.ok).toBe(true);
+    expect(resolveSeat(parsed, TENANT, MEMBER)?.magnusExtension).toBe("9610");
     // Right member, wrong tenant — the cross-tenant case.
-    expect(resolveSeat(seats, OTHER_TENANT, MEMBER)).toBeNull();
-    expect(resolveSeat(seats, TENANT, "member-nobody")).toBeNull();
-    expect(resolveSeat(seats, "", "")).toBeNull();
+    expect(resolveSeat(parsed, OTHER_TENANT, MEMBER)).toBeNull();
+    expect(resolveSeat(parsed, TENANT, "member-nobody")).toBeNull();
+    expect(resolveSeat(parsed, "", "")).toBeNull();
   });
+});
+
+describe("request-level: an invalid mapping 404s and never calls upstream (blocker 1)", () => {
+  for (const [label, raw] of INVALID_MAPPINGS) {
+    it(`${label} → 404, identical to an unknown route, upstream untouched`, async () => {
+      const source = countingSource(hostileUpstream());
+      const server = await startServer({
+        config: voiceEnv({ GATEWAY_VOICE_SEATS_JSON: raw }),
+        personalLineSource: source,
+      });
+      try {
+        const res = await get(server.url, PATH, VOICE_TOKEN);
+        const unknown = await get(server.url, "/v1/nothing-here", VOICE_TOKEN);
+        expect(res.status).toBe(404);
+        expect(res.json["outcome"]).toBe(unknown.json["outcome"]);
+        expect(res.json["error"]).toBe(unknown.json["error"]);
+        // The upstream must never be consulted for an unresolvable seat.
+        expect(source.calls).toBe(0);
+      } finally {
+        await server.close();
+      }
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -363,6 +458,219 @@ describe("HTTP", () => {
     } finally {
       await server.close();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BLOCKER 2 — the returned row must BE the requested seat
+// ---------------------------------------------------------------------------
+
+describe("upstream row binding (blocker 2)", () => {
+  const SELECTOR = MAGNUS_SIP_SELECTOR_FIELD;
+
+  it("uses the canonical live contract: sip / read / name", () => {
+    // Matches the proven client in artifacts/isola/engines/magnus.ts
+    // (findRowByField) and artifacts/isola/lib/magnus-voice.ts (findOneByField).
+    expect(MAGNUS_SIP_MODULE).toBe("sip");
+    expect(MAGNUS_SIP_READ_ACTION).toBe("read");
+    expect(SELECTOR).toBe("name");
+  });
+
+  it("returns null when the filter was ignored and the first row is someone else", () => {
+    const rows = [
+      { [SELECTOR]: "9999", state: "active" },
+      { [SELECTOR]: "8888", state: "active" },
+    ];
+    expect(selectExactSeatRow(rows, SELECTOR, "9610")).toBeNull();
+  });
+
+  it("finds the correct row when it appears after a mismatched first row", () => {
+    const rows = [
+      { [SELECTOR]: "9999", state: "other" },
+      { [SELECTOR]: "9610", state: "mine" },
+      { [SELECTOR]: "8888", state: "other" },
+    ];
+    expect(selectExactSeatRow(rows, SELECTOR, "9610")?.["state"]).toBe("mine");
+  });
+
+  it("returns null on zero matches", () => {
+    expect(selectExactSeatRow([{ [SELECTOR]: "1" }], SELECTOR, "9610")).toBeNull();
+    expect(selectExactSeatRow([], SELECTOR, "9610")).toBeNull();
+  });
+
+  it("returns null on duplicate exact matches rather than guessing", () => {
+    const rows = [
+      { [SELECTOR]: "9610", state: "a" },
+      { [SELECTOR]: "9610", state: "b" },
+    ];
+    expect(selectExactSeatRow(rows, SELECTOR, "9610")).toBeNull();
+  });
+
+  it("accepts a numeric identifier that stringifies to the requested seat", () => {
+    expect(selectExactSeatRow([{ [SELECTOR]: 9610 }], SELECTOR, "9610")).not.toBeNull();
+  });
+
+  it("does not match on a loose or padded identifier", () => {
+    expect(selectExactSeatRow([{ [SELECTOR]: " 9610" }], SELECTOR, "9610")).toBeNull();
+    expect(selectExactSeatRow([{ [SELECTOR]: "96100" }], SELECTOR, "9610")).toBeNull();
+  });
+
+  it("ignores non-object rows", () => {
+    expect(selectExactSeatRow(["9610", null, 42], SELECTOR, "9610")).toBeNull();
+  });
+
+  /**
+   * The live probe against voice00.epic.dm reported a `sip` row exposing only
+   * `id` and `name`. Only the proven mapping is applied; the other six fields
+   * are ABSENT rather than guessed from a same-named column.
+   */
+  describe("live-proven field mapping", () => {
+    it("maps only the proven column, sip.name -> sip_username", () => {
+      expect(MAGNUS_FIELD_MAP.map(([f]) => f)).toEqual(["sip_username"]);
+      const mapped = normaliseMagnusRow({ id: "17", name: "9610" });
+      expect(mapped["sip_username"]).toBe("9610");
+    });
+
+    it("leaves unproven fields absent rather than inventing them", () => {
+      const projected = projectPersonalLine(normaliseMagnusRow({ id: "17", name: "9610" }));
+      expect(Object.keys(projected)).toEqual(["sip_username"]);
+      expect(projected).not.toHaveProperty("state");
+      expect(projected).not.toHaveProperty("activation_state");
+    });
+
+    it("never emits a credential column carried through for redaction", () => {
+      const mapped = normaliseMagnusRow({
+        name: "9610",
+        secret: SIP_SECRET,
+        provisioning_error: `rejected ${SIP_SECRET}`,
+      });
+      // Carried on the intermediate record so the redactor can see it...
+      expect(mapped["secret"]).toBe(SIP_SECRET);
+      // ...but never projected, and scrubbed out of the diagnostic.
+      const projected = projectPersonalLine(mapped) as Record<string, unknown>;
+      expect(projected["secret"]).toBeUndefined();
+      expect(JSON.stringify(projected)).not.toContain(SIP_SECRET);
+      expect(projected["provisioning_error"]).toContain("[redacted]");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BLOCKER 4 — path decoding must never throw
+// ---------------------------------------------------------------------------
+
+describe("path identifier decoding (blocker 4)", () => {
+  it("rejects malformed percent-encoding instead of throwing", () => {
+    expect(safeDecodeIdentifier("%E0%A4%A")).toBeNull();
+    expect(safeDecodeIdentifier("%")).toBeNull();
+    expect(safeDecodeIdentifier("%ZZ")).toBeNull();
+  });
+
+  it("rejects encoded separators and control characters", () => {
+    expect(safeDecodeIdentifier("a%2Fb")).toBeNull(); // encoded slash
+    expect(safeDecodeIdentifier("a%5Cb")).toBeNull(); // encoded backslash
+    expect(safeDecodeIdentifier("a%00b")).toBeNull(); // NUL
+    expect(safeDecodeIdentifier("a%20b")).toBeNull(); // space
+    expect(safeDecodeIdentifier("")).toBeNull();
+  });
+
+  it("accepts ordinary opaque identifiers", () => {
+    expect(safeDecodeIdentifier("tenant-acme")).toBe("tenant-acme");
+    expect(safeDecodeIdentifier("8D3dp3z")).toBe("8D3dp3z");
+    expect(safeDecodeIdentifier("member%2Deric")).toBe("member-eric");
+  });
+
+  const BAD_PATHS: Array<[string, string]> = [
+    ["malformed percent sequence in tenant", "/v1/tenants/%E0%A4%A/members/m/personal-line"],
+    ["malformed percent sequence in member", "/v1/tenants/t/members/%E0%A4%A/personal-line"],
+    ["bare percent", "/v1/tenants/%/members/m/personal-line"],
+    ["encoded slash", "/v1/tenants/a%2Fb/members/m/personal-line"],
+    ["encoded NUL", "/v1/tenants/t/members/a%00b/personal-line"],
+  ];
+
+  for (const [label, path] of BAD_PATHS) {
+    it(`${label} → 404 and the service stays up`, async () => {
+      const source = countingSource(hostileUpstream());
+      const server = await startServer({
+        config: voiceEnv(),
+        personalLineSource: source,
+      });
+      try {
+        const res = await get(server.url, path, VOICE_TOKEN);
+        expect(res.status).toBe(404);
+        expect(source.calls).toBe(0);
+        // The handler survived: a normal request still works afterwards.
+        expect((await get(server.url, PATH, VOICE_TOKEN)).status).toBe(200);
+      } finally {
+        await server.close();
+      }
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// BLOCKER 5 — GET only
+// ---------------------------------------------------------------------------
+
+describe("HTTP method contract (blocker 5)", () => {
+  const REFUSED = ["HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+
+  for (const method of REFUSED) {
+    it(`${method} is refused 405 and never reaches the upstream`, async () => {
+      const source = countingSource(hostileUpstream());
+      const server = await startServer({
+        config: voiceEnv(),
+        personalLineSource: source,
+      });
+      try {
+        const res = await fetch(`${server.url}${PATH}`, {
+          method,
+          headers: { authorization: `Bearer ${VOICE_TOKEN}` },
+        });
+        expect(res.status).toBe(405);
+        expect(source.calls).toBe(0);
+      } finally {
+        await server.close();
+      }
+    });
+  }
+
+  it("GET is the only method that performs a read", async () => {
+    const source = countingSource(hostileUpstream());
+    const server = await startServer({ config: voiceEnv(), personalLineSource: source });
+    try {
+      expect((await get(server.url, PATH, VOICE_TOKEN)).status).toBe(200);
+      expect(source.calls).toBe(1);
+    } finally {
+      await server.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Credential-shaped values after punctuation (Codex P1)
+// ---------------------------------------------------------------------------
+
+describe("credential detection is not defeated by punctuation", () => {
+  const CASES = [
+    'rejected "csc:user:password@host"',
+    "invalid (https://user:password@host)",
+    "[csc://user:password@host]",
+    "error:csc:user:password@host",
+    "see <sip://alice:hunter2000@voice00.epic.dm>",
+    "payload=data:image/png;base64,AAAA",
+  ];
+
+  for (const text of CASES) {
+    it(`withholds: ${text.slice(0, 34)}…`, () => {
+      expect(safeProvisioningError(text, [])).toBe("provisioning failed; details withheld");
+    });
+  }
+
+  it("still lets an ordinary diagnostic through", () => {
+    expect(safeProvisioningError("DID not available (region: DM)", [])).toBe(
+      "DID not available (region: DM)",
+    );
   });
 });
 
