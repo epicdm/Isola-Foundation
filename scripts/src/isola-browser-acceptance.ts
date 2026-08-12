@@ -135,18 +135,44 @@ function hashFile(file: string) {
  * customer, and neither does text present only in the DOM.
  */
 const VISIBLE_TEXT_FN = `
-  function __isolaVisibleText(sel) {
-    const el = document.querySelector(sel);
-    if (!el) return { found: false, visible: false, text: null };
+  function __isolaIsVisible(el) {
+    if (!el) return false;
     const style = window.getComputedStyle(el);
-    const rects = el.getClientRects();
-    const visible =
+    return (
       style.display !== 'none' &&
       style.visibility !== 'hidden' &&
       Number(style.opacity) !== 0 &&
-      rects.length > 0 &&
-      el.offsetParent !== null;
-    return { found: true, visible, text: el.textContent };
+      el.getClientRects().length > 0 &&
+      el.offsetParent !== null
+    );
+  }
+  function __isolaVisibleText(sel) {
+    const el = document.querySelector(sel);
+    if (!el) return { found: false, visible: false, text: null };
+    return { found: true, visible: __isolaIsVisible(el), text: el.textContent };
+  }
+  // Every message the CUSTOMER can actually see, and only those. Shared by the
+  // pre- and post-reply reads: a weaker test on either side would let a reply
+  // hidden by visibility, opacity or zero size count as delivered, which is
+  // precisely the claim check 16 exists to refuse.
+  function __isolaVisibleMessages() {
+    const out = [];
+    document.querySelectorAll('[data-testid^="isola-message-"][data-sender-kind]').forEach((li) => {
+      if (!__isolaIsVisible(li)) return;
+      const id = (li.getAttribute('data-testid') || '').replace('isola-message-', '');
+      const text = li.querySelector('[data-testid="isola-message-' + id + '-text"]');
+      const label = li.querySelector('[data-testid="isola-message-' + id + '-sender-label"]');
+      // The text itself must be visible too, not merely inside a visible row.
+      if (!__isolaIsVisible(text)) return;
+      const kind = li.getAttribute('data-sender-kind');
+      out.push({
+        text: text.textContent || '',
+        senderLabel: label ? (label.textContent || '').trim() : '',
+        senderKind: kind === 'human' || kind === 'ai' || kind === 'customer' ? kind : 'unknown',
+        messageRef: id,
+      });
+    });
+    return out;
   }
 `;
 
@@ -441,23 +467,10 @@ export async function runBrowserChecks(input: BrowserRunInput): Promise<BrowserR
       const read = await b.evaluate<{ ref: string | null; replies: Check16Evidence["renderedReplies"] }>(
         `(() => { ${VISIBLE_TEXT_FN}
           const refEl = __isolaVisibleText('[data-testid="isola-conversation-ref"]');
-          const out = [];
-          document.querySelectorAll('[data-testid^="isola-message-"][data-sender-kind]').forEach((li) => {
-            const id = (li.getAttribute('data-testid') || '').replace('isola-message-', '');
-            const text = li.querySelector('[data-testid="isola-message-' + id + '-text"]');
-            const label = li.querySelector('[data-testid="isola-message-' + id + '-sender-label"]');
-            const kind = li.getAttribute('data-sender-kind');
-            // Only messages the CUSTOMER can actually see count as delivered.
-            const style = window.getComputedStyle(li);
-            if (style.display === 'none' || style.visibility === 'hidden' || li.offsetParent === null) return;
-            out.push({
-              text: text ? text.textContent : '',
-              senderLabel: label ? (label.textContent || '').trim() : '',
-              senderKind: kind === 'human' || kind === 'ai' ? kind : 'unknown',
-              messageRef: id,
-            });
-          });
-          return { ref: refEl.found && refEl.visible ? (refEl.text || '').trim() : null, replies: out };
+          return {
+            ref: refEl.found && refEl.visible ? (refEl.text || '').trim() : null,
+            replies: __isolaVisibleMessages(),
+          };
         })()`,
       );
       observedConversationRef = read.ref;
@@ -496,23 +509,7 @@ export async function runBrowserChecks(input: BrowserRunInput): Promise<BrowserR
       await waitForTerminalState(b);
       await new Promise((r) => setTimeout(r, 6000));
       const after = await b.evaluate<Check16Evidence["renderedReplies"]>(
-        `(() => {
-          const out = [];
-          document.querySelectorAll('[data-testid^="isola-message-"][data-sender-kind]').forEach((li) => {
-            const id = (li.getAttribute('data-testid') || '').replace('isola-message-', '');
-            const text = li.querySelector('[data-testid="isola-message-' + id + '-text"]');
-            const label = li.querySelector('[data-testid="isola-message-' + id + '-sender-label"]');
-            const kind = li.getAttribute('data-sender-kind');
-            if (li.offsetParent === null) return;
-            out.push({
-              text: text ? text.textContent : '',
-              senderLabel: label ? (label.textContent || '').trim() : '',
-              senderKind: kind === 'human' || kind === 'ai' ? kind : 'unknown',
-              messageRef: id,
-            });
-          });
-          return out;
-        })()`,
+        `(() => { ${VISIBLE_TEXT_FN} return __isolaVisibleMessages(); })()`,
       );
       check16Evidence.renderedReplies = after;
       await shot(conversationRoute!.route, "Customer conversation surface after the operator reply");
