@@ -1,0 +1,22 @@
+{
+  "name": "meta-egress-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The dedicated Meta egress boundary. The only holder of Meta credentials, and the only component permitted to reach Graph. Callers name an operation id; every method, path, version, query parameter and returned field is fixed server-side. No generic proxy, no caller-supplied URL, header, query or token. NOT the Chatwoot-to-Paperclip conversation gateway.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/server.js",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "~5.9.3",
+    "vitest": "^2.1.9"
+  }
+}
