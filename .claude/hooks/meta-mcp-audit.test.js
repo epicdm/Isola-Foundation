@@ -178,6 +178,63 @@ test('a clean key name is withheld even when nothing else is wrong', () => {
   assert.ok(!res.stderrOut.includes('harmless_looking_key'));
 });
 
+// ---- round-10 F5: traversal bounds must fail CLOSED ---------------------
+// walk() used to return silently past its depth cap, so anything below it was
+// treated as "nothing dangerous here" — the opposite of the discipline applied
+// everywhere else, where undecidable input is refused.
+function nest(depth, leaf) {
+  let node = leaf;
+  for (let i = 0; i < depth; i++) node = { child: node };
+  return node;
+}
+
+test('dangerous content immediately beyond the depth limit is refused', () => {
+  const res = runOnce({ action: 'search_docs', query: nest(13, { access_token: SENTINEL }) },
+    'mcp__meta_developer_tools__devtools_discovery');
+  assert.strictEqual(res.verdict, 'DENY');
+  assert.match(res.logText, /DENY:meta-mcp-uninspectable-input/);
+});
+
+test('a nested action directive beyond the limit is refused', () => {
+  const res = runOnce({ action: 'search_docs', query: nest(15, { action: 'subscribe' }) },
+    'mcp__meta_developer_tools__devtools_discovery');
+  assert.strictEqual(res.verdict, 'DENY');
+});
+
+test('depth exhaustion alone fails closed, with no dangerous marker present', () => {
+  const res = runOnce({ action: 'search_docs', query: nest(20, { harmless: 'text' }) },
+    'mcp__meta_developer_tools__devtools_discovery');
+  assert.strictEqual(res.verdict, 'DENY', 'exceeding the bound is itself the refusal');
+  assert.match(res.logText, /DENY:meta-mcp-uninspectable-input/);
+});
+
+test('traversal-budget exhaustion fails closed', () => {
+  // Wide rather than deep: thousands of shallow keys exhaust the node budget.
+  const wide = {};
+  for (let i = 0; i < 6000; i++) wide['k' + i] = 'v';
+  const res = runOnce({ action: 'search_docs', query: wide },
+    'mcp__meta_developer_tools__devtools_discovery');
+  assert.strictEqual(res.verdict, 'DENY');
+});
+
+test('a normal nested request below both bounds still passes', () => {
+  const res = runOnce({ action: 'search_docs', query: 'whatsapp webhooks' },
+    'mcp__meta_developer_tools__devtools_discovery');
+  assert.strictEqual(res.verdict, 'ALLOW');
+  assert.match(res.logText, /action=search_docs/);
+});
+
+test('over-depth refusal echoes no part of the nested payload', () => {
+  const res = runOnce({ action: 'search_docs', query: nest(13, { access_token: SENTINEL, [SENTINEL_KEY]: 'x' }) },
+    'mcp__meta_developer_tools__devtools_discovery');
+  assert.strictEqual(res.verdict, 'DENY');
+  assert.ok(!res.stderrOut.includes(SENTINEL), 'nested value must not reach stderr');
+  assert.ok(!res.stderrOut.includes(SENTINEL_KEY), 'nested key must not reach stderr');
+  assert.ok(!res.logText.includes(SENTINEL), 'nested value must not be persisted');
+  assert.ok(!res.logText.includes(SENTINEL_KEY), 'nested key must not be persisted');
+  assert.strictEqual(res.logLines.length, 1);
+});
+
 test('every audit line is exactly one line, across a mixed sequence', () => {
   for (const input of [
     { action: 'basic_settings', app_id: '1' },

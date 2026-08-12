@@ -206,19 +206,43 @@ function shortToolName(toolName) {
 }
 
 /** Walk every nested key/value so hidden actions and credentials cannot slip past. */
-function walk(node, fn, depth = 0, path = '') {
-  if (depth > 12 || node === null || node === undefined) return;
+/**
+ * Traversal bounds. Round 10, F5: the depth cap used to `return` silently, so
+ * everything below it was treated as "nothing dangerous here" — the opposite of
+ * the discipline applied everywhere else in this policy, where input that
+ * cannot be decided is refused. A credential and a nested `action` placed at
+ * depth 13 were simply not seen.
+ *
+ * The bounds stay (unbounded recursion over attacker-shaped input is its own
+ * problem). Only the verdict changes: hitting a bound records that inspection
+ * was INCOMPLETE, and an incomplete inspection denies.
+ */
+const WALK_MAX_DEPTH = 12;
+const WALK_MAX_NODES = 5000;
+
+function walk(node, fn, depth = 0, path = '', budget = null) {
+  const b = budget || { nodes: 0, truncated: false };
+  if (node === null || node === undefined) return b;
+  if (depth > WALK_MAX_DEPTH) {
+    b.truncated = true;
+    return b;
+  }
+  if (++b.nodes > WALK_MAX_NODES) {
+    b.truncated = true;
+    return b;
+  }
   if (Array.isArray(node)) {
-    node.forEach((v, i) => walk(v, fn, depth + 1, `${path}[${i}]`));
-    return;
+    node.forEach((v, i) => walk(v, fn, depth + 1, `${path}[${i}]`, b));
+    return b;
   }
   if (typeof node === 'object') {
     for (const [k, v] of Object.entries(node)) {
       fn(k, v, path ? `${path}.${k}` : k);
-      walk(v, fn, depth + 1, path ? `${path}.${k}` : k);
+      walk(v, fn, depth + 1, path ? `${path}.${k}` : k, b);
     }
-    return;
+    return b;
   }
+  return b;
 }
 
 /**
@@ -240,13 +264,24 @@ function evaluateMetaMcp(toolName, toolInput) {
 
   // --- credential material in input, checked before anything else ----------
   let credentialHit = null;
-  walk(ti, (k, v, p) => {
+  const budget = walk(ti, (k, v, p) => {
     if (credentialHit) return;
     if (typeof v === 'string') {
       if (CREDENTIAL_KEY_RE.test(k) && v.trim() !== '') credentialHit = p;
       else if (CREDENTIAL_VALUE_RES.some((re) => re.test(v))) credentialHit = p;
     }
   });
+  // An inspection that could not finish is not an inspection that found
+  // nothing. Checked before the credential result is trusted, because the
+  // credential walk is what got truncated.
+  if (budget && budget.truncated) {
+    return deny(short, null, 'meta-mcp-uninspectable-input',
+      'This tool input is nested more deeply, or is larger, than the policy will traverse, so it could not be fully ' +
+        'inspected. Reaching a traversal bound means the contents below it are unknown — not that they are safe. ' +
+        'No part of the payload is echoed here.',
+      'send a flat input containing only the documented fields for this action.');
+  }
+
   if (credentialHit) {
     return deny(short, null, 'meta-mcp-credential-input',
       `An input field ${keyRef(credentialHit)} carries credential-shaped material. Credentials must never be passed through an agent session. Neither the field path nor its value is echoed or recorded — a path can itself carry the secret.`,
