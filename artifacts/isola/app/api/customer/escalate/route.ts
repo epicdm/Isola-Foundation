@@ -215,7 +215,7 @@ export async function POST(req: NextRequest) {
     const note = summary
       ? `🙋 Customer requested a human — escalate_to_human invoked.\n\n${summary}`
       : '🙋 Customer requested a human — escalate_to_human invoked.';
-    await surfaceHandoff(
+    const surface = await surfaceHandoff(
       binding.base_url,
       binding.account_id,
       conversation.chatwoot_conversation_id,
@@ -223,19 +223,52 @@ export async function POST(req: NextRequest) {
       note,
     );
 
-    // Assignment + context publication completed → HUMAN_OWNED. Replies stay
-    // suppressed either way; this records that a person can now actually see
-    // the conversation, which is the precondition a later handback
-    // reconciles against.
-    await confirmHumanOwnership({
-      tenantId:       conversation.tenant_id,
-      conversationId: conversation.id,
-      operationId:    `${resolved.correlationId}:assigned`,
-      episode:        transition.episode,
-      reason:         'chatwoot_assignment_and_context_published',
-      actorRef:       'clawith:escalate_to_human',
-      correlationId,
-    });
+    // Context publication completed → HUMAN_OWNED. Replies stay suppressed
+    // either way (HUMAN_REQUESTED is excluded from AI_REPLY_OWNERSHIP_STATES
+    // too); this records that a person can now actually see the conversation,
+    // which is the precondition a later handback reconciles against.
+    //
+    // GATED on the surface actually landing. Previously this ran
+    // unconditionally because surfaceHandoff returned void and swallowed its
+    // own failures, so Foundation recorded HUMAN_OWNED even when nothing
+    // reached Chatwoot. Same posture as the gateway's `handoff_blocked`:
+    // telling a customer their conversation is with a team member when it is
+    // not is a lie they cannot check.
+    //
+    // The reason no longer says "assignment". Foundation issues NO Chatwoot
+    // assignment call — the team assignment seen in production is Chatwoot
+    // automation rule #3 reacting to the status reopen. Claiming an assignment
+    // we do not perform is what made the ownership audit unfalsifiable.
+    // Historical rows carry `chatwoot_assignment_and_context_published`;
+    // readers must accept both.
+    if (surface.surfaced) {
+      await confirmHumanOwnership({
+        tenantId:       conversation.tenant_id,
+        conversationId: conversation.id,
+        operationId:    `${resolved.correlationId}:assigned`,
+        episode:        transition.episode,
+        reason:         'chatwoot_context_published',
+        actorRef:       'clawith:escalate_to_human',
+        correlationId,
+      });
+    } else {
+      // Fail closed and loud. Ownership stays at HUMAN_REQUESTED: the AI is
+      // still silent, but nothing claims a person is on it.
+      await audit({
+        tenantId:  conversation.tenant_id,
+        actorId:   'clawith:escalate_to_human',
+        action:    'escalate_to_human.surface_failed',
+        entity:    'conversation',
+        entityId:  conversation.id,
+        requestId: correlationId,
+        meta:      {
+          note_posted:   surface.notePosted,
+          label_applied: surface.labelApplied,
+          status_opened: surface.statusOpened,
+          episode:       transition.episode,
+        },
+      });
+    }
   }
 
   await audit({

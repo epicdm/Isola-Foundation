@@ -176,3 +176,87 @@ describe('surfaceHandoff — duplicate suppression when the label was never writ
     expect(calls.filter((c) => c.includes('/messages'))).toHaveLength(0);
   });
 });
+
+/**
+ * E3, REWRITTEN.
+ *
+ * The original E3 ("assignment fails → no customer message, HUMAN_REQUESTED
+ * retained") could not fail: it assumed Foundation performs the Chatwoot
+ * assignment. Foundation issues no assignment call at all — rule #3 does it —
+ * so E3 passed whether or not anything worked. See
+ * `defect-handoff-assignment-performed-by-chatwoot-automation-not-foundation-2026-08-13`.
+ *
+ * The real failure mode is: NOTHING REACHES CHATWOOT AND FOUNDATION SAYS IT DID.
+ * These tests target that, at the seam where it is detectable.
+ */
+describe('surfaceHandoff — E3 rewritten: reports what it actually achieved', () => {
+  it('returns surfaced=false when the note, the label AND the status reopen all fail', async () => {
+    (global.fetch as any).mockImplementation((url: string, init?: any) => {
+      const method = init?.method ?? 'GET';
+      // Label GET succeeds so we get past the fast-path check with an empty set.
+      if (url.endsWith('/labels') && method === 'GET') return Promise.resolve(jsonResponse({ payload: [] }));
+      // Everything that WRITES fails.
+      return Promise.resolve(jsonResponse({ error: 'boom' }, false));
+    });
+
+    const result = await surfaceHandoff(BASE_URL, ACCOUNT_ID, CW_CONV_ID, BOT_TOKEN);
+
+    expect(result.notePosted).toBe(false);
+    expect(result.labelApplied).toBe(false);
+    expect(result.statusOpened).toBe(false);
+    expect(result.alreadySurfaced).toBe(false);
+    // The assertion that matters: the caller must be able to see that no person
+    // can see this conversation, so it does not record HUMAN_OWNED.
+    expect(result.surfaced).toBe(false);
+  });
+
+  it('returns surfaced=true when only the private note lands', async () => {
+    (global.fetch as any).mockImplementation((url: string, init?: any) => {
+      const method = init?.method ?? 'GET';
+      if (url.endsWith('/labels') && method === 'GET') return Promise.resolve(jsonResponse({ payload: [] }));
+      if (url.endsWith('/messages') && method === 'POST') return Promise.resolve(jsonResponse({}));
+      return Promise.resolve(jsonResponse({ error: 'boom' }, false));
+    });
+
+    const result = await surfaceHandoff(BASE_URL, ACCOUNT_ID, CW_CONV_ID, BOT_TOKEN);
+
+    expect(result.notePosted).toBe(true);
+    expect(result.labelApplied).toBe(false);
+    expect(result.surfaced).toBe(true);
+  });
+
+  it('reports alreadySurfaced (still visible) when the label fast path matches', async () => {
+    (global.fetch as any).mockImplementation((url: string, init?: any) => {
+      const method = init?.method ?? 'GET';
+      if (url.endsWith('/labels') && method === 'GET') {
+        return Promise.resolve(jsonResponse({ payload: [HANDOFF_LABEL] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const result = await surfaceHandoff(BASE_URL, ACCOUNT_ID, CW_CONV_ID, BOT_TOKEN);
+
+    expect(result.alreadySurfaced).toBe(true);
+    expect(result.surfaced).toBe(true);
+    // Nothing was written this time round — the prior surface is what is visible.
+    expect(result.notePosted).toBe(false);
+  });
+
+  it('does not claim an assignment: no field asserts one, because Foundation never assigns', async () => {
+    (global.fetch as any).mockImplementation((url: string, init?: any) => {
+      const method = init?.method ?? 'GET';
+      if (url.endsWith('/labels') && method === 'GET') return Promise.resolve(jsonResponse({ payload: [] }));
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const result = await surfaceHandoff(BASE_URL, ACCOUNT_ID, CW_CONV_ID, BOT_TOKEN);
+
+    expect(Object.keys(result).sort()).toEqual(
+      ['alreadySurfaced', 'labelApplied', 'notePosted', 'statusOpened', 'surfaced'],
+    );
+    expect(result).not.toHaveProperty('assigned');
+    // And no assignment endpoint was ever called.
+    const calls = (global.fetch as any).mock.calls.map((c: any[]) => String(c[0]));
+    expect(calls.filter((u: string) => u.includes('/assignments'))).toHaveLength(0);
+  });
+});

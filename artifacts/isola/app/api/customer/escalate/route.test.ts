@@ -106,6 +106,12 @@ beforeEach(() => {
   prismaMock.chatwootBinding.findUnique.mockResolvedValue(bindingRow());
   prismaMock.conversation.findUnique.mockResolvedValue(conversationRow());
   prismaMock.conversation.update.mockResolvedValue({});
+  // surfaceHandoff now REPORTS what it achieved (it used to return void and
+  // swallow its failures). Default: the surface landed.
+  surfaceHandoffMock.mockResolvedValue({
+    surfaced: true, alreadySurfaced: false,
+    notePosted: true, labelApplied: true, statusOpened: true,
+  });
   // Per-agent ClawithBinding lookup — the "current" clawith_agent_id for
   // bindingRow().agent_id. Tests that want the tenant-level fallback path
   // clear this and set findFirst instead.
@@ -454,5 +460,76 @@ describe('POST /api/customer/escalate — idempotency (repeat calls)', () => {
     const res = await POST(req({ conversation_ref: REF }));
     expect(res.status).toBe(409);
     expect(surfaceHandoffMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * E3, REWRITTEN — route half.
+ *
+ * The original E3 assumed Foundation performs the Chatwoot assignment and can
+ * therefore fail at it. It does not: Foundation issues no assignment call, and
+ * the team assignment seen in production is Chatwoot automation rule #3. So E3
+ * passed whether or not anything worked.
+ *
+ * The real failure mode is: NOTHING REACHES CHATWOOT AND FOUNDATION RECORDS
+ * HUMAN_OWNED ANYWAY. That is what these assert.
+ */
+describe('E3 rewritten — ownership is not advanced when the handoff never surfaced', () => {
+  function surfaceFailed() {
+    surfaceHandoffMock.mockResolvedValue({
+      surfaced: false, alreadySurfaced: false,
+      notePosted: false, labelApplied: false, statusOpened: false,
+    });
+  }
+
+  it('does NOT record HUMAN_OWNED when note, label and reopen all failed', async () => {
+    surfaceFailed();
+    await POST(req({ conversation_ref: REF }));
+
+    expect(surfaceHandoffMock).toHaveBeenCalled();
+    // The assertion the old E3 could never make.
+    expect(confirmHumanOwnershipMock).not.toHaveBeenCalled();
+  });
+
+  it('records escalate_to_human.surface_failed with which parts failed', async () => {
+    surfaceFailed();
+    await POST(req({ conversation_ref: REF }));
+
+    const failures = auditMock.mock.calls
+      .map((c: any[]) => c[0])
+      .filter((a: any) => a?.action === 'escalate_to_human.surface_failed');
+    expect(failures).toHaveLength(1);
+    expect(failures[0].meta).toMatchObject({
+      note_posted: false, label_applied: false, status_opened: false,
+    });
+  });
+
+  it('leaves ownership at HUMAN_REQUESTED — the AI stays silent, but nothing claims a person is on it', async () => {
+    surfaceFailed();
+    await POST(req({ conversation_ref: REF }));
+
+    // requestHumanOwnership ran (HUMAN_REQUESTED); confirm did not.
+    expect(requestHumanOwnershipMock).toHaveBeenCalled();
+    expect(confirmHumanOwnershipMock).not.toHaveBeenCalled();
+  });
+
+  it('still records HUMAN_OWNED on the normal path, with a reason that does not claim an assignment', async () => {
+    await POST(req({ conversation_ref: REF }));
+
+    expect(confirmHumanOwnershipMock).toHaveBeenCalledTimes(1);
+    const arg = confirmHumanOwnershipMock.mock.calls[0][0];
+    expect(arg.reason).toBe('chatwoot_context_published');
+    // Foundation never assigns; the reason must not say it did.
+    expect(arg.reason).not.toContain('assignment');
+  });
+
+  it('records HUMAN_OWNED when a prior handoff was already surfaced', async () => {
+    surfaceHandoffMock.mockResolvedValue({
+      surfaced: true, alreadySurfaced: true,
+      notePosted: false, labelApplied: false, statusOpened: false,
+    });
+    await POST(req({ conversation_ref: REF }));
+
+    expect(confirmHumanOwnershipMock).toHaveBeenCalledTimes(1);
   });
 });
