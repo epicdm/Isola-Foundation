@@ -523,6 +523,38 @@ describe('E3 rewritten — ownership is not advanced when the handoff never surf
     expect(arg.reason).not.toContain('assignment');
   });
 
+  it('RECOVERS a conversation stranded at HUMAN_REQUESTED by a previously failed surface', async () => {
+    // First escalation opened the episode but its surfacing failed, so the
+    // conversation sits at HUMAN_REQUESTED. requestHumanOwnership cannot
+    // re-enter (allowedFrom is AI_OWNED/AI_RESUMED), so it refuses — and
+    // without the recovery path this call would skip surfacing forever,
+    // leaving the conversation silent, unsurfaced and unreachable.
+    requestHumanOwnershipMock.mockResolvedValue({
+      ok: false, status: 'invalid_source_state', state: 'HUMAN_REQUESTED', episode: 1,
+      operationId: 'corr-1', transitionId: null,
+    });
+
+    await POST(req({ conversation_ref: REF }));
+
+    expect(surfaceHandoffMock).toHaveBeenCalled();
+    // Surfacing succeeds this time (default mock) → ownership finally advances.
+    expect(confirmHumanOwnershipMock).toHaveBeenCalledTimes(1);
+    expect(confirmHumanOwnershipMock.mock.calls[0][0].episode).toBe(1);
+  });
+
+  it('does NOT re-surface a conversation already confirmed HUMAN_OWNED', async () => {
+    requestHumanOwnershipMock.mockResolvedValue({
+      ok: false, status: 'invalid_source_state', state: 'HUMAN_OWNED', episode: 1,
+      operationId: 'corr-1', transitionId: null,
+    });
+
+    await POST(req({ conversation_ref: REF }));
+
+    // Already owned by a human — nothing to recover, nothing to re-post.
+    expect(surfaceHandoffMock).not.toHaveBeenCalled();
+    expect(confirmHumanOwnershipMock).not.toHaveBeenCalled();
+  });
+
   it('records HUMAN_OWNED when a prior handoff was already surfaced', async () => {
     surfaceHandoffMock.mockResolvedValue({
       surfaced: true, alreadySurfaced: true,

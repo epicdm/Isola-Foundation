@@ -210,8 +210,32 @@ export async function POST(req: NextRequest) {
   }
   const alreadyEscalated = transition.status !== 'applied';
 
-  // ── 2. Surface into Chatwoot — ONLY on the winning claim ─────────────────
-  if (!alreadyEscalated) {
+  // RECOVERY PATH. Gating the HUMAN_OWNED confirmation on the surface actually
+  // landing (below) introduced a way to strand a conversation: if the first
+  // escalation's surfacing failed, the conversation sits at HUMAN_REQUESTED,
+  // and `requestHumanOwnership` cannot re-enter it because its `allowedFrom` is
+  // ['AI_OWNED', 'AI_RESUMED']. A retry would be refused, read as
+  // `alreadyEscalated`, and skip surfacing forever — silent, unsurfaced, and
+  // unreachable. So: surface whenever the claim was won OR the conversation is
+  // sitting in HUMAN_REQUESTED with no confirmation.
+  //
+  // Safe to re-run: surfaceHandoff is idempotent (label fast path, then a
+  // note-presence check), and returns alreadySurfaced=true rather than posting
+  // a second note. `transition.state` is documented as the state AFTER the
+  // call, unchanged when not applied, and `episode` is populated on refusal.
+  // Keyed on `ok === false` (REFUSED), not merely "not applied". A replay of
+  // the same operation returns status 'duplicate' with ok=true and must NOT
+  // re-surface — that is the idempotency contract, and re-posting there would
+  // reintroduce the duplicate-note P1. A refusal is different: it means a
+  // DIFFERENT operation is being turned away because the conversation is
+  // already HUMAN_REQUESTED, which is exactly the stranded case. Refs are
+  // minted per turn, so the customer's next message produces a new ref, a
+  // refusal, and therefore a recovery attempt.
+  const needsSurfacing =
+    !alreadyEscalated || (!transition.ok && transition.state === 'HUMAN_REQUESTED');
+
+  // ── 2. Surface into Chatwoot — on the winning claim, or to recover ────────
+  if (needsSurfacing) {
     const note = summary
       ? `🙋 Customer requested a human — escalate_to_human invoked.\n\n${summary}`
       : '🙋 Customer requested a human — escalate_to_human invoked.';
