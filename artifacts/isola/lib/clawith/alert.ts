@@ -43,7 +43,16 @@ import type { ClawithFailure, ClawithFailureKind } from './errors';
  *  (lib/clawith/circuit-breaker.ts) immediately, and every occurrence is
  *  flagged P0 in the audit row so an operator query/dashboard can filter to
  *  it without waiting on a second failure. */
-const P0_KINDS: ReadonlySet<ClawithFailureKind> = new Set<ClawithFailureKind>(['payment_required']);
+const P0_KINDS: ReadonlySet<ClawithFailureKind> = new Set<ClawithFailureKind>([
+  'payment_required',
+  // `provider_error_leaked` is P0 for a stronger reason than payment_required:
+  // it is the only kind that describes text which ALREADY REACHED, or came one
+  // gate away from reaching, a customer. A 402 that fails closed costs a reply;
+  // a leaked provider error costs trust and cannot be recalled. Observed live
+  // on 2026-08-13 (Chatwoot conv 233, msg 2784) — a raw `HTTP 402` body and an
+  // internal run id delivered to a customer as an agent reply.
+  'provider_error_leaked',
+]);
 
 /** Additive, default-empty — mirrors the `FOUNDATION_STAFF_CHAT_AGENT_IDS`
  *  / `AI_LOOP_ENABLED` env-gate pattern already used for governance-
