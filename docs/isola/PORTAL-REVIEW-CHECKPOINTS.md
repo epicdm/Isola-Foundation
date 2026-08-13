@@ -58,7 +58,7 @@ No calendar dates. Each trigger is a state condition that must be true first.
 | # | Checkpoint | Earliest trigger condition (date-independent) | Duration | Who attends |
 |---|---|---|---|---|
 | **1** | Sign-in and company setup | The WS3 Apptension fork boots on the pinned commit **and** a public domain is attached **and** invite gating is closed in `UserSignupSerializer.validate()` **and** the social-auth pipeline **and** transactional email delivers a verification link | 25 min | **Phillip (Owner — rules)** · Isola engineering lead (drives the screen) · scribe (records to Port in-session) |
-| **2** | Dashboard and provisioning | Checkpoint 1 accepted **and** provisioning writes real IDs the portal can read back **and** NocoBase is administrable (root bootstrap + domain) for the operator half | 25 min | Phillip (Owner) · engineering lead · scribe |
+| **2** | Home (the dashboard) and provisioning | Checkpoint 1 accepted **and** provisioning writes real IDs the portal can read back **and** NocoBase is administrable (root bootstrap + domain) for the operator half | 25 min | Phillip (Owner) · engineering lead · scribe |
 | **3** | My AI Company and employee profile | Checkpoint 2 accepted **and** the PUBLIC Front Desk employee for a *synthetic* tenant renders in the portal from Paperclip truth (not a fixture) | 20 min | Phillip (Owner) · engineering lead · scribe |
 | **4** | Test Agent and Open Inbox | Checkpoint 3 accepted **and** the Test Agent control creates a real Chatwoot conversation **and** the PUBLIC employee has been invoked end to end at least once | 30 min | Phillip (Owner) · engineering lead · scribe |
 | **5** | Human takeover and handback | Chatwoot account 3 / inbox 4 / AgentBot 1 reachable — **true today** | 30 min | Phillip (Owner) · engineering lead · scribe |
@@ -179,7 +179,7 @@ disconnected/reconnected during controlled testing without causing a customer ou
 | Any pricing page, plan selector, card form or checkout | **Payments are deferred until the MVP is accepted** (ratified). The MVP entitlement rule is `VERIFIED_SIGNUP + PILOT_APPROVED → PROVISION`. |
 | Free-trial or subscription copy | The Stripe subscription signal is deliberately disabled (`STRIPE_CHECKS_ENABLED=False`). Surviving trial copy is upstream boilerplate text — a copy issue, not a commercial offer. |
 | Open self-serve signup | Invite/allowlist gating is mandatory until payment, rate limiting and abuse controls are live. The refusal **is** the feature. |
-| The dashboard, AI Company, Test Agent, Open Inbox | Checkpoints 2–4. The walkthrough stops at company setup on purpose. |
+| Home (the dashboard), AI Company, Test Agent, Open Inbox | Checkpoints 2–4. The walkthrough stops at company setup on purpose. |
 | Social login providers | Not in scope; the social-auth pipeline is being closed *against* signup, not opened. |
 | Any EPIC/operator screen | NocoBase is the operator control plane and is never the customer's UI (ratified). |
 | Apptension boilerplate demo content (CRUD demo items, sample pages) | Upstream fork residue. Log as `idea` (cleanup), never as a defect against the Isola journey. |
@@ -230,12 +230,12 @@ the operator in Checkpoint 2.
 
 ---
 
-## 4. Checkpoint 2 — Dashboard and provisioning
+## 4. Checkpoint 2 — Home (the dashboard) and provisioning
 
 ### What Phillip sees
 
 1. Driver signs in as synthetic tenant A (state carried from Checkpoint 1).
-2. The portal lands on the dashboard and shows **provisioning in progress** with a truthful state — not a fake progress bar.
+2. The portal lands on the dashboard — **the sidebar entry is labelled “Home”, not “Dashboard”** — and shows **provisioning in progress** with a truthful state — not a fake progress bar.
 3. Driver refreshes mid-provisioning. The state advances or holds; it never resets and never duplicates.
 4. Driver triggers the retry/refresh control once. Phillip sees a retry return the **existing** resources rather than create a second set.
 5. Provisioning completes. The dashboard shows the **real** identifiers it created — company, employee, workspace — not placeholders.
