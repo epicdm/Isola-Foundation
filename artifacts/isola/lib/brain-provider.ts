@@ -39,6 +39,7 @@ import { prisma } from './prisma';
 import { guardReply, SALES_TENANT_IDS, DEFLECTION as GUARD_ERROR_DEFLECTION } from './claim-guard';
 import { detectEscalationIntent } from './escalation-intent';
 import { detectEscalationClaim } from './escalation-claim';
+import { detectProviderFailure } from './provider-failure';
 import { audit } from './audit';
 import { isAiLoopGatedDoor } from './clawith/gate';
 import type { OwnershipState } from './ownership/state';
@@ -508,6 +509,37 @@ export async function generateReply(params: {
   const escalation = detectEscalationIntent(lastUserText, tenantId);
 
   try {
+    // Provider-failure containment runs FIRST, before the claim-guard.
+    // Infrastructure output is not a claim to be checked against a price
+    // register — it is text that must never reach a customer at all. A raw
+    // `HTTP 402: {"error":...}` dump was relayed verbatim to a customer on
+    // 2026-08-13 (Chatwoot conv 233, msg 2784), and the token-quota notice is
+    // the same leak waiting on a cap being set. Both originate in Clawith,
+    // which this programme does not fork (CLAUDE.md law 2), so this chokepoint
+    // is the only place either can be stopped.
+    //
+    // Not scoped to SALES_TENANT_IDS — same reasoning as the escalation-claim
+    // backstop. A leaked provider error is wrong for every tenant.
+    const providerFailure = detectProviderFailure(result.text);
+    if (providerFailure.leaks) {
+      console.warn(
+        `[brain-provider] provider-failure contained (rule=${providerFailure.rule}) for tenant ${tenantId}`,
+      );
+      await audit({
+        tenantId,
+        actorId: `agent:${agent.id}`,
+        action: 'provider_failure.contained',
+        entity: 'conversation',
+        entityId: sessionId,
+        // Rule id only. The failure text is never audited: it is the thing we
+        // are containing, and it carries provider payloads and run identifiers.
+        meta: { rule: providerFailure.rule },
+      });
+      // DEFLECTION promises a person will follow up, and needsHandoff makes
+      // that promise true — the same pairing the claim-guard path relies on.
+      return { ...result, text: GUARD_ERROR_DEFLECTION, needsHandoff: true };
+    }
+
     const guarded = guardReply(result.text, tenantId);
     if (guarded.blocked) {
       console.warn(`[brain-provider] claim-guard blocked a reply (rule=${guarded.rule}) for tenant ${tenantId}`);
