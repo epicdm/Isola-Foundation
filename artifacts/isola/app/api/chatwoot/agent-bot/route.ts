@@ -80,6 +80,7 @@ import { generateReply } from '@/lib/brain-provider';
 import { meterTokens } from '@/lib/meter';
 import { claimInboundMessageId } from '@/lib/inbound-dedup';
 import { toggleConvStatus, surfaceHandoff } from '@/lib/chatwoot-handoff';
+import { maybeAcknowledgeHandover } from '@/lib/handover-ack';
 import { resolveActiveBinding } from '@/lib/chatwoot-binding-resolution';
 import { stampLeadContext } from '@/lib/chatwoot-lead-context';
 import { SALES_TENANT_IDS } from '@/lib/claim-guard';
@@ -466,6 +467,72 @@ async function handleMessageCreated(body: Record<string, any>): Promise<number> 
         `${ownershipAuthoritative ? 'ownership' : 'legacy'} state=${ownership.state} ` +
         `episode=${ownership.episode} diverged=${ownership.diverged}`,
     );
+
+    // The AI staying silent is correct and unchanged. What was wrong is that
+    // the silence was TOTAL: a customer messaging after a handover got nothing
+    // back and could not tell "a person has this" from "this channel is dead".
+    // Send exactly one system acknowledgement per handover episode. Pinned
+    // text, no model, no template — this is not an AI reply.
+    // Never allowed to affect the 200: an acknowledgement failing must not turn
+    // into a webhook retry storm on a conversation a human already owns.
+    if (botToken && cwConvId != null) {
+      try {
+        const ackOutcome = await maybeAcknowledgeHandover(
+          {
+            conversationId:   conversation.id,
+            ownershipState:   ownership.state,
+            ownershipEpisode: ownership.episode,
+            ownershipAuthoritative,
+            // Fail closed: a payload with no explicit `false` is treated as private.
+            isPrivate:        body.private !== false,
+            isIncoming:       messageType === 'incoming',
+            senderType:       body.sender?.type ?? null,
+          },
+          {
+            // Conditional claim — the exactly-once gate. Two inbound messages
+            // in the same instant cannot both win: the second updates 0 rows.
+            claimEpisode: async (conversationId, episode) => {
+              const claim = await prisma.conversation.updateMany({
+                where: {
+                  id:                conversationId,
+                  ownership_episode: episode,
+                  OR: [
+                    { handover_ack_episode: null },
+                    { handover_ack_episode: { lt: episode } },
+                  ],
+                },
+                data: { handover_ack_episode: episode },
+              });
+              return claim.count;
+            },
+            postMessage: async (text) => {
+              try {
+                const res = await fetch(
+                  `${baseUrl}/api/v1/accounts/${accountId}/conversations/${cwConvId}/messages`,
+                  {
+                    method:  'POST',
+                    headers: { 'Content-Type': 'application/json', api_access_token: botToken },
+                    body:    JSON.stringify({ content: text, message_type: 'outgoing', private: false }),
+                    signal:  AbortSignal.timeout(10000),
+                  },
+                );
+                return res.ok;
+              } catch {
+                return false;
+              }
+            },
+          },
+        );
+        if (ackOutcome === 'sent' || ackOutcome === 'post_failed') {
+          console.log(
+            `[agent-bot] handover ack ${ackOutcome} for conv cw#${cwConvId} ` +
+              `episode=${ownership.episode}`,
+          );
+        }
+      } catch (e: any) {
+        console.warn('[agent-bot] handover ack error:', e?.message);
+      }
+    }
     return 200;
   }
 

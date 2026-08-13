@@ -1,6 +1,10 @@
 # Escalation reality + handover acknowledgement — design
 
-**Status:** DESIGN FOR REVIEW. Creates no code. Not implementation authority.
+**Status:** BUILT, NOT PUBLISHED. Implemented in `lib/handover-ack.ts` +
+`app/api/chatwoot/agent-bot/route.ts`, with the K matrix (§7) executable in
+`lib/handover-ack.test.ts` and the `handover_ack_episode` column added by migration
+`20260813190000_conversation_handover_ack_episode`. Foundation ships by manual Replit
+publish, which remains owner-gated and is a separate decision from merging.
 **Supersedes** the gateway-side revision of this file (H4 bound to the gateway's
 `status === "pending"` predicate). That binding was wrong: live WhatsApp is Foundation-side,
 deepseek inbox 46, account 5.

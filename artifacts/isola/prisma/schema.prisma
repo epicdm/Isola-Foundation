@@ -520,6 +520,17 @@ model Conversation {
   ownership_escalation_operation_id String?
   ownership_handback_operation_id   String?
 
+  /// The `ownership_episode` an automated handover acknowledgement was sent
+  /// for. NULL means none has been sent for any episode on this conversation.
+  ///
+  /// Exactly-once identity is the one the schema already declares authoritative
+  /// — tenant + conversation + episode — so this needs no second mechanism and
+  /// no Chatwoot custom attribute. The send is CLAIMED with a conditional
+  /// UPDATE on this column before the message is posted, so two inbound
+  /// messages arriving together cannot both send one. A duplicate
+  /// acknowledgement is worse than the silence it replaces.
+  handover_ack_episode              Int?
+
   // Authoritative snapshot of the exact Chatwoot inbox/binding this
   // conversation lives in, captured from the live webhook's inbox_id (see
   // agent-bot/route.ts) — never re-derived from tenant_id alone. A tenant can
