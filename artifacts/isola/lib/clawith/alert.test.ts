@@ -60,7 +60,13 @@ describe('recordClawithFailure — internal diagnostics are always preserved', (
     });
   });
 
-  it('flags payment_required as P0 and every other kind as P2', async () => {
+  it('flags payment_required AND provider_error_leaked as P0, every other kind as P2', async () => {
+    // provider_error_leaked was promoted to P0 on 2026-08-13. It is the only
+    // kind describing text that already reached, or came one gate away from
+    // reaching, a customer: a raw `HTTP 402` body and an internal run id were
+    // delivered as an agent reply on Chatwoot conv 233, msg 2784. A payment
+    // failure that fails closed costs a reply; a leaked provider error costs
+    // trust and cannot be recalled.
     await recordClawithFailure(new ClawithFailure('payment_required', null, 402), ctx({ correlationId: 'corr-a' }));
     await recordClawithFailure(new ClawithFailure('provider_error_leaked', null), ctx({ correlationId: 'corr-b' }));
     await recordClawithFailure(new ClawithFailure('provider_unavailable', null, 503), ctx({ correlationId: 'corr-c' }));
@@ -68,7 +74,7 @@ describe('recordClawithFailure — internal diagnostics are always preserved', (
     const severities = (auditMock.mock.calls as unknown as [{ meta: { severity: string } }][]).map(
       ([call]) => call.meta.severity,
     );
-    expect(severities).toEqual(['P0', 'P2', 'P2']);
+    expect(severities).toEqual(['P0', 'P0', 'P2']);
   });
 
   it('records the customer_dispatch surface with a null Foundation agentId, exactly as invoke.ts calls it', async () => {

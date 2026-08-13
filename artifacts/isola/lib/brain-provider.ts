@@ -40,6 +40,8 @@ import { guardReply, SALES_TENANT_IDS, DEFLECTION as GUARD_ERROR_DEFLECTION } fr
 import { detectEscalationIntent } from './escalation-intent';
 import { detectEscalationClaim } from './escalation-claim';
 import { detectProviderFailure } from './provider-failure';
+import { recordClawithFailure } from './clawith/alert';
+import { ClawithFailure } from './clawith/errors';
 import { audit } from './audit';
 import { isAiLoopGatedDoor } from './clawith/gate';
 import type { OwnershipState } from './ownership/state';
@@ -535,6 +537,42 @@ export async function generateReply(params: {
         // are containing, and it carries provider payloads and run identifiers.
         meta: { rule: providerFailure.rule },
       });
+
+      // Raise it on the operator alert channel that already exists, rather
+      // than inventing a second one. `provider_error_leaked` is a kind the
+      // taxonomy ALREADY defines — verbatim, "a structurally valid 200
+      // response whose customer-visible text is itself a raw provider/runtime
+      // failure ... the exact leak this taxonomy exists to catch when it
+      // arrives through a 'successful' call". The kind existed and the alert
+      // channel existed; only the detection was missing, which is how this
+      // reached a customer through the gap between two things already built.
+      //
+      // recordClawithFailure is fire-and-forget by contract and flags this
+      // kind P0, so an operator query surfaces it without waiting for a second
+      // occurrence, and the WhatsApp leg fires when a template is approved.
+      // Two audit rows are deliberate and answer different questions:
+      // `provider_failure.contained` is what we STOPPED; `clawith.failure` is
+      // the operator alert with the full diagnostic.
+      if (clawithBinding?.clawith_agent_id) {
+        await recordClawithFailure(
+          new ClawithFailure(
+            'provider_error_leaked',
+            // Rule id only. The failure text itself is never carried into the
+            // alert: it is the thing being contained, and it holds provider
+            // payloads and run identifiers.
+            `contained by rule=${providerFailure.rule}`,
+          ),
+          {
+            tenantId:       tenantId,
+            agentId:        agent.id,
+            clawithAgentId: clawithBinding.clawith_agent_id,
+            surface:        'customer_dispatch',
+            correlationId:  escalationCorrelationId ?? sessionId,
+            actorId:        `agent:${agent.id}`,
+          },
+        ).catch(() => undefined);
+      }
+
       // DEFLECTION promises a person will follow up, and needsHandoff makes
       // that promise true — the same pairing the claim-guard path relies on.
       return { ...result, text: GUARD_ERROR_DEFLECTION, needsHandoff: true };
