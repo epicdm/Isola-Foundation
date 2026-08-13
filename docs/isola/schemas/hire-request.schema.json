@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://isola.epic.dm/schemas/hire-request.schema.json",
+  "title": "Isola Hire-an-Agent request body",
+  "description": "The COMPLETE JSON body of POST /api/isola/tenants/{tenant_id}/hires/. Exactly four properties, all required. Tenant identity is NOT here - it comes from the authenticated session. correlation_id is NOT here - it is server-generated. exposure is NOT here and is prohibited: any client-supplied exposure is rejected 400 even when its value matches the resolved template.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["template_id", "template_version", "template_digest", "idempotency_key"],
+  "properties": {
+    "template_id": {
+      "type": "string",
+      "description": "Stable catalogue entry id. Matched exactly against the server-side registry; unknown value is 404.",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "examples": ["sales-front-desk", "staff-ops-coordinator"]
+    },
+    "template_version": {
+      "type": "string",
+      "description": "Immutable version of that entry. Mismatch is 409 and is NEVER coerced to latest.",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^v[0-9]+$",
+      "examples": ["v1"]
+    },
+    "template_digest": {
+      "type": "string",
+      "description": "Optimistic-integrity assertion: content hash of the resolved template INCLUDING its exposure. Mismatch fails closed with 409 and never silently upgrades to a newer template.",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "description": "Caller-supplied. Scoped to (tenant, requester, operation). Same key + identical canonical request returns the original result; same key + different request is a deterministic 409.",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._~-]+$"
+    }
+  }
+}
