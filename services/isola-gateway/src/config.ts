@@ -8,7 +8,6 @@
 import { hostOf, parseAllowlist } from "./egress.js";
 import { parseBindings, type Binding, type BindingParseResult } from "./bindings.js";
 import { isFailpointName, type FailpointName } from "./failpoint.js";
-import { parseVoiceSeats, type SeatParseResult } from "./voice.js";
 
 export interface GatewayConfig {
   port: number;
@@ -71,24 +70,6 @@ export interface GatewayConfig {
 
   /** Parsed bindings, or the validation errors that must stop the boot. */
   bindings: BindingParseResult;
-
-  // -- Personal-line voice read (read-only projection) ----------------------
-  /**
-   * KILL SWITCH. Defaults to FALSE, so the endpoint deploys inert and is
-   * indistinguishable from an unknown route until deliberately enabled.
-   */
-  voiceReadEnabled: boolean;
-  /** Bearer required by the personal-line read. `null` means the route is 503. */
-  voiceReadToken: string | null;
-  voiceRateLimit: number;
-  voiceRateWindowMs: number;
-  /** Magnus, the telephony authority. Never rebuilt — only read. */
-  magnusBaseUrl: string | null;
-  magnusApiKey: string | null;
-  magnusApiSecret: string | null;
-  magnusTimeoutMs: number;
-  /** Parsed (tenant, member) → Magnus seat mapping. */
-  voiceSeats: SeatParseResult;
 }
 
 export const DEFAULT_CHATWOOT_BASE_URL = "https://isola-chat.saas00.epic.dm";
@@ -107,9 +88,6 @@ export const DEFAULT_ESCALATED_LABEL = "isola-ai-escalated";
 export const DEFAULT_LEDGER_LEASE_MS = 5 * 60 * 1000;
 export const DEFAULT_LEDGER_RECOVERY_INTERVAL_MS = 60 * 1000;
 export const DEFAULT_LEDGER_RECOVERY_BATCH = 20;
-export const DEFAULT_VOICE_RATE_LIMIT = 30;
-export const DEFAULT_VOICE_RATE_WINDOW_MS = 60_000;
-export const DEFAULT_MAGNUS_TIMEOUT_MS = 15_000;
 
 export type EnvRecord = Record<string, string | undefined>;
 
@@ -168,28 +146,10 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
     str(env, "RUNTIME_BASE_URL") ?? DEFAULT_RUNTIME_BASE_URL,
   );
 
-  // Accept MAGNUS_URL, the name actually set in the deployed environments, with
-  // MAGNUS_BASE_URL as the legacy fallback — matching engines/magnus.ts.
-  const magnusRaw = str(env, "MAGNUS_URL") ?? str(env, "MAGNUS_BASE_URL");
-  const magnusBaseUrl = magnusRaw === null ? null : stripTrailingSlash(magnusRaw);
-
-  // Read the kill switch BEFORE the allowlist is derived: the allowlist depends
-  // on it, and the same parsed boolean is returned in the config below so the
-  // two decisions cannot drift apart.
-  const voiceReadEnabled = bool(env, "GATEWAY_VOICE_READ_ENABLED", false);
-
   const explicitAllowlist = parseAllowlist(env["EGRESS_ALLOWLIST"]);
-  const derivedAllowlist = [
-    hostOf(chatwootBaseUrl),
-    hostOf(runtimeBaseUrl),
-    // Magnus is derived into the allowlist ONLY while the personal-line read is
-    // enabled. Adding it unconditionally meant that merely LANDING this
-    // disabled feature widened the gateway's permitted outbound destinations
-    // wherever MAGNUS_URL was already set and EGRESS_ALLOWLIST was not — which
-    // contradicts "inert if landed". A disabled feature must expand no
-    // capability, egress included.
-    voiceReadEnabled ? hostOf(magnusBaseUrl) : null,
-  ].filter((h): h is string => h !== null);
+  const derivedAllowlist = [hostOf(chatwootBaseUrl), hostOf(runtimeBaseUrl)].filter(
+    (h): h is string => h !== null,
+  );
   const egressAllowlist =
     explicitAllowlist.length > 0
       ? explicitAllowlist
@@ -242,17 +202,6 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
     escalatedLabel: label(env, "GATEWAY_LABEL_ESCALATED", DEFAULT_ESCALATED_LABEL),
 
     bindings: parseBindings(env["GATEWAY_BINDINGS_JSON"]),
-
-    // The SAME boolean the egress derivation above used. Do not re-read it.
-    voiceReadEnabled,
-    voiceReadToken: str(env, "GATEWAY_VOICE_READ_TOKEN"),
-    voiceRateLimit: int(env, "GATEWAY_VOICE_RATE_LIMIT", DEFAULT_VOICE_RATE_LIMIT),
-    voiceRateWindowMs: int(env, "GATEWAY_VOICE_RATE_WINDOW_MS", DEFAULT_VOICE_RATE_WINDOW_MS),
-    magnusBaseUrl: magnusBaseUrl,
-    magnusApiKey: str(env, "MAGNUS_API_KEY"),
-    magnusApiSecret: str(env, "MAGNUS_API_SECRET"),
-    magnusTimeoutMs: int(env, "GATEWAY_MAGNUS_TIMEOUT_MS", DEFAULT_MAGNUS_TIMEOUT_MS),
-    voiceSeats: parseVoiceSeats(env["GATEWAY_VOICE_SEATS_JSON"]),
   };
 }
 
@@ -294,11 +243,12 @@ export function bootWarnings(config: GatewayConfig): string[] {
     );
   }
 
-  // A binding may name its own Chatwoot (multi-tenant: a tenant brings its own).
-  // That host still has to be on the egress allowlist, and the moment to find
-  // out is boot, not the first customer message — an unallowlisted host makes
-  // every outbound call for that tenant fail closed, which reads as an outage
-  // rather than as the one-line configuration mistake it is.
+  // A binding may name its own Chatwoot INSTANCE (the estate is mid-migration
+  // between two of them; see the note on Binding.chatwootBaseUrl). That host
+  // still has to be on the egress allowlist, and the moment to find out is
+  // boot, not the first customer message — an unallowlisted host makes every
+  // outbound call for that tenant fail closed, which reads as an outage rather
+  // than as the one-line configuration mistake it is.
   for (const binding of bindings) {
     if (binding.chatwootBaseUrl === undefined) continue;
     const host = hostOf(binding.chatwootBaseUrl);
@@ -311,6 +261,7 @@ export function bootWarnings(config: GatewayConfig): string[] {
       );
     }
   }
+
 
   if (config.runtimeSecret === null) {
     warnings.push(
@@ -336,32 +287,6 @@ export function bootWarnings(config: GatewayConfig): string[] {
         ? "GATEWAY_LEDGER_URL is unset: the durable delivery ledger cannot be reached, so an acknowledged webhook could not be recorded. The service will refuse to start."
         : "GATEWAY_LEDGER_URL is unset and GATEWAY_LEDGER_REQUIRED is false: de-duplication is in memory only and will NOT survive a container replacement.",
     );
-  }
-  if (config.voiceReadEnabled) {
-    if (config.voiceReadToken === null) {
-      warnings.push(
-        "GATEWAY_VOICE_READ_ENABLED is on but GATEWAY_VOICE_READ_TOKEN is unset: the personal-line read will return 503.",
-      );
-    }
-    if (config.magnusBaseUrl === null) {
-      warnings.push(
-        "GATEWAY_VOICE_READ_ENABLED is on but MAGNUS_URL is unset: the personal-line read cannot reach the telephony authority.",
-      );
-    }
-    if (config.magnusApiKey === null || config.magnusApiSecret === null) {
-      warnings.push(
-        "GATEWAY_VOICE_READ_ENABLED is on but MAGNUS_API_KEY/MAGNUS_API_SECRET are unset: every seat read fails closed.",
-      );
-    }
-    if (!config.voiceSeats.ok) {
-      warnings.push(
-        "GATEWAY_VOICE_SEATS_JSON failed validation: no seat resolves, so every personal-line read returns 404 (fail closed).",
-      );
-    } else if (config.voiceSeats.seats.length === 0) {
-      warnings.push(
-        "GATEWAY_VOICE_SEATS_JSON is unset or empty: every personal-line read returns 404.",
-      );
-    }
   }
   if (config.failpoint === "unrecognised") {
     warnings.push(
