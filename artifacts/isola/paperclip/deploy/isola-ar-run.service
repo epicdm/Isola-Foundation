@@ -1,0 +1,27 @@
+[Unit]
+Description=EPIC receivables action list (deterministic; model is optional polish)
+Documentation=file:///opt/isola/README-ar-run.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/isola-ar-run.sh
+
+# HARD DEADLINE. The run ends, whatever happens. The Odoo reads take ~13s; the
+# model is given 60s and is abandoned rather than retried. 10 minutes is therefore
+# generous and exists only to guarantee termination.
+TimeoutStartSec=600
+KillMode=mixed
+KillSignal=SIGTERM
+
+# BOUNDED: no retry, no backlog. A missed or failed run is skipped, not queued —
+# the next weekday run supersedes it, and a stale receivables list has no value.
+Restart=no
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=isola-ar-run
+
+[Install]
+WantedBy=multi-user.target

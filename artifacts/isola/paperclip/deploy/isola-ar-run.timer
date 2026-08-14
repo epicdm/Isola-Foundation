@@ -1,0 +1,18 @@
+[Unit]
+Description=Weekday 07:00 America/Dominica receivables run (11:00 UTC)
+
+[Timer]
+# host03 runs Etc/UTC. 07:00 America/Dominica (UTC-4) = 11:00 UTC.
+# Measured: 0 Ollama requests in that hour across 5.5 days of logs.
+OnCalendar=Mon..Fri *-*-* 11:00:00 UTC
+
+# NOT Persistent. A missed run (host down) must NOT fire late — a receivables list
+# published at an arbitrary hour is worse than none, and the next weekday supersedes it.
+Persistent=false
+
+# Small jitter so we never land on the same instant as anything else on the box.
+RandomizedDelaySec=120
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
