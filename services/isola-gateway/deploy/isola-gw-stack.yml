@@ -23,9 +23,9 @@
 #
 # ── IMAGE PROVENANCE — READ THIS BEFORE CALLING IT "PINNED" ──────────────────
 #
-#   image:     isola-gateway:a9df3d6
-#   image id:  sha256:826ac4d8a995be781dc7997a394f333d68269daf2af9288a26be9cfc90bd2d3b
-#   built:     /opt/isola-gw-build/a9df3d6, from `git archive` of commit a9df3d6
+#   image:     isola-gateway:13ea8c4
+#   image id:  sha256:03bf36e5c3c2f2749fd0ee8a4ef06dcda55366b4cd5206d4a11dff3d968d3f6c
+#   built:     /opt/isola-gw-build/13ea8c4, from `git archive` of commit 13ea8c4
 #              on branch m1/ownership-store-host03-2026-08-14
 #   contains:  b5f4d81 (ownership store) + c54338e (ownership gate on the reply
 #              path) + d2e141e (Swarm-secret entrypoint) + 9715b5b (LF fix)
@@ -75,7 +75,7 @@ version: "3.8"
 
 services:
   gateway:
-    image: isola-gateway:a9df3d6
+    image: isola-gateway:13ea8c4
 
     # Traefik discovery. THIS HOST RUNS providers.docker, NOT providers.swarm
     # (TRAEFIK_PROVIDERS_DOCKER=true, Traefik 3.6.7), so Traefik reads CONTAINER
