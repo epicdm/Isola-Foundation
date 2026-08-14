@@ -1,0 +1,861 @@
+/**
+ * The durable conversation-ownership store.
+ *
+ * WHY THIS IS A DATABASE AND NOT A FILE
+ * -------------------------------------
+ * Every correctness guarantee the ownership contract makes is a DATABASE
+ * guarantee, and none of them can be provided by a process-local structure:
+ *
+ *   - exactly-once       -> a UNIQUE index the database enforces
+ *   - the ack claim      -> a conditional UPDATE whose ROW COUNT is the answer
+ *   - `allowedFrom`      -> a precondition read under a row lock, in the same
+ *                           transaction as the write it guards
+ *   - `expectedEpisode`  -> compared under that SAME lock
+ *
+ * The sibling service `isola-runtime` persists its whole state as one JSON file
+ * behind an in-process promise chain. That serialises transactions within one
+ * process and not at all across two, so two concurrent webhook deliveries race
+ * on a whole-file read-modify-write and one silently wins. Porting this engine
+ * onto that substrate would pass every test written against it and fail under
+ * real concurrency, silently. So the store came first.
+ *
+ * WHERE IT LIVES
+ * --------------
+ * The same database as `delivery_ledger` — `isola_ledger` on the existing
+ * managed Postgres — reached through the same pool via `SqlExecutor`.
+ *
+ * SAME DATABASE, DELIBERATELY. Postgres has no cross-database transaction. A
+ * separate database would make it permanently impossible to claim a delivery
+ * and move ownership in one atomic step, which is exactly the coupling the
+ * reply path needs: suppress first, publish second, both or neither. The
+ * cheaper-looking isolation would have bought nothing and foreclosed that.
+ *
+ * NO ORM, NO MIGRATION ENGINE
+ * ---------------------------
+ * Explicit, idempotent, additive DDL applied at boot — the idiom `ledger.ts`
+ * already established here. What runs is what is written below. The same
+ * statements are also checked in as a reviewable migration under
+ * `migrations/`, so the schema has a diff even though nothing diffs it.
+ *
+ * NO CUSTOMER CONTENT
+ * -------------------
+ * Identifiers, states, episodes, reason CODES and timestamps only. No message
+ * body, no answer text, no customer name, no attachment name, no credential.
+ * `test/ledger-no-content.test.ts`'s column-scan discipline applies here too.
+ */
+import {
+  canTransition,
+  conversationKey,
+  DEFAULT_OWNERSHIP_STATE,
+  readEpisode,
+  readState,
+  type OwnershipOperationKind,
+  type OwnershipState,
+} from "./ownership.js";
+import type { QueryResult, SqlClient, SqlExecutor } from "./ledger.js";
+
+// ---------------------------------------------------------------------------
+// Schema
+// ---------------------------------------------------------------------------
+
+/**
+ * Idempotent and additive. Nothing here drops, renames or re-types anything,
+ * and it does not touch `delivery_ledger`.
+ *
+ * `ownership_state` is TEXT with no enum and no CHECK, matching the ratified
+ * Foundation schema and for the reason recorded there: the vocabulary is shared
+ * with an external contract, and a Postgres enum (or a CHECK listing the
+ * values) makes every future state a locking DDL migration on a live table.
+ * An unrecognised value is not left to the database to catch — `readState()`
+ * fails it closed to HUMAN_OWNED, which silences the AI rather than licensing
+ * it. The two numeric CHECKs below constrain quantities, not vocabulary, so
+ * they can never need to change.
+ */
+export const OWNERSHIP_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS conversation_ownership (
+  tenant_id                         text        NOT NULL,
+  conversation_key                  text        NOT NULL,
+  chatwoot_account_id               integer     NOT NULL,
+  chatwoot_conversation_id          integer     NOT NULL,
+  chatwoot_inbox_id                 integer,
+  binding_id                        text,
+  ownership_state                   text        NOT NULL DEFAULT 'AI_OWNED',
+  ownership_episode                 integer     NOT NULL DEFAULT 0,
+  handover_ack_episode              integer,
+  ownership_changed_at              timestamptz,
+  ownership_reason                  text,
+  ownership_actor_ref               text,
+  ownership_correlation_id          text,
+  ownership_escalation_operation_id text,
+  ownership_handback_operation_id   text,
+  created_at                        timestamptz NOT NULL DEFAULT now(),
+  updated_at                        timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT conversation_ownership_pkey
+    PRIMARY KEY (tenant_id, conversation_key),
+  CONSTRAINT conversation_ownership_episode_nonneg
+    CHECK (ownership_episode >= 0),
+  CONSTRAINT conversation_ownership_ack_episode_nonneg
+    CHECK (handover_ack_episode IS NULL OR handover_ack_episode >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS conversation_ownership_tenant_state_idx
+  ON conversation_ownership (tenant_id, ownership_state);
+
+CREATE TABLE IF NOT EXISTS conversation_ownership_transition (
+  id               bigint      GENERATED ALWAYS AS IDENTITY,
+  tenant_id        text        NOT NULL,
+  conversation_key text        NOT NULL,
+  episode          integer     NOT NULL,
+  from_state       text        NOT NULL,
+  to_state         text        NOT NULL,
+  reason           text        NOT NULL,
+  operation_id     text        NOT NULL,
+  operation_kind   text        NOT NULL,
+  actor_ref        text,
+  correlation_id   text,
+  created_at       timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT conversation_ownership_transition_pkey PRIMARY KEY (id),
+  CONSTRAINT conversation_ownership_transition_conversation_fkey
+    FOREIGN KEY (tenant_id, conversation_key)
+    REFERENCES conversation_ownership (tenant_id, conversation_key)
+    ON DELETE RESTRICT ON UPDATE CASCADE
+);
+
+-- THE CLAIM. Exactly-once for escalation, assignment, handoff and handback is
+-- this index and nothing else. A replayed webhook or a retried tool call
+-- presenting the same operation id loses the INSERT, and its call site performs
+-- no side effect.
+--
+-- A UNIQUE INDEX, not an ALTER TABLE ADD CONSTRAINT. Adding a constraint has
+-- no IF NOT EXISTS form, so making it re-runnable needs a DROP first -- and
+-- this DDL runs on EVERY boot, which would mean every restart briefly leaves
+-- the claim unenforced. A restart is exactly when a redelivery storm arrives.
+-- The enforcement is identical either way: a duplicate raises SQLSTATE 23505.
+CREATE UNIQUE INDEX IF NOT EXISTS conversation_ownership_transition_claim_key
+  ON conversation_ownership_transition (tenant_id, conversation_key, operation_id);
+
+CREATE INDEX IF NOT EXISTS conversation_ownership_transition_episode_idx
+  ON conversation_ownership_transition (tenant_id, conversation_key, episode);
+
+CREATE INDEX IF NOT EXISTS conversation_ownership_transition_created_idx
+  ON conversation_ownership_transition (tenant_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS conversation_ownership_transition_correlation_idx
+  ON conversation_ownership_transition (correlation_id);
+`;
+
+/** The name of the claim constraint, so tests and error handling refer to the
+ *  same string the DDL declares rather than a copy of it. */
+export const CLAIM_CONSTRAINT = "conversation_ownership_transition_claim_key";
+
+/** Postgres `unique_violation`. The value that means "a concurrent writer
+ *  claimed this operation id first", which is a normal outcome, not a fault. */
+export const UNIQUE_VIOLATION = "23505";
+
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === UNIQUE_VIOLATION
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Vocabulary
+// ---------------------------------------------------------------------------
+
+export type TransitionStatus =
+  /** Claimed and applied by THIS call. Side effects belong here and nowhere else. */
+  | "applied"
+  /** This exact operation was already claimed. Nothing changed. Not an error. */
+  | "duplicate"
+  /** The caller named an episode that is no longer current. Refused. */
+  | "stale_episode"
+  /** Not in a state from which this transition is legal. Refused. */
+  | "illegal_transition";
+
+export interface TransitionOutcome {
+  /** True for `applied` and `duplicate` — the intent holds. False means refused. */
+  ok: boolean;
+  status: TransitionStatus;
+  /** The state AFTER this call. Unchanged when not applied. */
+  state: OwnershipState;
+  episode: number;
+  operationId: string;
+  /**
+   * Which mechanism produced a `duplicate`.
+   *
+   *   `replay`     — the pre-check found the operation already recorded. This is
+   *                  a retried delivery arriving after the original finished.
+   *   `constraint` — the INSERT was rejected by
+   *                  `conversation_ownership_transition_claim_key`. A concurrent
+   *                  writer won the race.
+   *
+   * Recorded because "the database rejected it" and "we noticed and did not
+   * try" are different facts, and an audit that cannot tell them apart cannot
+   * show the constraint is doing any work.
+   */
+  duplicateSource: "replay" | "constraint" | null;
+}
+
+/** The conversation a transition applies to, in this service's own identifiers. */
+export interface ConversationRef {
+  /** Resolved from the binding, NEVER read from the webhook payload. */
+  tenantId: string;
+  chatwootAccountId: number;
+  /** Chatwoot's `display_id` — see `conversationKey` in `src/ownership.ts`. */
+  chatwootConversationId: number;
+  chatwootInboxId?: number | null;
+  bindingId?: string | null;
+}
+
+export interface OwnershipView {
+  state: OwnershipState;
+  episode: number;
+  handoverAckEpisode: number | null;
+  /**
+   * True when the stored state string was not one this build recognises and was
+   * therefore failed closed to HUMAN_OWNED. A divergence must silence the AI,
+   * never license it — and it must be visible, because the silence is otherwise
+   * indistinguishable from a legitimate human hold.
+   */
+  diverged: boolean;
+}
+
+export interface ApplyTransitionInput {
+  conversation: ConversationRef;
+  /** The claim key. Stable for the life of the operation it names. */
+  operationId: string;
+  operationKind: OwnershipOperationKind;
+  /** Ignored — and not required — when `selfTransition` is set. */
+  toState?: OwnershipState;
+  reason: string;
+  /**
+   * States this transition may legally start from. A current state outside this
+   * set is refused EVEN WHEN `canTransition` would allow it, so each caller's
+   * own precondition is explicit rather than implied by the graph.
+   *
+   * Ignored when `selfTransition` is set: an observation that moves nothing is
+   * legal from every state by construction.
+   */
+  allowedFrom?: readonly OwnershipState[];
+  /**
+   * Record an OBSERVATION rather than a move: the target is whatever the state
+   * is under the lock, so `from_state` and `to_state` are equal and no
+   * authority changes.
+   *
+   * This is how `conversation_resolved` is recorded. It exists as a flag rather
+   * than a self-edge in `LEGAL_TRANSITIONS` because adding `X -> X` for all
+   * five states to the graph would make "nothing happened" indistinguishable
+   * from a real transition at every call site that reads the graph.
+   *
+   * The target is read UNDER THE LOCK and never taken from the caller: a
+   * caller-supplied "current state" read before the lock could be stale, and
+   * writing it back would overwrite a transition that landed in between.
+   */
+  selfTransition?: boolean;
+  actorRef?: string | null;
+  correlationId?: string | null;
+  /** When set, the current episode must equal this exactly. */
+  expectedEpisode?: number | null;
+  /** True for transitions that OPEN a new span of human involvement. */
+  startsNewEpisode?: boolean;
+  escalationOperationId?: string | null;
+  handbackOperationId?: string | null;
+}
+
+interface OwnershipRow {
+  ownership_state: string | null;
+  ownership_episode: number | string | null;
+  handover_ack_episode: number | string | null;
+}
+
+const SELECT_COLUMNS = "ownership_state, ownership_episode, handover_ack_episode";
+
+function viewOf(row: OwnershipRow): OwnershipView {
+  const state = readState(row.ownership_state);
+  return {
+    state,
+    episode: readEpisode(row.ownership_episode),
+    handoverAckEpisode:
+      row.handover_ack_episode === null || row.handover_ack_episode === undefined
+        ? null
+        : readEpisode(row.handover_ack_episode),
+    diverged: row.ownership_state !== state,
+  };
+}
+
+function refused(
+  status: TransitionStatus,
+  view: OwnershipView,
+  operationId: string,
+): TransitionOutcome {
+  return {
+    ok: false,
+    status,
+    state: view.state,
+    episode: view.episode,
+    operationId,
+    duplicateSource: null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The engine
+// ---------------------------------------------------------------------------
+
+/**
+ * Create the conversation's ownership row if this is the first time we have
+ * seen it, then LOCK it and return what it says.
+ *
+ * `ON CONFLICT DO NOTHING` is the race-safe form: two transactions arriving
+ * together for a brand-new conversation cannot both insert, and the loser
+ * blocks until the winner commits rather than raising. `FOR UPDATE` then takes
+ * the row lock that every precondition below is evaluated under, and that lock
+ * is held until the transaction ends.
+ *
+ * A conversation the gateway has never transitioned starts at the default
+ * AI_OWNED / episode 0 — which is the truthful reading, not an assumption: it
+ * is exactly the state in which the AI is permitted to answer, and it is the
+ * state the current Chatwoot-derived predicate already puts every unassigned
+ * pending conversation in.
+ */
+async function lockConversation(
+  tx: SqlClient,
+  ref: ConversationRef,
+  key: string,
+): Promise<OwnershipView> {
+  await tx.query(
+    `
+    INSERT INTO conversation_ownership (
+      tenant_id, conversation_key, chatwoot_account_id, chatwoot_conversation_id,
+      chatwoot_inbox_id, binding_id, ownership_state, ownership_episode
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, 0)
+    ON CONFLICT ON CONSTRAINT conversation_ownership_pkey DO NOTHING
+    `,
+    [
+      ref.tenantId,
+      key,
+      ref.chatwootAccountId,
+      ref.chatwootConversationId,
+      ref.chatwootInboxId ?? null,
+      ref.bindingId ?? null,
+      DEFAULT_OWNERSHIP_STATE,
+    ],
+  );
+
+  const locked: QueryResult<OwnershipRow> = await tx.query<OwnershipRow>(
+    `
+    SELECT ${SELECT_COLUMNS}
+      FROM conversation_ownership
+     WHERE tenant_id = $1 AND conversation_key = $2
+       FOR UPDATE
+    `,
+    [ref.tenantId, key],
+  );
+
+  const row = locked.rows[0];
+  if (row === undefined) {
+    // Unreachable in practice: the INSERT above guarantees the row exists and
+    // the lock is taken in the same transaction. Treated as a divergence and
+    // failed closed rather than assumed away.
+    return { state: "HUMAN_OWNED", episode: 0, handoverAckEpisode: null, diverged: true };
+  }
+  return viewOf(row);
+}
+
+/**
+ * Move response authority. THE only function that writes `ownership_state`.
+ *
+ * ORDER OF CHECKS, AND WHY
+ *
+ *   1. Lock the conversation row.       Everything after this is serialised
+ *                                       against every other transition on the
+ *                                       same conversation.
+ *   2. Replay pre-check.                A retry must NOT be judged against
+ *                                       preconditions its own original
+ *                                       application already changed. Without
+ *                                       this, a retried escalation would read
+ *                                       HUMAN_REQUESTED, fail `allowedFrom`,
+ *                                       and report `illegal_transition` for an
+ *                                       operation that in fact SUCCEEDED.
+ *   3. `expectedEpisode`, then          Under the lock, so the value tested is
+ *      `allowedFrom` + `canTransition`. the value written against.
+ *   4. INSERT the transition.           The claim. If a writer got past step 2
+ *                                       concurrently, THE CONSTRAINT rejects it
+ *                                       here — application code does not, and
+ *                                       cannot, because both readers saw the
+ *                                       same absence.
+ *   5. UPDATE the conversation.         Same transaction. A crash between 4 and
+ *                                       5 would otherwise leave a claimed
+ *                                       operation whose state change never
+ *                                       landed — and because the claim is
+ *                                       idempotent, the retry would be
+ *                                       swallowed as a duplicate and the
+ *                                       conversation would sit in the old state
+ *                                       forever.
+ */
+export async function applyOwnershipTransition(
+  exec: SqlExecutor,
+  input: ApplyTransitionInput,
+): Promise<TransitionOutcome> {
+  const {
+    conversation,
+    operationId,
+    operationKind,
+    toState,
+    reason,
+    allowedFrom = [],
+    selfTransition = false,
+    actorRef = null,
+    correlationId = null,
+    expectedEpisode = null,
+    startsNewEpisode = false,
+    escalationOperationId = null,
+    handbackOperationId = null,
+  } = input;
+
+  const key = conversationKey(
+    conversation.chatwootAccountId,
+    conversation.chatwootConversationId,
+  );
+
+  return exec.transaction(async (tx) => {
+    const view = await lockConversation(tx, conversation, key);
+
+    // 2. Replay.
+    const existing = await tx.query<{ episode: number | string }>(
+      `
+      SELECT episode
+        FROM conversation_ownership_transition
+       WHERE tenant_id = $1 AND conversation_key = $2 AND operation_id = $3
+      `,
+      [conversation.tenantId, key, operationId],
+    );
+    if (existing.rows[0] !== undefined) {
+      return {
+        ok: true,
+        status: "duplicate" as const,
+        state: view.state,
+        episode: view.episode,
+        operationId,
+        duplicateSource: "replay" as const,
+      };
+    }
+
+    // 3. Preconditions, under the lock taken in step 1.
+    if (expectedEpisode !== null && expectedEpisode !== view.episode) {
+      return refused("stale_episode", view, operationId);
+    }
+
+    // The target is resolved HERE, under the lock, not by the caller.
+    const target: OwnershipState = selfTransition ? view.state : (toState ?? view.state);
+
+    if (!selfTransition) {
+      if (toState === undefined) {
+        return refused("illegal_transition", view, operationId);
+      }
+      if (!allowedFrom.includes(view.state) || !canTransition(view.state, target)) {
+        return refused("illegal_transition", view, operationId);
+      }
+    }
+
+    const nextEpisode = selfTransition
+      ? view.episode
+      : startsNewEpisode
+        ? view.episode + 1
+        : view.episode;
+
+    // 4. The claim. A SAVEPOINT so that losing the race leaves the transaction
+    //    usable: without it the unique violation aborts the whole transaction
+    //    and the accurate `duplicate` answer below could not be returned.
+    await tx.query("SAVEPOINT ownership_claim");
+    try {
+      await tx.query(
+        `
+        INSERT INTO conversation_ownership_transition (
+          tenant_id, conversation_key, episode, from_state, to_state,
+          reason, operation_id, operation_kind, actor_ref, correlation_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        `,
+        [
+          conversation.tenantId,
+          key,
+          nextEpisode,
+          view.state,
+          target,
+          reason,
+          operationId,
+          operationKind,
+          actorRef,
+          correlationId,
+        ],
+      );
+    } catch (err) {
+      if (!isUniqueViolation(err)) throw err;
+      await tx.query("ROLLBACK TO SAVEPOINT ownership_claim");
+      return {
+        ok: true,
+        status: "duplicate" as const,
+        state: view.state,
+        episode: view.episode,
+        operationId,
+        duplicateSource: "constraint" as const,
+      };
+    }
+    await tx.query("RELEASE SAVEPOINT ownership_claim");
+
+    // 5. The state change, in the same transaction as the claim.
+    await tx.query(
+      `
+      UPDATE conversation_ownership
+         SET ownership_state          = $3,
+             ownership_episode        = $4,
+             ownership_changed_at     = now(),
+             ownership_reason         = $5,
+             ownership_actor_ref      = $6,
+             ownership_correlation_id = $7,
+             ownership_escalation_operation_id =
+               COALESCE($8, ownership_escalation_operation_id),
+             ownership_handback_operation_id =
+               COALESCE($9, ownership_handback_operation_id),
+             updated_at               = now()
+       WHERE tenant_id = $1 AND conversation_key = $2
+      `,
+      [
+        conversation.tenantId,
+        key,
+        target,
+        nextEpisode,
+        reason,
+        actorRef,
+        correlationId,
+        escalationOperationId,
+        handbackOperationId,
+      ],
+    );
+
+    return {
+      ok: true,
+      status: "applied" as const,
+      state: target,
+      episode: nextEpisode,
+      operationId,
+      duplicateSource: null,
+    };
+  });
+}
+
+/**
+ * Claim the right to send ONE handover acknowledgement for one episode.
+ *
+ * The claim is the ROW COUNT of a conditional UPDATE, not a read followed by a
+ * write. Two inbound messages arriving in the same instant both run this
+ * statement; the predicate can only hold for one of them, so exactly one gets
+ * `rowCount === 1` and sends. A duplicate acknowledgement is worse than the
+ * silence it replaces, which is why this is a claim and not a check.
+ *
+ * `ownership_episode = $3` in the predicate is what ties the claim to the
+ * episode it was decided for: if the conversation has moved on to another
+ * episode since the caller read it, no row matches and nothing is sent.
+ *
+ * Returns true if THIS caller may send. The caller must post the message only
+ * on true, and must accept that a crash after the claim and before the post
+ * loses that one acknowledgement — deliberately, because the alternative is
+ * sending two.
+ */
+export async function claimHandoverAck(
+  exec: SqlExecutor,
+  ref: ConversationRef,
+  episode: number,
+): Promise<boolean> {
+  const key = conversationKey(ref.chatwootAccountId, ref.chatwootConversationId);
+  const claim = await exec.query(
+    `
+    UPDATE conversation_ownership
+       SET handover_ack_episode = $3,
+           updated_at           = now()
+     WHERE tenant_id         = $1
+       AND conversation_key  = $2
+       AND ownership_episode = $3
+       AND (handover_ack_episode IS NULL OR handover_ack_episode < $3)
+    `,
+    [ref.tenantId, key, episode],
+  );
+  return claim.rowCount === 1;
+}
+
+/**
+ * Read ownership without taking a lock or creating a row.
+ *
+ * Returns the default AI_OWNED view for a conversation that has no row yet:
+ * that is not an absence of information, it is the state a conversation the
+ * gateway has never had to hold is in.
+ */
+export async function readConversationOwnership(
+  exec: SqlClient,
+  ref: ConversationRef,
+): Promise<OwnershipView> {
+  const key = conversationKey(ref.chatwootAccountId, ref.chatwootConversationId);
+  const result = await exec.query<OwnershipRow>(
+    `
+    SELECT ${SELECT_COLUMNS}
+      FROM conversation_ownership
+     WHERE tenant_id = $1 AND conversation_key = $2
+    `,
+    [ref.tenantId, key],
+  );
+  const row = result.rows[0];
+  if (row === undefined) {
+    return {
+      state: DEFAULT_OWNERSHIP_STATE,
+      episode: 0,
+      handoverAckEpisode: null,
+      diverged: false,
+    };
+  }
+  return viewOf(row);
+}
+
+/** Idempotent DDL. Safe to run on every boot, alongside `Ledger.migrate()`. */
+export async function migrateOwnershipStore(exec: SqlClient): Promise<void> {
+  await exec.query(OWNERSHIP_SCHEMA_SQL);
+}
+
+// ---------------------------------------------------------------------------
+// The named transitions — the contract call sites use
+// ---------------------------------------------------------------------------
+
+/**
+ * Accepted escalation -> HUMAN_REQUESTED, opening a new episode.
+ *
+ * Automated replies are suppressed from the moment this returns `applied` (or
+ * `duplicate` — the suppression is already in force), BEFORE the caller
+ * performs the Chatwoot assignment. Suppress first, publish second: the reverse
+ * order leaves a window in which the bot can answer a conversation that has
+ * already been handed to a person.
+ */
+export function requestHumanOwnership(
+  exec: SqlExecutor,
+  input: {
+    conversation: ConversationRef;
+    operationId: string;
+    reason: string;
+    actorRef?: string | null;
+    correlationId?: string | null;
+  },
+): Promise<TransitionOutcome> {
+  return applyOwnershipTransition(exec, {
+    ...input,
+    operationKind: "escalate",
+    toState: "HUMAN_REQUESTED",
+    allowedFrom: ["AI_OWNED", "AI_RESUMED"],
+    startsNewEpisode: true,
+    escalationOperationId: input.operationId,
+  });
+}
+
+/** Assignment and context publication completed -> HUMAN_OWNED. Replies stay
+ *  suppressed; the difference is that a person can now actually see it. */
+export function confirmHumanOwnership(
+  exec: SqlExecutor,
+  input: {
+    conversation: ConversationRef;
+    operationId: string;
+    episode: number;
+    reason: string;
+    actorRef?: string | null;
+    correlationId?: string | null;
+  },
+): Promise<TransitionOutcome> {
+  return applyOwnershipTransition(exec, {
+    ...input,
+    operationKind: "human_assigned",
+    toState: "HUMAN_OWNED",
+    allowedFrom: ["HUMAN_REQUESTED"],
+    expectedEpisode: input.episode,
+  });
+}
+
+/**
+ * A human agent replied in the Chatwoot dashboard -> HUMAN_OWNED.
+ *
+ * From an AI state this opens a new episode (a takeover with no prior
+ * escalation). From HUMAN_REQUESTED it confirms the existing one. Already
+ * HUMAN_OWNED or mid-handback, there is nothing to transition and the bot is
+ * already silent — `duplicate` says exactly that, rather than reporting an
+ * illegal transition for an event whose intent already holds.
+ */
+export async function recordHumanReply(
+  exec: SqlExecutor,
+  input: {
+    conversation: ConversationRef;
+    /** Chatwoot's own message id — one physical human reply, one transition. */
+    operationId: string;
+    currentState: OwnershipState;
+    currentEpisode: number;
+    reason?: string;
+    actorRef?: string | null;
+  },
+): Promise<TransitionOutcome> {
+  if (input.currentState === "HUMAN_OWNED" || input.currentState === "HANDING_BACK") {
+    return {
+      ok: true,
+      status: "duplicate",
+      state: input.currentState,
+      episode: input.currentEpisode,
+      operationId: input.operationId,
+      duplicateSource: "replay",
+    };
+  }
+  const fromAi = input.currentState === "AI_OWNED" || input.currentState === "AI_RESUMED";
+  return applyOwnershipTransition(exec, {
+    conversation: input.conversation,
+    operationId: input.operationId,
+    operationKind: "human_reply",
+    toState: "HUMAN_OWNED",
+    reason: input.reason ?? "human_agent_replied_in_chatwoot",
+    allowedFrom: fromAi ? ["AI_OWNED", "AI_RESUMED"] : ["HUMAN_REQUESTED"],
+    startsNewEpisode: fromAi,
+    actorRef: input.actorRef ?? null,
+  });
+}
+
+/** Explicit, authorized handback begins -> HANDING_BACK. Nobody speaks. */
+export function beginHandback(
+  exec: SqlExecutor,
+  input: {
+    conversation: ConversationRef;
+    operationId: string;
+    episode: number;
+    actorRef: string;
+    reason?: string;
+    correlationId?: string | null;
+  },
+): Promise<TransitionOutcome> {
+  return applyOwnershipTransition(exec, {
+    conversation: input.conversation,
+    operationId: input.operationId,
+    operationKind: "handback_begin",
+    toState: "HANDING_BACK",
+    reason: input.reason ?? "explicit_authorized_handback_requested",
+    allowedFrom: ["HUMAN_OWNED", "HUMAN_REQUESTED"],
+    expectedEpisode: input.episode,
+    actorRef: input.actorRef,
+    correlationId: input.correlationId ?? null,
+    handbackOperationId: input.operationId,
+  });
+}
+
+/** Reconciliation succeeded -> AI_RESUMED. The ONLY edge back to AI authority. */
+export function completeHandback(
+  exec: SqlExecutor,
+  input: {
+    conversation: ConversationRef;
+    operationId: string;
+    episode: number;
+    actorRef: string;
+    correlationId?: string | null;
+  },
+): Promise<TransitionOutcome> {
+  return applyOwnershipTransition(exec, {
+    conversation: input.conversation,
+    // Suffixed so completing and beginning the same handback are two distinct
+    // claims. Without it the completion would collide with its own begin and be
+    // swallowed as a duplicate.
+    operationId: `${input.operationId}:complete`,
+    operationKind: "handback_complete",
+    toState: "AI_RESUMED",
+    reason: "handback_reconciled",
+    allowedFrom: ["HANDING_BACK"],
+    expectedEpisode: input.episode,
+    actorRef: input.actorRef,
+    correlationId: input.correlationId ?? null,
+    handbackOperationId: input.operationId,
+  });
+}
+
+/** Reconciliation failed -> back to HUMAN_OWNED. The AI does not resume. */
+export function abortHandback(
+  exec: SqlExecutor,
+  input: {
+    conversation: ConversationRef;
+    operationId: string;
+    episode: number;
+    actorRef: string;
+    reason: string;
+    correlationId?: string | null;
+  },
+): Promise<TransitionOutcome> {
+  return applyOwnershipTransition(exec, {
+    conversation: input.conversation,
+    operationId: `${input.operationId}:failed`,
+    operationKind: "handback_failed",
+    toState: "HUMAN_OWNED",
+    reason: input.reason,
+    allowedFrom: ["HANDING_BACK"],
+    expectedEpisode: input.episode,
+    actorRef: input.actorRef,
+    correlationId: input.correlationId ?? null,
+  });
+}
+
+/**
+ * The resumed turn has been consumed -> AI_RESUMED settles to AI_OWNED.
+ *
+ * Both states permit an invocation, so this changes no authority; it makes "the
+ * next customer message invoked the runtime once after handback" an observable
+ * fact rather than an assumption.
+ */
+export function settleResumed(
+  exec: SqlExecutor,
+  input: {
+    conversation: ConversationRef;
+    operationId: string;
+    episode: number;
+  },
+): Promise<TransitionOutcome> {
+  return applyOwnershipTransition(exec, {
+    conversation: input.conversation,
+    operationId: input.operationId,
+    operationKind: "resumed_settled",
+    toState: "AI_OWNED",
+    reason: "resumed_turn_consumed",
+    allowedFrom: ["AI_RESUMED"],
+    expectedEpisode: input.episode,
+  });
+}
+
+/**
+ * `conversation_resolved` — recorded, NOT a grant of authority.
+ *
+ * This is the behaviour the Chatwoot-derived predicate gets wrong today. An
+ * agent resolving a ticket for housekeeping, or an automation rule doing it,
+ * currently returns the conversation to a state the AI will answer in, with no
+ * reconciliation, no human outcome in context and no record. Here it writes a
+ * ledger row and moves ownership NOWHERE. Only an explicit authorized handback
+ * returns authority to the AI.
+ *
+ * Implemented as a self-transition so the audit trail carries the observation
+ * without the state graph having to admit an edge for it.
+ */
+export function recordResolution(
+  exec: SqlExecutor,
+  input: {
+    conversation: ConversationRef;
+    /** Stable per (conversation, episode) so webhook retries collapse. */
+    operationId: string;
+    reason?: string;
+  },
+): Promise<TransitionOutcome> {
+  return applyOwnershipTransition(exec, {
+    conversation: input.conversation,
+    operationId: input.operationId,
+    operationKind: "resolution_observed",
+    reason: input.reason ?? "chatwoot_resolution_observed_ownership_unchanged",
+    // No target and no `allowedFrom`: the state under the lock is both the
+    // from- and the to-state, so this is legal from anywhere and moves nothing.
+    selfTransition: true,
+    actorRef: "chatwoot:conversation_resolved",
+  });
+}

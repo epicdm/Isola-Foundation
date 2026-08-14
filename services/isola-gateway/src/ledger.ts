@@ -146,6 +146,49 @@ export interface ReserveArgs {
   leaseMs: number;
 }
 
+/** What a statement returns. Deliberately the smallest useful shape: the rows
+ *  and the row count, because `rowCount` IS the result for a conditional
+ *  update used as a claim. */
+export interface QueryResult<T> {
+  rows: T[];
+  rowCount: number;
+}
+
+/**
+ * The minimal SQL surface, so a module that needs the database does not need
+ * the driver.
+ *
+ * `src/ownership-store.ts` issues SQL through this interface and imports no
+ * database package at all. That keeps the structural guarantee asserted by
+ * `test/no-direct-network.test.ts` — `pg` is imported by this file and by no
+ * other — intact while a SECOND store shares the one pool. One driver import,
+ * one pool, one confinement rule, two stores.
+ */
+export interface SqlClient {
+  query<T = Record<string, unknown>>(
+    sql: string,
+    params?: readonly unknown[],
+  ): Promise<QueryResult<T>>;
+}
+
+export interface SqlExecutor extends SqlClient {
+  /**
+   * Run `fn` inside ONE transaction on ONE pooled connection: `BEGIN`, the
+   * body, then `COMMIT`, or `ROLLBACK` if the body throws.
+   *
+   * A single connection is the point, not an implementation detail. `SELECT
+   * ... FOR UPDATE` takes a row lock that is held until the transaction ends,
+   * and the ownership engine's preconditions — `allowedFrom` and
+   * `expectedEpisode` — are only sound if they are evaluated while that lock is
+   * held. Issuing the lock and the check on two pooled connections would take
+   * the lock in one transaction and test the precondition in another, which is
+   * no lock at all.
+   *
+   * ERRORS FROM `fn` PROPAGATE UNWRAPPED, on purpose. See `SqlClient` below.
+   */
+  transaction<T>(fn: (client: SqlClient) => Promise<T>): Promise<T>;
+}
+
 export interface Ledger {
   /** Idempotent DDL. Safe to run on every boot. */
   migrate(): Promise<void>;
@@ -251,7 +294,7 @@ export interface PostgresLedgerOptions {
   statementTimeoutMs?: number;
 }
 
-export class PostgresLedger implements Ledger {
+export class PostgresLedger implements Ledger, SqlExecutor {
   private readonly pool: PgPool;
   private readonly instanceId: string;
 
@@ -273,10 +316,20 @@ export class PostgresLedger implements Ledger {
     this.instanceId = options.instanceId;
   }
 
-  private async query<T>(
+  /**
+   * One pooled statement.
+   *
+   * The delivery ledger's own call sites want a failure here to be
+   * indistinguishable from "the ledger is unreachable", because for them it is:
+   * either way the delivery cannot be recorded and must fail closed. So the
+   * driver error is deliberately flattened into `LedgerUnavailableError`, and
+   * only its NAME is carried — never its message, which can quote SQL and
+   * parameter values.
+   */
+  async query<T = Record<string, unknown>>(
     sql: string,
-    params: readonly unknown[],
-  ): Promise<{ rows: T[]; rowCount: number }> {
+    params: readonly unknown[] = [],
+  ): Promise<QueryResult<T>> {
     let client: PoolClient;
     try {
       client = await this.pool.connect();
@@ -288,6 +341,61 @@ export class PostgresLedger implements Ledger {
       return { rows: result.rows as T[], rowCount: result.rowCount ?? 0 };
     } catch (err) {
       throw new LedgerUnavailableError(err instanceof Error ? err.name : "query_failed");
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * See `SqlExecutor.transaction`.
+   *
+   * WHY THE SCOPED CLIENT DOES NOT WRAP ITS ERRORS
+   *   The ownership engine has to tell a UNIQUE-violation (SQLSTATE `23505` —
+   *   a concurrent writer claimed the same operation id, which is a normal,
+   *   expected outcome meaning "the other one won") apart from a database that
+   *   is unreachable (which must fail closed and alert). `LedgerUnavailableError`
+   *   carries only the error NAME, so wrapping here would erase the SQLSTATE
+   *   that distinguishes them and the engine would have to guess. It would
+   *   guess "unavailable", and a routine concurrent claim would page somebody.
+   *
+   *   The raw driver error is therefore rethrown as-is. It never reaches a log
+   *   or a response: `src/ownership-store.ts` classifies it by `code` and
+   *   returns a value.
+   */
+  async transaction<T>(fn: (client: SqlClient) => Promise<T>): Promise<T> {
+    let client: PoolClient;
+    try {
+      client = await this.pool.connect();
+    } catch (err) {
+      throw new LedgerUnavailableError(err instanceof Error ? err.name : "connect_failed");
+    }
+
+    const scoped: SqlClient = {
+      query: async <T2 = Record<string, unknown>>(
+        sql: string,
+        params: readonly unknown[] = [],
+      ): Promise<QueryResult<T2>> => {
+        const result = await client.query(sql, params as unknown[]);
+        return { rows: result.rows as T2[], rowCount: result.rowCount ?? 0 };
+      },
+    };
+
+    try {
+      await client.query("BEGIN");
+      const result = await fn(scoped);
+      await client.query("COMMIT");
+      return result;
+    } catch (err) {
+      // Best effort: if the connection itself died there is nothing to roll
+      // back, and Postgres has already discarded the transaction. Swallowing
+      // here preserves the ORIGINAL error, which is the one that explains what
+      // happened.
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        /* connection already gone */
+      }
+      throw err;
     } finally {
       client.release();
     }
@@ -560,6 +668,12 @@ export class PostgresLedger implements Ledger {
   }
 }
 
-export function createLedger(options: PostgresLedgerOptions): Ledger {
+/**
+ * Returns the ledger AND the SQL executor the ownership store needs, because
+ * they are one object over one pool. Widening the return type rather than the
+ * `Ledger` interface is deliberate: `src/app.ts` and the test double in
+ * `test/harness.ts` continue to depend on `Ledger` alone and are unaffected.
+ */
+export function createLedger(options: PostgresLedgerOptions): Ledger & SqlExecutor {
   return new PostgresLedger(options);
 }

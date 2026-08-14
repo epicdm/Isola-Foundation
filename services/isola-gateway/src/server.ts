@@ -11,6 +11,7 @@ import { createServer } from "node:http";
 import { createGateway } from "./app.js";
 import { bootWarnings, configuredBindings, loadConfig } from "./config.js";
 import { createLedger } from "./ledger.js";
+import { migrateOwnershipStore } from "./ownership-store.js";
 import { createLogger } from "./log.js";
 import { createSweeper } from "./recovery.js";
 import { SERVICE_VERSION } from "./version.js";
@@ -113,8 +114,18 @@ const sweeper = createSweeper({
 });
 
 async function boot(): Promise<void> {
+  // Named so the refusal below reports WHICH migration failed. A boot-refused
+  // line that blames the delivery ledger for an ownership-store failure sends
+  // the next person to the wrong table.
+  let stage = "delivery ledger";
   try {
     await ledger.migrate();
+    // The ownership store lives in the SAME database, reached over the SAME
+    // pool, so this shares the ledger's failure mode rather than adding one: if
+    // this DDL cannot run, the statement above could not have run either. Both
+    // are idempotent and additive, and nothing reads the ownership tables yet.
+    stage = "conversation ownership store";
+    await migrateOwnershipStore(ledger);
     logger.info({ event: "boot", outcome: "ledger_ready", instanceId });
   } catch (err) {
     // Do not start serving with an unusable ledger: every delivery would be
@@ -123,7 +134,7 @@ async function boot(): Promise<void> {
     logger.error({
       event: "boot",
       outcome: "boot_refused",
-      detail: `delivery ledger migration failed: ${err instanceof Error ? err.message : "unknown"}`,
+      detail: `${stage} migration failed: ${err instanceof Error ? err.message : "unknown"}`,
     });
     process.exit(1);
   }
