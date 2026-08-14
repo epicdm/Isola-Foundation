@@ -380,24 +380,30 @@ export class PostgresLedger implements Ledger, SqlExecutor {
       },
     };
 
+    // When ROLLBACK itself fails the connection cannot be trusted to be back at
+    // idle, and node-postgres does NOT close an open transaction for you when a
+    // client is returned. Handing such a client back to the pool would let the
+    // next unrelated caller inherit an open transaction. Passing a truthy value
+    // to release() destroys the client instead, and the pool opens a fresh one.
+    let poisoned: unknown = null;
+
     try {
       await client.query("BEGIN");
       const result = await fn(scoped);
       await client.query("COMMIT");
       return result;
     } catch (err) {
-      // Best effort: if the connection itself died there is nothing to roll
-      // back, and Postgres has already discarded the transaction. Swallowing
-      // here preserves the ORIGINAL error, which is the one that explains what
-      // happened.
       try {
         await client.query("ROLLBACK");
-      } catch {
-        /* connection already gone */
+      } catch (rollbackErr) {
+        poisoned = rollbackErr;
       }
+      // The ORIGINAL error is rethrown either way: it is the one that explains
+      // what happened, and the ownership engine classifies it by SQLSTATE.
       throw err;
     } finally {
-      client.release();
+      if (poisoned !== null) client.release(true);
+      else client.release();
     }
   }
 

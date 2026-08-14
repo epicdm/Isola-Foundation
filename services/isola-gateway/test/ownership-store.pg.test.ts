@@ -326,6 +326,112 @@ maybe("exactly-once is enforced by the database", () => {
     const view = await readConversationOwnership(exec, ref);
     expect(view.state).toBe("HUMAN_REQUESTED");
     expect(view.episode).toBe(1);
+
+    // HONEST NOTE, asserted rather than left to a comment: with the row lock
+    // held, the two transactions serialise, so the loser's REPLAY PRE-CHECK
+    // sees the winner's row and reports `replay`. The unique index is the
+    // backstop here, not the arbiter — which is precisely why the raw-SQL case
+    // above exists, and why it bypasses the pre-check entirely to exercise the
+    // constraint. If this ever reports `constraint`, the lock stopped working.
+    const loser = x.status === "duplicate" ? x : y;
+    expect(loser.duplicateSource).toBe("replay");
+  }, 30_000);
+
+  it("a caller's stale view cannot skip recording a real human takeover", async () => {
+    const ref = freshConversation();
+    // The conversation is AI_OWNED in the store. A caller that read it before a
+    // human arrived might believe otherwise; `recordHumanReply` takes no such
+    // argument, so there is nothing to be stale about — it decides under the
+    // lock, from the row.
+    const before = await readConversationOwnership(exec, ref);
+    expect(before.state).toBe("AI_OWNED");
+
+    const applied = await recordHumanReply(exec, {
+      conversation: ref,
+      operationId: "cw-message-1",
+    });
+    expect(applied.status).toBe("applied");
+    expect(applied.state).toBe("HUMAN_OWNED");
+    expect(applied.episode).toBe(1);
+
+    // A second physical human message is a different operation id. The
+    // conversation is already human-owned, so nothing MOVES — but the operation
+    // is still CLAIMED, recorded as an observation (from_state == to_state).
+    const second = await recordHumanReply(exec, {
+      conversation: ref,
+      operationId: "cw-message-2",
+    });
+    expect(second.status).toBe("applied");
+    expect(second.state).toBe("HUMAN_OWNED");
+    const view = await readConversationOwnership(exec, ref);
+    expect(view.episode).toBe(1); // no second episode
+    const observation = (await transitionRows(ref)).find(
+      (r) => r.operation_id === "cw-message-2",
+    )!;
+    expect(observation.from_state).toBe("HUMAN_OWNED");
+    expect(observation.to_state).toBe("HUMAN_OWNED");
+
+    // And re-presenting that same message is recognised as a replay.
+    const replay = await recordHumanReply(exec, {
+      conversation: ref,
+      operationId: "cw-message-2",
+    });
+    expect(replay.status).toBe("duplicate");
+    expect(replay.duplicateSource).toBe("replay");
+  }, 30_000);
+
+  /**
+   * The hole an adversarial review found: when an already-human-held
+   * conversation claimed NOTHING, a replay of that message arriving after a
+   * handback would find no claim, see AI_RESUMED, and apply a brand new human
+   * takeover for a message the human sent in a PREVIOUS episode.
+   */
+  it("a human message replayed after a handback does not re-take the conversation", async () => {
+    const ref = freshConversation();
+    // Episode 1: a human takes over, then sends a second message.
+    await recordHumanReply(exec, { conversation: ref, operationId: "m1" });
+    await recordHumanReply(exec, { conversation: ref, operationId: "m2" });
+    expect((await readConversationOwnership(exec, ref)).episode).toBe(1);
+
+    // Handback: the conversation returns to the AI.
+    await beginHandback(exec, {
+      conversation: ref,
+      operationId: "hb",
+      episode: 1,
+      actorRef: "user:9",
+    });
+    await completeHandback(exec, {
+      conversation: ref,
+      operationId: "hb",
+      episode: 1,
+      actorRef: "user:9",
+    });
+    expect((await readConversationOwnership(exec, ref)).state).toBe("AI_RESUMED");
+
+    // The old message is redelivered. It must change nothing.
+    const replayed = await recordHumanReply(exec, { conversation: ref, operationId: "m2" });
+    expect(replayed.status).toBe("duplicate");
+    expect(replayed.duplicateSource).toBe("replay");
+
+    const after = await readConversationOwnership(exec, ref);
+    expect(after.state).toBe("AI_RESUMED"); // NOT dragged back to HUMAN_OWNED
+    expect(after.episode).toBe(1);
+  }, 30_000);
+
+  it("refuses to persist a reason that is free text rather than a code", async () => {
+    const ref = freshConversation();
+    await expect(
+      requestHumanOwnership(exec, {
+        conversation: ref,
+        operationId: "op-prose",
+        // A customer's message, passed by accident. The audit table promises it
+        // holds no customer content, so this must not reach it.
+        reason: "Hi, my card was charged twice and I need a refund please",
+      }),
+    ).rejects.toThrow(/reason must be a lower-case code/);
+
+    // Nothing was written — not the transition, and not the conversation row.
+    expect(await transitionRows(ref)).toHaveLength(0);
   }, 30_000);
 });
 
@@ -490,10 +596,36 @@ maybe("the handover acknowledgement is claimed, not checked", () => {
       reason: "explicit_human_request",
     });
 
+    // EIGHT DISTINCT claimants: eight different deliveries racing, which is the
+    // case the claim exists to arbitrate. (The same claimant re-entering is a
+    // retry of one delivery and is asserted separately below.)
     const claims = await Promise.all(
-      Array.from({ length: 8 }, () => claimHandoverAck(exec, ref, 1)),
+      Array.from({ length: 8 }, (_unused, i) =>
+        claimHandoverAck(exec, ref, 1, `delivery-${i}`),
+      ),
     );
     expect(claims.filter(Boolean)).toHaveLength(1);
+  }, 30_000);
+
+  /**
+   * The counterpart, and the reason the claimant exists at all: a delivery
+   * whose acknowledgement did not send is retried by the recovery sweeper, and
+   * a claim it could not re-enter would mean the customer is greeted ZERO
+   * times rather than once.
+   */
+  it("the SAME delivery re-enters its own claim, so a retry can still send", async () => {
+    const ref = freshConversation();
+    await requestHumanOwnership(exec, {
+      conversation: ref,
+      operationId: "esc-reenter",
+      reason: "explicit_human_request",
+    });
+
+    expect(await claimHandoverAck(exec, ref, 1, "delivery-x")).toBe(true);
+    // The send failed; the sweeper retries the same delivery.
+    expect(await claimHandoverAck(exec, ref, 1, "delivery-x")).toBe(true);
+    // A different delivery is still locked out.
+    expect(await claimHandoverAck(exec, ref, 1, "delivery-y")).toBe(false);
   }, 30_000);
 
   it("a claim for an episode the conversation is not in matches nothing", async () => {
@@ -505,8 +637,8 @@ maybe("the handover acknowledgement is claimed, not checked", () => {
     });
     // Current episode is 1; a claim naming 2 must not mint a right to send
     // that nobody granted.
-    expect(await claimHandoverAck(exec, ref, 2)).toBe(false);
-    expect(await claimHandoverAck(exec, ref, 1)).toBe(true);
+    expect(await claimHandoverAck(exec, ref, 2, "claimant-a")).toBe(false);
+    expect(await claimHandoverAck(exec, ref, 1, "claimant-a")).toBe(true);
   }, 30_000);
 
   it("a new episode may be acknowledged again", async () => {
@@ -516,8 +648,9 @@ maybe("the handover acknowledgement is claimed, not checked", () => {
       operationId: "e1",
       reason: "explicit_human_request",
     });
-    expect(await claimHandoverAck(exec, ref, 1)).toBe(true);
-    expect(await claimHandoverAck(exec, ref, 1)).toBe(false);
+    expect(await claimHandoverAck(exec, ref, 1, "delivery-a")).toBe(true);
+    // A DIFFERENT delivery is refused: one greeting per handover.
+    expect(await claimHandoverAck(exec, ref, 1, "delivery-b")).toBe(false);
 
     await beginHandback(exec, {
       conversation: ref,
@@ -542,7 +675,7 @@ maybe("the handover acknowledgement is claimed, not checked", () => {
     expect(after.episode).toBe(2);
     // Episode 2 is a genuinely new span of human involvement, so it gets its
     // own acknowledgement.
-    expect(await claimHandoverAck(exec, ref, 2)).toBe(true);
+    expect(await claimHandoverAck(exec, ref, 2, "claimant-a")).toBe(true);
   }, 30_000);
 });
 
@@ -556,8 +689,6 @@ maybe("resolution is an observation, not a grant of authority", () => {
     await recordHumanReply(exec, {
       conversation: ref,
       operationId: "msg-1",
-      currentState: "AI_OWNED",
-      currentEpisode: 0,
     });
     const held = await readConversationOwnership(exec, ref);
     expect(held.state).toBe("HUMAN_OWNED");
@@ -672,8 +803,6 @@ maybe("tenants cannot see or move each other's conversations", () => {
     await recordHumanReply(exec, {
       conversation: ref,
       operationId: "msg-x",
-      currentState: "AI_OWNED",
-      currentEpisode: 0,
     });
     const impostor: ConversationRef = { ...ref, tenantId: `t-${randomUUID()}` };
     const view = await readConversationOwnership(exec, impostor);

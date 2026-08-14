@@ -30,6 +30,175 @@ import type {
   RuntimeCompletionState,
 } from "../src/runtime.js";
 import { computeSignature } from "../src/signature.js";
+import {
+  canTransition,
+  conversationKey,
+  DEFAULT_OWNERSHIP_STATE,
+  type ConversationRef,
+  type OwnershipGate,
+  type OwnershipState,
+  type OwnershipView,
+  type TransitionOutcome,
+} from "../src/ownership.js";
+
+/**
+ * An in-memory ownership gate for the unit suite.
+ *
+ * A REAL implementation of the rules, not a stub that says yes. It reuses the
+ * same pure functions the Postgres store uses, so a test that passes here is
+ * testing the same transition graph. What it deliberately does NOT reproduce is
+ * concurrency: there is no lock and no unique index, because a Map cannot have
+ * either. That is exactly why `test/ownership-store.pg.test.ts` exists and why
+ * it refuses to pass without a real database — the guarantees this double
+ * cannot make are proven there, against Postgres, or they are not proven.
+ *
+ * Default state is AI_OWNED, matching the store: a conversation with no history
+ * is one the AI may answer.
+ */
+export class InMemoryOwnershipGate implements OwnershipGate {
+  private readonly rows = new Map<
+    string,
+    {
+      state: OwnershipState;
+      episode: number;
+      ack: number | null;
+      ackRef: string | null;
+      escalationOperationId: string | null;
+    }
+  >();
+  private readonly claimed = new Set<string>();
+
+  /** Test hook: put a conversation into a state without going through a transition. */
+  seed(
+    ref: ConversationRef,
+    state: OwnershipState,
+    episode = 1,
+    seedOperationId?: string,
+  ): void {
+    this.rows.set(this.key(ref), {
+      state,
+      episode,
+      ack: null,
+      ackRef: null,
+      escalationOperationId: seedOperationId ?? null,
+    });
+  }
+
+  private key(ref: ConversationRef): string {
+    return `${ref.tenantId}|${conversationKey(ref.chatwootAccountId, ref.chatwootConversationId)}`;
+  }
+
+  async read(ref: ConversationRef): Promise<OwnershipView> {
+    const row = this.rows.get(this.key(ref));
+    if (row === undefined) {
+      return {
+        state: DEFAULT_OWNERSHIP_STATE,
+        episode: 0,
+        handoverAckEpisode: null,
+        escalationOperationId: null,
+        diverged: false,
+      };
+    }
+    return {
+      state: row.state,
+      episode: row.episode,
+      handoverAckEpisode: row.ack,
+      escalationOperationId: row.escalationOperationId,
+      diverged: false,
+    };
+  }
+
+  async requestHuman(input: {
+    conversation: ConversationRef;
+    operationId: string;
+  }): Promise<TransitionOutcome> {
+    const key = this.key(input.conversation);
+    const claimKey = `${key}|${input.operationId}`;
+    const row =
+      this.rows.get(key) ??
+      {
+        state: DEFAULT_OWNERSHIP_STATE as OwnershipState,
+        episode: 0,
+        ack: null,
+        ackRef: null,
+        escalationOperationId: null,
+      };
+
+    if (this.claimed.has(claimKey)) {
+      return {
+        ok: true,
+        status: "duplicate",
+        state: row.state,
+        episode: row.episode,
+        operationId: input.operationId,
+        duplicateSource: "replay",
+      };
+    }
+    if (row.state !== "AI_OWNED" && row.state !== "AI_RESUMED") {
+      return {
+        ok: false,
+        status: "illegal_transition",
+        state: row.state,
+        episode: row.episode,
+        operationId: input.operationId,
+        duplicateSource: null,
+      };
+    }
+    if (!canTransition(row.state, "HUMAN_REQUESTED")) {
+      return {
+        ok: false,
+        status: "illegal_transition",
+        state: row.state,
+        episode: row.episode,
+        operationId: input.operationId,
+        duplicateSource: null,
+      };
+    }
+
+    this.claimed.add(claimKey);
+    const next = {
+      state: "HUMAN_REQUESTED" as const,
+      episode: row.episode + 1,
+      ack: row.ack,
+      ackRef: row.ackRef,
+      escalationOperationId: input.operationId,
+    };
+    this.rows.set(key, next);
+    return {
+      ok: true,
+      status: "applied",
+      state: next.state,
+      episode: next.episode,
+      operationId: input.operationId,
+      duplicateSource: null,
+    };
+  }
+
+  async claimAck(ref: ConversationRef, episode: number, claimantRef: string): Promise<boolean> {
+    const key = this.key(ref);
+    const row = this.rows.get(key);
+    if (row === undefined || row.episode !== episode) return false;
+    // The same claimant may re-enter its own claim; a different one may not.
+    if (row.ack !== null && row.ack >= episode && row.ackRef !== claimantRef) return false;
+    row.ack = episode;
+    row.ackRef = claimantRef;
+    return true;
+  }
+}
+
+/** An ownership gate whose store is unreachable. Every call rejects, so a test
+ *  can assert the reply path fails CLOSED rather than answering anyway. */
+export class UnavailableOwnershipGate implements OwnershipGate {
+  async read(): Promise<OwnershipView> {
+    throw new Error("ownership store unavailable");
+  }
+  async requestHuman(): Promise<TransitionOutcome> {
+    throw new Error("ownership store unavailable");
+  }
+  async claimAck(): Promise<boolean> {
+    throw new Error("ownership store unavailable");
+  }
+}
 
 /**
  * Test-only placeholder credentials. Built at runtime rather than written as
@@ -803,6 +972,7 @@ export interface TestServer {
 export interface StartArgs extends Partial<GatewayDeps> {
   config?: GatewayConfig;
   ledger?: FakeLedger;
+  ownership?: OwnershipGate;
 }
 
 export async function startServer(args: StartArgs = {}): Promise<TestServer> {
@@ -811,6 +981,7 @@ export async function startServer(args: StartArgs = {}): Promise<TestServer> {
   const chatwoot = (args.chatwoot as StubChatwootApi | undefined) ?? new StubChatwootApi();
   const runtime = args.runtime ?? StubAgentRuntime.answering("Here is your answer.");
   const ledger = args.ledger ?? new FakeLedger();
+  const ownership = args.ownership ?? new InMemoryOwnershipGate();
 
   const gateway = createGateway({
     ...args,
@@ -818,6 +989,7 @@ export async function startServer(args: StartArgs = {}): Promise<TestServer> {
     chatwoot,
     runtime,
     ledger,
+    ownership,
   });
 
   const server: Server = createServer(gateway.handler);
@@ -854,7 +1026,7 @@ export interface RealClientServer {
  * service tried to reach for a delivery.
  */
 export async function startRealClientServer(
-  args: { config?: GatewayConfig; logger?: Logger; ledger?: FakeLedger } = {},
+  args: { config?: GatewayConfig; logger?: Logger; ledger?: FakeLedger; ownership?: OwnershipGate } = {},
 ): Promise<RealClientServer> {
   const egress = recordingEgress();
   const ledger = args.ledger ?? new FakeLedger();
@@ -863,6 +1035,7 @@ export async function startRealClientServer(
     ...(args.logger === undefined ? {} : { logger: args.logger }),
     safeFetch: egress.safeFetch,
     ledger,
+    ownership: args.ownership ?? new InMemoryOwnershipGate(),
   });
   const server: Server = createServer(gateway.handler);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

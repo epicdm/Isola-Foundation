@@ -41,14 +41,28 @@ describe("the migration file is the SQL that runs", () => {
     expect(OWNERSHIP_SCHEMA_SQL).toMatch(
       /CREATE UNIQUE INDEX IF NOT EXISTS\s+conversation_ownership_transition_claim_key\s+ON conversation_ownership_transition \(tenant_id, conversation_key, operation_id\)/,
     );
-    // No statement in the executed DDL may remove anything. This is the
-    // property that makes it safe to run on every boot.
+    // No statement in the executed DDL may remove or rewrite anything. That is
+    // the property that makes it safe to run on every boot — not the absence of
+    // the words "ALTER TABLE", which a purely additive
+    // `ADD COLUMN IF NOT EXISTS` also uses and which is required for a column
+    // added after the tables already exist on a live database.
     const executable = OWNERSHIP_SCHEMA_SQL.split("\n")
       .filter((line) => !line.trimStart().startsWith("--"))
       .join("\n");
     expect(executable).not.toMatch(/\bDROP\b/i);
     expect(executable).not.toMatch(/\bTRUNCATE\b/i);
-    expect(executable).not.toMatch(/\bALTER TABLE\b/i);
+    expect(executable).not.toMatch(/\bRENAME\b/i);
+    expect(executable).not.toMatch(/\bALTER COLUMN\b/i);
+    // A constraint added by ALTER has no IF NOT EXISTS form, so it cannot be
+    // re-run without first removing it — the exact pattern that would leave the
+    // claim briefly unenforced on every restart.
+    expect(executable).not.toMatch(/ADD\s+CONSTRAINT/i);
+
+    // Every ALTER TABLE that IS present must be an idempotent column addition.
+    const alters = executable.match(/ALTER TABLE[\s\S]*?;/gi) ?? [];
+    for (const statement of alters) {
+      expect(statement).toMatch(/ADD COLUMN IF NOT EXISTS/i);
+    }
   });
 
   it("carries no column that could hold customer content", () => {

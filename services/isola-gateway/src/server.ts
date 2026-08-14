@@ -11,7 +11,7 @@ import { createServer } from "node:http";
 import { createGateway } from "./app.js";
 import { bootWarnings, configuredBindings, loadConfig } from "./config.js";
 import { createLedger } from "./ledger.js";
-import { migrateOwnershipStore } from "./ownership-store.js";
+import { createPostgresOwnershipGate, migrateOwnershipStore } from "./ownership-store.js";
 import { createLogger } from "./log.js";
 import { createSweeper } from "./recovery.js";
 import { SERVICE_VERSION } from "./version.js";
@@ -99,12 +99,17 @@ const ledger = createLedger({
   instanceId,
 });
 
-const gateway = createGateway({ config, logger, ledger });
+// One pool, two stores. The ownership gate speaks SQL through the ledger's
+// executor, so `pg` stays imported by exactly one module.
+const ownership = createPostgresOwnershipGate(ledger);
+
+const gateway = createGateway({ config, logger, ledger, ownership });
 const server = createServer(gateway.handler);
 
 const sweeper = createSweeper({
   config,
   ledger,
+  ownership,
   bindingStore: gateway.bindingStore,
   chatwoot: gateway.chatwoot,
   runtime: gateway.runtime,

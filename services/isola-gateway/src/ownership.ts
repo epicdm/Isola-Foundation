@@ -124,6 +124,47 @@ export const ESCALATION_REASON_CODES = [
 
 export type EscalationReasonCode = (typeof ESCALATION_REASON_CODES)[number];
 
+/**
+ * Reason strings are CODES, never prose, and this is where that is enforced
+ * rather than merely intended.
+ *
+ * The store's "no customer content" guarantee was previously carried only by a
+ * column-name scan — which proves no column is NAMED for content, and proves
+ * nothing about what a caller puts in a free-text `reason`. A caller could pass
+ * the customer's message, the model's answer or an attachment filename by
+ * accident, and it would be written to the audit table and survive there.
+ *
+ * A code matching this pattern cannot contain a space, a quote, an @, a slash
+ * or any punctuation prose needs, and is capped at 64 characters. Every reason
+ * the gateway actually passes is already of this shape: the failure outcomes in
+ * `FAILURE_EXPLANATIONS`, the handoff `NoTextClassification.reason` values and
+ * the escalation reason codes.
+ */
+export const REASON_CODE_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/;
+
+export function isReasonCode(value: unknown): value is string {
+  return typeof value === "string" && REASON_CODE_PATTERN.test(value);
+}
+
+/** Thrown rather than silently truncating: a reason that is not a code is a
+ *  programming error at the call site, and the safe thing is to refuse to write
+ *  it at all rather than to write a redacted version that looks deliberate. */
+export class ReasonNotACodeError extends Error {
+  constructor() {
+    super(
+      "ownership reason must be a lower-case code matching " +
+        String(REASON_CODE_PATTERN) +
+        " — free text is refused because this value is persisted to the audit trail",
+    );
+    this.name = "ReasonNotACodeError";
+  }
+}
+
+export function assertReasonCode(value: string): string {
+  if (!isReasonCode(value)) throw new ReasonNotACodeError();
+  return value;
+}
+
 export function isOwnershipState(value: unknown): value is OwnershipState {
   return typeof value === "string" && (OWNERSHIP_STATES as readonly string[]).includes(value);
 }
@@ -234,4 +275,122 @@ export function conversationKey(accountId: number, conversationDisplayId: number
     throw new RangeError("conversationKey: conversationDisplayId must be a positive integer");
   }
   return `cw:${accountId}:${conversationDisplayId}`;
+}
+
+// ---------------------------------------------------------------------------
+// The port
+// ---------------------------------------------------------------------------
+
+/** The conversation a transition applies to, in this service's own identifiers. */
+export interface ConversationRef {
+  /** Resolved from the binding, NEVER read from the webhook payload. */
+  tenantId: string;
+  chatwootAccountId: number;
+  /** Chatwoot's `display_id` — see `conversationKey` above. */
+  chatwootConversationId: number;
+  chatwootInboxId?: number | null;
+  bindingId?: string | null;
+}
+
+export interface OwnershipView {
+  state: OwnershipState;
+  episode: number;
+  handoverAckEpisode: number | null;
+  /**
+   * The operation id that opened the CURRENT episode of human involvement.
+   *
+   * Read so a resumed delivery can tell "a human holds this because MY OWN
+   * earlier attempt recorded it, and I still owe Chatwoot the writes" apart
+   * from "a different human genuinely took this over". Without that distinction
+   * a resumed delivery either abandons its own half-finished handover or talks
+   * over somebody else, and there is no third option.
+   */
+  escalationOperationId: string | null;
+  /**
+   * True when the stored state string was not one this build recognises and was
+   * therefore failed closed to HUMAN_OWNED. A divergence must silence the AI,
+   * never license it — and it must be VISIBLE, because that silence is
+   * otherwise indistinguishable from a legitimate human hold.
+   */
+  diverged: boolean;
+}
+
+export type TransitionStatus =
+  /** Claimed and applied by THIS call. Side effects belong here and nowhere else. */
+  | "applied"
+  /** This exact operation was already claimed. Nothing changed. Not an error. */
+  | "duplicate"
+  /** The caller named an episode that is no longer current. Refused. */
+  | "stale_episode"
+  /** Not in a state from which this transition is legal. Refused. */
+  | "illegal_transition";
+
+export interface TransitionOutcome {
+  /** True for `applied` and `duplicate` — the intent holds. False means refused. */
+  ok: boolean;
+  status: TransitionStatus;
+  /** The state AFTER this call. Unchanged when not applied. */
+  state: OwnershipState;
+  episode: number;
+  operationId: string;
+  /**
+   * Which mechanism produced a `duplicate`.
+   *
+   *   `replay`     — the pre-check found the operation already recorded; a
+   *                  retried delivery arriving after the original finished.
+   *   `constraint` — the INSERT was rejected by the unique index. A concurrent
+   *                  writer won the race.
+   *
+   * Recorded because "the database rejected it" and "we noticed and did not
+   * try" are different facts, and an audit that cannot tell them apart cannot
+   * show the constraint is doing any work.
+   */
+  duplicateSource: "replay" | "constraint" | null;
+}
+
+/**
+ * THE PORT the reply path depends on.
+ *
+ * Narrow on purpose. `src/pipeline.ts` must not import a database driver, a
+ * connection or any SQL — it takes this interface, exactly as it already takes
+ * `ChatwootApi`, `AgentRuntime` and `Ledger`. The Postgres implementation is
+ * `createPostgresOwnershipGate` in `src/ownership-store.ts`; the unit suite
+ * supplies an in-memory one.
+ *
+ * Every method is failure-visible rather than failure-silent: an implementation
+ * that cannot reach its store must REJECT, so the caller fails closed. A gate
+ * that returns AI_OWNED when it does not know is a gate that licenses the bot
+ * to answer a conversation a human is holding.
+ */
+export interface OwnershipGate {
+  /** Current authority. Never throws for "no row" — a conversation with no
+   *  history is AI_OWNED, which is a fact and not an absence. */
+  read(ref: ConversationRef): Promise<OwnershipView>;
+
+  /** Accepted escalation -> HUMAN_REQUESTED, opening a new episode. */
+  requestHuman(input: {
+    conversation: ConversationRef;
+    operationId: string;
+    reason: string;
+    actorRef?: string | null;
+    correlationId?: string | null;
+  }): Promise<TransitionOutcome>;
+
+  /**
+   * Claim the right to send ONE handover acknowledgement for one episode.
+   *
+   * True means THIS caller may send. The claim is a conditional UPDATE whose
+   * ROW COUNT is the answer, so two DIFFERENT deliveries racing cannot both get
+   * true — one greeting per handover, not one per delivery.
+   *
+   * `claimantRef` identifies the delivery holding the claim, and re-claiming
+   * with the SAME ref succeeds. That is not a loophole, it is the point: a
+   * delivery whose acknowledgement failed to send is retried by the recovery
+   * sweeper, and a claim it could not re-enter would mean the customer is
+   * greeted ZERO times rather than once. Cross-delivery exclusion is preserved
+   * because a different delivery presents a different ref. At-most-once for the
+   * same delivery is already guaranteed a layer down, by the per-delivery write
+   * guard, which also reconciles an ambiguous send rather than repeating it.
+   */
+  claimAck(ref: ConversationRef, episode: number, claimantRef: string): Promise<boolean>;
 }

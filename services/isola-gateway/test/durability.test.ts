@@ -27,6 +27,7 @@ import {
   envConfig,
   FakeLedger,
   INBOX_ID,
+  InMemoryOwnershipGate,
   makeBinding,
   messageCreatedPayload,
   MESSAGE_ID,
@@ -169,6 +170,7 @@ describe("3. a restart after durable enqueue but before processing", () => {
       chatwoot,
       runtime,
       logger: logger.logger,
+      ownership: new InMemoryOwnershipGate(),
       failpoint: DISARMED,
       now: () => Date.now(),
     });
@@ -211,6 +213,7 @@ describe("3. a restart after durable enqueue but before processing", () => {
       chatwoot,
       runtime,
       logger: logger.logger,
+      ownership: new InMemoryOwnershipGate(),
       failpoint: DISARMED,
       now: () => Date.now(),
     });
@@ -255,6 +258,7 @@ describe("3. a restart after durable enqueue but before processing", () => {
       chatwoot,
       runtime,
       logger: logger.logger,
+      ownership: new InMemoryOwnershipGate(),
       failpoint: DISARMED,
       now: () => Date.now(),
     }).sweep();
@@ -305,6 +309,7 @@ describe("4a. the crash window itself, made deterministic by the failpoint", () 
       chatwoot,
       runtime,
       logger: logger.logger,
+      ownership: new InMemoryOwnershipGate(),
       failpoint: DISARMED,
       now: () => Date.now(),
     }).sweep();
@@ -346,6 +351,7 @@ describe("4a. the crash window itself, made deterministic by the failpoint", () 
       chatwoot,
       runtime,
       logger: logger.logger,
+      ownership: new InMemoryOwnershipGate(),
       failpoint: DISARMED,
       now: () => Date.now(),
     }).sweep();
@@ -605,6 +611,7 @@ describe("9. lifecycle enforcement on the recovery path", () => {
       chatwoot,
       runtime,
       logger: logger.logger,
+      ownership: new InMemoryOwnershipGate(),
       failpoint: DISARMED,
       now: () => Date.now(),
     }).sweep();
@@ -667,6 +674,7 @@ describe("10. recovery sweeper applies the same precedence", () => {
       chatwoot,
       runtime: StubAgentRuntime.answering("never"),
       logger: logger.logger,
+      ownership: new InMemoryOwnershipGate(),
       failpoint: DISARMED,
       now: () => Date.now(),
     }).sweep();

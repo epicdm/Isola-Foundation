@@ -44,15 +44,29 @@
  * `test/ledger-no-content.test.ts`'s column-scan discipline applies here too.
  */
 import {
+  assertReasonCode,
   canTransition,
   conversationKey,
   DEFAULT_OWNERSHIP_STATE,
   readEpisode,
   readState,
+  type ConversationRef,
+  type OwnershipGate,
   type OwnershipOperationKind,
   type OwnershipState,
+  type OwnershipView,
+  type TransitionOutcome,
+  type TransitionStatus,
 } from "./ownership.js";
 import type { QueryResult, SqlClient, SqlExecutor } from "./ledger.js";
+
+export type {
+  ConversationRef,
+  OwnershipGate,
+  OwnershipView,
+  TransitionOutcome,
+  TransitionStatus,
+};
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -82,6 +96,7 @@ CREATE TABLE IF NOT EXISTS conversation_ownership (
   ownership_state                   text        NOT NULL DEFAULT 'AI_OWNED',
   ownership_episode                 integer     NOT NULL DEFAULT 0,
   handover_ack_episode              integer,
+  handover_ack_ref                  text,
   ownership_changed_at              timestamptz,
   ownership_reason                  text,
   ownership_actor_ref               text,
@@ -97,6 +112,15 @@ CREATE TABLE IF NOT EXISTS conversation_ownership (
   CONSTRAINT conversation_ownership_ack_episode_nonneg
     CHECK (handover_ack_episode IS NULL OR handover_ack_episode >= 0)
 );
+
+-- Additive, for a database where the table above already exists.
+-- CREATE TABLE IF NOT EXISTS does nothing at all when the table is present, so
+-- a column added after the first deploy needs this second statement or it never
+-- lands on the environments that mattered. ADD COLUMN IF NOT EXISTS is
+-- idempotent, and adding a nullable column with no default does not rewrite the
+-- table or take a long lock.
+ALTER TABLE conversation_ownership
+  ADD COLUMN IF NOT EXISTS handover_ack_ref text;
 
 CREATE INDEX IF NOT EXISTS conversation_ownership_tenant_state_idx
   ON conversation_ownership (tenant_id, ownership_state);
@@ -164,63 +188,29 @@ function isUniqueViolation(err: unknown): boolean {
 // Vocabulary
 // ---------------------------------------------------------------------------
 
-export type TransitionStatus =
-  /** Claimed and applied by THIS call. Side effects belong here and nowhere else. */
-  | "applied"
-  /** This exact operation was already claimed. Nothing changed. Not an error. */
-  | "duplicate"
-  /** The caller named an episode that is no longer current. Refused. */
-  | "stale_episode"
-  /** Not in a state from which this transition is legal. Refused. */
-  | "illegal_transition";
-
-export interface TransitionOutcome {
-  /** True for `applied` and `duplicate` — the intent holds. False means refused. */
-  ok: boolean;
-  status: TransitionStatus;
-  /** The state AFTER this call. Unchanged when not applied. */
-  state: OwnershipState;
-  episode: number;
-  operationId: string;
+/**
+ * What a `resolvePlan` callback decides, having seen the LOCKED state.
+ *
+ *   `apply`     — move to `toState`, opening a new episode if asked.
+ *   `duplicate` — the intent already holds; change nothing, report success.
+ *   `refuse`    — refused, with the reason the caller should report.
+ */
+export type TransitionPlan =
+  | { kind: "apply"; toState: OwnershipState; startsNewEpisode: boolean }
   /**
-   * Which mechanism produced a `duplicate`.
+   * The intent already holds and nothing needs to move — but the operation id
+   * IS still claimed, as a self-transition, so a later replay of this same
+   * operation is recognised as one.
    *
-   *   `replay`     — the pre-check found the operation already recorded. This is
-   *                  a retried delivery arriving after the original finished.
-   *   `constraint` — the INSERT was rejected by
-   *                  `conversation_ownership_transition_claim_key`. A concurrent
-   *                  writer won the race.
-   *
-   * Recorded because "the database rejected it" and "we noticed and did not
-   * try" are different facts, and an audit that cannot tell them apart cannot
-   * show the constraint is doing any work.
+   * `duplicate` (below) claims nothing, which means a replay arriving after the
+   * conversation has moved on would find no claim and be judged fresh. For a
+   * human reply that is a real hole: replay an old message after a handback and
+   * it would apply a brand new takeover against AI_RESUMED.
    */
-  duplicateSource: "replay" | "constraint" | null;
-}
-
-/** The conversation a transition applies to, in this service's own identifiers. */
-export interface ConversationRef {
-  /** Resolved from the binding, NEVER read from the webhook payload. */
-  tenantId: string;
-  chatwootAccountId: number;
-  /** Chatwoot's `display_id` — see `conversationKey` in `src/ownership.ts`. */
-  chatwootConversationId: number;
-  chatwootInboxId?: number | null;
-  bindingId?: string | null;
-}
-
-export interface OwnershipView {
-  state: OwnershipState;
-  episode: number;
-  handoverAckEpisode: number | null;
-  /**
-   * True when the stored state string was not one this build recognises and was
-   * therefore failed closed to HUMAN_OWNED. A divergence must silence the AI,
-   * never license it — and it must be visible, because the silence is otherwise
-   * indistinguishable from a legitimate human hold.
-   */
-  diverged: boolean;
-}
+  | { kind: "observe" }
+  /** Nothing to do and nothing to claim. */
+  | { kind: "duplicate" }
+  | { kind: "refuse"; status: Exclude<TransitionStatus, "applied" | "duplicate"> };
 
 export interface ApplyTransitionInput {
   conversation: ConversationRef;
@@ -254,6 +244,22 @@ export interface ApplyTransitionInput {
    * writing it back would overwrite a transition that landed in between.
    */
   selfTransition?: boolean;
+  /**
+   * Decide the transition FROM THE LOCKED STATE, instead of from anything the
+   * caller believed before the lock was taken.
+   *
+   * Needed by any transition whose target depends on where the conversation
+   * actually is — `recordHumanReply` is the case: a human message means "open a
+   * new episode" from an AI state, "confirm the existing one" from
+   * HUMAN_REQUESTED, and "nothing to do" when a human already has it. Deciding
+   * that from a caller-supplied `currentState` read BEFORE the lock is a
+   * time-of-check-to-time-of-use hole: a stale "HUMAN_OWNED" would skip
+   * recording a real takeover while the stored row still said AI_OWNED, leaving
+   * the bot licensed to speak.
+   *
+   * When set, `toState`, `allowedFrom` and `startsNewEpisode` are ignored.
+   */
+  resolvePlan?: (view: OwnershipView) => TransitionPlan;
   actorRef?: string | null;
   correlationId?: string | null;
   /** When set, the current episode must equal this exactly. */
@@ -268,9 +274,11 @@ interface OwnershipRow {
   ownership_state: string | null;
   ownership_episode: number | string | null;
   handover_ack_episode: number | string | null;
+  ownership_escalation_operation_id?: string | null;
 }
 
-const SELECT_COLUMNS = "ownership_state, ownership_episode, handover_ack_episode";
+const SELECT_COLUMNS =
+  "ownership_state, ownership_episode, handover_ack_episode, ownership_escalation_operation_id";
 
 function viewOf(row: OwnershipRow): OwnershipView {
   const state = readState(row.ownership_state);
@@ -281,6 +289,7 @@ function viewOf(row: OwnershipRow): OwnershipView {
       row.handover_ack_episode === null || row.handover_ack_episode === undefined
         ? null
         : readEpisode(row.handover_ack_episode),
+    escalationOperationId: row.ownership_escalation_operation_id ?? null,
     diverged: row.ownership_state !== state,
   };
 }
@@ -359,7 +368,13 @@ async function lockConversation(
     // Unreachable in practice: the INSERT above guarantees the row exists and
     // the lock is taken in the same transaction. Treated as a divergence and
     // failed closed rather than assumed away.
-    return { state: "HUMAN_OWNED", episode: 0, handoverAckEpisode: null, diverged: true };
+    return {
+      state: "HUMAN_OWNED",
+      episode: 0,
+      handoverAckEpisode: null,
+      escalationOperationId: null,
+      diverged: true,
+    };
   }
   return viewOf(row);
 }
@@ -407,6 +422,7 @@ export async function applyOwnershipTransition(
     reason,
     allowedFrom = [],
     selfTransition = false,
+    resolvePlan,
     actorRef = null,
     correlationId = null,
     expectedEpisode = null,
@@ -419,6 +435,11 @@ export async function applyOwnershipTransition(
     conversation.chatwootAccountId,
     conversation.chatwootConversationId,
   );
+
+  // Refuse free text BEFORE opening a transaction. This value is persisted to
+  // the audit trail on both tables, so a prose reason would be customer content
+  // written into a store that promises it holds none.
+  const reasonCode = assertReasonCode(reason);
 
   return exec.transaction(async (tx) => {
     const view = await lockConversation(tx, conversation, key);
@@ -448,23 +469,52 @@ export async function applyOwnershipTransition(
       return refused("stale_episode", view, operationId);
     }
 
-    // The target is resolved HERE, under the lock, not by the caller.
-    const target: OwnershipState = selfTransition ? view.state : (toState ?? view.state);
+    // The target is resolved HERE, under the lock, never by the caller.
+    let target: OwnershipState;
+    let opensEpisode: boolean;
 
-    if (!selfTransition) {
+    if (resolvePlan !== undefined) {
+      const plan = resolvePlan(view);
+      if (plan.kind === "refuse") return refused(plan.status, view, operationId);
+      if (plan.kind === "duplicate") {
+        // The intent already holds in the state we just locked. Nothing is
+        // written, and no claim is made, because there is no operation to
+        // claim — reporting `duplicate` says exactly that.
+        return {
+          ok: true,
+          status: "duplicate" as const,
+          state: view.state,
+          episode: view.episode,
+          operationId,
+          duplicateSource: "replay" as const,
+        };
+      }
+      if (plan.kind === "observe") {
+        // Claim the operation id against the CURRENT state, moving nothing.
+        target = view.state;
+        opensEpisode = false;
+      } else {
+        if (!canTransition(view.state, plan.toState)) {
+          return refused("illegal_transition", view, operationId);
+        }
+        target = plan.toState;
+        opensEpisode = plan.startsNewEpisode;
+      }
+    } else if (selfTransition) {
+      target = view.state;
+      opensEpisode = false;
+    } else {
       if (toState === undefined) {
         return refused("illegal_transition", view, operationId);
       }
-      if (!allowedFrom.includes(view.state) || !canTransition(view.state, target)) {
+      if (!allowedFrom.includes(view.state) || !canTransition(view.state, toState)) {
         return refused("illegal_transition", view, operationId);
       }
+      target = toState;
+      opensEpisode = startsNewEpisode;
     }
 
-    const nextEpisode = selfTransition
-      ? view.episode
-      : startsNewEpisode
-        ? view.episode + 1
-        : view.episode;
+    const nextEpisode = opensEpisode ? view.episode + 1 : view.episode;
 
     // 4. The claim. A SAVEPOINT so that losing the race leaves the transaction
     //    usable: without it the unique violation aborts the whole transaction
@@ -484,7 +534,7 @@ export async function applyOwnershipTransition(
           nextEpisode,
           view.state,
           target,
-          reason,
+          reasonCode,
           operationId,
           operationKind,
           actorRef,
@@ -527,7 +577,7 @@ export async function applyOwnershipTransition(
         key,
         target,
         nextEpisode,
-        reason,
+        reasonCode,
         actorRef,
         correlationId,
         escalationOperationId,
@@ -568,19 +618,23 @@ export async function claimHandoverAck(
   exec: SqlExecutor,
   ref: ConversationRef,
   episode: number,
+  claimantRef: string,
 ): Promise<boolean> {
   const key = conversationKey(ref.chatwootAccountId, ref.chatwootConversationId);
   const claim = await exec.query(
     `
     UPDATE conversation_ownership
        SET handover_ack_episode = $3,
+           handover_ack_ref     = $4,
            updated_at           = now()
      WHERE tenant_id         = $1
        AND conversation_key  = $2
        AND ownership_episode = $3
-       AND (handover_ack_episode IS NULL OR handover_ack_episode < $3)
+       AND (handover_ack_episode IS NULL
+            OR handover_ack_episode < $3
+            OR handover_ack_ref = $4)
     `,
-    [ref.tenantId, key, episode],
+    [ref.tenantId, key, episode, claimantRef],
   );
   return claim.rowCount === 1;
 }
@@ -611,6 +665,7 @@ export async function readConversationOwnership(
       state: DEFAULT_OWNERSHIP_STATE,
       episode: 0,
       handoverAckEpisode: null,
+      escalationOperationId: null,
       diverged: false,
     };
   }
@@ -620,6 +675,27 @@ export async function readConversationOwnership(
 /** Idempotent DDL. Safe to run on every boot, alongside `Ledger.migrate()`. */
 export async function migrateOwnershipStore(exec: SqlClient): Promise<void> {
   await exec.query(OWNERSHIP_SCHEMA_SQL);
+}
+
+/**
+ * The Postgres implementation of the port the reply path depends on.
+ *
+ * Deliberately thin: it binds an executor to the free functions above and adds
+ * nothing. All the behaviour is in the SQL, where it can be enforced rather
+ * than intended.
+ *
+ * NOTHING HERE CATCHES. A store that cannot be reached must propagate, so the
+ * caller fails closed. Returning AI_OWNED on an unreachable database would let
+ * the bot answer a conversation a human is holding — the precise defect this
+ * whole module exists to make impossible — and it would do it silently,
+ * because a swallowed error looks exactly like a healthy AI_OWNED read.
+ */
+export function createPostgresOwnershipGate(exec: SqlExecutor): OwnershipGate {
+  return {
+    read: (ref) => readConversationOwnership(exec, ref),
+    requestHuman: (input) => requestHumanOwnership(exec, input),
+    claimAck: (ref, episode, claimantRef) => claimHandoverAck(exec, ref, episode, claimantRef),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -692,32 +768,35 @@ export async function recordHumanReply(
     conversation: ConversationRef;
     /** Chatwoot's own message id — one physical human reply, one transition. */
     operationId: string;
-    currentState: OwnershipState;
-    currentEpisode: number;
     reason?: string;
     actorRef?: string | null;
   },
 ): Promise<TransitionOutcome> {
-  if (input.currentState === "HUMAN_OWNED" || input.currentState === "HANDING_BACK") {
-    return {
-      ok: true,
-      status: "duplicate",
-      state: input.currentState,
-      episode: input.currentEpisode,
-      operationId: input.operationId,
-      duplicateSource: "replay",
-    };
-  }
-  const fromAi = input.currentState === "AI_OWNED" || input.currentState === "AI_RESUMED";
   return applyOwnershipTransition(exec, {
     conversation: input.conversation,
     operationId: input.operationId,
     operationKind: "human_reply",
-    toState: "HUMAN_OWNED",
     reason: input.reason ?? "human_agent_replied_in_chatwoot",
-    allowedFrom: fromAi ? ["AI_OWNED", "AI_RESUMED"] : ["HUMAN_REQUESTED"],
-    startsNewEpisode: fromAi,
     actorRef: input.actorRef ?? null,
+    // Decided from the LOCKED state. This deliberately takes no `currentState`
+    // argument: a caller's pre-lock reading of "a human already has it" could
+    // be stale, and acting on it would skip recording a real takeover and leave
+    // the bot licensed to speak into a conversation a person had just entered.
+    resolvePlan: (view) => {
+      if (view.state === "HUMAN_OWNED" || view.state === "HANDING_BACK") {
+        // Nothing to transition and the bot is already silent. Mid-handback a
+        // human message is part of the reconciliation, not a new takeover.
+        //
+        // `observe`, not `duplicate`: the operation id must still be CLAIMED.
+        // Chatwoot message ids are the operation id here, and a replay of this
+        // same message arriving after a handback would otherwise find no claim,
+        // see AI_RESUMED, and apply a brand new human takeover for a message
+        // the human sent in a previous episode.
+        return { kind: "observe" };
+      }
+      const fromAi = view.state === "AI_OWNED" || view.state === "AI_RESUMED";
+      return { kind: "apply", toState: "HUMAN_OWNED", startsNewEpisode: fromAi };
+    },
   });
 }
 

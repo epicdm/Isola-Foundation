@@ -42,6 +42,7 @@ import { createSafeFetch, type SafeFetch } from "./egress.js";
 import { createFailpoint, DISARMED, type Failpoint } from "./failpoint.js";
 import { idempotencyKey } from "./idempotency.js";
 import type { Ledger, ReserveResult } from "./ledger.js";
+import type { OwnershipGate } from "./ownership.js";
 import { constantTimeEquals } from "./signature.js";
 import { createLogger, type Logger } from "./log.js";
 import { processDelivery, type DeliveryJob, type DeliveryMode } from "./pipeline.js";
@@ -369,6 +370,14 @@ export interface GatewayDeps {
    * boot without it; tests inject a fake.
    */
   ledger: Ledger;
+  /**
+   * The durable answer to "may the AI speak in this conversation". Required for
+   * the same reason the ledger is: a missing ownership store must never
+   * silently degrade into "every conversation looks AI-owned", which is the one
+   * failure that puts an automated reply into a conversation a human is
+   * holding. `server.ts` builds the Postgres-backed one; tests inject a fake.
+   */
+  ownership: OwnershipGate;
   safeFetch?: SafeFetch;
   /**
    * Test-only. Defaults to the env-configured failpoint, which is DISARMED in
@@ -669,7 +678,10 @@ export function createGateway(deps: GatewayDeps): Gateway {
     });
 
     track(
-      processDelivery({ config, chatwoot, runtime, logger, ledger, failpoint, now }, job).catch(
+      processDelivery(
+        { config, chatwoot, runtime, logger, ledger, ownership: deps.ownership, failpoint, now },
+        job,
+      ).catch(
         (err: unknown) => {
           logger.error({
             event: "delivery",

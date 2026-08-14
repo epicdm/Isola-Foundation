@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS conversation_ownership (
   ownership_state                   text        NOT NULL DEFAULT 'AI_OWNED',
   ownership_episode                 integer     NOT NULL DEFAULT 0,
   handover_ack_episode              integer,
+  handover_ack_ref                  text,
   ownership_changed_at              timestamptz,
   ownership_reason                  text,
   ownership_actor_ref               text,
@@ -87,6 +88,15 @@ CREATE TABLE IF NOT EXISTS conversation_ownership (
   CONSTRAINT conversation_ownership_ack_episode_nonneg
     CHECK (handover_ack_episode IS NULL OR handover_ack_episode >= 0)
 );
+
+-- Additive, for a database where the table above already exists.
+-- CREATE TABLE IF NOT EXISTS does nothing at all when the table is present, so
+-- a column added after the first deploy needs this second statement or it never
+-- lands on the environments that mattered. ADD COLUMN IF NOT EXISTS is
+-- idempotent, and adding a nullable column with no default does not rewrite the
+-- table or take a long lock.
+ALTER TABLE conversation_ownership
+  ADD COLUMN IF NOT EXISTS handover_ack_ref text;
 
 CREATE INDEX IF NOT EXISTS conversation_ownership_tenant_state_idx
   ON conversation_ownership (tenant_id, ownership_state);

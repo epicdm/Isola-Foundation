@@ -33,6 +33,7 @@ import {
 } from "./deliveryref.js";
 import type { Failpoint } from "./failpoint.js";
 import type { Ledger, RecoverableDelivery } from "./ledger.js";
+import type { OwnershipGate } from "./ownership.js";
 import type { Logger } from "./log.js";
 import { processDelivery, type DeliveryJob } from "./pipeline.js";
 import type { AgentRuntime } from "./runtime.js";
@@ -46,9 +47,23 @@ import {
   type WebhookPayload,
 } from "./webhook.js";
 
+/**
+ * How many times the sweeper will re-attempt one delivery before abandoning it
+ * and alerting. Chosen to span a real incident window at the default one-minute
+ * lease without becoming an unbounded background loop.
+ */
+export const MAX_RECOVERY_ATTEMPTS = 8;
+
 export interface RecoveryDeps {
   config: GatewayConfig;
   ledger: Ledger;
+  /**
+   * The same ownership gate the live path uses. A resumed delivery must be
+   * subject to the identical authority check — a conversation a human took over
+   * WHILE the original attempt was stalled must not be answered just because
+   * the sweeper, rather than the webhook, is the one driving it.
+   */
+  ownership: OwnershipGate;
   bindingStore: BindingStore;
   chatwoot: ChatwootApi;
   runtime: AgentRuntime;
@@ -173,6 +188,44 @@ export function createSweeper(deps: RecoveryDeps): Sweeper {
   let running = false;
 
   async function resume(row: RecoverableDelivery): Promise<boolean> {
+    // A delivery that cannot be completed must eventually STOP being retried.
+    //
+    // Deliveries are now deliberately left open when their handover did not
+    // become visible in Chatwoot, so the sweeper can finish them. If the cause
+    // is permanent — a deleted conversation, a revoked token, an inbox that no
+    // longer accepts writes — that turns into a delivery swept once per lease
+    // period forever, quietly, with nobody looking at it.
+    //
+    // Past the cap it is abandoned and ALERTED instead. The conversation is
+    // left suppressed for the AI on purpose: a human still needs to answer it,
+    // and silently handing it back to the bot after repeated failures would be
+    // the wrong repair. The alert is the handle a person picks it up by.
+    if (row.attempts >= MAX_RECOVERY_ATTEMPTS) {
+      const identity: LedgerIdentity = {
+        tenantId: row.tenantId,
+        bindingId: row.bindingId,
+        chatwootAccountId: row.chatwootAccountId,
+        chatwootInboxId: row.chatwootInboxId,
+        eventId: row.eventId,
+      };
+      deps.logger.error({
+        event: "recovery",
+        alert: true,
+        alertCode: "recovery_attempts_exhausted",
+        outcome: "abandoned",
+        correlationId: row.correlationId,
+        tenantId: row.tenantId,
+        accountId: row.chatwootAccountId,
+        inboxId: row.chatwootInboxId,
+        conversationId: row.conversationId,
+        attempts: row.attempts,
+        detail:
+          "this delivery has been retried to the cap without completing; it needs a human. The AI stays suppressed for this conversation.",
+      });
+      await deps.ledger.fail(identity, DELIVERY_ACTION, "recovery_attempts_exhausted");
+      return false;
+    }
+
     const binding = findBinding(deps.bindingStore.list(), row);
     if (binding === null) {
       // The binding is gone or has been re-pointed. Do not guess: close the row
@@ -325,7 +378,25 @@ export function createSweeper(deps: RecoveryDeps): Sweeper {
     // Re-evaluate against the CURRENT conversation. A human who took over while
     // this service was down must not be talked over by a resumed delivery.
     const verdict = evaluateSuppression(payload);
-    if (verdict.action === "suppress") {
+
+    // EXCEPT for a delivery that was reserved as a HANDOFF.
+    //
+    // A handoff records the ownership transfer BEFORE it opens and assigns the
+    // conversation in Chatwoot. If it died between those, the conversation is
+    // now `open` and possibly assigned — which is precisely what
+    // `evaluateSuppression` reads as "a human has this, stay out". Completing
+    // the row on that reading closes the delivery for good and leaves its own
+    // half-finished handoff forever: the AI is suppressed by the store and the
+    // note and acknowledgement were never written. Nobody answers.
+    //
+    // `row.mode` is what this delivery was RESERVED as, recorded before any of
+    // that happened, so it is the honest question to ask. Re-running is safe:
+    // every write is claimed under this delivery's ledger key and reconciled,
+    // and the customer acknowledgement is claimed per episode with this
+    // delivery as the claimant.
+    const resumingHandoff = row.mode === "handoff";
+
+    if (verdict.action === "suppress" && !resumingHandoff) {
       deps.logger.info({
         event: "recovery",
         outcome: "suppressed_on_resume",
@@ -347,8 +418,13 @@ export function createSweeper(deps: RecoveryDeps): Sweeper {
       payload,
       conversationId: row.conversationId,
       startedAtMs: startedAt,
-      mode: verdict.action === "handoff" ? "handoff" : "answer",
-      classification: verdict.action === "handoff" ? classifyNoText(payload) : null,
+      resumed: true,
+      // A resumed handoff stays a handoff even when the CURRENT verdict no
+      // longer says so, because the current state is the one its own first
+      // attempt produced.
+      mode: resumingHandoff || verdict.action === "handoff" ? "handoff" : "answer",
+      classification:
+        resumingHandoff || verdict.action === "handoff" ? classifyNoText(payload) : null,
     };
 
     deps.logger.warn({
@@ -371,6 +447,7 @@ export function createSweeper(deps: RecoveryDeps): Sweeper {
         runtime: deps.runtime,
         logger: deps.logger,
         ledger: deps.ledger,
+        ownership: deps.ownership,
         failpoint: deps.failpoint,
         now: deps.now,
       },
