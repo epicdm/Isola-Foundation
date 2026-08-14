@@ -305,6 +305,8 @@ export function createSweeper(deps: RecoveryDeps): Sweeper {
       accountId: binding.chatwootAccountId,
       conversationId: row.conversationId,
       accessToken: binding.agentBotAccessToken,
+    // The tenant's own Chatwoot, when the binding names one.
+    ...(binding.chatwootBaseUrl === undefined ? {} : { baseUrl: binding.chatwootBaseUrl }),
     };
 
     // ---- Did this delivery already answer? --------------------------------

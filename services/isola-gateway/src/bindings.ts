@@ -68,6 +68,39 @@ export interface Binding {
    * down on a bad projection instead of refusing the one affected binding.
    */
   lifecycle: string | null;
+  /**
+   * The Chatwoot INSTANCE this binding's inbox lives in, e.g.
+   * `https://inbox.epic.dm`. Absent means the gateway's configured default,
+   * which is the normal case and is what every binding should use.
+   *
+   * WHAT THIS IS NOT FOR
+   *   It is NOT how Isola does multi-tenancy. The target architecture is ONE
+   *   Chatwoot instance serving many tenants as separate Chatwoot ACCOUNTS,
+   *   which is Chatwoot's own model and is what `chatwootAccountId` +
+   *   `chatwootInboxId` already key on. A Chatwoot instance per customer is
+   *   not the design and should not become one by habit.
+   *
+   * WHY IT EXISTS ANYWAY
+   *   Because the estate currently has TWO instances and a migration between
+   *   them. Without a per-binding host, a gateway process can serve exactly one
+   *   instance, which makes moving inboxes between them ALL-OR-NOTHING: every
+   *   inbox cuts over in the same breath, and a rollback takes them all back.
+   *
+   *   With it, inboxes move ONE AT A TIME. Each is a single field on a single
+   *   binding, each rolls back independently, and an inbox already moved and an
+   *   inbox not yet moved are served side by side by the same process. That is
+   *   also what lets a UAT inbox and a production inbox coexist, so the
+   *   regression harness survives a cutover instead of being spent on it.
+   *
+   *   Once consolidation is finished this field goes back to being unset
+   *   everywhere and costs nothing.
+   *
+   * The HOST of this URL must be on the egress allowlist. That is checked at
+   * boot (see `bootWarnings` in src/config.ts) rather than discovered on the
+   * first customer message, because an unallowlisted host fails every call
+   * closed and looks like an outage rather than a misconfiguration.
+   */
+  chatwootBaseUrl?: string;
   /** Team to assign on escalation. Absent means "escalate but do not assign". */
   escalationTeamId?: number;
   /** Extra approved labels for this tenant, on top of the configured defaults. */
@@ -236,6 +269,67 @@ function optionalInt(
   return undefined;
 }
 
+/**
+ * The tenant's own Chatwoot origin, validated hard at boot.
+ *
+ * HTTPS ONLY, and origin only — no path, no query, no fragment, no credentials
+ * in the URL. Every one of those is refused rather than normalised away:
+ *
+ *   - `http://` would send an AgentBot access token over the wire in clear. The
+ *     token is the tenant's whole authority over its Chatwoot account.
+ *   - a path would be silently concatenated with the API path built downstream,
+ *     producing a URL nobody wrote and a 404 that looks like Chatwoot is down.
+ *   - `user:pass@host` would put a credential somewhere that is logged as a
+ *     "base URL" by everything that handles one.
+ *
+ * A trailing slash IS tolerated and stripped, because it is the one variation
+ * that is unambiguous and that people type constantly.
+ */
+function optionalBaseUrl(
+  record: Record<string, unknown>,
+  index: number,
+  errors: string[],
+): string | undefined {
+  const value = record["chatwootBaseUrl"];
+  if (value === undefined || value === null) return undefined;
+
+  const refuse = (why: string): undefined => {
+    errors.push(`binding[${index}]: "chatwootBaseUrl", when present, ${why}`);
+    return undefined;
+  };
+
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return refuse("must be a non-empty string");
+  }
+
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    return refuse("must be an absolute URL");
+  }
+
+  if (url.protocol !== "https:") {
+    return refuse(
+      "must be https — this URL carries an AgentBot access token on every outbound call",
+    );
+  }
+  if (url.username !== "" || url.password !== "") {
+    return refuse("must not embed credentials in the URL");
+  }
+  if (url.search !== "" || url.hash !== "") {
+    return refuse("must be an origin with no query string or fragment");
+  }
+  if (url.pathname !== "/" && url.pathname !== "") {
+    return refuse(
+      "must be an origin with no path — the Chatwoot API path is appended to it",
+    );
+  }
+
+  // `origin` drops the trailing slash and any default port for us.
+  return url.origin;
+}
+
 function optionalLabels(
   record: Record<string, unknown>,
   index: number,
@@ -295,6 +389,7 @@ export function parseBindings(raw: string | null | undefined): BindingParseResul
     const paperclipAgentId = requiredString(entry, "paperclipAgentId", index, errors);
     const templateId = requiredString(entry, "templateId", index, errors);
     const escalationTeamId = optionalInt(entry, "escalationTeamId", index, errors);
+    const chatwootBaseUrl = optionalBaseUrl(entry, index, errors);
     const labels = optionalLabels(entry, index, errors);
 
     const exposureRaw = entry["exposure"];
@@ -351,6 +446,7 @@ export function parseBindings(raw: string | null | undefined): BindingParseResul
       exposure: "PUBLIC",
       status: statusRaw,
       lifecycle,
+      ...(chatwootBaseUrl === undefined ? {} : { chatwootBaseUrl }),
       ...(escalationTeamId === undefined ? {} : { escalationTeamId }),
       ...(labels === undefined ? {} : { labels }),
     });

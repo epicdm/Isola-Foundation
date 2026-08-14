@@ -37,6 +37,14 @@ export interface ChatwootTarget {
   conversationId: number;
   /** The AgentBot's `access_token`. */
   accessToken: string;
+  /**
+   * The Chatwoot origin this target lives in, from the resolved binding.
+   *
+   * Absent means the gateway's configured default. Present means THIS tenant
+   * is in a different Chatwoot, which is the ordinary case on a multi-tenant
+   * platform rather than an exception.
+   */
+  baseUrl?: string;
 }
 
 /**
@@ -258,6 +266,8 @@ export class HttpChatwootApi implements ChatwootApi {
     path: string,
     body: unknown,
     accessToken: string,
+    /** Per-binding Chatwoot origin. Absent falls back to the configured default. */
+    baseUrl?: string,
   ): Promise<unknown> {
     const controller = new AbortController();
     let timedOut = false;
@@ -277,7 +287,13 @@ export class HttpChatwootApi implements ChatwootApi {
 
     let response: Response;
     try {
-      response = await this.safeFetch(`${this.baseUrl}${path}`, {
+      // The tenant's own Chatwoot when the binding names one, otherwise the
+      // gateway default. Either way the host must be on the egress allowlist —
+      // src/egress.ts refuses anything else, and that refusal is what stops a
+      // crafted or mistyped binding turning into an outbound call to an
+      // arbitrary host carrying an access token.
+      const origin = (baseUrl ?? this.baseUrl).replace(/\/+$/, "");
+      response = await this.safeFetch(`${origin}${path}`, {
         method,
         headers,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -337,6 +353,7 @@ export class HttpChatwootApi implements ChatwootApi {
           : { content_attributes: { [DELIVERY_REF_ATTRIBUTE]: deliveryRef } }),
       },
       target.accessToken,
+      target.baseUrl,
     );
     return readMessageId(payload);
   }
@@ -417,7 +434,7 @@ export class HttpChatwootApi implements ChatwootApi {
   }
 
   async getConversationRecord(target: ChatwootTarget): Promise<unknown> {
-    return this.request("GET", this.conversationPath(target, ""), undefined, target.accessToken);
+    return this.request("GET", this.conversationPath(target, ""), undefined, target.accessToken, target.baseUrl);
   }
 
   async openConversation(target: ChatwootTarget): Promise<void> {
@@ -426,6 +443,7 @@ export class HttpChatwootApi implements ChatwootApi {
       this.conversationPath(target, "/toggle_status"),
       { status: "open" },
       target.accessToken,
+      target.baseUrl,
     );
   }
 
@@ -435,6 +453,7 @@ export class HttpChatwootApi implements ChatwootApi {
       this.conversationPath(target, "/assignments"),
       { team_id: teamId },
       target.accessToken,
+      target.baseUrl,
     );
   }
 
@@ -444,6 +463,7 @@ export class HttpChatwootApi implements ChatwootApi {
       this.conversationPath(target, "/labels"),
       undefined,
       target.accessToken,
+      target.baseUrl,
     );
     const list = isRecord(payload) ? payload["payload"] : payload;
     if (!Array.isArray(list)) return [];
@@ -456,6 +476,7 @@ export class HttpChatwootApi implements ChatwootApi {
       this.conversationPath(target, "/labels"),
       { labels },
       target.accessToken,
+      target.baseUrl,
     );
   }
 
@@ -465,6 +486,7 @@ export class HttpChatwootApi implements ChatwootApi {
       this.conversationPath(target, ""),
       undefined,
       target.accessToken,
+      target.baseUrl,
     );
     if (!isRecord(payload)) return {};
     const attributes = payload["custom_attributes"];
@@ -480,6 +502,7 @@ export class HttpChatwootApi implements ChatwootApi {
       this.conversationPath(target, "/custom_attributes"),
       { custom_attributes: attributes },
       target.accessToken,
+      target.baseUrl,
     );
   }
 }

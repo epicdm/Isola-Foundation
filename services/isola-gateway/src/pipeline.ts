@@ -353,6 +353,8 @@ export async function processDelivery(
     accountId: binding.chatwootAccountId,
     conversationId: job.conversationId,
     accessToken: binding.agentBotAccessToken,
+    // The tenant's own Chatwoot, when the binding names one.
+    ...(binding.chatwootBaseUrl === undefined ? {} : { baseUrl: binding.chatwootBaseUrl }),
   };
 
   const base = {
