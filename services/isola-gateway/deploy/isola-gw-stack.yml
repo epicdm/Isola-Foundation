@@ -23,12 +23,13 @@
 #
 # ── IMAGE PROVENANCE — READ THIS BEFORE CALLING IT "PINNED" ──────────────────
 #
-#   image:     isola-gateway:9715b5b
-#   image id:  sha256:03195ee025724761134ddbe5e0bb1a2332e0bc16ccca263c4a7ccf5004ea3d30
-#   built:     /opt/isola-gw-build/9715b5b, from `git archive` of commit 9715b5b
+#   image:     isola-gateway:a9df3d6
+#   image id:  sha256:826ac4d8a995be781dc7997a394f333d68269daf2af9288a26be9cfc90bd2d3b
+#   built:     /opt/isola-gw-build/a9df3d6, from `git archive` of commit a9df3d6
 #              on branch m1/ownership-store-host03-2026-08-14
 #   contains:  b5f4d81 (ownership store) + c54338e (ownership gate on the reply
 #              path) + d2e141e (Swarm-secret entrypoint) + 9715b5b (LF fix)
+#              + b24835f (per-binding Chatwoot host) + a9df3d6 (de-contaminate)
 #
 # This is an IMMUTABLE TAG, not a registry digest pin. There is no registry on
 # this host, and a `@sha256:` reference requires a repoDigest, which only a
@@ -74,7 +75,7 @@ version: "3.8"
 
 services:
   gateway:
-    image: isola-gateway:9715b5b
+    image: isola-gateway:a9df3d6
 
     # Traefik discovery. THIS HOST RUNS providers.docker, NOT providers.swarm
     # (TRAEFIK_PROVIDERS_DOCKER=true, Traefik 3.6.7), so Traefik reads CONTAINER
@@ -113,6 +114,11 @@ services:
     # the chance of getting there.
     cap_drop:
       - ALL
+    # NOTE: `docker stack deploy` IGNORES security_opt and says so on every
+    # deploy ("Ignoring unsupported options: security_opt"). It is kept here as
+    # the declared intent, but no-new-privileges is NOT in effect — do not read
+    # this block as though it were. cap_drop and read_only ARE applied and are
+    # verified on the running service.
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -137,8 +143,12 @@ services:
       CHATWOOT_BASE_URL: https://isola-chat.saas00.epic.dm
       RUNTIME_BASE_URL: http://isola_isola-runtime:3000
 
-      # Allowlist, not a default-open egress. Additive only.
-      EGRESS_ALLOWLIST: isola-chat.saas00.epic.dm,isola_isola-runtime
+      # Allowlist, not a default-open egress. ADDITIVE ONLY — the existing
+      # entries are never removed. inbox.epic.dm is the PRODUCTION Chatwoot on
+      # deepseek, named by the inbox 46 binding's chatwootBaseUrl. Without it
+      # every reply, note and assignment for that tenant is blocked inside this
+      # process before it reaches the network.
+      EGRESS_ALLOWLIST: isola-chat.saas00.epic.dm,isola_isola-runtime,inbox.epic.dm
 
       GATEWAY_LEDGER_LEASE_MS: "300000"
       GATEWAY_LEDGER_RECOVERY_INTERVAL_MS: "60000"
@@ -160,7 +170,7 @@ services:
         target: gateway_admin_token
       - source: isola_gw_runtime_secret_v1
         target: gateway_runtime_secret
-      - source: isola_gw_bindings_v1
+      - source: isola_gw_bindings_v2
         target: gateway_bindings
 
     deploy:
@@ -205,5 +215,5 @@ secrets:
     external: true
   isola_gw_runtime_secret_v1:
     external: true
-  isola_gw_bindings_v1:
+  isola_gw_bindings_v2:
     external: true
