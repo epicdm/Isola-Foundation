@@ -56,6 +56,13 @@ RUN chown -R root:root /app && chmod -R a-w /app
 # without any chown at deploy time. A bind mount still has to be writable by
 # uid 1000 — if it is not, the runtime warns `state_store_degraded` and keeps
 # serving from memory rather than failing to start.
+# The Swarm-secret shim. Credentials arrive as files under /run/secrets and are
+# mapped to the environment variables this service reads, OUTSIDE the app module
+# graph so filesystem access stays confined to src/state.ts. It execs node, so
+# no shell survives in the process tree.
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 0555 /usr/local/bin/entrypoint.sh
+
 RUN mkdir -p /data/isola-runtime-state && chown -R node:node /data
 
 USER node
@@ -65,4 +72,5 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["node", "dist/server.js"]
