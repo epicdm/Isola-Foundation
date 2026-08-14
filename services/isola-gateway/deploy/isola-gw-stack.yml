@@ -43,11 +43,33 @@
 # genuine upstream repoDigest. It is not in this stack, so nothing here claims
 # a pin it does not have.
 #
-# ── SECRETS ─────────────────────────────────────────────────────────────────
+# ── SECRETS, AND WHAT THIS DOES NOT PROTECT AGAINST ─────────────────────────
 # Four Swarm secrets, delivered as files under /run/secrets and mapped to the
 # environment variables the service reads by the entrypoint shim (see
 # entrypoint.sh — the read happens outside the app so `node:fs` stays out of
 # src/). No credential is in this file, in the image, or in the repository.
+#
+# STATED PLAINLY, because it is a real property and not a solved one: once the
+# entrypoint has run, the four values live in PID 1's ENVIRONMENT for the life
+# of the process. They are readable at /proc/1/environ by anything running as
+# the same user, and they would appear in a core dump.
+#
+# That is inherent, not an oversight. The service reads its configuration from
+# environment variables, and the alternative — teaching src/config.ts to read a
+# file — would put `node:fs` into the module graph of the only publicly exposed
+# Isola component, which a standing source-scan test forbids. Trading that for
+# a packaging preference is the worse deal.
+#
+# The residual exposure is also narrower than it first looks: an attacker who
+# can read /proc/1/environ is already executing code inside this container as
+# the app user, and can equally read /run/secrets directly. So the environment
+# copy does not widen the blast radius of a compromise; it only means the
+# secrets are not protected AFTER one. The hardening below is aimed at the step
+# before that — not getting execution in the first place.
+#
+# There are no child processes to inherit the environment: the service spawns
+# nothing, `node:child_process` appears nowhere in src/, and the entrypoint
+# `exec`s so no shell survives.
 version: "3.8"
 
 services:
@@ -78,6 +100,34 @@ services:
       - easypanel
       # The private side: isola_isola-ledger-db and isola_isola-runtime.
       - easypanel-isola
+
+    # ── Hardening ────────────────────────────────────────────────────────────
+    # This is the only publicly reachable Isola component and it is already
+    # taking internet scanner traffic (/.env, /.git/HEAD, /wp-login.php within
+    # minutes of going up). None of the below is needed for the service to
+    # work, which is exactly why it should be on: the process binds :3000 as a
+    # non-root user, spawns nothing, and writes nothing.
+    #
+    # This does NOT protect the credentials from someone who already has code
+    # execution in the container — see the note on secrets below. It reduces
+    # the chance of getting there.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      # Node wants a writable temp dir even though this service never uses one.
+      # Small, noexec, and gone on restart.
+      - /tmp:rw,noexec,nosuid,size=16m
+
+    # Swarm's default stop grace is 10s. The service's own SIGTERM handler
+    # drains in-flight deliveries and force-exits at 20s, so under the default
+    # it would be SIGKILLed BEFORE its own drain could finish — the drain would
+    # look implemented and never actually run. Nothing is lost either way (the
+    # delivery is durably reserved and the sweeper recovers it), but a
+    # completed drain answers the customer now instead of a lease period later.
+    stop_grace_period: 30s
 
     environment:
       NODE_ENV: production
