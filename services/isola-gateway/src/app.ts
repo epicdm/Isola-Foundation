@@ -83,6 +83,12 @@ export type Outcome =
   | "binding_not_accepted"
   | "suppressed"
   /**
+   * The event carried no routable account/inbox. Chatwoot sends these
+   * routinely and they need no action. 422, not 401: answering 401 made a
+   * normal event indistinguishable from a real signature failure.
+   */
+  | "unroutable_event"
+  /**
    * The same event id re-presented with a different signed body. Refused with
    * 409 — not retryable, and alerted on. Chatwoot's own failure handling then
    * opens the conversation to a human, which is the right place for an anomaly.
@@ -507,14 +513,38 @@ export function createGateway(deps: GatewayDeps): Gateway {
     const decision = evaluated.decision;
 
     switch (decision.kind) {
-      case "reject":
+      case "reject": {
         // The reason is logged, never returned. Telling the caller which half
         // failed turns this endpoint into an oracle for the replay window and
         // for which inboxes exist.
+        //
+        // ONE EXCEPTION, and it is not a weakening of that rule.
+        //
+        // `unparseable_body` is decided BEFORE any secret is consulted: it just
+        // means the body carried no account/inbox to route by. Chatwoot itself
+        // sends such events routinely — entity events that are not about an
+        // inbox at all — and answering 401 to them made a normal, expected,
+        // harmless event indistinguishable in the logs from a genuine signature
+        // failure. That poisons the one alarm you actually want to trust.
+        //
+        // It leaks nothing: the caller already knows the shape of the body it
+        // sent, and no secret, no binding and no inbox existence is involved in
+        // reaching this branch. `no_binding_secret` and every signature failure
+        // DO leak inbox existence or replay-window state, so they stay 401 and
+        // stay opaque.
+        //
+        // 422 rather than 204: 204 would claim we processed it. We did not.
+        if (decision.reason === "unparseable_body") {
+          finish(422, "unroutable_event", { rejectionReason: decision.reason }, {
+            error: "event carries no routable account/inbox and was not processed",
+          });
+          return;
+        }
         finish(401, "unauthorized", { rejectionReason: decision.reason }, {
           error: "unauthorized",
         });
         return;
+      }
 
       case "bad_request":
         finish(400, "bad_request", {}, { error: "body must be a JSON object" });

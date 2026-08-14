@@ -69,12 +69,37 @@ describe("POST /v1/chatwoot/agent-bot — authentication", () => {
       () => signRequest({ timestamp: Math.floor(Date.now() / 1000) + 600 }),
       "timestamp_in_future",
     ],
-    [
-      "a body that cannot even be routed",
-      () => signRequest({ rawBody: "not json at all" }),
-      "unparseable_body",
-    ],
   ];
+
+  /**
+   * An unroutable body is NOT an authentication failure and must not answer as
+   * though it were.
+   *
+   * Chatwoot routinely sends events that carry no inbox — entity events that
+   * are not about an inbox at all. Answering 401 to those made a normal,
+   * expected event indistinguishable in the logs from a genuine signature
+   * failure, which poisons the one alarm worth trusting. It is decided before
+   * any secret is consulted, so 422 leaks nothing: the caller already knows the
+   * shape of the body it sent.
+   */
+  it("answers 422, not 401, for a body with no routable account/inbox", async () => {
+    const capture = new CapturingLogger();
+    const server = await startServer({ logger: capture.logger });
+    try {
+      const res = await postWebhook(server.url, signRequest({ rawBody: "not json at all" }));
+      expect(res.status).toBe(422);
+      expect(res.json["outcome"]).toBe("unroutable_event");
+      // Still no oracle: the response says nothing about secrets or inboxes.
+      expect(res.text).not.toContain("signature");
+      expect(res.text).not.toContain("secret");
+      // The server-side log still records exactly what happened.
+      expect(
+        capture.lines.some((l) => l["rejectionReason"] === "unparseable_body"),
+      ).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
 
   for (const [label, build, expectedReason] of rejected) {
     it(`rejects ${label} with 401 and never says why`, async () => {

@@ -1,0 +1,174 @@
+# isola-runtime — hand-deployed Swarm stack. NOT EasyPanel-managed, by design.
+#
+#   deploy:  sudo docker stack deploy -c /opt/isola/isola-rt-stack.yml isolart
+#   service: isolart_runtime
+#   reached: http://isolart_runtime:3000 on easypanel-isola (INTERNAL ONLY)
+#
+# WHY THIS EXISTS — IT IS NOT THEORETICAL
+# --------------------------------------
+# On 2026-08-14 host03 rebooted. isola-runtime exited CLEANLY, and EasyPanel
+# injects restart.condition=on-failure, which does not restart a clean exit. It
+# stayed down for TWO HOURS. The Gate C gateway, with restart_policy any, came
+# back by itself in the same reboot.
+#
+# Before the cut that was an inconvenience. After the cut, isola-runtime is in
+# the live customer reply path for +1 767-295-6737, and the same clean exit
+# means a customer gets silence with nothing to tell anyone. That is the entire
+# reason this file exists, and the incident is the evidence.
+#
+# NOT PUBLICLY EXPOSED. No Traefik labels, and it deliberately does not join the
+# `easypanel` network. The gateway reaches it over `easypanel-isola` only.
+#
+# ── IMAGE PROVENANCE — READ BEFORE CALLING IT "PINNED" ──────────────────────
+#   image:    isola-runtime:gatec-1
+#   image id: sha256:f0ef326d34ef1971adf50d2df448fd2d6c8f4edfd38eeb1afc64e4b22392f289
+#   built:    /opt/isola-rt-build/rt-gatec-1 from `git archive` of the commit
+#             adding entrypoint.sh, on m1/ownership-store-host03-2026-08-14
+#
+# An IMMUTABLE TAG, not a registry digest pin: there is no registry on this
+# host, and `@sha256:` needs a repoDigest only a registry can issue. Claiming a
+# digest pin would be false. The tag is never reused and the image id above lets
+# the running artefact be checked against this file.
+#
+# ── STATE — THE PART THAT NEEDS CARE ────────────────────────────────────────
+# This service is NOT stateless. `isola_isola-runtime_state` holds the
+# idempotency records, the undelivered cost-event outbox, the sub-cent
+# accumulator and — the one that matters most — `conversationIssues`, the map
+# from a Chatwoot conversation to its Paperclip issue. At the time of writing it
+# held 39 of those.
+#
+# Losing it does not lose money (the outbox had 0 pending) but it WOULD create a
+# second Paperclip issue for every one of those 39 live conversations on their
+# next message.
+#
+# So: this stack takes over the SAME volume, and the old service and this one
+# must NEVER run against it at once. The store is a whole-file read-modify-write
+# serialised only within a single process; two processes on one volume is the
+# exact race the ownership store was built in Postgres to avoid.
+version: "3.8"
+
+services:
+  runtime:
+    image: isola-runtime:gatec-1
+
+    networks:
+      # The private side only. The gateway calls it here. There is deliberately
+      # no route in from the internet.
+      - easypanel-isola
+
+    volumes:
+      # The SAME named volume the EasyPanel service used. See the state note.
+      - isola_isola-runtime_state:/data
+
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: --disable-proto=throw
+      PORT: "3000"
+
+      MODEL_PROVIDER: deepseek
+      MODEL_BASE_URL: https://api.deepseek.com
+      MODEL_NAME: deepseek-chat
+      RUNTIME_MODEL_TIMEOUT_MS: "60000"
+
+      PAPERCLIP_BASE_URL: https://isola-ai.saas00.epic.dm
+      PAPERCLIP_COMPANY_ID: 3ed3869b-463c-4876-8e16-ddc058f06cd9
+      PAPERCLIP_SUCCESS_STATUS: done
+      PAPERCLIP_FAILURE_STATUS: blocked
+
+      # Allowlist, not default-open egress. The model provider and Paperclip,
+      # nothing else.
+      EGRESS_ALLOWLIST: api.deepseek.com,isola-ai.saas00.epic.dm
+
+      RUNTIME_BUDGET_ENFORCEMENT: "true"
+      RUNTIME_STATE_DIR: /data/isola-runtime-state
+
+      # Swarm secrets, resolved by entrypoint.sh. The VALUES are not here.
+      MODEL_API_KEY_FILE: /run/secrets/model_api_key
+      PAPERCLIP_API_KEY_FILE: /run/secrets/paperclip_api_key
+      PAPERCLIP_AGENT_KEY_INTERNAL_FILE: /run/secrets/pc_agent_key_internal
+      PAPERCLIP_AGENT_KEY_PUBLIC_FILE: /run/secrets/pc_agent_key_public
+      RUNTIME_SECRET_INTERNAL_FILE: /run/secrets/runtime_secret_internal
+      RUNTIME_SECRET_PUBLIC_FILE: /run/secrets/runtime_secret_public
+
+    secrets:
+      - source: isola_rt_model_api_key_v1
+        target: model_api_key
+      - source: isola_rt_paperclip_api_key_v1
+        target: paperclip_api_key
+      - source: isola_rt_pc_agent_key_internal_v1
+        target: pc_agent_key_internal
+      - source: isola_rt_pc_agent_key_public_v1
+        target: pc_agent_key_public
+      - source: isola_rt_secret_internal_v1
+        target: runtime_secret_internal
+      - source: isola_rt_secret_public_v1
+        target: runtime_secret_public
+
+    # Hardening. read_only is NOT set here, unlike the gateway: this service
+    # writes its durable state to /data. The volume is writable; the rootfs is
+    # not written to, but leaving read_only off avoids a failure mode where a
+    # future state path outside the volume silently degrades to memory-only.
+    #
+    # NOTE: `docker stack deploy` IGNORES security_opt and says so on every
+    # deploy. no-new-privileges is therefore NOT in effect. Declared intent,
+    # stated limitation — do not read this block as though it were applied.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    # The service drains and exits on SIGTERM; give it room to finish rather
+    # than being killed at Swarm's 10s default.
+    stop_grace_period: 30s
+
+    deploy:
+      replicas: 1
+      # GATE C, AND THE WHOLE POINT OF THIS FILE. `any` restarts a CLEAN exit.
+      # `on-failure` — what EasyPanel injects and does not let you change — does
+      # not, and that is what kept this service down for two hours.
+      restart_policy:
+        condition: any
+        delay: 5s
+      update_config:
+        # NOT start-first. Two runtimes on one state volume would race on a
+        # whole-file read-modify-write. Stop the old task before starting the
+        # new one, and accept a few seconds of unavailability: a delivery in
+        # that window is durably reserved by the gateway and recovered by its
+        # sweeper.
+        order: stop-first
+        failure_action: rollback
+      rollback_config:
+        order: stop-first
+
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+networks:
+  easypanel-isola:
+    external: true
+
+volumes:
+  isola_isola-runtime_state:
+    external: true
+
+secrets:
+  isola_rt_model_api_key_v1:
+    external: true
+  isola_rt_paperclip_api_key_v1:
+    external: true
+  isola_rt_pc_agent_key_internal_v1:
+    external: true
+  isola_rt_pc_agent_key_public_v1:
+    external: true
+  isola_rt_secret_internal_v1:
+    external: true
+  isola_rt_secret_public_v1:
+    external: true

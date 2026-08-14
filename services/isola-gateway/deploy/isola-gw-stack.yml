@@ -141,14 +141,17 @@ services:
       PORT: "3000"
 
       CHATWOOT_BASE_URL: https://isola-chat.saas00.epic.dm
-      RUNTIME_BASE_URL: http://isola_isola-runtime:3000
+      # The Gate C runtime (stack `isolart`). The EasyPanel service it replaced
+      # is scaled to 0, not deleted — rollback is pointing this back at
+      # http://isola_isola-runtime:3000 and scaling that service to 1.
+      RUNTIME_BASE_URL: http://isolart_runtime:3000
 
       # Allowlist, not a default-open egress. ADDITIVE ONLY — the existing
       # entries are never removed. inbox.epic.dm is the PRODUCTION Chatwoot on
       # deepseek, named by the inbox 46 binding's chatwootBaseUrl. Without it
       # every reply, note and assignment for that tenant is blocked inside this
       # process before it reaches the network.
-      EGRESS_ALLOWLIST: isola-chat.saas00.epic.dm,isola_isola-runtime,inbox.epic.dm
+      EGRESS_ALLOWLIST: isola-chat.saas00.epic.dm,isola_isola-runtime,isolart_runtime,inbox.epic.dm
 
       GATEWAY_LEDGER_LEASE_MS: "300000"
       GATEWAY_LEDGER_RECOVERY_INTERVAL_MS: "60000"
