@@ -58,6 +58,14 @@ COPY --chown=node:node package.json ./
 COPY --chown=node:node --from=build /app/node_modules ./node_modules
 COPY --chown=node:node --from=build /app/dist ./dist
 
+# The Swarm-secret shim. See the long note in the script: it exists so
+# credentials can arrive as Swarm secrets (files under /run/secrets) without
+# `node:fs` entering src/, and it `exec`s node so no shell remains in the
+# process tree. It is a no-op when no `*_FILE` variable is set, so a plain
+# environment-variable deployment behaves exactly as before.
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 0555 /usr/local/bin/entrypoint.sh
+
 # Non-root. The app directory is owned by root and is not writable by the app
 # user, so the process cannot write to its own code either.
 RUN chown -R root:root /app && chmod -R a-w /app
@@ -69,4 +77,5 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["node", "dist/server.js"]
