@@ -81,6 +81,12 @@ const CFG = {
   dockerSocketPath: process.env.SENTINEL_DOCKER_SOCKET || "",
   driftRenotifyMs: Number(process.env.SENTINEL_DRIFT_RENOTIFY_MS || 86_400_000),
   driftExempt: (process.env.SENTINEL_DRIFT_EXEMPT || "").split(",").map((s) => s.trim()).filter(Boolean),
+  // service -> the image its stack file DECLARES. The record states intent; the
+  // substrate holds reality; they drift, and the drift is invisible until someone
+  // reads both. Two cases found by hand in one session — so it walks the same loop.
+  expectedImages: (() => {
+    try { return JSON.parse(process.env.SENTINEL_EXPECTED_IMAGES || "{}"); } catch { return {}; }
+  })(),
   dryRun: process.env.SENTINEL_DRY_RUN === "1",
 };
 
@@ -304,11 +310,28 @@ function checkRestartPolicyDrift() {
             return resolve({ key, ok: true, summary: "docker API unreadable", skipped: true });
           }
           const drifted = [];
+          const imageDrift = [];
           for (const s of services) {
             const name = s?.Spec?.Name ?? "?";
             if (CFG.driftExempt.includes(name)) continue;
             const cond = s?.Spec?.TaskTemplate?.RestartPolicy?.Condition;
             if (cond !== "any") drifted.push(`${name}=${cond ?? "unset"}`);
+            // Same walk: is it running what its stack file says it runs?
+            const expected = CFG.expectedImages[name];
+            if (expected) {
+              const running = (s?.Spec?.TaskTemplate?.ContainerSpec?.Image ?? "").split("@")[0];
+              if (running !== expected) imageDrift.push(`${name}: running ${running} != declared ${expected}`);
+            }
+          }
+          if (imageDrift.length > 0) {
+            return resolve({
+              key: "image_drift", ok: false, renotifyMs: CFG.driftRenotifyMs,
+              summary: `${imageDrift.length} service(s) run an image their stack file does not declare`,
+              detail:
+                "The record describes intent; the substrate holds reality. They drift,\n" +
+                "and the drift is invisible until someone reads both.\n\n" +
+                imageDrift.map((d) => "  " + d).join("\n"),
+            });
           }
           if (drifted.length === 0) return resolve({ key, ok: true, summary: "all services restart: any" });
           resolve({
