@@ -114,9 +114,11 @@ services:
       # mutates without a run id (comment 201, transition 200, cost-event 201).
       #
       # PRIVILEGE NOTE: this is not an escalation — the runtime already held a
-      # board-scoped PAPERCLIP_API_KEY. Narrowing it is Item 6, and it needs an
-      # upstream fix: Paperclip must either issue a run id or offer a write-scoped
-      # non-agent credential.
+      # board-scoped PAPERCLIP_API_KEY. Narrowing it is BLOCKED UPSTREAM, not merely
+      # deferred, and is tracked at:
+      #   https://github.com/paperclipai/paperclip/issues/11444
+      # It cannot be scoped down until Paperclip either issues a run id an agent key
+      # can use, or offers a write-scoped non-agent credential.
       RUNTIME_SECRET_INTERNAL_FILE: /run/secrets/runtime_secret_internal
       RUNTIME_SECRET_PUBLIC_FILE: /run/secrets/runtime_secret_public
       # Used ONLY to read instruction bundles. Kept as its own variable rather than

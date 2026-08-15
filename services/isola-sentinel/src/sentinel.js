@@ -56,6 +56,13 @@ const CFG = {
   // Re-send a still-failing alert at most this often, so a long outage does not
   // become a mailbox full of identical mail nobody reads.
   renotifyMs: Number(process.env.SENTINEL_RENOTIFY_MS || 3_600_000),
+  // A known, accepted condition still gets delivered — but rarely. Ten minutes of
+  // shouting is how the egress critical became invisible for three days.
+  egressAlertsPath: process.env.SENTINEL_EGRESS_ALERTS_PATH || "",
+  egressRenotifyMs: Number(process.env.SENTINEL_EGRESS_RENOTIFY_MS || 86_400_000),
+  egressCloseCondition:
+    process.env.SENTINEL_EGRESS_CLOSE_CONDITION ||
+    "open until the Compose migration moves isola_chat and isola_chatwoot-sidekiq onto declared networks",
   ledgerUrl: readFileOr("SENTINEL_LEDGER_URL_FILE", process.env.SENTINEL_LEDGER_URL),
   smtpHost: process.env.SENTINEL_SMTP_HOST || "",
   smtpPort: Number(process.env.SENTINEL_SMTP_PORT || 2525),
@@ -214,6 +221,53 @@ async function checkReceivablesOutput() {
   }
 }
 
+/**
+ * The Meta egress exposure — a TRUE critical that was shouting into a log nobody
+ * reads, every ten minutes, for three days.
+ *
+ * It is not silenced and it is not fixed here: it is ACCEPTED as a known, bounded
+ * exposure with a named close condition, and delivered at most once a day. A
+ * suppression with an expiry and an owner is a decision; a suppression without one is
+ * how this became invisible in the first place.
+ *
+ * Detection is reused from `meta-topology-verify`, which is accurate — this only adds
+ * the delivery that was missing.
+ */
+function checkEgressExposure() {
+  const key = "egress_exposure";
+  if (!CFG.egressAlertsPath) return { key, ok: true, summary: "not configured", skipped: true };
+  let last;
+  try {
+    const lines = fs.readFileSync(CFG.egressAlertsPath, "utf8").trim().split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const parsed = JSON.parse(lines[i]);
+      if (parsed.event === "meta.egress.topology_verify") { last = parsed; break; }
+    }
+  } catch (e) {
+    return { key, ok: true, summary: `egress alert file unreadable (${e.message})`, skipped: true };
+  }
+  if (!last || last.result !== "FAIL") return { key, ok: true, summary: "egress topology verified" };
+  return {
+    key,
+    ok: false,
+    renotifyMs: CFG.egressRenotifyMs,
+    summary: "Meta egress exposure remains open (accepted, bounded)",
+    detail:
+      `ACCEPTED AS A KNOWN, BOUNDED EXPOSURE — ${CFG.egressCloseCondition}.\n\n` +
+      `This mail is sent at most once every 24h while the condition persists.\n\n` +
+      `What the verifier reports:\n  ${String(last.reason || "").slice(0, 400)}\n\n` +
+      `Why it is not fixed in place: meta-egress-enforce default-denies 10.0.2.0/24\n` +
+      `only. The two services sit on easypanel (10.11.0.0/16) and easypanel-isola\n` +
+      `(10.0.1.0/24). Closing it in place would mean a default-deny on the shared\n` +
+      `network every service on the host uses, and the per-container alternative pins\n` +
+      `rules to IPs EasyPanel reassigns on every deploy.\n\n` +
+      `Measured 2026-08-15: every recorded probe outcome since 2026-08-12 is HTTP 400\n` +
+      `(290 of 290). The probe is an unauthenticated GET to the Graph IP with the\n` +
+      `response discarded — no customer data. Chatwoot has NO WhatsApp or Facebook\n` +
+      `channel configured, so nothing is currently calling Meta.`,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // delivery
 // ---------------------------------------------------------------------------
@@ -271,6 +325,7 @@ async function runOnce() {
   const results = [];
   results.push(await checkStuckDeliveries());
   results.push(await checkReceivablesOutput());
+  results.push(checkEgressExposure());
   for (const t of TARGETS) results.push(await checkHttp(t));
 
   const state = loadState();
@@ -282,7 +337,8 @@ async function runOnce() {
 
     if (!r.ok) {
       const isNew = prev.ok;
-      const stale = now - (prev.lastNotified || 0) > CFG.renotifyMs;
+      const renotify = r.renotifyMs || CFG.renotifyMs;
+      const stale = now - (prev.lastNotified || 0) > renotify;
       if (isNew || stale) {
         const downFor = isNew ? 0 : Math.round((now - prev.since) / 1000);
         const subject = `[isola] ${isNew ? "" : "STILL "}${r.summary}`;

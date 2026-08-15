@@ -70,12 +70,37 @@ acceptance, audit correlation, suspension/rollback.
     letter. When a check reports failure, **verify the check before believing it about
     the system** — and a check nobody has deliberately fired is a check that reports
     success.
-12. **Partial agreement is more dangerous than total disagreement.** When two figures
+12. **Fail closed, because the dangerous failure is fluent, not loud.** The old
+    front-desk path did not fall over — it answered confidently and wrongly. Measured
+    against inbox 46's own history (2026-08-15): it invented *"over 200 channels"* and
+    a *"$49.99 activation, $79.99/month"* price that does not exist, leaked the
+    internal control token `[ask_owner: …]` to a customer, and sent a customer a raw
+    `HTTP 402 Insufficient Balance` in Chinese. **A confident wrong price is more
+    dangerous than an error message, because nothing about it looks broken** — and it
+    is a number a customer could hold EPIC to. A default that answers when it does not
+    know is not a fallback; it is the defect. Prefer a path that says it cannot help
+    and escalates.
+13. **Partial agreement is more dangerous than total disagreement.** When two figures
    disagree and a third agrees, **do not** assume the disagreement is definitional.
    **Confirm which database answered first.** Measured 2026-08-14: `epic_sandbox` returned
    246 XCD / 458,701.86 — wrong — alongside 2 USD / 971.17, *identical to the truth*. The
    matching leg made a wrong leg look like a definition problem rather than a wrong
    database, and cost real time.
+13. **A test that passes because nothing happened is not a test that the wrong thing
+   didn't happen.** Every absence-assertion needs a **positive control in the same
+   harness** — a companion proving the thing CAN happen there. Without it, a broken
+   fixture, a refused request or an empty database makes every "did not occur" test
+   pass vacuously. Measured 2026-08-15: in `test_signup_session_gate.py`, the
+   assertions that *no JWT* and *no session* were issued PASSED while the assertions
+   that a user WAS created failed — because signup was being refused outright in that
+   environment. The absence-assertions were passing against an endpoint that simply
+   did not work. This is the positive-control rule this file already applies to greps,
+   permission probes and negative claims, **pointed at test design**.
+   Corollary, same date, same incident: **verify against the real thing, not a
+   convenient artifact.** A suite certified green by mounting files into a container
+   image that predated several merges — including its own `.test.env` — went red on
+   CI's first run against the actual repo. Same family as the busybox grep, the
+   ghost-id probe, and the gate that rejected its own source data.
 
 ## 3. The 9 questions — answer before implementing
 

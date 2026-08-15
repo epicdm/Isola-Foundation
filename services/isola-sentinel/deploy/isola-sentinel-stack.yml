@@ -28,6 +28,12 @@ services:
       # Alert state, so a restart does not re-announce every open alert and a long
       # outage does not become a mailbox full of identical mail.
       - isola_sentinel_state:/data
+      # READ-ONLY. The Meta-egress verifier already detects the exposure accurately;
+      # what it lacked was delivery. This adds the delivery, nothing else.
+      - type: bind
+        source: /var/lib/meta-egress/alerts.jsonl
+        target: /egress-alerts.jsonl
+        read_only: true
 
     environment:
       NODE_ENV: production
@@ -52,6 +58,13 @@ services:
       SENTINEL_AR_GRACE_MIN: "20"
 
       # Must be the authenticated sender or SMTP2GO will refuse it.
+      # A TRUE critical with a known owner and a known close condition: delivered,
+      # but at most once a day. Ten minutes of shouting into a log nobody reads is
+      # how this stayed invisible for three days.
+      SENTINEL_EGRESS_ALERTS_PATH: /egress-alerts.jsonl
+      SENTINEL_EGRESS_RENOTIFY_MS: "86400000"
+      SENTINEL_EGRESS_CLOSE_CONDITION: "open until the Compose migration moves isola_chat and isola_chatwoot-sidekiq onto declared networks"
+
       SENTINEL_ALERT_FROM: bff@epic.dm
       SENTINEL_ALERT_TO: epiccommunicationsinc@gmail.com
 
