@@ -31,6 +31,7 @@
  */
 const fs = require("node:fs");
 const path = require("node:path");
+const http = require("node:http");
 const { Client } = require("pg");
 const nodemailer = require("nodemailer");
 
@@ -76,6 +77,10 @@ const CFG = {
   // The receivables agent's schedule. Absence of output after this is an alert.
   arDueUtcHour: Number(process.env.SENTINEL_AR_DUE_UTC_HOUR || 11),
   arGraceMin: Number(process.env.SENTINEL_AR_GRACE_MIN || 20),
+  // Read-only Docker API access for the restart-policy drift check.
+  dockerSocketPath: process.env.SENTINEL_DOCKER_SOCKET || "",
+  driftRenotifyMs: Number(process.env.SENTINEL_DRIFT_RENOTIFY_MS || 86_400_000),
+  driftExempt: (process.env.SENTINEL_DRIFT_EXEMPT || "").split(",").map((s) => s.trim()).filter(Boolean),
   dryRun: process.env.SENTINEL_DRY_RUN === "1",
 };
 
@@ -268,6 +273,64 @@ function checkEgressExposure() {
   };
 }
 
+/**
+ * RESTART-POLICY DRIFT — the standing replacement for isola_isola-probe.
+ *
+ * That probe was meant to prove clean-exit restart worked. It ran ONCE, failed, and
+ * then slept forever while `docker ps` reported it healthy — so we had no working test
+ * of the policy at all, for the failure mode that caused two silent outages.
+ *
+ * A restart condition is a STATIC CONFIG PROPERTY. Assert it directly. This check
+ * never sleeps, cannot pass by existing, and would have flagged all seventeen
+ * on-failure services on day one.
+ *
+ * Reads the Docker API over the mounted socket, READ-ONLY (GET only). If the socket is
+ * absent the check reports skipped rather than healthy — blind is not green.
+ */
+function checkRestartPolicyDrift() {
+  const key = "restart_policy_drift";
+  if (!CFG.dockerSocketPath) return { key, ok: true, summary: "docker socket not mounted", skipped: true };
+  return new Promise((resolve) => {
+    const req = http.request(
+      { socketPath: CFG.dockerSocketPath, path: "/services", method: "GET", timeout: 10_000 },
+      (res) => {
+        let body = "";
+        res.on("data", (c) => (body += c));
+        res.on("end", () => {
+          let services;
+          try {
+            services = JSON.parse(body);
+          } catch {
+            return resolve({ key, ok: true, summary: "docker API unreadable", skipped: true });
+          }
+          const drifted = [];
+          for (const s of services) {
+            const name = s?.Spec?.Name ?? "?";
+            if (CFG.driftExempt.includes(name)) continue;
+            const cond = s?.Spec?.TaskTemplate?.RestartPolicy?.Condition;
+            if (cond !== "any") drifted.push(`${name}=${cond ?? "unset"}`);
+          }
+          if (drifted.length === 0) return resolve({ key, ok: true, summary: "all services restart: any" });
+          resolve({
+            key,
+            ok: false,
+            renotifyMs: CFG.driftRenotifyMs,
+            summary: `${drifted.length} service(s) will NOT restart after a clean exit`,
+            detail:
+              `Swarm does not recreate a task that exits 0 under restart.condition=on-failure.\n` +
+              `A gracefully-stopping service is then stranded at 0/1, silently, with every\n` +
+              `health signal green. That is what kept isola-runtime down for two hours.\n\n` +
+              drifted.map((d) => `  ${d}`).join("\n"),
+          });
+        });
+      },
+    );
+    req.on("error", (e) => resolve({ key, ok: true, summary: `docker API error (${e.message})`, skipped: true }));
+    req.on("timeout", () => { req.destroy(); resolve({ key, ok: true, summary: "docker API timeout", skipped: true }); });
+    req.end();
+  });
+}
+
 // ---------------------------------------------------------------------------
 // delivery
 // ---------------------------------------------------------------------------
@@ -326,6 +389,7 @@ async function runOnce() {
   results.push(await checkStuckDeliveries());
   results.push(await checkReceivablesOutput());
   results.push(checkEgressExposure());
+  results.push(await checkRestartPolicyDrift());
   for (const t of TARGETS) results.push(await checkHttp(t));
 
   const state = loadState();

@@ -19,7 +19,11 @@ version: "3.8"
 
 services:
   sentinel:
-    image: isola-sentinel:2
+    # PINNED TO A LOCAL IMAGE ID — NOT a registry manifest digest. Resolves only on
+    # host03. EXPIRY: a second swarm node, or any need to reproduce off host03, moves
+    # builds to a registry (GHCR) and this becomes a real manifest digest.
+    # was: isola-sentinel:3
+    image: sha256:16f07a254c931b5805a4fe641e4dc65d8bd3e8c54bac65a0d2eaf58a718d9976
 
     networks:
       - easypanel-isola

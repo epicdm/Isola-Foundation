@@ -1,0 +1,98 @@
+# CANARY — isola-portal-api-staging under Gate C. AUTHORED, NOT APPLIED.
+#
+#   deploy:  sudo docker stack deploy -c /opt/isola/canary-portal-api-staging.yml pcanary
+#   service: pcanary_api
+#
+# WHY THIS SERVICE
+# ----------------
+# Same class as portal-api prod — EasyPanel-BUILT, file-provider routed, tag-only — so
+# it answers both open questions (the cut-and-retire step, and the rebuild->digest
+# workflow) on a service with ZERO users. portal-api prod has six; staging has none.
+#
+# WHAT THIS CANARY DOES **NOT** NEED TO PROVE
+# -------------------------------------------
+# Parallel-run-by-hostname is ALREADY PROVEN IN PRODUCTION on this host:
+# isola-gw2.saas00.epic.dm is served by Docker-provider container labels, letsencrypt
+# TLS, carrying the LIVE customer path, alongside EasyPanel's file routes. Do not
+# re-prove routing. This canary proves A1 (clean-exit restart), A2 (the pin),
+# A4 (lane deploy without the EasyPanel API), and THE CUT-AND-RETIRE STEP — the only
+# genuinely untested part.
+#
+# STRATEGY (C) — PARALLEL RUN, THEN CUT, THEN RETIRE. NOT A ROLLBACK PLAN.
+#   1. Stand this up on a NEW hostname. EasyPanel's service keeps serving, untouched.
+#   2. Prove A1-A5 against the new hostname. Nothing live is at risk.
+#   3. CUT: delete the EasyPanel app — which removes its service AND its main.yaml
+#      route together, EasyPanel doing its own bookkeeping rather than us hand-editing
+#      generated config — THEN add the production Host rule to the labels below.
+#      ORDER IS NOT OPTIONAL: both providers are live, and a file router and a
+#      container router matching the same Host rule is a coin flip. Never both.
+#   4. Retire. Forward only. Nothing is ever reverted.
+#
+# ── BEFORE THIS CAN BE APPLIED ──────────────────────────────────────────────
+# The EasyPanel service carries application env (database URL, Django secret, etc.).
+# Gate C requires those as SWARM SECRETS, not literals in this file. They are NOT
+# transcribed here on purpose — no value belongs in a tree. First Phase 1 step is to
+# enumerate the running service's env var NAMES, create a Swarm secret per sensitive
+# one, and fill in the `secrets:` block below. Placeholders are left deliberately
+# obvious so this file cannot be applied half-configured.
+version: "3.8"
+
+services:
+  api:
+    # PINNED TO A LOCAL IMAGE ID — NOT a registry manifest digest.
+    # easypanel/isola/isola-portal-api-staging:latest as built on host03.
+    # This resolves ONLY on this node; it is provenance by coincidence of there being
+    # one swarm node. EXPIRY: the moment a second node joins, or any built service must
+    # be reproducible off host03, builds move to a registry (GHCR — we already pull
+    # Paperclip from there) and this becomes a real manifest digest.
+    image: sha256:d3e15f2bdf1ca72601318ed2bf9a1172152310d482b7d12f05d30dbae5661982
+
+    networks:
+      # Traefik's network — required for the Docker provider to route to it.
+      - easypanel
+      # The private side: portal db and redis.
+      - easypanel-isola
+
+    environment:
+      # NON-SECRET ONLY. Everything else arrives via secrets, below.
+      DJANGO_SETTINGS_MODULE: "REPLACE_ME_FROM_RUNNING_SERVICE"
+
+    # secrets:
+    #   - source: isola_portal_staging_database_url_v1
+    #     target: database_url
+    #   ... one per sensitive env var, filled in during Phase 1.
+
+    labels:
+      # Docker provider, NOT deploy.labels — this host runs
+      # TRAEFIK_PROVIDERS_DOCKER=true (not the swarm provider), so labels must sit on
+      # the CONTAINER. Verified against the live isola-gw2 router.
+      traefik.enable: "true"
+      traefik.docker.network: "easypanel"
+      # STEP 1 hostname — parallel run. The production Host rule is added only at the
+      # CUT, after EasyPanel's app (and therefore its file route) is deleted.
+      traefik.http.routers.pcanary.rule: "Host(`isola-portal-staging2.saas00.epic.dm`)"
+      traefik.http.routers.pcanary.entrypoints: "https"
+      traefik.http.routers.pcanary.tls: "true"
+      traefik.http.routers.pcanary.tls.certresolver: "letsencrypt"
+      traefik.http.services.pcanary.loadbalancer.server.port: "8000"
+
+    cap_drop:
+      - ALL
+
+    deploy:
+      replicas: 1
+      # GATE C. `any` restarts a CLEAN exit; `on-failure` — what EasyPanel injects and
+      # does not let you change — does not. A1 proves this behaviourally rather than
+      # trusting the string.
+      restart_policy:
+        condition: any
+        delay: 5s
+      update_config:
+        order: start-first
+        failure_action: rollback
+
+networks:
+  easypanel:
+    external: true
+  easypanel-isola:
+    external: true

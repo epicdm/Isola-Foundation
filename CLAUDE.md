@@ -80,7 +80,33 @@ acceptance, audit correlation, suspension/rollback.
     is a number a customer could hold EPIC to. A default that answers when it does not
     know is not a fallback; it is the defect. Prefer a path that says it cannot help
     and escalates.
-13. **Partial agreement is more dangerous than total disagreement.** When two figures
+13. **Every measurement carries a known-positive control in the same query. If the
+    control reads zero, the instrument is broken, not the world.** Law 11 is that rule
+    for tests; this is it for measurements. Measured 2026-08-15: grepping Traefik's
+    access log by **hostname** returned `0` for every service — including `isola_ai`,
+    which had 2,233 requests. Traefik's default CLF line carries the path and the
+    **router name**, never the Host. It was caught only by cross-checking against
+    services known to be live; uncaught, it would have argued for **retiring the live
+    customer path**. Record the consequence, not just the mechanism.
+14. **Activity can prove alive. It cannot prove dead.** A window that starts at a
+    reboot makes zero mean "no visitors since the reboot", not "nobody uses this".
+    Retirement needs a **positive** reason: superseded by something named, the owner's
+    word, or no configured caller anywhere. And for an *inbound* endpoint, traffic
+    answers "who called recently" — only **configuration** answers "who would call next
+    month". A quarterly webhook reads zero in a 19-hour window and is entirely alive.
+15. **Before retiring anything, ask the catalogue, not the proxy.** `isola_nocobase`
+    showed 0 requests in 19 hours and was nearly retired; the Port record shows it is
+    the in-progress owner/tenant control cockpit, at a PARTIAL PASS with 8 corrections,
+    holding hand-built roles and data scopes. **Zero requests meant "not finished yet",
+    not "not used".** Traffic is the right instrument for a different question.
+16. **A container can report success by existing.** `isola_isola-probe` runs
+    `node p.js ; echo EXIT=$? ; while true; do sleep 3600; done` — it ran once on
+    2026-08-14, printed `PROBE ERROR fetch failed`, and has slept since, while
+    `docker ps` shows it running with `restarts=0`. The trailing sleep loop converts
+    "my one job failed" into "I am up". Test a static config property by **asserting
+    the config** and by **causing the behaviour at cutover** — never by a long-lived
+    container whose liveness is its own answer.
+17. **Partial agreement is more dangerous than total disagreement.** When two figures
    disagree and a third agrees, **do not** assume the disagreement is definitional.
    **Confirm which database answered first.** Measured 2026-08-14: `epic_sandbox` returned
    246 XCD / 458,701.86 — wrong — alongside 2 USD / 971.17, *identical to the truth*. The

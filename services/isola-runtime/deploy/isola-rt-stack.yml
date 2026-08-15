@@ -27,10 +27,10 @@
 #             sha256:f0ef326d34ef1971adf50d2df448fd2d6c8f4edfd38eeb1afc64e4b22392f289
 #             — roll back by setting the tag here and re-deploying the stack.
 #
-# An IMMUTABLE TAG, not a registry digest pin: there is no registry on this
-# host, and `@sha256:` needs a repoDigest only a registry can issue. Claiming a
-# digest pin would be false. The tag is never reused and the image id above lets
-# the running artefact be checked against this file.
+# NOW PINNED BY LOCAL IMAGE ID (see the image: line). That is NOT a registry
+# manifest digest — there is no registry on this host — so it is provenance by
+# coincidence of there being one swarm node. It gives a byte-identical redeploy
+# here and nothing portable. It is NOT a rollback mechanism.
 #
 # ── STATE — THE PART THAT NEEDS CARE ────────────────────────────────────────
 # This service is NOT stateless. `isola_isola-runtime_state` holds the
@@ -51,7 +51,12 @@ version: "3.8"
 
 services:
   runtime:
-    image: isola-runtime:gatec-2
+    # PINNED TO A LOCAL IMAGE ID — NOT a registry manifest digest. It resolves only on
+    # host03; this is provenance by coincidence of there being one swarm node.
+    # EXPIRY: when a second node joins, or any built service must be reproducible off
+    # host03, builds move to a registry (GHCR) and this becomes a real manifest digest.
+    # was: isola-runtime:gatec-2
+    image: sha256:658fcd700936458016abac2009da1d0495a39f8504986a4f7a24f3a536f481f6
 
     networks:
       # The private side only. The gateway calls it here. There is deliberately
