@@ -106,7 +106,16 @@ acceptance, audit correlation, suspension/rollback.
     "my one job failed" into "I am up". Test a static config property by **asserting
     the config** and by **causing the behaviour at cutover** — never by a long-lived
     container whose liveness is its own answer.
-17. **Partial agreement is more dangerous than total disagreement.** When two figures
+17. **No service holding unique state is migrated without a PROVEN RESTORE.** Not a
+    backup — a restore, performed, counted and evidenced. Chatwoot cleared this bar on
+    2026-08-13 and NocoBase on 2026-08-15 (95/95 tables, 351/351 files, restored into a
+    scratch database and counted against the source). **A backup nobody has restored is
+    a hypothesis.** Two artefacts found on this estate prove the point: a 0-byte
+    `chatwoot-host03-20260812-042842.dump`, and a committed
+    `templates/employees/isola-ai-sales-front-desk-agent/v1/AGENTS.md` that no longer
+    contains any of the live content — **a stale copy in git is not a second copy; it
+    is the thing most likely to be mistaken for one.**
+18. **Partial agreement is more dangerous than total disagreement.** When two figures
    disagree and a third agrees, **do not** assume the disagreement is definitional.
    **Confirm which database answered first.** Measured 2026-08-14: `epic_sandbox` returned
    246 XCD / 458,701.86 — wrong — alongside 2 USD / 971.17, *identical to the truth*. The
