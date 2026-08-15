@@ -55,7 +55,22 @@ acceptance, audit correlation, suspension/rollback.
    and verify both removal *and* unchanged neighbouring state. Never probe by writing to
    `account.move`: automations #10/#11/#12 fire `on_write` and post the false "paid"
    notes, so the probe would manufacture the defect being investigated.
-10. **Partial agreement is more dangerous than total disagreement.** When two figures
+10. **A retry that changes the request is a different request, not a retry.** It can
+    carry you from one failure mode into another while looking like recovery. Measured
+    2026-08-15: an agent key with no `X-Paperclip-Run-Id` gets `401 "Agent run id
+    required"`; with a run id Paperclip never issued it gets `500`. Both call sites
+    "recovered" from the 500 by dropping the header — walking straight into the 401.
+    **The retry meant to save the employee's output was guaranteeing its loss.** Check
+    every retry path against that sentence.
+11. **The measuring instrument is part of the system under test.** An acceptance script
+    reported `INCONCLUSIVE` on a test that plainly passed, because it asserted a word
+    absent from the "before" answer that the *question itself* contained. Same family as
+    a traceability gate that rejected its own source data (hyphens read as minus signs),
+    a `--include` that matched nothing, and a structural scan that passes on a capital
+    letter. When a check reports failure, **verify the check before believing it about
+    the system** — and a check nobody has deliberately fired is a check that reports
+    success.
+12. **Partial agreement is more dangerous than total disagreement.** When two figures
    disagree and a third agrees, **do not** assume the disagreement is definitional.
    **Confirm which database answered first.** Measured 2026-08-14: `epic_sandbox` returned
    246 XCD / 458,701.86 — wrong — alongside 2 USD / 971.17, *identical to the truth*. The
