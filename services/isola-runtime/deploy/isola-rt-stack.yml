@@ -97,13 +97,31 @@ services:
       # Swarm secrets, resolved by entrypoint.sh. The VALUES are not here.
       MODEL_API_KEY_FILE: /run/secrets/model_api_key
       PAPERCLIP_API_KEY_FILE: /run/secrets/paperclip_api_key
-      PAPERCLIP_AGENT_KEY_INTERNAL_FILE: /run/secrets/pc_agent_key_internal
-      PAPERCLIP_AGENT_KEY_PUBLIC_FILE: /run/secrets/pc_agent_key_public
+
+      # PAPERCLIP_AGENT_KEY_{PUBLIC,INTERNAL} are DELIBERATELY UNSET, so config.ts
+      # falls back to PAPERCLIP_API_KEY for write-backs.
+      #
+      # An agent-actor key CANNOT be used for a mutation here. Verified 2026-08-15:
+      #   agent key, no X-Paperclip-Run-Id      -> 401 "Agent run id required"
+      #   agent key, run id Paperclip never issued -> 500
+      # and Paperclip exposes no route to obtain a legitimate run id (POST
+      # /api/agents/{id}/runs, /heartbeat, /wake and the company-level equivalents
+      # are all 404 on this build). The runtime mints its own run ids for
+      # gateway-driven replies, so the agent-key path is unsatisfiable by
+      # construction — it is not a credential we are missing.
+      #
+      # This is why every reply failed 502 persistence_failed. The board-scoped key
+      # mutates without a run id (comment 201, transition 200, cost-event 201).
+      #
+      # PRIVILEGE NOTE: this is not an escalation — the runtime already held a
+      # board-scoped PAPERCLIP_API_KEY. Narrowing it is Item 6, and it needs an
+      # upstream fix: Paperclip must either issue a run id or offer a write-scoped
+      # non-agent credential.
       RUNTIME_SECRET_INTERNAL_FILE: /run/secrets/runtime_secret_internal
       RUNTIME_SECRET_PUBLIC_FILE: /run/secrets/runtime_secret_public
-      # Read-only board scope, used ONLY to read instruction bundles. Separate from
-      # the agent keys above on purpose: reading company configuration is a larger
-      # authority than recording a cost event, and this service faces customers.
+      # Used ONLY to read instruction bundles. Kept as its own variable rather than
+      # reusing PAPERCLIP_API_KEY so that when Item 6 narrows the write credential,
+      # the read path does not have to be untangled from it first.
       PAPERCLIP_BOARD_TOKEN_FILE: /run/secrets/paperclip_board_token
 
     secrets:
@@ -111,15 +129,10 @@ services:
         target: model_api_key
       - source: isola_rt_paperclip_api_key_v1
         target: paperclip_api_key
-      - source: isola_rt_pc_agent_key_internal_v1
-        target: pc_agent_key_internal
-      # v2, minted 2026-08-15. v1 belonged to the RETIRED front-desk agent and its
-      # own key had been revoked on 2026-08-12, so every cost event for the live
-      # agent came back 403 "Agent can only report its own costs". One undeliverable
-      # event then aged past the integrity limit and the runtime refused EVERY reply
-      # for ~11 hours, silently. See README-ar-run.md's sibling incident note.
-      - source: isola_rt_pc_agent_key_public_v2
-        target: pc_agent_key_public
+      # NOTE: the per-agent keys (isola_rt_pc_agent_key_public_v2 /
+      # _internal_v1) are intentionally NOT mounted — see the env block above.
+      # They still exist as secrets; nothing here can use them until Paperclip
+      # can issue a run id.
       - source: isola_rt_secret_internal_v1
         target: runtime_secret_internal
       - source: isola_rt_secret_public_v1
@@ -186,10 +199,6 @@ secrets:
   isola_rt_model_api_key_v1:
     external: true
   isola_rt_paperclip_api_key_v1:
-    external: true
-  isola_rt_pc_agent_key_internal_v1:
-    external: true
-  isola_rt_pc_agent_key_public_v2:
     external: true
   isola_rt_secret_internal_v1:
     external: true
