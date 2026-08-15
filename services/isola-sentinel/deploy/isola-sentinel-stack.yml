@@ -63,7 +63,7 @@ services:
       # how this stayed invisible for three days.
       SENTINEL_EGRESS_ALERTS_PATH: /egress-alerts.jsonl
       SENTINEL_EGRESS_RENOTIFY_MS: "86400000"
-      SENTINEL_EGRESS_CLOSE_CONDITION: "open until the Compose migration moves isola_chat and isola_chatwoot-sidekiq onto declared networks"
+      SENTINEL_EGRESS_CLOSE_CONDITION: "NO WhatsApp or Facebook channel may be configured on host03 Chatwoot until isola_chat and isola_chatwoot-sidekiq sit on declared networks. The exposure is capability, not path — a configured channel turns it into a path silently, with no new alert, because this alert already fires and is already accepted."
 
       SENTINEL_ALERT_FROM: bff@epic.dm
       SENTINEL_ALERT_TO: epiccommunicationsinc@gmail.com
