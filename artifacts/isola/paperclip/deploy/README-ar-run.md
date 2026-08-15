@@ -93,6 +93,18 @@ sudo docker exec -u node -e AR_DRY_RUN=1 \
   "$CID" node /paperclip/bin/ar-run.js
 ```
 
+## Exit codes — what a red unit means
+
+| exit | meaning | did the owner get his list? |
+|---|---|---|
+| 0 | ran, or correctly declined (weekend / already published today / agent paused) | yes, or nothing was due |
+| **3** | **the traceability gate fired** — the model produced an untraceable figure | **yes.** The figures are computed, not generated; the prose was discarded |
+| 1 | the run failed (Odoo unreachable, etc.) | no — see the log for the named next action |
+
+Exit 3 is deliberate: publication is never blocked on the model, but a run where the
+guard fired must not look clean to monitoring. If it recurs, the model is too small for
+the rendering task — report it rather than lowering the check.
+
 ## Tuning it
 
 Edit **`AGENTS.md`** in Paperclip (the agent's instructions bundle). The ```` ```epic-config ````

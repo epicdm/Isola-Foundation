@@ -33,11 +33,33 @@
 const NUMERIC_TOKEN = /\d[\d,]*(?:\.\d+)?/g;
 
 /**
- * Numbers that are structural rather than factual and may appear without being in
- * the input: list ordinals and a small set of harmless formatting values. Kept
- * deliberately tiny — every entry here is a hole in the gate.
+ * A LIST ORDINAL is structural, not factual: "1." at the start of a line numbers an
+ * item, it does not assert a quantity.
+ *
+ * This used to be a blanket allowlist of 0-10 anywhere in the text, which was an
+ * unconditional bypass — "3 customers need calls" or "10 overdue invoices" passed
+ * untouched even with those numbers absent from the input. Position is what makes a
+ * number structural, so match position, not value.
  */
-const STRUCTURAL_ALLOWLIST = new Set(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]);
+const LIST_ORDINAL = /^[ \t]*(\d{1,2})[.)]\s/gm;
+
+/**
+ * Compact and worded quantities. The input handed to the model is always plain
+ * decimal, so if the model writes "5k", "1e6" or "one million" it has restated a
+ * figure in a form we cannot trace — and in "5k" the "5" would previously also be
+ * swallowed by the ordinal allowlist. Refuse them outright.
+ */
+const COMPACT_NUMERAL = /\b\d+(?:\.\d+)?\s*[kKmMbB]\b|\b\d+(?:\.\d+)?[eE][+-]?\d+\b/;
+// Scale words are always a quantity. Small number-words are only a quantity when they
+// count something — "one million owed" and "three invoices" are figures, but "the one
+// that matters" is ordinary prose and must NOT trip the gate. A gate that fires on
+// normal English would silently disable the covering note forever.
+const SCALE_WORD = /\b(?:hundred|thousand|million|billion)\b/i;
+const COUNTING_WORD = new RegExp(
+  "\\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\\s+" +
+    "(?:invoices?|customers?|clients?|accounts?|days?|weeks?|months?|dollars?|XCD|USD)\\b",
+  "i"
+);
 
 /** Normalise a numeric token so "326,116.99", "326116.99" and "326116.990" agree. */
 function normalise(token) {
@@ -148,12 +170,18 @@ function verify(output, facts) {
   const violations = [];
   const text = String(output || "");
 
+  // 0. Positions of genuine list ordinals — exempt by POSITION, never by value.
+  const ordinalAt = new Set();
+  for (const m of text.matchAll(LIST_ORDINAL)) {
+    ordinalAt.add((m.index || 0) + m[0].indexOf(m[1]));
+  }
+
   // 1. NUMBERS. Every numeric token must be traceable to the input.
   for (const match of text.matchAll(NUMERIC_TOKEN)) {
     const raw = match[0];
     const n = normalise(raw);
     if (!n) continue;
-    if (STRUCTURAL_ALLOWLIST.has(n.exact) && !raw.includes(".") && !raw.includes(",")) continue;
+    if (ordinalAt.has(match.index || 0)) continue;
     const traceable = allowed.has(n.exact) || allowed.has(n.two) || (n.int && allowed.has(n.int));
     if (!traceable) {
       const at = match.index || 0;
@@ -191,7 +219,18 @@ function verify(output, facts) {
     violations.push({ kind: "currencies_summed", token: "-", context: "output appears to combine XCD and USD" });
   }
 
-  // 4. DRAFT LEAKAGE. Drafts are not debts and must never be presented as owed.
+  // 4. COMPACT / WORDED QUANTITIES. Untraceable by construction — the input is always
+  // plain decimal, so any of these is the model restating a figure in its own words.
+  const compact = text.match(COMPACT_NUMERAL);
+  if (compact) {
+    violations.push({ kind: "compact_numeral", token: compact[0].trim(), context: "compact form cannot be traced to a decimal input figure" });
+  }
+  const worded = text.match(SCALE_WORD) || text.match(COUNTING_WORD);
+  if (worded) {
+    violations.push({ kind: "worded_numeral", token: worded[0].trim(), context: "a quantity written as a word cannot be traced to the input" });
+  }
+
+  // 5. DRAFT LEAKAGE. Drafts are not debts and must never be presented as owed.
   if (/\bdraft\b[^.\n]{0,60}\b(?:owed|overdue|receivable|outstanding)\b/i.test(text)) {
     violations.push({ kind: "draft_presented_as_debt", token: "-", context: "output ties 'draft' to money owed" });
   }
@@ -217,4 +256,4 @@ function explain(result) {
   return lines.join("\n");
 }
 
-module.exports = { verify, explain, allowedValuesFrom, allowedNamesFrom, currencyPairsFrom, normalise, NUMERIC_TOKEN };
+module.exports = { verify, explain, allowedValuesFrom, allowedNamesFrom, currencyPairsFrom, normalise, NUMERIC_TOKEN, LIST_ORDINAL };

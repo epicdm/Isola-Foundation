@@ -399,7 +399,12 @@ async function tryProse(facts, guidance, settings) {
   const gate = verify(text, modelFacts);
   if (!gate.ok) {
     console.error(explain(gate));
-    return { prose: null, note: "_Covering note was generated and then **rejected by the numeric traceability check** " +
+    // Publication still proceeds — the facts are never blocked on the polish, and the
+    // rejected prose is discarded rather than published. But a run where the guard
+    // fired must NOT look clean to monitoring, so it is flagged and the process exits
+    // non-zero at the end (systemd will mark the unit failed while the owner still
+    // gets his list).
+    return { gateFailed: true, prose: null, note: "_Covering note was generated and then **rejected by the numeric traceability check** " +
       "(it contained a figure not present in the ledger read). It was discarded, not published. The figures above are computed, not generated._" };
   }
   const took = Math.round((Date.now() - started) / 1000);
@@ -447,13 +452,28 @@ async function agentAllowsRun(pcKey) {
   return { allowed: true, why: `agent status is ${agent.status}` };
 }
 
+/**
+ * FAILS CLOSED. If we cannot establish that today's issue does NOT exist, we must
+ * assume it does. Returning false on a timeout or a transient 5xx would publish a
+ * duplicate in exactly the failure mode where listing is broken but creating still
+ * works — and "exactly one output per day" is a promise, not a preference. A missed
+ * day is recoverable; two contradictory action lists in the owner's inbox are not.
+ */
 async function alreadyPublishedToday(title, pcKey) {
-  const res = await fetch(`${ENV.paperclipUrl}/api/companies/${ENV.companyId}/issues`, {
-    headers: { Authorization: "Bearer " + pcKey }, signal: AbortSignal.timeout(30_000),
-  });
-  if (!res.ok) return false;
-  const issues = await res.json();
-  return (issues || []).some((i) => i.title === title);
+  try {
+    const res = await fetch(`${ENV.paperclipUrl}/api/companies/${ENV.companyId}/issues`, {
+      headers: { Authorization: "Bearer " + pcKey }, signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) {
+      console.error(`cannot verify today's issue (HTTP ${res.status}); assuming it exists and skipping`);
+      return true;
+    }
+    const issues = await res.json();
+    return (issues || []).some((i) => i.title === title);
+  } catch (e) {
+    console.error(`cannot verify today's issue (${e.message}); assuming it exists and skipping`);
+    return true;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -512,20 +532,28 @@ async function main() {
 
   const odooKey = readKey(ENV.odooKeyFile);
   const facts = await gatherFacts(odooKey, today, settings);
-  const { prose, note } = await tryProse(facts, guidance, settings);
+  const { prose, note, gateFailed } = await tryProse(facts, guidance, settings);
   const body = buildArtefact(facts, prose, note);
 
   if (ENV.dryRun) {
     console.log(body);
     console.log("\n--- DRY RUN: nothing published ---");
-    return;
+    return { gateFailed };
   }
   const issue = await publish(title, body, pcKey);
   console.log(`published ${issue.identifier || issue.id}`);
+  return { gateFailed };
 }
 
 if (require.main === module) {
-  withLock(ENV.lockFile, main).catch((e) => {
+  withLock(ENV.lockFile, main).then((r) => {
+    if (r && r.gateFailed) {
+      console.error("TRACEABILITY GATE FIRED: the model produced an untraceable figure.");
+      console.error("The figures published are computed, not generated, and the prose was");
+      console.error("discarded — but this run is marked failed so it is not read as clean.");
+      process.exit(3);
+    }
+  }).catch((e) => {
     console.error("RUN FAILED:", e.message);
     console.error("Nothing was published. Next action: re-read the error above; if Odoo is");
     console.error("unreachable, restore access before the next weekday run.");

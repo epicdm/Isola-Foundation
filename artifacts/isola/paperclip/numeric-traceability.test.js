@@ -114,9 +114,30 @@ test("formatting variants of a real number are accepted", () => {
   assert.ok(verify("6,932.00 owed", FACTS).ok, "two decimal places");
 });
 
-test("small list ordinals are allowed, but a formatted small number is not", () => {
-  assert.ok(verify("1. First item\n2. Second item", FACTS).ok, "ordinals");
+test("list ordinals are exempt by POSITION, not by value", () => {
+  assert.ok(verify("1. First item\n2. Second item", FACTS).ok, "line-leading ordinals");
   assert.ok(!verify("owed 3.50", FACTS).ok, "a money-shaped small number must still be traceable");
+});
+
+test("a small number in ordinary prose is NOT exempt — the old blanket allowlist bypass", () => {
+  // Found by codex review: 0-10 were allowlisted anywhere in the text, so the model
+  // could invent any of them. Neither figure below is in FACTS.
+  assert.ok(!verify("3 customers need calls today.", FACTS).ok, "invented count of 3");
+  assert.ok(!verify("There are 10 overdue invoices.", FACTS).ok, "invented count of 10");
+});
+
+test("compact numerals are refused — and their leading digit no longer sneaks through", () => {
+  assert.ok(!verify("5k outstanding", FACTS).ok, "5k");
+  assert.ok(!verify("1e6 receivable", FACTS).ok, "scientific notation");
+  assert.ok(verify("326,116.99 owed", FACTS).ok, "plain decimals still fine");
+});
+
+test("worded quantities are refused, but ordinary English is not", () => {
+  assert.ok(!verify("one million owed", FACTS).ok, "scale word");
+  assert.ok(!verify("three invoices are overdue", FACTS).ok, "counting word + noun");
+  assert.ok(verify("The one that matters is INV/2026/00037.", FACTS).ok,
+    "'one' as a pronoun must not trip the gate");
+  assert.ok(verify("Collect it and the rest is housekeeping.", FACTS).ok, "plain prose");
 });
 
 test("dates in the input are traceable", () => {
