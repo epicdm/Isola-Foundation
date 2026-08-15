@@ -56,6 +56,22 @@ They are omitted on purpose. **A check that can never pass is worse than no chec
 it trains the reader to ignore the mail, and then a real alert arrives into a habit of
 ignoring. Add each one only once a healthy response has actually been observed.
 
+### What each one needs to become checkable
+
+This is a handover, not a to-do for this service. **Do not build a health endpoint
+inside someone else's service** — the owning lane provides the endpoint; the sentinel
+adds the check once it answers.
+
+| target | measured 2026-08-15 | what it needs |
+|---|---|---|
+| **isola-portal (web + api)** | `portal.epic.dm` does not resolve (curl exit, HTTP 000). `isola-portal.saas00.epic.dm` answers but returns **404** on `/`, `/api/`, `/healthz`, `/api/health/`. The Swarm services publish **no port** (`.Endpoint.Ports` empty) and did not answer on `isola_isola-portal-api:8000/3000` or `isola_isola-portal-web:3000/80` from `easypanel-isola`. | **One** of: (a) an unauthenticated health path that returns 2xx on the existing public hostname — say `GET /api/health/` on `isola-portal.saas00.epic.dm`; or (b) a resolvable in-cluster name + port the sentinel can reach. Then add `portal=<url>` to `SENTINEL_HTTP_TARGETS`. |
+| **fiserv-api** | Not on `easypanel-isola`; there is a separate `easypanel-fiserv` network. Not reachable from where the sentinel runs. | Either attach the sentinel to `easypanel-fiserv` (one line in the stack) **or** a public health URL. Needs a decision on which, since joining another network widens the sentinel's reach. |
+| **Odoo reach** | Not attempted from host03. The ledger of record is the SaaS at `epic-communications-inc.odoo.com`. | An unauthenticated liveness probe. `POST /jsonrpc {service:"common",method:"version"}` needs no auth and is the cheapest honest check; confirm it is acceptable to poll a SaaS endpoint on a schedule before adding it. |
+
+**Why this matters beyond monitoring:** the portal's health cannot currently be
+checked from anywhere except Docker or the EasyPanel console. It was deployed without
+any external way to tell whether it came up.
+
 ## Delivery
 
 SMTP, **not** the SMTP2GO HTTP API. The value stored as `SMTP2GO_API_KEY` on this
