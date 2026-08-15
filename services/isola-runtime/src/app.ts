@@ -36,6 +36,10 @@ import {
 } from "./conversation.js";
 import { createSafeFetch, type SafeFetch } from "./egress.js";
 import {
+  createInstructionsProvider,
+  type InstructionsProvider,
+} from "./instructions.js";
+import {
   ModelInvalidOutputError,
   ModelProviderError,
   ModelTimeoutError,
@@ -120,6 +124,8 @@ export interface AppDeps {
   /** Injected in tests; defaults to the configured file or in-memory store. */
   stateStore?: StateStore;
   safeFetch?: SafeFetch;
+  /** Injectable so tests can drive prompt resolution without a network. */
+  instructions?: InstructionsProvider;
   now?: () => number;
   newCorrelationId?: () => string;
 }
@@ -371,6 +377,27 @@ export function createRuntime(deps: AppDeps): Runtime {
     deps.paperclipApi !== undefined
       ? deps.paperclipApi
       : createPaperclipApi({ baseUrl: config.paperclipBaseUrl, safeFetch });
+
+  /**
+   * A template is only bound to Paperclip when BOTH a mapping and a board token are
+   * configured. Without the token the map collapses to empty and every template keeps
+   * its compiled-in prompt — a missing credential must not silently become the
+   * fail-closed prompt for live customers.
+   */
+  const instructions =
+    deps.instructions ??
+    createInstructionsProvider({
+      baseUrl: config.paperclipBaseUrl ?? "",
+      map:
+        config.paperclipBoardToken === null || config.paperclipBaseUrl === null
+          ? {}
+          : config.paperclipInstructionsMap,
+      readToken: () => config.paperclipBoardToken ?? "",
+      safeFetch,
+      ttlMs: config.paperclipInstructionsTtlMs,
+      timeoutMs: config.paperclipInstructionsTimeoutMs,
+      now,
+    });
 
   const stateStore =
     deps.stateStore ??
@@ -931,6 +958,32 @@ export function createRuntime(deps: AppDeps): Runtime {
         return;
       }
 
+      // ---- behaviour comes from Paperclip ----------------------------------
+      // Resolved BEFORE the budget preflight so the reservation is costed against
+      // the prompt actually sent. Never throws: an unreachable Paperclip yields the
+      // fail-closed prompt, which escalates instead of answering.
+      const resolvedPrompt = await instructions.resolve(template.id, template.systemPrompt);
+      if (resolvedPrompt.source === "fail_closed") {
+        logger.error({
+          event: "instructions",
+          outcome: "instructions_unavailable",
+          correlationId,
+          runId,
+          templateId: template.id,
+          detail: resolvedPrompt.failure,
+        });
+      } else if (resolvedPrompt.failure !== null) {
+        logger.warn({
+          event: "instructions",
+          outcome: "instructions_stale",
+          correlationId,
+          runId,
+          templateId: template.id,
+          cacheAgeMs: resolvedPrompt.cacheAgeMs,
+          detail: resolvedPrompt.failure,
+        });
+      }
+
       // ---- budget preflight and reservation --------------------------------
       const pre = await metering.preflight({
         companyId,
@@ -938,7 +991,7 @@ export function createRuntime(deps: AppDeps): Runtime {
         exposure,
         runId,
         model,
-        promptChars: template.systemPrompt.length + userMessage.length,
+        promptChars: resolvedPrompt.prompt.length + userMessage.length,
       });
 
       if (pre.kind === "exhausted") {
@@ -1063,7 +1116,7 @@ export function createRuntime(deps: AppDeps): Runtime {
           model,
           timeoutMs,
           messages: [
-            { role: "system", content: template.systemPrompt },
+            { role: "system", content: resolvedPrompt.prompt },
             { role: "user", content: userMessage },
           ],
         });

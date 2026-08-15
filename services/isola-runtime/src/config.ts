@@ -7,6 +7,7 @@ import { hostOf, parseAllowlist } from "./egress.js";
 import type { RateOverrides } from "./money.js";
 import { DEFAULT_HANDOFF, type HandoffPolicy } from "./callbacks.js";
 import { isIssueStatus } from "./paperclip.js";
+import { parseInstructionsMap } from "./instructions.js";
 import { DEFAULT_STATE_DIR } from "./state.js";
 
 export interface RuntimeConfig {
@@ -30,6 +31,21 @@ export interface RuntimeConfig {
   paperclipRecordPath: string;
   /** Company that owns the cost events. Metering is off without one. */
   paperclipCompanyId: string | null;
+  /**
+   * Behaviour lives in Paperclip. `PAPERCLIP_INSTRUCTIONS_MAP` binds a template id
+   * to the Paperclip agent whose instructions bundle supplies its system prompt.
+   * A template absent from this map keeps its compiled-in prompt.
+   */
+  paperclipInstructionsMap: Readonly<Record<string, string>>;
+  /**
+   * Board-scoped token used ONLY to read instruction bundles. Deliberately not the
+   * agent keys above: reading company configuration is a different authority from
+   * recording a cost event, and a customer-facing path should hold the smaller one.
+   */
+  paperclipBoardToken: string | null;
+  /** How long a fetched prompt may be reused before re-reading Paperclip. */
+  paperclipInstructionsTtlMs: number;
+  paperclipInstructionsTimeoutMs: number;
   egressAllowlist: string[];
   /** Hard ceiling on an inbound request body, in bytes. */
   maxRequestBytes: number;
@@ -83,6 +99,14 @@ export const DEFAULT_MODEL_NAME = "deepseek-chat";
 export const DEFAULT_MODEL_TIMEOUT_MS = 60_000;
 export const DEFAULT_RECORD_PATH = "/api/issues/{issueId}/comments";
 export const DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024; // 1 MiB
+/**
+ * Short by design. This is the delay between the owner editing AGENTS.md in Paperclip
+ * and a customer seeing the change — the acceptance test for the whole feature — and
+ * it also bounds how long a withdrawn instruction can still be spoken.
+ */
+export const DEFAULT_INSTRUCTIONS_TTL_MS = 60_000;
+/** A reply is already waiting on this; it must not become the slow path. */
+export const DEFAULT_INSTRUCTIONS_TIMEOUT_MS = 5_000;
 export const DEFAULT_MAX_UNDELIVERED_COST_CENTS = 50;
 export const DEFAULT_MAX_UNDELIVERED_AGE_MS = 60 * 60 * 1000;
 export const DEFAULT_BUDGET_ALERT_PCT = 80;
@@ -204,6 +228,18 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
     }),
     paperclipRecordPath: str(env, "PAPERCLIP_RECORD_PATH") ?? DEFAULT_RECORD_PATH,
     paperclipCompanyId: str(env, "PAPERCLIP_COMPANY_ID"),
+    paperclipInstructionsMap: parseInstructionsMap(str(env, "PAPERCLIP_INSTRUCTIONS_MAP")),
+    paperclipBoardToken: str(env, "PAPERCLIP_BOARD_TOKEN"),
+    paperclipInstructionsTtlMs: int(
+      env,
+      "PAPERCLIP_INSTRUCTIONS_TTL_MS",
+      DEFAULT_INSTRUCTIONS_TTL_MS,
+    ),
+    paperclipInstructionsTimeoutMs: int(
+      env,
+      "PAPERCLIP_INSTRUCTIONS_TIMEOUT_MS",
+      DEFAULT_INSTRUCTIONS_TIMEOUT_MS,
+    ),
     egressAllowlist,
     maxRequestBytes: int(env, "RUNTIME_MAX_REQUEST_BYTES", DEFAULT_MAX_REQUEST_BYTES),
 

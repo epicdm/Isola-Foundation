@@ -20,10 +20,12 @@
 # `easypanel` network. The gateway reaches it over `easypanel-isola` only.
 #
 # ── IMAGE PROVENANCE — READ BEFORE CALLING IT "PINNED" ──────────────────────
-#   image:    isola-runtime:gatec-1
-#   image id: sha256:f0ef326d34ef1971adf50d2df448fd2d6c8f4edfd38eeb1afc64e4b22392f289
-#   built:    /opt/isola-rt-build/rt-gatec-1 from `git archive` of the commit
-#             adding entrypoint.sh, on m1/ownership-store-host03-2026-08-14
+#   image:    isola-runtime:gatec-2
+#   built:    /opt/isola-rt-build/rt-gatec-2 from the commit adding src/instructions.ts
+#             (Paperclip-sourced behaviour), on m1/ownership-store-host03-2026-08-14
+#   previous: isola-runtime:gatec-1
+#             sha256:f0ef326d34ef1971adf50d2df448fd2d6c8f4edfd38eeb1afc64e4b22392f289
+#             — roll back by setting the tag here and re-deploying the stack.
 #
 # An IMMUTABLE TAG, not a registry digest pin: there is no registry on this
 # host, and `@sha256:` needs a repoDigest only a registry can issue. Claiming a
@@ -49,7 +51,7 @@ version: "3.8"
 
 services:
   runtime:
-    image: isola-runtime:gatec-1
+    image: isola-runtime:gatec-2
 
     networks:
       # The private side only. The gateway calls it here. There is deliberately
@@ -75,6 +77,16 @@ services:
       PAPERCLIP_SUCCESS_STATUS: done
       PAPERCLIP_FAILURE_STATUS: blocked
 
+      # BEHAVIOUR COMES FROM PAPERCLIP, NOT FROM THIS IMAGE.
+      # The front-desk template's system prompt is the AGENTS.md of this Paperclip
+      # agent, fetched per reply. Editing it in Paperclip changes what customers are
+      # told, within the TTL below. A template absent from this map keeps the prompt
+      # compiled into registry.ts.
+      PAPERCLIP_INSTRUCTIONS_MAP: '{"isola-ai-sales-front-desk-agent@v1":"fd2867d1-ee43-4032-a1cc-52eb3379a581"}'
+      # Also the lag between an owner edit and a customer seeing it.
+      PAPERCLIP_INSTRUCTIONS_TTL_MS: "60000"
+      PAPERCLIP_INSTRUCTIONS_TIMEOUT_MS: "5000"
+
       # Allowlist, not default-open egress. The model provider and Paperclip,
       # nothing else.
       EGRESS_ALLOWLIST: api.deepseek.com,isola-ai.saas00.epic.dm
@@ -89,6 +101,10 @@ services:
       PAPERCLIP_AGENT_KEY_PUBLIC_FILE: /run/secrets/pc_agent_key_public
       RUNTIME_SECRET_INTERNAL_FILE: /run/secrets/runtime_secret_internal
       RUNTIME_SECRET_PUBLIC_FILE: /run/secrets/runtime_secret_public
+      # Read-only board scope, used ONLY to read instruction bundles. Separate from
+      # the agent keys above on purpose: reading company configuration is a larger
+      # authority than recording a cost event, and this service faces customers.
+      PAPERCLIP_BOARD_TOKEN_FILE: /run/secrets/paperclip_board_token
 
     secrets:
       - source: isola_rt_model_api_key_v1
@@ -103,6 +119,8 @@ services:
         target: runtime_secret_internal
       - source: isola_rt_secret_public_v1
         target: runtime_secret_public
+      - source: isola_paperclip_board_token_v1
+        target: paperclip_board_token
 
     # Hardening. read_only is NOT set here, unlike the gateway: this service
     # writes its durable state to /data. The volume is writable; the rootfs is
@@ -171,4 +189,6 @@ secrets:
   isola_rt_secret_internal_v1:
     external: true
   isola_rt_secret_public_v1:
+    external: true
+  isola_paperclip_board_token_v1:
     external: true
