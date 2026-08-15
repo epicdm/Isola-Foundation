@@ -113,7 +113,12 @@ services:
         target: paperclip_api_key
       - source: isola_rt_pc_agent_key_internal_v1
         target: pc_agent_key_internal
-      - source: isola_rt_pc_agent_key_public_v1
+      # v2, minted 2026-08-15. v1 belonged to the RETIRED front-desk agent and its
+      # own key had been revoked on 2026-08-12, so every cost event for the live
+      # agent came back 403 "Agent can only report its own costs". One undeliverable
+      # event then aged past the integrity limit and the runtime refused EVERY reply
+      # for ~11 hours, silently. See README-ar-run.md's sibling incident note.
+      - source: isola_rt_pc_agent_key_public_v2
         target: pc_agent_key_public
       - source: isola_rt_secret_internal_v1
         target: runtime_secret_internal
@@ -184,7 +189,7 @@ secrets:
     external: true
   isola_rt_pc_agent_key_internal_v1:
     external: true
-  isola_rt_pc_agent_key_public_v1:
+  isola_rt_pc_agent_key_public_v2:
     external: true
   isola_rt_secret_internal_v1:
     external: true
