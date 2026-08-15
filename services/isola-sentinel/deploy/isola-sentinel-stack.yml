@@ -1,0 +1,104 @@
+# isola-sentinel — hand-deployed Swarm stack.
+#
+#   deploy:  sudo docker stack deploy -c /opt/isola/isola-sentinel-stack.yml isolasentinel
+#   service: isolasentinel_sentinel
+#
+# WHY THIS EXISTS
+# ---------------
+# The customer line died twice — eleven hours, then twenty-four — and both times it
+# was found by someone looking at something else. Every container was up and healthy
+# throughout. So this service does not lead with liveness; it leads with:
+#
+#     A DELIVERY WAS ACCEPTED AND NO REPLY WAS POSTED WITHIN N SECONDS
+#
+# read from `delivery_ledger`, which the gateway already writes on the reply path.
+#
+# It is on `easypanel-isola` to reach the gateway, the runtime and the ledger DB by
+# service name, and it needs egress for SMTP2GO and Paperclip.
+version: "3.8"
+
+services:
+  sentinel:
+    image: isola-sentinel:2
+
+    networks:
+      - easypanel-isola
+
+    volumes:
+      # Alert state, so a restart does not re-announce every open alert and a long
+      # outage does not become a mailbox full of identical mail.
+      - isola_sentinel_state:/data
+
+    environment:
+      NODE_ENV: production
+      SENTINEL_INTERVAL_MS: "60000"
+      # A reply that has not landed in three minutes is a customer sitting in silence.
+      SENTINEL_STUCK_DELIVERY_MS: "180000"
+      SENTINEL_RENOTIFY_MS: "3600000"
+      SENTINEL_STATE_PATH: /data/sentinel-state.json
+
+      # ONLY targets whose healthy response has been observed. A target that can
+      # never pass is worse than no target: it trains the reader to ignore the
+      # mail. isola-portal, fiserv-api and Odoo reach are NOT here yet because
+      # their endpoints were not reachable from this network when verified —
+      # see README.md "Targets not yet covered".
+      SENTINEL_HTTP_TARGETS: "gateway=http://isolagw_gateway:3000/healthz,runtime=http://isolart_runtime:3000/healthz,paperclip=https://isola-ai.saas00.epic.dm/api/health,chatwoot=https://isola-chat.saas00.epic.dm/api"
+
+      # Expected-output-absent for the receivables agent. It fires 11:00 UTC Mon-Fri;
+      # absence of its issue after the grace window is itself the alert.
+      PAPERCLIP_BASE_URL: https://isola-ai.saas00.epic.dm
+      PAPERCLIP_COMPANY_ID: 3ed3869b-463c-4876-8e16-ddc058f06cd9
+      SENTINEL_AR_DUE_UTC_HOUR: "11"
+      SENTINEL_AR_GRACE_MIN: "20"
+
+      # Must be the authenticated sender or SMTP2GO will refuse it.
+      SENTINEL_ALERT_FROM: bff@epic.dm
+      SENTINEL_ALERT_TO: epiccommunicationsinc@gmail.com
+
+      SENTINEL_LEDGER_URL_FILE: /run/secrets/sentinel_ledger_url
+      # SMTP, not the SMTP2GO HTTP API: the stored "api key" on this estate is a
+      # 12-char SMTP password and the HTTP API rejects it outright.
+      SENTINEL_SMTP_HOST: mail.smtp2go.com
+      SENTINEL_SMTP_PORT: "2525"
+      SENTINEL_SMTP_USER: bff@epic.dm
+      SENTINEL_SMTP_PASS_FILE: /run/secrets/smtp_pass
+      PAPERCLIP_BOARD_TOKEN_FILE: /run/secrets/paperclip_board_token
+
+    secrets:
+      # The SAME ledger the gateway writes. Read-only use here.
+      - source: isola_gw_ledger_url_v1
+        target: sentinel_ledger_url
+      - source: isola_smtp_pass_v1
+        target: smtp_pass
+      - source: isola_paperclip_board_token_v1
+        target: paperclip_board_token
+
+    cap_drop:
+      - ALL
+
+    deploy:
+      replicas: 1
+      # GATE C. `any` restarts a CLEAN exit — the failure mode that kept
+      # isola-runtime down for two hours. A monitor that does not come back is
+      # worse than no monitor, because its silence reads as health.
+      restart_policy:
+        condition: any
+        delay: 10s
+      update_config:
+        order: start-first
+        failure_action: rollback
+
+networks:
+  easypanel-isola:
+    external: true
+
+volumes:
+  isola_sentinel_state:
+
+secrets:
+  isola_gw_ledger_url_v1:
+    external: true
+  isola_smtp_pass_v1:
+    external: true
+  isola_paperclip_board_token_v1:
+    external: true
