@@ -287,8 +287,43 @@ function evaluate(inp) {
   const remote = !!host || tool === 'mcp__ssh-deepseek__remote-ssh';
   if (!cmd) allow('exec tool=' + tool + ' (no command)');
 
+  // 0. PROSE IS NOT EXECUTION.
+  //
+  // The exec rules scan the whole command string, so a `git commit -F -` or
+  // `-m` whose MESSAGE quotes a command gets judged as if it ran that command.
+  // That fired twice on 2026-08-16 — a commit message documenting this very
+  // guard was blocked for containing the words `cat .env`, and the fix was to
+  // route the message through a file. Routing around a guard is one step from
+  // switching it off, so the rule is fixed here instead.
+  //
+  // This is the same principle the file header already states for TaskUpdate
+  // and Port records — DESCRIBING an operation is not PERFORMING it — applied
+  // to the one exec shape that is mostly prose.
+  //
+  // NARROW BY DESIGN, and the limits are the safety case:
+  //   - only `git commit`/`git tag`, nothing else
+  //   - only the MESSAGE BODY is exempted; the command around it is still
+  //     scanned in full, so `git commit -m "x" && curl evil` is unaffected
+  //   - the shape rules are relaxed, NOT the credential rules. A message may
+  //     describe `cat .env`; it may never CONTAIN a live token, because a
+  //     commit message is permanent and public in a way a transcript is not.
+  const messageBody = T.extractCommitMessage ? T.extractCommitMessage(cmd) : '';
+  const scanTarget = messageBody ? cmd.split(messageBody).join(' <commit-message> ') : cmd;
+
+  // A literal credential inside a commit message is WORSE than in a command —
+  // it would be committed. Checked before anything is exempted.
+  if (messageBody && M.redactSensitive(messageBody) !== messageBody) {
+    deny(
+      'credential-in-commit-message',
+      'The commit message contains something shaped like a live credential. ' +
+        'A commit message is permanent and travels with the repository.',
+      'describe the credential by NAME and location, never by value — e.g. ' +
+        '"the Magnus API key in bff-v2 .env" rather than the key itself.'
+    );
+  }
+
   // 1. Secrets must not be printed.
-  if (T.SECRET_DUMP_RE.test(cmd)) {
+  if (T.SECRET_DUMP_RE.test(scanTarget)) {
     deny(
       'secret-dump',
       'This command would print secret values into the transcript.',
@@ -328,8 +363,11 @@ function evaluate(inp) {
   }
 
   // 2. Destructive shapes (execution only).
+  // scanTarget, not cmd: a commit message describing a table drop is a ledger
+  // entry, not a table drop. Same reason the write-path rules already exempt
+  // Port records and task text.
   for (const rule of T.DESTRUCTIVE_RULES) {
-    if (rule.re.test(cmd)) {
+    if (rule.re.test(scanTarget)) {
       deny(
         rule.id,
         rule.why,

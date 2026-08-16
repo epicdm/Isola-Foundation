@@ -531,6 +531,37 @@ function isProseFile(p) {
   return PROSE_EXTENSIONS.has(extname(p));
 }
 
+/**
+ * extractCommitMessage — return the MESSAGE BODY of a `git commit`/`git tag`,
+ * or '' when the command is not one.
+ *
+ * Exists so the exec shape-rules can treat prose as prose. A commit message
+ * documenting `cat .env` is describing an operation, not performing one, and
+ * blocking it teaches people to route the message through a file — one step
+ * from switching the guard off.
+ *
+ * Returns ONLY the message. The caller still scans the surrounding command, so
+ * a real operation chained after the message is unaffected.
+ */
+function extractCommitMessage(cmd) {
+  const s = String(cmd || '');
+  if (!/\bgit\s+(commit|tag)\b/.test(s)) return '';
+
+  // Heredoc: git commit -F - <<'EOF' ... EOF   (quoted or bare delimiter)
+  const here = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\2\b/.exec(s);
+  if (here) return here[3];
+
+  // -m/--message with a quoted body. Longest match wins: a message often
+  // contains the other quote character.
+  let best = '';
+  for (const re of [/-m\s+"((?:[^"\\]|\\.)*)"/g, /-m\s+'((?:[^'\\]|\\.)*)'/g,
+                    /--message[=\s]+"((?:[^"\\]|\\.)*)"/g, /--message[=\s]+'((?:[^'\\]|\\.)*)'/g]) {
+    let m;
+    while ((m = re.exec(s))) if (m[1].length > best.length) best = m[1];
+  }
+  return best;
+}
+
 function isSecretFile(p) {
   const norm = normalizePath(p);
   if (SECRET_FILE_EXEMPT_RE.test(norm)) return false;
@@ -570,4 +601,5 @@ module.exports = {
   extname,
   isProseFile,
   isSecretFile,
+  extractCommitMessage,
 };

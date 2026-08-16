@@ -38,7 +38,8 @@ under pressure:
 | **Why the guard missed it** | `isola-guard` inspected command *text*; `git remote -v` does not look like a secret read. **Closed 2026-08-16** — see "Detection already in place". |
 | **Depends on it** | Nothing at runtime. `lk-voice-agent` is a **deployed checkout that only ever needs to pull**. Verified: blast radius is one — of `/opt/bff-v2`, `/opt/isola-runtime`, `/opt/lk-voice-agent`, `/opt/hermes-eric`, `/home/epicdm/hermes-workspace`, only this one embeds a credential in its remote. |
 | **PLACEMENT DECISION** | **Do not mint a replacement PAT into `.git/config`.** Replace with a **read-only deploy key** scoped to `epicdm/isolav2`, held as an SSH key with the remote rewritten to the `git@github.com:` form. **A running host never needs push access.** If any lane genuinely needs to push from that host, it does so from a worktree with the operator's own credential, not from the live checkout. |
-| **Was it used?** | **No evidence of use.** Last `PushEvent` to `epicdm/isolav2` = **2026-07-28**, actor `epicdm`. Every event in the visible window is `epicdm` or `chatgpt-codex-connector[bot]`. Zero pushes after the 2026-08-16 exposure. *Caveat, stated honestly:* the `/events` API is a partial view (retention-limited, not a complete audit). The authoritative sources are the org audit log and the token's own "last used" timestamp in GitHub settings — **neither has been checked; that is an access gap, not a clean bill.** |
+| **Was it used?** | **No evidence of use — and note what would and would not count as evidence.** Last `PushEvent` to `epicdm/isolav2` = **2026-07-28**, actor `epicdm`; every visible event is `epicdm` or `chatgpt-codex-connector[bot]`; zero pushes after the exposure. The `/events` API is retention-limited and partial. |
+| **Evidence hierarchy — CORRECTED 2026-08-16** | **PRIMARY: the account security log** (`github.com/settings/security-log`) — it shows **what was done**. **SECONDARY: the token's "last used" timestamp** — which is *not* authoritative, contrary to how it was first recorded here. **This token is legitimately used by whatever pulls that repo, so a recent "last used" is EXPECTED and proves nothing either way.** A warm timestamp is not evidence of misuse and a cold one is only weak evidence of safety. Neither source has been read — **an access gap, not a clean bill.** |
 
 ### C-02 — SIP peer secret, `livekittestagen_9666`
 
@@ -87,8 +88,10 @@ under pressure:
 | **Where it lives** | `C:\epic-workspace\magnus.txt` — a plaintext file at the workspace root of a developer machine, outside any secret store. Supplied to this session deliberately by the owner so the CDR-watch probe could run. |
 | **Exposed** | Read into this session 2026-08-16. Values were not echoed back. |
 | **Depends on it** | `/opt/bff-v2` holds the same credential as `MAGNUS_API_KEY` / `MAGNUS_API_SECRET` / `MAGNUS_URL` (var names confirmed; values not read). Rotating affects bff-v2's voice paths — balance, calls, provisioning, top-up. |
-| **PLACEMENT DECISION** | Two parts. **(a)** The file should not persist at the workspace root — it is neither gitignored-by-design nor in a secret store, and it sits in a directory two agent lanes both operate in. **(b)** More important: this is the credential the CDR watch would need, and **a money-moving key is the wrong thing to hand a monitoring service.** See the watch decision below. |
-| **Was it used?** | Not applicable in the same sense — this is a live operational credential in daily use by bff-v2, not a dormant one. There is no "unused" baseline to compare against, so a usage probe would not distinguish legitimate traffic from misuse. **Recorded as not-answerable-by-this-method**, not as clean. |
+| **Severity, corrected** | Initially recorded as an admin-**read** credential and judged "smaller than a DB credential". **That was wrong. It is larger than the write PAT.** A write PAT pushes code — reviewable, revertible, and visible in history. This adjusts **customer balances silently**. Worst placement of anything found on 2026-08-16, the PAT included. |
+| **PLACEMENT — FIXED 2026-08-16, and this was NOT a rotation** | The value did not change, so the owner's rotation freeze never covered it: **placement was never frozen.** Actions taken: (1) fingerprint-confirmed the file was an exact duplicate of `/opt/bff-v2/.env` (`MAGNUS_API_KEY` → `8354cfbf`, secret → `488f0303`, matching on both sides), so removing it lost nothing; (2) **overwrote the 148 bytes before unlinking** — a plain delete leaves a live money-moving credential recoverable; (3) added `magnus.txt`, `*secret*.txt`, `*credential*.txt`, `*.env.txt` to `C:\epic-workspace\.gitignore`, verified by `git check-ignore`. |
+| **Why it was worse than first recorded** | The file was **untracked AND un-ignored inside a git work tree rooted at `C:\epic-workspace`**. A single `git add -A` in that repo would have committed a money-moving credential — and this workspace is shared by two agent lanes. |
+| **Was it used?** | **Not answerable by this method, and that is the honest status — not "clean".** This is a live operational credential in daily use by bff-v2, so there is no unused baseline against which misuse would stand out. A usage probe cannot separate legitimate traffic from abuse here. |
 
 ### Carried forward — already-known items that belong in the same sweep
 
@@ -144,10 +147,36 @@ Both are additions to `services/isola-sentinel` (already deployed, alerts by SMT
 to `SENTINEL_ALERT_TO`, check-per-key with transition/renotify/RECOVERED handling).
 **Neither is built yet.**
 
-| watch | signal | gate before building |
+| watch | signal | status |
 |---|---|---|
-| `cdr_anomaly` | Outbound calls to destinations outside the normal set, volume spikes, and calls at hours EPIC does not normally place them. Toll fraud is automated and fast; the CDR is where it shows. | The sentinel runs on **host03**; the CDR lives in `mbilling` on **voice00**. Reachability and a read-only DB credential are unproven. |
-| `unexpected_push` | Any push to `epicdm/isolav2` not attributable to a known author or lane. The PAT has write access; this is the only signal that would show it being used. | Needs a GitHub credential the sentinel can hold — **which must not be another write-capable PAT**, or the watch becomes the next C-01. |
+| `cdr_anomaly` | Outbound calls to destinations outside the normal set, volume spikes, and calls at hours EPIC does not normally place them. Toll fraud is automated and fast; the CDR is where it shows. | **UNBLOCKED — no DB access needed.** Magnus REST answers it with count-only queries. API shape verified 2026-08-16, see below. |
+| `unexpected_push` | Any push to `epicdm/isolav2` not attributable to a known author or lane. | **WAITING** on a read-only fine-grained GitHub token scoped to that one repo. **A watch that requires a dangerous credential is not a safety improvement** — if the token cannot be issued read-only, the watch waits. |
+
+#### Magnus REST — measured API shape, 2026-08-16
+
+Reuse-first: `magnusRequest(config, 'call', 'read', …)` over HTTPS. **No DB credential, no tunnel, no second way to read the CDR that could disagree with the first.** Base URL requires the `/mbilling` suffix — the bare host fails.
+
+**`total` does not exist.** Response keys are `rows, count, sum`. A check written against `total` would have been *a check that never fires*. `count` is the match total, proven by varying `limit` while `count` held constant (862,868 at limit=1 and limit=25), then narrowed two independent ways (`starttime` 771 / 17,080; `calledstation` prefix 814,082 ≈ 94% local).
+
+**Negative control:** `calledstation = ZZZZNOSUCH` → `count=0, rows=0`. That is what makes every other number mean something — a zero is a real zero, not a broken filter.
+
+**SCOPING RESOLVED — and it changes how the baseline must be built.** The unfiltered count (862,868) is *lower* than any filtered count. Every explicit filter — `starttime gt 1970-01-01`, `gt 2020-01-01`, `lt 2030-01-01`, `id gt 0`, `sessiontime gt -1` — returns the **identical 914,586**. Filters therefore do not narrow an 862,868 universe; they **replace a default scope** the grid applies only when no filter is supplied. **914,586 is the true universe; 862,868 is a defaulted subset (Δ 51,718) whose window we neither control nor can see, and which will drift as time passes.**
+
+> **RULE FOR THE WATCH: always pass an explicit filter. Never baseline on the unfiltered count.** An undefined baseline is a threshold wearing a number.
+
+#### Credential for the CDR watch — option taken, and why
+
+Preference order was: (1) read-scoped Magnus key, (2) compute on voice00 and push the verdict, (3) the existing key under constraints.
+
+**(2) was priced and rejected.** voice00 is CentOS 7 and a read-only host today, with no deployment tooling present. Standing up a job there creates a **new deployable surface on the PBX** — a larger change than the watch it enables. Not a free option.
+
+**Taking (3), with the constraints hardened because C-09 is money-moving:**
+
+1. **The credential lives in the secret store, never in a file on a host.** (C-09's loose copy is already removed.)
+2. **Read-only BY CONSTRUCTION.** The sentinel's Magnus client is a purpose-built module in which **no code path can emit `save` or `refill` — the capability does not exist in the module.** Not a flag, not a convention, not a runtime check. Tested by attempting to induce it.
+3. **It goes on this register** (as C-09) so it is rotated with everything else and never forgotten.
+
+**The REST key is an INTERIM with a short life, not the design.** The intended end state is an **Asterisk AMI read-only user** — `manager.conf` permission classes give a genuinely read-scoped credential (`read = cdr,call`, `write =` empty), which removes a money-moving credential from a monitoring service entirely. That is the next step, not a someday.
 
 Both gates exist because of the sentinel's own rule, which applies to its author too:
 

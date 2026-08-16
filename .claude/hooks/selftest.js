@@ -511,6 +511,53 @@ const cases = [
       tool_input: { command: "ssh voice00 \"sed -n '100,140p' /etc/asterisk/sip_peers.conf\"" },
     },
   },
+  // --- PROSE IS NOT EXECUTION (commit messages) ----------------------------
+  // LAW, adopted 2026-08-16: every relaxation of a security rule ships with a
+  // test that the rule still catches what it was for. Otherwise the fix and the
+  // hole look identical from the test suite. Hence the four controls below.
+  {
+    name: 'a commit message DESCRIBING a secret dump is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'git commit -m "docs: explain why ' + t('cat ', '.env') + ' is blocked by the guard"' },
+    },
+  },
+  {
+    name: 'a commit message DESCRIBING a destructive op is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'git commit -m "ledger: records a ' + t('DR', 'OP TABLE') + ' performed under owner authorization"' },
+    },
+  },
+  {
+    // CONTROL 1: the exemption must cover the MESSAGE ONLY. A real operation
+    // chained after it is still a real operation.
+    name: 'a real secret dump CHAINED after a commit is still BLOCKED',
+    expect: BLOCK,
+    contains: 'secret-dump',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'git commit -m "harmless note" && ' + t('cat ', '/opt/bff-v2/.env') },
+    },
+  },
+  {
+    // CONTROL 2: relaxing shape rules must NOT relax credential rules. A commit
+    // message is permanent and travels with the repo — worse than a transcript.
+    name: 'a LITERAL credential inside a commit message is BLOCKED',
+    expect: BLOCK,
+    contains: 'credential-in-commit-message',
+    notContains: FAKE_TOKEN,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'git commit -m "chore: rotate to ' + FAKE_TOKEN + '"' },
+    },
+  },
   {
     // A bare environment dump must STILL be denied — the positive control for
     // the lookbehind added below it. Without this, relaxing that rule could
