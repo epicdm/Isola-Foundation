@@ -178,6 +178,27 @@ Preference order was: (1) read-scoped Magnus key, (2) compute on voice00 and pus
 
 **The REST key is an INTERIM with a short life, not the design.** The intended end state is an **Asterisk AMI read-only user** — `manager.conf` permission classes give a genuinely read-scoped credential (`read = cdr,call`, `write =` empty), which removes a money-moving credential from a monitoring service entirely. That is the next step, not a someday.
 
+### F-01 — the existing `ami-listener` AMI account is full-privilege (FINDING; reported, not changed)
+
+Checked because a second event listener holding an over-scoped AMI user would be the same class of problem. **It is.** `/etc/asterisk/manager.conf` on voice00, section `[epic-ai-app]` — the account `ami-listener` on deepseek logs in as (`AMI_USER` default `epic-ai-app`, `AMI_SECRET` from env; the code refuses to start on a hardcoded fallback, which is correct):
+
+| line | directive | effect |
+|---|---|---|
+| 29 | `deny=0.0.0.0/0.0.0.0` | default-deny — good |
+| 32 | `permit = 66.118.37.12/…` | **deepseek only.** Two stale permits sit commented out with dates and lane attribution; the earlier `0.0.0.0/0` exposure is gone. |
+| 33 | `read = system,call,log,verbose,agent,user,config,dtmf,reporting,cdr,dialplan` | a deliberately scoped class… |
+| 34 | `write = system,call,agent,user,config,command,reporting,originate` | …including `originate` (place calls) and `command` (Asterisk CLI) |
+| 36 | `read = all` | **overrides line 33** |
+| 37 | `write = all` | **overrides line 34** |
+
+**Effective permission is `read = all, write = all` — full control of the PBX.** In `manager.conf` a later directive in the same section wins. Verified the boundary: the query filtered on `^\[` as well as read/write/permit/deny, so a section header between 27 and 37 would have appeared. **None did — lines 36–37 are inside `[epic-ai-app]`.**
+
+**The most useful detail: lines 33–34 show someone already tried to scope this account.** That intent is dead config, defeated by two trailing lines that look appended from a template. **The fix is deleting two lines**, which also makes the read-only-AMI end state above cheap rather than speculative.
+
+Residual risk today is bounded by the network ACL: a caller must be on deepseek. So this is not an open internet exposure — it is a **blast-radius** problem. If deepseek is compromised, that account can originate calls and run CLI commands on the PBX.
+
+**Reported, not changed**, per instruction. Not a credential exposure, so it is not a C-row; it belongs to the same sweep because the AMI read-only user is C-09's end state.
+
 Both gates exist because of the sentinel's own rule, which applies to its author too:
 
 > **"A check that can never pass is worse than no check"** — it trains the reader to
