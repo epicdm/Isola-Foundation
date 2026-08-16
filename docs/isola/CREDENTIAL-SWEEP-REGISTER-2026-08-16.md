@@ -134,12 +134,49 @@ Proven, not asserted:
 - Guard selftest **63/63** (was 59; +4 including two negative controls proving
   ordinary commands and PowerShell are *not* rewritten)
 
+> ### METHOD — a false clean is the worst output a check can produce
+>
+> **This belongs at the top of the verification-method doc, above every other
+> instrument lesson.** It is recorded here instead because
+> `VERIFICATION-METHOD-HANDOFF-2026-08-13.md` currently has **28 uncommitted
+> lines from another lane, at lines 3–11 — exactly the top.** Writing there
+> would be the same collision that was just ruled on for the sentinel.
+> **Owner/estate: please merge this paragraph into that doc.**
+>
+> Reading the AMI permission class, the first attempt used
+> `awk '/^\[epic-ai-app\]/,/^\[.*\]$/'`. **The header line matches BOTH the
+> start and the end pattern**, so the range closed immediately and returned the
+> header alone. Output: `[epic-ai-app]` and nothing else.
+>
+> **That reads as "no permissions defined" — i.e. a clean result — on a
+> security question.**
+>
+> Every other instrument failure this session failed toward *"something is
+> wrong"* or *"I cannot tell"*: a hung grep produced no matches, a collapsed
+> `jobs` produced an empty list, an absent `total` produced a visible ABSENT.
+> **This one failed toward "everything is fine", which ENDS the investigation
+> rather than prompting another look.**
+>
+> The fix that caught it: re-read with `grep -A`, then confirm the section
+> boundary with a query that *would have shown* a boundary if one existed
+> (filter on `^\[` as well as the fields of interest). **Absence is only
+> evidence when the instrument could have rendered presence.**
+
 **Coverage boundary, stated plainly:** Bash only. `Read`/`Grep`/`Glob` results, MCP
 tool responses, and PowerShell are **not** covered. The wrapper is bash syntax and
 emitting it for PowerShell would produce a broken command. Anything outside that
 boundary can still leak. This narrows the hole; it does not close it. The structural
 fix is C-01's placement decision — a runtime host that holds no write credential
 cannot leak one.
+
+**AND THERE ARE TWO GUARDS, SO THE CLASS IS NARROWED, NOT CLOSED.** A second,
+user-level hook — `~/.claude/hooks/enforce-safety.js` — carries the same
+comment-vs-command flaw and still blocks a commit message merely for *naming*
+destructive SQL. It sits outside this repository and is the owner's file, so it
+was **reported rather than silently edited**: changing someone else's security
+control without asking is its own defect. **Until that second hook is fixed, the
+prose-is-not-execution fix covers one of two enforcement paths.** Stated in those
+words deliberately — "fixed" would be wrong.
 
 ## Detection still to build — the two watches
 
@@ -193,7 +230,37 @@ Checked because a second event listener holding an over-scoped AMI user would be
 
 **Effective permission is `read = all, write = all` — full control of the PBX.** In `manager.conf` a later directive in the same section wins. Verified the boundary: the query filtered on `^\[` as well as read/write/permit/deny, so a section header between 27 and 37 would have appeared. **None did — lines 36–37 are inside `[epic-ai-app]`.**
 
-**The most useful detail: lines 33–34 show someone already tried to scope this account.** That intent is dead config, defeated by two trailing lines that look appended from a template. **The fix is deleting two lines**, which also makes the read-only-AMI end state above cheap rather than speculative.
+**Lines 33–34 show someone already tried to scope this account.** That intent is dead config, defeated by two trailing lines that look appended from a template — the declared-vs-effective class again, this time in a config file.
+
+**CORRECTION — "delete two lines" is NOT the fix, and I had it wrong.** Line 34's *scoped* intent is already
+`write = system,call,agent,user,config,command,reporting,originate` — which **still carries `command` (Asterisk CLI) and `originate` (place calls)**. Deleting 36–37 narrows blast radius while leaving the two capabilities that actually matter. The read-only end state needs **line 34 changed too**.
+
+**AND THE PREREQUISITE READ CHANGES THE ANSWER AGAIN. `ami-listener` is not an event listener.** Every AMI action it issues, enumerated from `/opt/bff-v2/ami-listener.js`:
+
+| line | action | class |
+|---|---|---|
+| 388 | `Login` | auth |
+| 402 | `Events` `EventMask: 'call,cdr'` | **read** — the only listening it does |
+| 514 | **`Originate`** | **write** — places a call |
+| 549 | **`Originate`** | **write** — places a call |
+| 580 | **`Hangup`** | **write** — tears down a call |
+
+So `write =` empty would **break it**. It is a **call-control service carrying an event-listener's name**, and that naming is itself a hazard: it invites exactly the "an event listener only needs read" reasoning I applied a paragraph ago.
+
+**Minimal permission set, derived from observed behaviour rather than guessed:**
+
+```
+read  = call,cdr          ; matches its own EventMask exactly
+write = call,originate    ; Originate + Hangup, nothing more
+```
+
+That drops `system`, `config`, **`command`**, `agent`, `user`, `reporting`, `log`, `verbose`, `dtmf`, `dialplan`. **`command` — arbitrary Asterisk CLI — is never used and is the single most dangerous entry in the list.**
+
+**NOT TONIGHT.** voice00 is live and must not break. The risk is conditional on deepseek being compromised, not an internet exposure, so it takes a scheduled change with verification — not a 3am edit to a production PBX. The two `Originate` call sites should also be read in full first, to confirm what triggers them.
+
+**Adjacent, and it sharpens the "if deepseek is compromised" clause:** `ami-listener` also runs an HTTP server whose only accepted action is `hangup` (it 400s everything else — a good default). That server listens on **`*:3016` — all interfaces, not loopback** (`ss -tlnp`, pid 1455). So the call-control path is not restricted by the process itself.
+
+**Whether it is reachable from outside is NOT established and I have not tested it.** Per the estate's own law, a local probe proves nothing here: my egress (`66.118.37.10`) is in the same `/24` as deepseek, so a successful connection from here would demonstrate only same-subnet reachability. Exposure has to be proven from a genuinely external vantage — the method already used to confirm voice00's AMI `5038` is filtered. **Recorded as an open verification item, not as an exposure claim.**
 
 Residual risk today is bounded by the network ACL: a caller must be on deepseek. So this is not an open internet exposure — it is a **blast-radius** problem. If deepseek is compromised, that account can originate calls and run CLI commands on the PBX.
 
