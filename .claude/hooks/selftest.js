@@ -567,6 +567,29 @@ const cases = [
     contains: 'secret-dump',
     payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: 'ssh deepseek "env | sort"' } },
   },
+  // REGRESSION COVER — found by adversarial review 2026-08-16, NOT by the tests
+  // written alongside the change. The first lookbehind excluded `/` as well as
+  // `.`, which let every path-qualified environment dump through. These are the
+  // reviewer's exact bypass strings, kept verbatim so the regression cannot
+  // return quietly.
+  {
+    name: 'path-qualified env dump /usr/bin/env is BLOCKED',
+    expect: BLOCK,
+    contains: 'secret-dump',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: 'ssh deepseek "/usr/bin/env | sort"' } },
+  },
+  {
+    name: 'path-qualified /usr/bin/printenv is BLOCKED',
+    expect: BLOCK,
+    contains: 'secret-dump',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: 'ssh deepseek /usr/bin/printenv' } },
+  },
+  {
+    name: 'relative ./env dump is BLOCKED',
+    expect: BLOCK,
+    contains: 'secret-dump',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: 'ssh deepseek "./env | sort"' } },
+  },
   {
     // …but a .env FILE PATH followed by a pipe is not an environment dump. This
     // false positive fired ahead of the rewrite rule and blocked the safe,

@@ -321,6 +321,14 @@ const CREDENTIAL_SURFACE_RE = new RegExp(
     // back as `KEY=[REDACTED:…]`. The blatant `cat .env` stays denied by rule 1,
     // which runs first.
     '\\b(sed|awk|grep|rg|strings|od|perl|python3?|cut|sort|uniq|wc)\\b[^\\n|;&]*(^|[\\s\'"`/\\\\=])\\.env(\\.[a-z0-9_-]+)?\\b',
+    // A SECRET MANAGER'S CLI IS A CREDENTIAL-BEARING SURFACE BY DEFINITION.
+    // Added BEFORE any bulk migration work, not after — the guard had never
+    // seen `infisical`, and `secrets`, `export` and `run` all print values.
+    // Wrapping (not denying) is what makes it usable: the redactor leaves the
+    // KEY NAMES and folder structure readable, which is exactly what inventory
+    // and organisation work needs, while the values never reach a transcript.
+    // Covers the sibling CLIs too, so this is not a one-vendor patch.
+    '\\b(infisical|vault|doppler|op|sops|aws\\s+secretsmanager|gcloud\\s+secrets|az\\s+keyvault)\\b',
   ].join('|'),
   'i'
 );
@@ -336,7 +344,23 @@ const SECRET_DUMP_RE = new RegExp(
     // rewrite below, so the safe, redacted form of the read was blocked while
     // the guard's own remedy text was recommending exactly that command. Bare
     // `env |`, `printenv` and `set | grep` are still caught.
-    '(?<![./\\w])(printenv|env\\s*(\\||$)|set\\s*\\|\\s*grep|Get-ChildItem\\s+Env:|dir\\s+env:)',
+    // Lookbehind excludes a preceding DOT ONLY — not a slash.
+    //
+    // The first version used (?<![./\w]) and that was a REGRESSION, found by
+    // adversarial review 2026-08-16, not by the tests I wrote: excluding `/`
+    // let every path-qualified dump through —
+    //     /usr/bin/env | sort      /bin/env | sort      /usr/bin/printenv
+    // are genuine environment dumps that the original rule caught and my
+    // "fix" did not.
+    //
+    // Only the dot is needed for the false positive this was meant to solve:
+    // `/opt/bff-v2/.env | sort` is a FILE PATH piped, and its `env` is
+    // preceded by `.`. A slash before `env` means a binary, and a binary
+    // named env being piped IS the dump.
+    //
+    // Residual, accepted: a FILE literally named `/etc/env` piped would now
+    // match and be denied. Rare, and it fails toward denial.
+    '(?<![.\\w])(printenv|env\\s*(\\||$)|set\\s*\\|\\s*grep|Get-ChildItem\\s+Env:|dir\\s+env:)',
     // A pager/dump command applied to a secret file. The gap deliberately
     // excludes `|`, `;` and `&` so a later, unrelated command in the same line
     // cannot be attributed to an earlier `cat`/`head`.
