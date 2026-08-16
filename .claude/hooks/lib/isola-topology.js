@@ -271,6 +271,36 @@ const SECRET_FILE_EXEMPT_RE = /\.(example|sample|template|dist)$|\.example\.|\.s
 const SECRET_PATH_TOKEN =
   '(^|[\\s\'"`/\\\\=])(\\.env(\\.[a-z0-9_-]+)?|\\.pgpass|id_rsa|id_ed25519|[^\\s\'"]*\\.pem|credentials\\.json|auth\\.json)\\b';
 
+/**
+ * CREDENTIAL-BEARING SURFACES — read legitimately, but the output carries a
+ * secret. These are NOT denied: denying them would block real investigation
+ * (you often need to see a git remote, or an Asterisk peer block). Instead the
+ * guard rewrites the command to pipe its own output through lib/secret-redact.js
+ * via PreToolUse `updatedInput`.
+ *
+ * Each entry below is a MEASURED exposure, not a hypothetical:
+ *   - `git remote -v` / `git config ... url`  printed a live GitHub PAT that was
+ *     embedded in /opt/lk-voice-agent/.git/config          (2026-08-16)
+ *   - a line-range read of an Asterisk SIP peers config printed two plaintext
+ *     `secret=` values                                      (2026-08-16)
+ *
+ * Note `sed`/`awk`/`grep`/`strings` are the readers here. SECRET_DUMP_RE only
+ * knows cat/head/tail/less — which is precisely why the SIP read sailed through.
+ */
+const CREDENTIAL_SURFACE_RE = new RegExp(
+  [
+    // A git remote URL can embed user:token@host.
+    '\\bgit\\s+(remote\\s+(-v|show|get-url)|config\\b[^\\n|;&]*\\b(url|remote\\.))',
+    '[\\\\/]\\.git[\\\\/]config\\b',
+    // Telephony peer/registration configs hold plaintext `secret=` per peer.
+    '\\bsip[a-z0-9_-]*\\.conf\\b',
+    '\\b(pjsip|sip_[a-z0-9_]*|iax|manager)\\.conf\\b',
+    // Any reader pointed at a generic config/ini that commonly carries secrets.
+    '\\b(sed|awk|grep|rg|strings|od|perl|python3?)\\b[^\\n|;&]*\\.(conf|cfg|ini|properties)\\b',
+  ].join('|'),
+  'i'
+);
+
 const SECRET_DUMP_RE = new RegExp(
   [
     '\\b(printenv|env\\s*(\\||$)|set\\s*\\|\\s*grep|Get-ChildItem\\s+Env:|dir\\s+env:)',
@@ -489,6 +519,7 @@ module.exports = {
   LEGACY_REFERENCE_RE,
   SECRET_FILE_RE,
   SECRET_DUMP_RE,
+  CREDENTIAL_SURFACE_RE,
   EASYPANEL_BLOCKED_PROCEDURES,
   EASYPANEL_MCP_TOOL_RE,
   EASYPANEL_RAW_ENDPOINT_RE,

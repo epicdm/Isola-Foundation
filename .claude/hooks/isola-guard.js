@@ -103,6 +103,36 @@ function allow(note) {
   process.exit(0);
 }
 
+/**
+ * Allow the call, but with a REWRITTEN command.
+ *
+ * This is the only mechanism in Claude Code that can keep a credential out of
+ * the transcript. Verified against the hooks reference 2026-08-16: PostToolUse
+ * cannot modify, replace or suppress tool output — `suppressOutput` is accepted
+ * and ignored — so there is no output-side filter to install. PreToolUse
+ * `updatedInput` is the whole toolbox.
+ *
+ * Four exposures went through this guard because it inspects COMMANDS and a
+ * command does not announce what it will print. Rewriting the command so it
+ * filters its own output is how we close that, on the surfaces we know carry
+ * credentials.
+ */
+function allowRewritten(ruleId, updatedInput, note) {
+  log('REWRITE rule=' + ruleId + (note ? ' ' + note : ''));
+  process.stdout.write(
+    JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'allow',
+        permissionDecisionReason:
+          '[' + ruleId + '] output piped through secret-redact (credential-bearing surface)',
+        updatedInput,
+      },
+    })
+  );
+  process.exit(0);
+}
+
 let raw = '';
 process.stdin.on('data', (d) => (raw += d));
 process.stdin.on('end', () => {
@@ -264,6 +294,36 @@ function evaluate(inp) {
       'This command would print secret values into the transcript.',
       'report variable NAMES and a 4-character prefix only, e.g. ' +
         '`grep -o "^[A-Z_][A-Z0-9_]*=" .env` or `cut -c1-4`. Never echo a full secret.'
+    );
+  }
+
+  // 1b. Credential-bearing surface: allow the read, redact its output.
+  //
+  // Ordered AFTER the secret-dump deny on purpose. A `.env` or private key is
+  // never legitimately printed, so it stays denied. A git remote or a SIP peer
+  // block IS legitimate investigation — it just must not carry the credential
+  // into the transcript. Denying those would push the work into some unguarded
+  // shape; rewriting them keeps the investigation and drops the secret.
+  //
+  // Bash only, and that limit is deliberate. The wrapper below is bash syntax
+  // (`pipefail` + `{ ...; }`); emitting it for PowerShell would produce a broken
+  // command, and a guard that breaks commands gets disabled. PowerShell and the
+  // MCP ssh tool fall through to the ordinary rules — an honest gap, recorded in
+  // secret-redact.js under COVERAGE BOUNDARY rather than papered over.
+  if (tool === 'Bash' && T.CREDENTIAL_SURFACE_RE.test(cmd) && !/secret-redact\.js/.test(cmd)) {
+    const filter = path.join(__dirname, 'lib', 'secret-redact.js');
+    allowRewritten(
+      'credential-surface-redact',
+      // pipefail keeps the ORIGINAL command's failure visible; without it the
+      // pipeline would report the redactor's exit status and every failure
+      // would look like success.
+      Object.assign({}, ti, {
+        // The newline before `}` is load-bearing: it terminates the last command
+        // inside the group. `cmd + '; }'` breaks whenever cmd already ends in a
+        // separator — which the first live test hit immediately.
+        command: 'set -o pipefail; {\n' + cmd + '\n} 2>&1 | node ' + JSON.stringify(filter),
+      }),
+      'cmd=' + M.redactSensitive(cmd).slice(0, 120)
     );
   }
 

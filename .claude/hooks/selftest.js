@@ -486,6 +486,47 @@ const cases = [
     expect: PASS,
     payload: { session_id: SID, tool_name: 'Grep', tool_input: { pattern: 'tenant_id', path: 'artifacts/isola/lib' } },
   },
+
+  // --- CREDENTIAL-SURFACE OUTPUT REDACTION --------------------------------
+  // Regression cover for the two 2026-08-16 exposures. Both commands are
+  // legitimate reads, so the correct verdict is ALLOW-WITH-REWRITE, never a
+  // block: denying them pushes the same read into an unguarded shape.
+  {
+    name: 'git remote (PAT in remote URL) is ALLOWED but output-redacted',
+    expect: PASS,
+    contains: 'credential-surface-redact',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'cd /opt/lk-voice-agent && git remote -v' },
+    },
+  },
+  {
+    name: 'a line-range read of a SIP peers config is ALLOWED but output-redacted',
+    expect: PASS,
+    contains: 'secret-redact',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: "ssh voice00 \"sed -n '100,140p' /etc/asterisk/sip_peers.conf\"" },
+    },
+  },
+  {
+    // The negative control. Without it, a rule that rewrote EVERY command would
+    // still pass both cases above while quietly wrapping the whole session.
+    name: 'an ordinary command is NOT rewritten',
+    expect: PASS,
+    notContains: 'credential-surface-redact',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: 'ls -la /var/log' } },
+  },
+  {
+    // Rewriting is Bash-only by design (the wrapper is bash syntax). PowerShell
+    // must fall through untouched rather than receive a broken command.
+    name: 'PowerShell is NOT rewritten (wrapper is bash-only)',
+    expect: PASS,
+    notContains: 'credential-surface-redact',
+    payload: { session_id: SID, tool_name: 'PowerShell', tool_input: { command: 'git remote -v' } },
+  },
   {
     name: 'remote read-only inspection is ALLOWED',
     expect: PASS,
