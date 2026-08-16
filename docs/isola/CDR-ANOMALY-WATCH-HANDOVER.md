@@ -88,6 +88,32 @@ minority case and the sharper signal — but the exact band has to come from a
 week of hourly counts taken **with explicit filters**, per the scoping rule above.
 Do not ship a number that was guessed.
 
+### SHIP THE CRUDE INTERIM FIRST — armed from hour one
+
+**A week of baselining means the watch is not armed for a week. This check is the
+compensating control for credentials we deliberately chose not to rotate. A
+compensating control that starts compensating in seven days is not compensating.**
+
+So land these two **first**. Both are computable from explicit-filter counts
+*today*, with no baseline period, and both are replaced — not supplemented — once
+the measured thresholds exist.
+
+| interim key | rule | why it works from hour one |
+|---|---|---|
+| `cdr_new_destination_prefix` | any call to a destination prefix **not seen in the last 30 days** | the 30-day set *is* the baseline, computed on each run. Toll fraud dials somewhere new. |
+| `cdr_hour_exceeds_30d_max` | any hour whose count **exceeds the highest single hour in the last 30 days** | a record-breaking hour needs no threshold — the record is the threshold |
+
+Both are self-calibrating: they compare now against the recent past rather than
+against a number someone chose. **They will be noisy** — a first legitimate call to
+a new country trips the first one, and a genuinely busy hour trips the second.
+Accept that. **Crude and noisy beats seven days of nothing**, and the noise is
+itself baseline data.
+
+Implementation note: derive the 30-day prefix set and the 30-day hourly max with
+the *same* `magnusCount` calls the real check will use — explicit filters only.
+That way the interim exercises the identical code path, so replacing the rule later
+changes a threshold, not the plumbing.
+
 ## The module
 
 Drop in as `services/isola-sentinel/src/magnus-cdr.js`. Estate owns placement.

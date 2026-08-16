@@ -260,7 +260,42 @@ That drops `system`, `config`, **`command`**, `agent`, `user`, `reporting`, `log
 
 **Adjacent, and it sharpens the "if deepseek is compromised" clause:** `ami-listener` also runs an HTTP server whose only accepted action is `hangup` (it 400s everything else — a good default). That server listens on **`*:3016` — all interfaces, not loopback** (`ss -tlnp`, pid 1455). So the call-control path is not restricted by the process itself.
 
-**Whether it is reachable from outside is NOT established and I have not tested it.** Per the estate's own law, a local probe proves nothing here: my egress (`66.118.37.10`) is in the same `/24` as deepseek, so a successful connection from here would demonstrate only same-subnet reachability. Exposure has to be proven from a genuinely external vantage — the method already used to confirm voice00's AMI `5038` is filtered. **Recorded as an open verification item, not as an exposure claim.**
+**ANSWERED BY READING THE FIREWALL, not by probing** — no packets were aimed at a live PBX-adjacent service, and a probe from this egress would have proven only same-subnet reachability anyway.
+
+`iptables -S` on deepseek: **`-P INPUT DROP`.** The host is default-deny. `ami-listener` is a **native process (pid 1455), not a container**, so its inbound traffic traverses `INPUT` — it does not bypass via the Docker chains. **No rule anywhere permits 3016**: it appears in neither `iptables` nor ufw's allow list.
+
+> **So 3016 binds broadly but is NOT externally reachable. It is contained by the host's default-deny policy.**
+
+Residual caveat, kept deliberately: a firewall rule read is not the same as an external probe, which remains the gold standard. But the read is definitive about *intent and configuration*, and it was the instructed method.
+
+#### CORRECTION TO MY OWN EARLIER CLAIM — 8020 is contained, and I reported otherwise
+
+Earlier in this session I reported `bff-voice-engine` as *"port 8020 published on 0.0.0.0 (internet-facing)… re-confirmed live"*, citing `docker ps`. **That was the declared-vs-effective error, committed by me.** `docker ps` shows the *publish declaration*; it says nothing about whether packets survive the filter. They do not:
+
+```
+-A DOCKER-USER ! -s 127.0.0.0/8 -p tcp --dport 8020 -j DROP
+      # "block bff-voice-engine internet exposure inc-bff-voice-engine-exposed-2026-07-11"
+-A ufw-user-input -p tcp --dport 8020 -j DROP
+```
+
+**Blocked in two independent places since 2026-07-11**, with the incident id in the rule comment. `DOCKER-USER` is the correct chain for a published container port — the one place a Docker publish *can* be filtered.
+
+I also checked the known drift trap (ufw listing a rule that `iptables` no longer has, after a reboot): **no drift here.** The 8020 DROP is present in *both* views. Checking both is what makes that statement meaningful.
+
+**So this is ONE finding about the host, and it is a good one:** deepseek is default-deny with explicit, documented containment. Not two service exposures. The Port risk record describing 8020 as an open exposure is **stale and should be corrected.**
+
+#### FLAGGED, NOT CHASED — broad `ALLOW Anywhere` rules on deepseek
+
+Seen while reading the firewall; **outside this register's scope, not investigated, raised for a decision rather than actioned**:
+
+| rule | note |
+|---|---|
+| `5432/tcp ALLOW Anywhere  # PostgreSQL for Vercel` | **a database port open to the internet** — the item most worth a second look |
+| `5433/tcp ALLOW Anywhere` | second Postgres, no comment |
+| `3000`, `5173`, `19000`, `8065` `ALLOW Anywhere` | app/dev ports open broadly |
+| `10000:20000/udp`, `5080/udp ALLOW Anywhere` | RTP + SIP — plausibly required for voice, but worth confirming they are intended |
+
+Note the *contrast* that makes these stand out: `11434` (Ollama) is correctly restricted to three named source addresses, and `4000` to one. So this host demonstrably knows how to scope a rule — the broad ones look like accumulation, not policy.
 
 Residual risk today is bounded by the network ACL: a caller must be on deepseek. So this is not an open internet exposure — it is a **blast-radius** problem. If deepseek is compromised, that account can originate calls and run CLI commands on the PBX.
 
