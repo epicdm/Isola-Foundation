@@ -295,8 +295,20 @@ const CREDENTIAL_SURFACE_RE = new RegExp(
     // Telephony peer/registration configs hold plaintext `secret=` per peer.
     '\\bsip[a-z0-9_-]*\\.conf\\b',
     '\\b(pjsip|sip_[a-z0-9_]*|iax|manager)\\.conf\\b',
-    // Any reader pointed at a generic config/ini that commonly carries secrets.
-    '\\b(sed|awk|grep|rg|strings|od|perl|python3?)\\b[^\\n|;&]*\\.(conf|cfg|ini|properties)\\b',
+    // Any reader pointed at a config file that commonly carries an injected
+    // credential. The reader list is deliberately wider than SECRET_DUMP_RE's:
+    // that one knew only cat/head/tail/less, which is exactly how a `sed` line
+    // range over a SIP peers file walked straight through it.
+    //
+    // `.ya?ml` earns its place from a measured exposure: a provisioned
+    // `.paperclip.yaml` carries `adapter.config.headers.Authorization: Bearer
+    // rtp_…`, injected at provision time from the secret store. The COMMITTED
+    // template is clean — it holds only a comment saying the bearer is injected
+    // — so this is a case where placement was already right and the failure was
+    // purely in how the live file was read: dumped raw. Nothing else would have
+    // caught it, since a provisioned yaml is not SECRET_FILE-shaped.
+    '\\b(cat|bat|less|more|head|tail|type|Get-Content|nl|sed|awk|grep|rg|strings|od|perl|python3?)\\b' +
+      '[^\\n|;&]*\\.(conf|cfg|ini|properties|ya?ml)\\b',
   ].join('|'),
   'i'
 );

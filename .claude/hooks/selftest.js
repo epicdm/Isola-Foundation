@@ -512,6 +512,21 @@ const cases = [
     },
   },
   {
+    // C-04: a PROVISIONED .paperclip.yaml carries an injected `Bearer rtp_…`.
+    // The committed template is clean, so nothing in the repo would ever reveal
+    // this — only a raw read of the live file does, and a yaml is not
+    // SECRET_FILE-shaped. This is the case where placement was already correct
+    // and the read discipline was the only control.
+    name: 'a raw read of a provisioned .paperclip.yaml is ALLOWED but output-redacted',
+    expect: PASS,
+    contains: 'credential-surface-redact',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'ssh deepseek "cat /opt/paperclip/agents/front-desk/.paperclip.yaml"' },
+    },
+  },
+  {
     // The negative control. Without it, a rule that rewrote EVERY command would
     // still pass both cases above while quietly wrapping the whole session.
     name: 'an ordinary command is NOT rewritten',

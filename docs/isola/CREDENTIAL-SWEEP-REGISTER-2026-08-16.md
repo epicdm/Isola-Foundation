@@ -65,17 +65,18 @@ under pressure:
 | **PLACEMENT DECISION** | **Retire the peer.** A test credential on a production PBX with call-origination rights is the wrong object to own. If a test peer is genuinely needed, it belongs on a non-billing account with an outbound route restricted to a test destination. |
 | **Was it used?** | **No. Zero calls, ever** (0 rows, NULL), against the same working positive control as C-02. |
 
-### C-04 — `rtp_…` token — **UNIDENTIFIED, OWNER INPUT NEEDED**
+### C-04 — Paperclip runtime bearer (`rtp_…`), front-desk agent — **IDENTIFIED**
 
 | field | value |
 |---|---|
-| **What it is** | Named by the owner on 2026-08-16 as belonging in this sweep. **I could not identify it.** |
-| **Search performed** | ripgrep over this repo, completed, case-insensitive: the only `rtp_` occurrence is this register itself. **Scope is THIS REPO ONLY** — no host filesystem, no `.env` on deepseek/voice00/host03, no EasyPanel service env, no prior transcript was searched. A token that lives only on a host would not appear here, so this is *not* evidence the token does not exist. |
-| **What it grants** | Unknown |
-| **Where it lives** | Unknown |
-| **Exposed** | Unknown |
-| **PLACEMENT DECISION** | Cannot be written until the token is identified. |
-| **Action** | **Owner: name the system this belongs to** (or point at the transcript/host where it appeared) and this row gets completed. Recorded as a known-incomplete row rather than dropped — an unidentified item silently omitted is exactly how a sweep ends up partial. |
+| **What it is** | The front-desk agent's **Paperclip runtime bearer token**. Appears as `adapter.config.headers.Authorization: "Bearer rtp_…"`. |
+| **What it grants** | Authenticates adapter invocation for that agent, **bound to the PUBLIC exposure class**. Per the template's own comment the PUBLIC bearer cannot invoke the INTERNAL template and vice versa, so it is exposure-class-scoped rather than estate-wide. Described by the exposing lane as the secret "for the old runtime" — **whether it is still live is unconfirmed and must be checked at sweep time, not assumed dead.** |
+| **Where it lives** | The **provisioned (live)** `.paperclip.yaml` for the front-desk agent. **NOT in git** — verified 2026-08-16: both committed templates (`isola-ai-sales-front-desk-agent/v1`, `epic-staff-operations-coordinator/v1`) contain only the comment *"url and headers.Authorization injected at provision time"*. The repo is clean. |
+| **Exposed** | By the **estate lane**, earlier in the same session, and **disclosed immediately by that lane**. Their first export script redacted secret-ish keys; the follow-up dumped `.paperclip.yaml` **raw**. Carried in that lane's own notes as "exposed and unrotated — rotate tomorrow, on its own". |
+| **Why the repo search found nothing** | It was never in the repo. My initial search was scoped to this checkout and could not have found it — recorded here because "searched and found nothing" and "searched the wrong place" produce identical output. |
+| **PLACEMENT DECISION** | **No placement change. The placement is already correct** — injected at provision time from the approved secret store, never committed. This is the one row where the failure was **not** where the secret lived but **how the live file was read**. Rotate the value; change nothing structural. |
+| **Control added** | The read discipline is now enforced rather than remembered: `CREDENTIAL_SURFACE_RE` covers `.ya?ml` with the full reader set, so a raw read of a provisioned `.paperclip.yaml` is rewritten through the redactor. Verified — `Authorization: "Bearer rtp_…"` → `Authorization: "Bearer [REDACTED:bearer]"`. Nothing else would have caught it: a provisioned yaml is not `SECRET_FILE`-shaped and the committed template is clean. |
+| **Was it used?** | **Not checked.** Unlike C-01/C-02/C-03 I have run no usage probe for this token. Doing so needs the Paperclip request log or equivalent. **Recorded as an open question, not as a negative.** |
 
 ### Carried forward — already-known items that belong in the same sweep
 
