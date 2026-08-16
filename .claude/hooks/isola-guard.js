@@ -22,6 +22,49 @@
  *
  * Read-only investigation (Read/Grep/Glob/ssh-read/ssh-search) is never blocked
  * except when the target is a secret-bearing file.
+ *
+ * ===========================================================================
+ * NARROWED, NOT TRUSTED — this control states its own limits
+ * ===========================================================================
+ * Adversarially reviewed 2026-08-16. It stops MISTAKES. It does not stop an
+ * adversary, and it must not be described as if it does.
+ *
+ * KNOWN GAPS, all found by review rather than by the tests written alongside
+ * the code — which is the point of recording them here rather than in a review
+ * that expires:
+ *
+ *   1. IT MATCHES COMMAND TEXT, NOT THE FILE ACTUALLY OPENED. Shell
+ *      indirection defeats it by construction:
+ *          p=/opt/bff-v2/.env; grep TOKEN "$p"
+ *          printf '%s\n' /opt/bff-v2/.env | xargs cat
+ *          ln -s /opt/bff-v2/.env /tmp/e; cat /tmp/e
+ *          python3 -c 'print(open(".e"+"nv").read())'
+ *      No regex over command text closes this class. Only a different layer
+ *      would — and none exists in the harness.
+ *
+ *   2. SECRET_DUMP_RE knows a subset of readers and a subset of file shapes.
+ *      SECRET_FILE_RE knows about .npmrc/.pem/.p12/service-account JSON;
+ *      SECRET_DUMP_RE does not. `cat ~/.netrc`, `cat ~/.kube/config`,
+ *      `jq -r . credentials.json` and `cat terraform.tfvars` pass.
+ *
+ *   3. INNER COMMANDS inside `docker exec` / `ssh` are only caught when the
+ *      literal inner text matches. Shell-evaluated construction inside the
+ *      quotes is invisible.
+ *
+ *   4. THE REDACTOR IS NOT COMPLETE. It covers the shapes we have actually
+ *      met plus the common vendors. A novel prefix passes.
+ *
+ * WHAT IS DELIBERATELY *NOT* HERE: a mechanism that rewrites and runs a
+ * command. One existed; it was escapable by brace matching and was DELETED.
+ * A guard may refuse, and it may advise. It may not execute.
+ *
+ * WHY THIS CONTROL IS NEVERTHELESS CLOSED rather than endlessly iterated: the
+ * remaining gaps in (1)-(3) all require INTENT — deliberate indirection,
+ * encoding, or obfuscation. Those sit outside the stated model. A control
+ * closes when its remaining gaps fall outside its model, not when it has had
+ * enough attention. The gaps that were ACCIDENTS — a PEM block streaming
+ * through unredacted, `AWS_SECRET_ACCESS_KEY=` unmatched, a path-qualified
+ * env dump slipping a lookbehind — were all fixed, because those are Tuesday.
  */
 
 'use strict';
@@ -104,34 +147,33 @@ function allow(note) {
 }
 
 /**
- * Allow the call, but with a REWRITTEN command.
+ * REMOVED 2026-08-16: allowRewritten().
  *
- * This is the only mechanism in Claude Code that can keep a credential out of
- * the transcript. Verified against the hooks reference 2026-08-16: PostToolUse
- * cannot modify, replace or suppress tool output — `suppressOutput` is accepted
- * and ignored — so there is no output-side filter to install. PreToolUse
- * `updatedInput` is the whole toolbox.
+ * It rewrote credential-touching commands to pipe their own output through the
+ * redactor, by string-concatenating the original command into a brace group:
+ *     set -o pipefail; { <cmd> } 2>&1 | node redact.js
  *
- * Four exposures went through this guard because it inspects COMMANDS and a
- * command does not announce what it will print. Rewriting the command so it
- * filters its own output is how we close that, on the surfaces we know carry
- * credentials.
+ * Adversarial review escaped it in one line, using nothing more exotic than
+ * brace matching — the first thing anyone tries:
+ *
+ *     git remote -v; } ; printf '%s\n' /opt/bff-v2/.env | xargs cat; { true
+ *
+ * The guard rewrote (because `git remote -v` matched), the command closed the
+ * group, and the leak ran OUTSIDE the redaction pipe.
+ *
+ * THE RULING, AND IT IS A DESIGN RULE NOT A PATCH:
+ *
+ *   A GUARD MAY REFUSE, AND IT MAY ADVISE. IT MAY NOT EXECUTE.
+ *
+ * The wrapper's entire value was saving a human from retyping a command the
+ * guard already prints. The cost was that a security control assembled and ran
+ * a shell string — acquiring the exact property it exists to police. Every
+ * quoting bug in shell history became in scope for the file whose job is to
+ * prevent quoting mistakes. No amount of escaping fixes that, because
+ * ESCAPING IS THE BUG CLASS.
+ *
+ * So: block, and print the safe form. The text was always the useful half.
  */
-function allowRewritten(ruleId, updatedInput, note) {
-  log('REWRITE rule=' + ruleId + (note ? ' ' + note : ''));
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        permissionDecision: 'allow',
-        permissionDecisionReason:
-          '[' + ruleId + '] output piped through secret-redact (credential-bearing surface)',
-        updatedInput,
-      },
-    })
-  );
-  process.exit(0);
-}
 
 let raw = '';
 process.stdin.on('data', (d) => (raw += d));
@@ -307,8 +349,10 @@ function evaluate(inp) {
   //   - the shape rules are relaxed, NOT the credential rules. A message may
   //     describe `cat .env`; it may never CONTAIN a live token, because a
   //     commit message is permanent and public in a way a transcript is not.
-  const messageBody = T.extractCommitMessage ? T.extractCommitMessage(cmd) : '';
-  const scanTarget = messageBody ? cmd.split(messageBody).join(' <commit-message> ') : cmd;
+  const msg = T.extractCommitMessage ? T.extractCommitMessage(cmd) : null;
+  const messageBody = msg ? msg.text : '';
+  // BY OFFSET, never by content — see maskSpans() for the bypass this closes.
+  const scanTarget = msg ? T.maskSpans(cmd, msg.spans) : cmd;
 
   // A literal credential inside a commit message is WORSE than in a command —
   // it would be committed. Checked before anything is exempted.
@@ -328,7 +372,9 @@ function evaluate(inp) {
       'secret-dump',
       'This command would print secret values into the transcript.',
       'report variable NAMES and a 4-character prefix only, e.g. ' +
-        '`grep -o "^[A-Z_][A-Z0-9_]*=" .env` or `cut -c1-4`. Never echo a full secret.'
+        '`grep -o "^[A-Z_][A-Z0-9_]*=" .env` or `cut -c1-4`. Never echo a full secret.\n' +
+        'If the command is long or quotes other commands, PUT IT IN A FILE and run the file — ' +
+        'escaping it inline is what produces the next false positive.'
     );
   }
 
@@ -345,20 +391,17 @@ function evaluate(inp) {
   // command, and a guard that breaks commands gets disabled. PowerShell and the
   // MCP ssh tool fall through to the ordinary rules — an honest gap, recorded in
   // secret-redact.js under COVERAGE BOUNDARY rather than papered over.
-  if (tool === 'Bash' && T.CREDENTIAL_SURFACE_RE.test(cmd) && !/secret-redact\.js/.test(cmd)) {
+  if (T.CREDENTIAL_SURFACE_RE.test(cmd) && !/secret-redact\.js/.test(cmd)) {
     const filter = path.join(__dirname, 'lib', 'secret-redact.js');
-    allowRewritten(
+    deny(
       'credential-surface-redact',
-      // pipefail keeps the ORIGINAL command's failure visible; without it the
-      // pipeline would report the redactor's exit status and every failure
-      // would look like success.
-      Object.assign({}, ti, {
-        // The newline before `}` is load-bearing: it terminates the last command
-        // inside the group. `cmd + '; }'` breaks whenever cmd already ends in a
-        // separator — which the first live test hit immediately.
-        command: 'set -o pipefail; {\n' + cmd + '\n} 2>&1 | node ' + JSON.stringify(filter),
-      }),
-      'cmd=' + M.redactSensitive(cmd).slice(0, 120)
+      'This reads a credential-bearing surface (git remote/config, a SIP or PBX config, ' +
+        'a dotenv file, a provisioned .yaml, or a secret-manager CLI). Its OUTPUT would ' +
+        'carry the credential into the transcript, even though the command looks harmless.',
+      'run it with the redactor in the SAME pipeline, and read the redacted output:\n\n' +
+        '  ' + cmd + ' 2>&1 | node ' + JSON.stringify(filter) + '\n\n' +
+        'Key names, folder structure and config fields stay readable; only the values are ' +
+        'replaced. If the command is long, put it in a script file rather than escaping it inline.'
     );
   }
 

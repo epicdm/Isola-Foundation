@@ -320,7 +320,17 @@ const CREDENTIAL_SURFACE_RE = new RegExp(
     // produces that same names-only result automatically: `KEY=<secret>` comes
     // back as `KEY=[REDACTED:…]`. The blatant `cat .env` stays denied by rule 1,
     // which runs first.
-    '\\b(sed|awk|grep|rg|strings|od|perl|python3?|cut|sort|uniq|wc)\\b[^\\n|;&]*(^|[\\s\'"`/\\\\=])\\.env(\\.[a-z0-9_-]+)?\\b',
+    // The (?!example|sample|template|dist) is not cosmetic: `.env.example` is a
+    // committed TEMPLATE with no secrets in it, and SECRET_FILE_EXEMPT_RE
+    // already exempts that family elsewhere. Without this, the guard blocked
+    // reading a checked-in example file — caught by a PRE-EXISTING test that
+    // existed to stop exactly this over-blocking.
+    '\\b(sed|awk|grep|rg|strings|od|perl|python3?|cut|sort|uniq|wc)\\b[^\\n|;&]*' +
+      // The lookahead binds IMMEDIATELY after `.env`, before the optional
+      // suffix group. Placing it inside that group does nothing: the group is
+      // optional, so the engine simply matches bare `.env` and succeeds — which
+      // is what happened on the first attempt.
+      '(^|[\\s\'"`/\\\\=])\\.env(?!\\.(?:example|sample|template|dist)\\b)(\\.[a-z0-9_-]+)?\\b',
     // A SECRET MANAGER'S CLI IS A CREDENTIAL-BEARING SURFACE BY DEFINITION.
     // Added BEFORE any bulk migration work, not after — the guard had never
     // seen `infisical`, and `secrets`, `export` and `run` all print values.
@@ -569,21 +579,61 @@ function isProseFile(p) {
  */
 function extractCommitMessage(cmd) {
   const s = String(cmd || '');
-  if (!/\bgit\s+(commit|tag)\b/.test(s)) return '';
+  if (!/\bgit\s+(commit|tag)\b/.test(s)) return null;
+
+  const spans = [];
 
   // Heredoc: git commit -F - <<'EOF' ... EOF   (quoted or bare delimiter)
   const here = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\2\b/.exec(s);
-  if (here) return here[3];
+  if (here) {
+    const bodyStart = here.index + here[0].indexOf(here[3], here[0].indexOf('\n'));
+    spans.push([bodyStart, bodyStart + here[3].length]);
+  }
 
-  // -m/--message with a quoted body. Longest match wins: a message often
-  // contains the other quote character.
-  let best = '';
+  // -m / --message with a quoted body. ALL of them: git accepts repeated -m.
   for (const re of [/-m\s+"((?:[^"\\]|\\.)*)"/g, /-m\s+'((?:[^'\\]|\\.)*)'/g,
                     /--message[=\s]+"((?:[^"\\]|\\.)*)"/g, /--message[=\s]+'((?:[^'\\]|\\.)*)'/g]) {
     let m;
-    while ((m = re.exec(s))) if (m[1].length > best.length) best = m[1];
+    while ((m = re.exec(s))) {
+      const start = m.index + m[0].indexOf(m[1]);
+      spans.push([start, start + m[1].length]);
+    }
   }
-  return best;
+
+  if (!spans.length) return null;
+  return { text: spans.map(([a, b]) => s.slice(a, b)).join('\n'), spans };
+}
+
+/**
+ * maskSpans — blank the given [start,end) ranges of `s`.
+ *
+ * WHY OFFSETS AND NOT `split(value).join(...)`:
+ *
+ * The first implementation blanked the message BY CONTENT. Adversarial review
+ * 2026-08-16 broke it in one line:
+ *
+ *     git commit -F - <<EOF
+ *     cat /opt/bff-v2/.env
+ *     EOF
+ *     cat /opt/bff-v2/.env
+ *
+ * The real second command is byte-identical to the message body, so
+ * `split/join` erased BOTH — the exempted region swallowed a live command and
+ * the shape rules never saw it.
+ *
+ * LAW: AN EXEMPTION IDENTIFIES A REGION, NOT A VALUE. The moment it matches by
+ * content, any identical text anywhere inherits the exemption. This is the same
+ * defect class as an exemption token that is honoured wherever it appears —
+ * "the scope evaluated is wider than the scope intended".
+ *
+ * Replacement is a fixed-width placeholder so offsets stay meaningful, and
+ * spans are applied right-to-left so earlier ones are not shifted.
+ */
+function maskSpans(s, spans) {
+  const str = String(s == null ? '' : s);
+  return [...spans]
+    .sort((a, b) => b[0] - a[0])
+    .reduce((acc, [a, b]) => acc.slice(0, a) + ' <commit-message> ' + acc.slice(b), str);
 }
 
 function isSecretFile(p) {
@@ -626,4 +676,5 @@ module.exports = {
   isProseFile,
   isSecretFile,
   extractCommitMessage,
+  maskSpans,
 };

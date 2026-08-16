@@ -97,10 +97,24 @@ const RULES = [
   // URLs and connection strings. An env-var REFERENCE ($FOO / ${FOO} / %FOO%)
   // is deliberately preserved: it is not a secret, and blanking it destroys the
   // readability that makes a config diff reviewable at all.
+  // Vendor-prefixed opaque tokens. `rtp_` is FIRST because it is ours: the
+  // Paperclip runtime bearer leaked on 2026-08-16 (register C-04). The earlier
+  // version of this file would NOT have caught our own real leak unless it
+  // happened to sit behind `Bearer` — worth stating plainly.
+  { name: 'prefixed-token', re: /\b(rtp|glpat|xoxe|shpat|dop_v1|rnd|npm|pypi|dckr_pat)[_-][A-Za-z0-9_-]{16,}/g },
+  { name: 'stripe-key', re: /\bsk_(live|test)_[A-Za-z0-9]{16,}/g },
+  { name: 'sendgrid-key', re: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g },
+
   {
+    // KEY NAMES: `[A-Z0-9_]*` prefix and suffix are load-bearing. Without them
+    // `\b(secret)` never matches AWS_SECRET_ACCESS_KEY, because `_` is a word
+    // character so there is no boundary before SECRET. That miss was found by
+    // review, not by the tests here — `AWS_SECRET_ACCESS_KEY=` is not an
+    // attack, it is Tuesday.
     name: 'assignment',
-    re: /\b(secret|secretkey|secret_key|password|passwd|pwd|token|api_?key|access_?token|refresh_?token|auth_?token|client_?secret|private_?key|sessionkey|session_key|accesskeyid|secretaccesskey)(\s*[:=]\s*)(?!\$\{?[A-Za-z_])(?!%[A-Za-z_])(["']?)([^\s"',;]{4,})\3/gi,
-    replace: (_m, key, sep, quote) => key + sep + quote + '[REDACTED:' + key.toLowerCase() + ']' + quote,
+    re: /\b([A-Za-z0-9]*_?)(secret|secretkey|secret_key|password|passwd|pwd|token|api_?key|access_?key|access_?token|refresh_?token|auth_?token|client_?secret|private_?key|sessionkey|session_key|accesskeyid|secretaccesskey)([A-Za-z0-9_]*)(\s*[:=]\s*)(?!\$\{?[A-Za-z_])(?!%[A-Za-z_])(["']?)([^\s"',;]{4,})\5/gi,
+    replace: (_m, pre, key, post, sep, quote) =>
+      pre + key + post + sep + quote + '[REDACTED:' + key.toLowerCase() + ']' + quote,
   },
 
   // --- Long opaque hex ----------------------------------------------------
@@ -138,16 +152,76 @@ module.exports = { redact, hasSecret, RULES };
 // --- entry point ---------------------------------------------------------
 // Streams stdin -> stdout, redacting as it goes. Line-buffered so a long-running
 // command still streams rather than blocking until EOF.
+// CRITICAL FIX 2026-08-16 — the streaming path did NOT redact what redact() does.
+//
+// It split on newline and redacted each line INDEPENDENTLY. The private-key rule
+// is multi-line, so a PEM block streamed through the pipe was emitted verbatim,
+// body line by body line. The unit tests passed the whole time because they call
+// redact() on a complete string — which is not how the caller uses it.
+//
+//   LAW: A UNIT TEST THAT CALLS THE FUNCTION DIFFERENTLY FROM THE CALLER TESTS A
+//   DIFFERENT PROGRAM.
+//
+// This matters more than any single regex: the redactor is the entire basis on
+// which credential surfaces are read at all, and it was failing on the
+// highest-value shape we handle.
+//
+// Fix: hold lines back while inside a BEGIN/END block and redact the whole block
+// at once. Both buffers are capped — an unterminated block or a single enormous
+// line must not grow memory without bound, since this sits in the output path of
+// real commands and a hang is a denial of service against the operator.
+const PEM_BEGIN = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+const PEM_END = /-----END [A-Z ]*PRIVATE KEY-----/;
+const MAX_BLOCK_LINES = 200;   // a PEM key is ~30-70 lines
+const MAX_LINE_BYTES = 1 << 20; // 1 MiB
+
 if (require.main === module) {
   let carry = '';
+  let block = null; // non-null while inside a PEM block
+
+  // An OPEN block must never be released verbatim. redact() alone is not enough
+  // here: the private-key rule needs BEGIN *and* END, so an unterminated block
+  // passes through it untouched — which is failing toward release, on a key.
+  // So a forced flush replaces the body outright.
+  const flushOpenBlock = () => {
+    if (!block) return;
+    process.stdout.write(block[0] + '\n[REDACTED:private-key]\n');
+    block = null;
+  };
+
+  const emit = (line) => {
+    if (block) {
+      block.push(line);
+      if (PEM_END.test(line)) {
+        // Complete block — redact it as ONE string so the multi-line rule sees it.
+        process.stdout.write(redact(block.join('\n')) + '\n');
+        block = null;
+      } else if (block.length > MAX_BLOCK_LINES) {
+        flushOpenBlock();
+      }
+      return;
+    }
+    if (PEM_BEGIN.test(line)) { block = [line]; return; }
+    process.stdout.write(redact(line) + '\n');
+  };
+
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', (chunk) => {
-    const parts = (carry + chunk).split('\n');
+    carry += chunk;
+    if (carry.length > MAX_LINE_BYTES) {
+      // A single line longer than the cap: flush it redacted rather than buffer
+      // forever. Splitting mid-token is acceptable — the alternative is OOM.
+      process.stdout.write(redact(carry));
+      carry = '';
+      return;
+    }
+    const parts = carry.split('\n');
     carry = parts.pop();
-    for (const line of parts) process.stdout.write(redact(line) + '\n');
+    for (const line of parts) emit(line);
   });
   process.stdin.on('end', () => {
-    if (carry) process.stdout.write(redact(carry));
+    if (carry) emit(carry);
+    flushOpenBlock(); // EOF inside a block: replace, never release
   });
   // A broken downstream pipe is normal (`| head`), not an error worth a stack.
   process.stdout.on('error', () => process.exit(0));

@@ -492,8 +492,8 @@ const cases = [
   // legitimate reads, so the correct verdict is ALLOW-WITH-REWRITE, never a
   // block: denying them pushes the same read into an unguarded shape.
   {
-    name: 'git remote (PAT in remote URL) is ALLOWED but output-redacted',
-    expect: PASS,
+    name: 'git remote (PAT in remote URL) is BLOCKED with the redacted form as the remedy',
+    expect: BLOCK,
     contains: 'credential-surface-redact',
     payload: {
       session_id: SID,
@@ -502,8 +502,8 @@ const cases = [
     },
   },
   {
-    name: 'a line-range read of a SIP peers config is ALLOWED but output-redacted',
-    expect: PASS,
+    name: 'a line-range read of a SIP peers config is BLOCKED with the redacted form as the remedy',
+    expect: BLOCK,
     contains: 'secret-redact',
     payload: {
       session_id: SID,
@@ -594,8 +594,8 @@ const cases = [
     // …but a .env FILE PATH followed by a pipe is not an environment dump. This
     // false positive fired ahead of the rewrite rule and blocked the safe,
     // redacted form of a read the guard's own remedy text recommends.
-    name: 'a .env path piped to a filter is rewritten, not blocked as an env dump',
-    expect: PASS,
+    name: 'a dotenv path piped to a filter is blocked as a CREDENTIAL SURFACE, not as an env dump',
+    expect: BLOCK,
     contains: 'credential-surface-redact',
     payload: {
       session_id: SID,
@@ -609,8 +609,8 @@ const cases = [
     // this — only a raw read of the live file does, and a yaml is not
     // SECRET_FILE-shaped. This is the case where placement was already correct
     // and the read discipline was the only control.
-    name: 'a raw read of a provisioned .paperclip.yaml is ALLOWED but output-redacted',
-    expect: PASS,
+    name: 'a raw read of a provisioned .paperclip.yaml is BLOCKED with the redacted form as the remedy',
+    expect: BLOCK,
     contains: 'credential-surface-redact',
     payload: {
       session_id: SID,
@@ -621,7 +621,7 @@ const cases = [
   {
     // The negative control. Without it, a rule that rewrote EVERY command would
     // still pass both cases above while quietly wrapping the whole session.
-    name: 'an ordinary command is NOT rewritten',
+    name: 'an ordinary command is untouched',
     expect: PASS,
     notContains: 'credential-surface-redact',
     payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: 'ls -la /var/log' } },
@@ -629,9 +629,9 @@ const cases = [
   {
     // Rewriting is Bash-only by design (the wrapper is bash syntax). PowerShell
     // must fall through untouched rather than receive a broken command.
-    name: 'PowerShell is NOT rewritten (wrapper is bash-only)',
-    expect: PASS,
-    notContains: 'credential-surface-redact',
+    name: 'PowerShell reading a credential surface is BLOCKED too (no longer bash-only)',
+    expect: BLOCK,
+    contains: 'credential-surface-redact',
     payload: { session_id: SID, tool_name: 'PowerShell', tool_input: { command: 'git remote -v' } },
   },
   {
