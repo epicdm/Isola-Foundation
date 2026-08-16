@@ -78,6 +78,18 @@ under pressure:
 | **Control added** | The read discipline is now enforced rather than remembered: `CREDENTIAL_SURFACE_RE` covers `.ya?ml` with the full reader set, so a raw read of a provisioned `.paperclip.yaml` is rewritten through the redactor. Verified — `Authorization: "Bearer rtp_…"` → `Authorization: "Bearer [REDACTED:bearer]"`. Nothing else would have caught it: a provisioned yaml is not `SECRET_FILE`-shaped and the committed template is clean. |
 | **Was it used?** | **Not checked.** Unlike C-01/C-02/C-03 I have run no usage probe for this token. Doing so needs the Paperclip request log or equivalent. **Recorded as an open question, not as a negative.** |
 
+### C-09 — Magnus API key + secret in a plaintext file at the workspace root
+
+| field | value |
+|---|---|
+| **What it is** | `MAGNUS_API_KEY` and `MAGNUS_SECRET_KEY` (plus `MAGNUS_BASE_URL`) in cleartext |
+| **What it grants** | Authenticated Magnus REST access. Port records the Isola Magnus admin credential as able to **act across accounts**, and the same API surface includes `refill/save`, which moves real balance — **verified live 2026-07-11 that it applies a signed delta with no floor-at-zero and no rejection of negatives.** So this is a **money-moving** credential, not a read key. |
+| **Where it lives** | `C:\epic-workspace\magnus.txt` — a plaintext file at the workspace root of a developer machine, outside any secret store. Supplied to this session deliberately by the owner so the CDR-watch probe could run. |
+| **Exposed** | Read into this session 2026-08-16. Values were not echoed back. |
+| **Depends on it** | `/opt/bff-v2` holds the same credential as `MAGNUS_API_KEY` / `MAGNUS_API_SECRET` / `MAGNUS_URL` (var names confirmed; values not read). Rotating affects bff-v2's voice paths — balance, calls, provisioning, top-up. |
+| **PLACEMENT DECISION** | Two parts. **(a)** The file should not persist at the workspace root — it is neither gitignored-by-design nor in a secret store, and it sits in a directory two agent lanes both operate in. **(b)** More important: this is the credential the CDR watch would need, and **a money-moving key is the wrong thing to hand a monitoring service.** See the watch decision below. |
+| **Was it used?** | Not applicable in the same sense — this is a live operational credential in daily use by bff-v2, not a dormant one. There is no "unused" baseline to compare against, so a usage probe would not distinguish legitimate traffic from misuse. **Recorded as not-answerable-by-this-method**, not as clean. |
+
 ### Carried forward — already-known items that belong in the same sweep
 
 These are recorded in Port and must not be re-derived at sweep time. **I have not

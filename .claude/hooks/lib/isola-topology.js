@@ -309,13 +309,34 @@ const CREDENTIAL_SURFACE_RE = new RegExp(
     // caught it, since a provisioned yaml is not SECRET_FILE-shaped.
     '\\b(cat|bat|less|more|head|tail|type|Get-Content|nl|sed|awk|grep|rg|strings|od|perl|python3?)\\b' +
       '[^\\n|;&]*\\.(conf|cfg|ini|properties|ya?ml)\\b',
+    // `.env` too, and this closes a gap found while USING the rule: SECRET_DUMP_RE
+    // denies only PAGERS on a secret file (cat/head/tail/less/…), so `grep FOO
+    // /opt/bff-v2/.env` was neither denied nor rewritten — it printed values.
+    //
+    // Wrapping rather than denying is deliberate here. The guard's own remedy
+    // text tells you to read variable NAMES with
+    // `grep -o "^[A-Z_][A-Z0-9_]*=" .env`, so a blanket deny would forbid the
+    // very command the guard recommends. Routing it through the redactor
+    // produces that same names-only result automatically: `KEY=<secret>` comes
+    // back as `KEY=[REDACTED:…]`. The blatant `cat .env` stays denied by rule 1,
+    // which runs first.
+    '\\b(sed|awk|grep|rg|strings|od|perl|python3?|cut|sort|uniq|wc)\\b[^\\n|;&]*(^|[\\s\'"`/\\\\=])\\.env(\\.[a-z0-9_-]+)?\\b',
   ].join('|'),
   'i'
 );
 
 const SECRET_DUMP_RE = new RegExp(
   [
-    '\\b(printenv|env\\s*(\\||$)|set\\s*\\|\\s*grep|Get-ChildItem\\s+Env:|dir\\s+env:)',
+    // `env |` means "dump the environment". `.env |` means "a FILE PATH, piped"
+    // — a different thing entirely. Without the lookbehind, `\benv` matches the
+    // tail of `/opt/bff-v2/.env` (the `.` is a word boundary), so ANY pipe after
+    // a .env path was read as an environment dump and denied.
+    //
+    // That false positive mattered: it fired ahead of the credential-surface
+    // rewrite below, so the safe, redacted form of the read was blocked while
+    // the guard's own remedy text was recommending exactly that command. Bare
+    // `env |`, `printenv` and `set | grep` are still caught.
+    '(?<![./\\w])(printenv|env\\s*(\\||$)|set\\s*\\|\\s*grep|Get-ChildItem\\s+Env:|dir\\s+env:)',
     // A pager/dump command applied to a secret file. The gap deliberately
     // excludes `|`, `;` and `&` so a later, unrelated command in the same line
     // cannot be attributed to an earlier `cat`/`head`.

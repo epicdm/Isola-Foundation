@@ -512,6 +512,28 @@ const cases = [
     },
   },
   {
+    // A bare environment dump must STILL be denied — the positive control for
+    // the lookbehind added below it. Without this, relaxing that rule could
+    // silently stop catching `env |` and every other case would still pass.
+    name: 'a bare environment dump is still BLOCKED',
+    expect: BLOCK,
+    contains: 'secret-dump',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: 'ssh deepseek "env | sort"' } },
+  },
+  {
+    // …but a .env FILE PATH followed by a pipe is not an environment dump. This
+    // false positive fired ahead of the rewrite rule and blocked the safe,
+    // redacted form of a read the guard's own remedy text recommends.
+    name: 'a .env path piped to a filter is rewritten, not blocked as an env dump',
+    expect: PASS,
+    contains: 'credential-surface-redact',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'ssh deepseek "grep -oE \'^MAGNUS[A-Z0-9_]*=\' /opt/bff-v2/.env | sort -u"' },
+    },
+  },
+  {
     // C-04: a PROVISIONED .paperclip.yaml carries an injected `Bearer rtp_…`.
     // The committed template is clean, so nothing in the repo would ever reveal
     // this — only a raw read of the live file does, and a yaml is not
