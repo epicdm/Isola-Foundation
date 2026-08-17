@@ -19,9 +19,12 @@ describe("detectHumanPromise — the live sentence that escaped", () => {
     expect(v.matched).toContain("have a colleague");
   });
 
+  // NOTE: "Want me to connect you with someone?" was in this list and asserted
+  // to escalate. It was moved to the offer group below on 2026-08-17, because
+  // production proved that behaviour wrong: escalating on an offer silences the
+  // AI exactly when the customer is answering it. See the 6737 block.
   it("catches the other phrasings the same agent used", () => {
     for (const reply of [
-      "Want me to connect you with someone? I'd just need your name.",
       "I can connect you to a colleague who handles that.",
       "I can have someone confirm that for you.",
       "A team member will confirm current pricing.",
@@ -79,5 +82,67 @@ describe("matching survives real formatting", () => {
     expect(detectHumanPromise(null).promised).toBe(false);
     expect(detectHumanPromise("").promised).toBe(false);
     expect(detectHumanPromise("   ").promised).toBe(false);
+  });
+});
+
+describe("AN OFFER IS NOT A HANDOVER — measured on 6737, 2026-08-17", () => {
+  /**
+   * THE VERBATIM REGRESSION. This exact reply escalated, and the customer's
+   * answer to the AI's own question was then suppressed as status_not_pending.
+   * Twice.
+   */
+  const LIVE_REPLY =
+    "Hi Eric! We offer residential and commercial internet, landline services, " +
+    "data backup, and IT consultancy. We also have the Isola Smart Business Line " +
+    "for businesses.\n\nFor pricing on any of these, a colleague will need to " +
+    "confirm the current rates. Would you like me to pass that along for you?";
+
+  it("does NOT escalate on the reply that broke the live conversation", () => {
+    expect(detectHumanPromise(LIVE_REPLY).promised).toBe(false);
+  });
+
+  it("still escalates when the AI actually commits", () => {
+    expect(detectHumanPromise("I'll pass this to a colleague now.").promised).toBe(true);
+    expect(detectHumanPromise("A colleague will call you back today.").promised).toBe(true);
+  });
+
+  it("treats each sentence on its own — an offer elsewhere does not excuse a commitment", () => {
+    // Committing sentence + a separate unrelated offer: must still escalate.
+    const both = "I'm passing this to a colleague. Would you like anything else?";
+    expect(detectHumanPromise(both).promised).toBe(true);
+  });
+
+  it("does not escalate on any of the ordinary ways of asking permission", () => {
+    for (const q of [
+      "Shall I have a colleague call you?",
+      "Do you want me to pass this to a colleague?",
+      "If you like, a team member can confirm the rates.",
+      "Let me know if you want me to pass this to a colleague.",
+      "Want me to have someone check that for you?",
+    ]) {
+      expect(detectHumanPromise(q).promised, q).toBe(false);
+    }
+  });
+
+  it("is not vacuous — the same sentences escalate once the offer wording is removed", () => {
+    // Positive control: strip the question and the identical phrase fires.
+    expect(detectHumanPromise("A team member can confirm the rates.").promised).toBe(true);
+    expect(detectHumanPromise("I'll have someone check that for you.").promised).toBe(true);
+  });
+});
+
+describe("the offer that used to escalate", () => {
+  it("waits for consent instead of hanging up", () => {
+    // Previously asserted to escalate. The customer's "yes please" would then
+    // have been suppressed as status_not_pending — the live 6737 failure.
+    expect(
+      detectHumanPromise("Want me to connect you with someone? I'd just need your name.").promised,
+    ).toBe(false);
+  });
+
+  it("escalates on the NEXT turn, once the AI commits", () => {
+    expect(detectHumanPromise("Great — I'll connect you with a colleague now.").promised).toBe(
+      true,
+    );
   });
 });
