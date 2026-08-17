@@ -1,6 +1,25 @@
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  THIS FILE IS A REFERENCE COPY. DO NOT DEPLOY IT.                         ║
+# ║                                                                           ║
+# ║  The AUTHORITY is  /opt/isola/isola-gw-stack.yml  on 66.118.37.110.       ║
+# ║  That file is edited in place at each deploy and carries the current      ║
+# ║  image pin; this copy does not track it and never has.                    ║
+# ║                                                                           ║
+# ║  As of 2026-08-17 this copy still pinned `isola-gateway:13ea8c4`, THREE   ║
+# ║  images behind live. Deploying it would have silently rolled back both    ║
+# ║  conversation memory (09a2856) and the handback strand fix (ea947d8) —    ║
+# ║  a rollback that would look like a successful deploy, because the stack   ║
+# ║  would converge cleanly on an older image.                                ║
+# ║                                                                           ║
+# ║  A stale copy in git is not a second copy. It is the thing most likely    ║
+# ║  to be mistaken for one. Read it for SHAPE and rationale; take the image  ║
+# ║  pin, the env and the secret list from the host file only.                ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+#
 # isola-gateway — hand-deployed Swarm stack. NOT EasyPanel-managed, by design.
 #
 #   deploy:  sudo docker stack deploy -c /opt/isola/isola-gw-stack.yml isolagw
+#            (the HOST file — never this one)
 #   service: isolagw_gateway
 #   url:     https://isola-gw2.saas00.epic.dm
 #
