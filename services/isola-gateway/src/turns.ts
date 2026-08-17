@@ -33,6 +33,22 @@
 
 import type { QueryResult, SqlClient } from "./ledger.js";
 
+/**
+ * WHO ACTUALLY SPOKE.
+ *
+ * `role` collapses the AI and a human agent into `business`, deliberately — the
+ * model should read the thread as one business voice. But that collapse cost a
+ * wrong diagnosis on 2026-08-17: a `business` turn reading "We offer residential
+ * and commercial internet…" was reported as proof the AI had replied, and it was
+ * an EPIC staff member answering from his phone. The AI had answered nothing.
+ *
+ * `author` keeps the distinction the webhook already carries (`sender.type`), so
+ * "did the AI reply?" is answerable from the ledger instead of inferred.
+ * `unknown` is a real value, not a placeholder: an outgoing message with no
+ * sender type is genuinely unattributable and must not be guessed into `ai`.
+ */
+export type TurnAuthor = "customer" | "ai" | "human" | "unknown";
+
 /** Newest-last, as the model should read it. */
 export interface Turn {
   role: "customer" | "business";
@@ -64,6 +80,7 @@ CREATE TABLE IF NOT EXISTS conversation_turn (
   chatwoot_conversation_id integer NOT NULL,
   chatwoot_message_id  bigint      NOT NULL,
   role                 text        NOT NULL,
+  author               text        NOT NULL DEFAULT 'unknown',
   content              text        NOT NULL,
   created_at           timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT conversation_turn_pkey
@@ -71,6 +88,11 @@ CREATE TABLE IF NOT EXISTS conversation_turn (
   CONSTRAINT conversation_turn_role_known
     CHECK (role IN ('customer','business'))
 );
+
+-- Added after the table shipped, so it must be additive: rows written before
+-- attribution existed keep 'unknown', which is the truthful value for them.
+ALTER TABLE conversation_turn
+  ADD COLUMN IF NOT EXISTS author text NOT NULL DEFAULT 'unknown';
 
 CREATE INDEX IF NOT EXISTS conversation_turn_thread_idx
   ON conversation_turn (chatwoot_account_id, chatwoot_conversation_id, chatwoot_message_id);
@@ -86,6 +108,7 @@ export interface RecordTurnInput {
   conversationId: number;
   messageId: number;
   role: "customer" | "business";
+  author: TurnAuthor;
   content: string;
 }
 
@@ -104,10 +127,10 @@ export async function recordTurn(
   if (text.length === 0) return false;
   const res: QueryResult<Record<string, unknown>> = await exec.query(
     `INSERT INTO conversation_turn
-       (tenant_id, chatwoot_account_id, chatwoot_conversation_id, chatwoot_message_id, role, content)
-     VALUES ($1, $2, $3, $4, $5, $6)
+       (tenant_id, chatwoot_account_id, chatwoot_conversation_id, chatwoot_message_id, role, author, content)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      ON CONFLICT (chatwoot_account_id, chatwoot_message_id) DO NOTHING`,
-    [input.tenantId, input.accountId, input.conversationId, input.messageId, input.role, text],
+    [input.tenantId, input.accountId, input.conversationId, input.messageId, input.role, input.author, text],
   );
   return (res.rowCount ?? 0) > 0;
 }
@@ -211,14 +234,28 @@ export function classifyTurn(payload: {
   private: boolean | null;
   content: string | null;
   messageId: number | null;
-}): { role: "customer" | "business"; content: string } | null {
+  senderType?: string | null;
+}): { role: "customer" | "business"; author: TurnAuthor; content: string } | null {
   if (payload.event !== "message_created") return null;
   if (payload.messageId === null) return null;
   if (payload.private !== false) return null;
   const text = (payload.content ?? "").trim();
   if (text.length === 0) return null;
-  if (payload.messageType === "incoming") return { role: "customer", content: text };
-  if (payload.messageType === "outgoing") return { role: "business", content: text };
+  if (payload.messageType === "incoming") {
+    return { role: "customer", author: "customer", content: text };
+  }
+  if (payload.messageType === "outgoing") {
+    // `agent_bot` is us. Anything else that can post an outgoing public message
+    // is a person. A missing sender type is UNKNOWN, never assumed to be the AI:
+    // over-crediting the AI is exactly the error this field exists to prevent.
+    const author: TurnAuthor =
+      payload.senderType === "agent_bot"
+        ? "ai"
+        : typeof payload.senderType === "string" && payload.senderType.length > 0
+          ? "human"
+          : "unknown";
+    return { role: "business", author, content: text };
+  }
   // activity / template / anything else is not a turn
   return null;
 }

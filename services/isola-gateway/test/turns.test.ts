@@ -19,20 +19,23 @@ const base = {
 
 describe("classifyTurn — what is a turn", () => {
   it("records a customer message", () => {
-    expect(classifyTurn(base)).toEqual({ role: "customer", content: "hello" });
+    expect(classifyTurn(base)).toEqual({ role: "customer", author: "customer", content: "hello" });
   });
 
   it("records a BUSINESS reply — including a human agent's", () => {
     // The gateway suppresses these from triggering a reply but still sees them.
     // A bot resuming after handback must know what the human already said.
+    // No senderType on this fixture, so the author is honestly UNKNOWN rather
+    // than assumed to be the AI. Attribution is asserted in its own block below.
     expect(classifyTurn({ ...base, messageType: "outgoing", content: "I'll check that" })).toEqual(
-      { role: "business", content: "I'll check that" },
+      { role: "business", author: "unknown", content: "I'll check that" },
     );
   });
 
   it("trims, and drops a whitespace-only message", () => {
     expect(classifyTurn({ ...base, content: "  hi  " })).toEqual({
       role: "customer",
+      author: "customer",
       content: "hi",
     });
     expect(classifyTurn({ ...base, content: "   " })).toBeNull();
@@ -89,5 +92,52 @@ describe("the window is stated, not discovered", () => {
   it("is 20 turns and 8000 characters", () => {
     expect(TURN_MAX).toBe(20);
     expect(TURN_MAX_CHARS).toBe(8000);
+  });
+});
+
+describe("WHO SPOKE — the AI and a human agent are not the same voice", () => {
+  /**
+   * `role` deliberately collapses both into `business` for the model. That
+   * collapse produced a wrong report on 2026-08-17: a `business` turn was cited
+   * as proof the AI had replied, and it was an EPIC staff member answering from
+   * his phone. The AI had replied nothing at all.
+   */
+  it("credits the AI only when Chatwoot says the sender was the bot", () => {
+    expect(classifyTurn({ ...base, messageType: "outgoing", senderType: "agent_bot" })).toEqual({
+      role: "business",
+      author: "ai",
+      content: "hello",
+    });
+  });
+
+  it("credits a human when a person sent it", () => {
+    expect(classifyTurn({ ...base, messageType: "outgoing", senderType: "user" })).toEqual({
+      role: "business",
+      author: "human",
+      content: "hello",
+    });
+  });
+
+  it("says UNKNOWN rather than guessing the AI when there is no sender type", () => {
+    // Over-crediting the AI is the exact error this field exists to prevent, so
+    // an absent sender must never resolve to "ai".
+    for (const missing of [null, undefined, ""]) {
+      const t = classifyTurn({
+        ...base,
+        messageType: "outgoing",
+        senderType: missing as string | null,
+      });
+      expect(t, String(missing)).toEqual({
+        role: "business",
+        author: "unknown",
+        content: "hello",
+      });
+    }
+  });
+
+  it("a customer is always the customer, whatever the sender type claims", () => {
+    expect(
+      classifyTurn({ ...base, messageType: "incoming", senderType: "agent_bot" })?.author,
+    ).toBe("customer");
   });
 });

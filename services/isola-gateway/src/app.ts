@@ -552,6 +552,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
         private: decision.payload.private,
         content: decision.payload.content,
         messageId: decision.payload.messageId,
+        senderType: decision.payload.senderType,
       });
       if (
         turn !== null &&
@@ -571,6 +572,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
               conversationId: decision.payload.conversationDisplayId,
               messageId: decision.payload.messageId as number,
               role: turn.role,
+              author: turn.author,
               content: turn.content,
             });
           } catch (err) {
