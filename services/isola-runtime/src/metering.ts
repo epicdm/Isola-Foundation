@@ -189,7 +189,18 @@ export interface PreflightArgs {
   companyId: string | null;
   agentId: string | null;
   exposure: string;
+  /** OUR run id. Keys idempotency records and the cost outbox. Never null on a real run. */
   runId: string | null;
+  /**
+   * PAPERCLIP'S run id, and only set when Paperclip actually issued it.
+   *
+   * Deliberately a second field rather than a reuse of `runId`: this one becomes
+   * the `x-paperclip-run-id` HEADER, which Paperclip writes into a foreign key
+   * on a table only it populates. `runId` must stay real for our own keys, and
+   * this must be null unless Paperclip issued it. Collapsing them would either
+   * break our keys or break their foreign key.
+   */
+  paperclipRunId?: string | null;
   model: string;
   promptChars: number;
 }
@@ -480,7 +491,16 @@ export class MeteringService {
       };
     }
 
-    const snapshot = await this.budgetSnapshot(args.agentId, args.exposure, args.runId);
+    // PAPERCLIP-SCOPED, deliberately NOT args.runId. `runId` keys our
+    // idempotency records and the cost outbox; nulling it there would collapse
+    // distinct runs onto one key. This value only ever becomes the
+    // `x-paperclip-run-id` HEADER, which Paperclip writes into a foreign key, so
+    // it must be null unless Paperclip issued it.
+    const snapshot = await this.budgetSnapshot(
+      args.agentId,
+      args.exposure,
+      args.paperclipRunId ?? null,
+    );
     const agentId = args.agentId;
     const companyId = args.companyId ?? this.d.options.companyIdDefault ?? "";
 

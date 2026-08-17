@@ -258,6 +258,15 @@ export interface InvokeRequestShape {
   exposure: unknown;
   agentId: unknown;
   runId: unknown;
+  /**
+   * Who ISSUED `runId`. Only the literal "paperclip" means Paperclip did, and
+   * only then may it be sent as `x-paperclip-run-id` — that header populates two
+   * FOREIGN KEYS into a table only Paperclip writes.
+   *
+   * Absent means NOT issued, so the gateway (which sends its own delivery id)
+   * needs no change and the default is the safe one.
+   */
+  runIdIssuedBy: unknown;
   context: unknown;
   /**
    * Optional and versioned. Absent or `"none"` is exactly today's behaviour;
@@ -282,6 +291,7 @@ export function parseInvokeBody(raw: Buffer): InvokeRequestShape | null {
     exposure: body["exposure"],
     agentId: body["agentId"],
     runId: body["runId"],
+    runIdIssuedBy: body["runIdIssuedBy"],
     context: body["context"],
     responseMode: body["responseMode"],
   };
@@ -703,6 +713,31 @@ export function createRuntime(deps: AppDeps): Runtime {
     const runId = asString(body.runId);
     resolvedRunId = runId;
 
+    // PROVENANCE. Whose run id is this?
+    //
+    // Paperclip's `x-paperclip-run-id` header lands in `req.actor.runId` and is
+    // written straight into `issue_comments.created_by_run_id` and
+    // `cost_events.heartbeat_run_id` — both FOREIGN KEYS into `heartbeat_runs`,
+    // a table only Paperclip populates. So the header may only carry an id
+    // PAPERCLIP ISSUED.
+    //
+    // Two callers reach this endpoint with very different ids:
+    //   · Paperclip's own http adapter  -> a real heartbeat run
+    //   · isola-gateway                 -> its own delivery id, never valid
+    //
+    // ABSENCE MEANS NOT ISSUED, so the default is the safe one and the gateway
+    // needs no change. An agent Paperclip dispatches declares it in
+    // adapterConfig.payloadTemplate as { "runIdIssuedBy": "paperclip" }.
+    //
+    // Measured 2026-08-17, why this is not cosmetic: EVERY customer reply cost a
+    // guaranteed Paperclip 500 (53 of them on the comments endpoint) because the
+    // header was always wrong on the gateway path. A retry-without-the-header
+    // usually rescued it. When that retry ALSO failed — a transport TypeError at
+    // 20:18:43 — the model's answer was generated, billed, and WITHHELD from the
+    // customer. Not sending a wrong id removes both legs: no 500, so no retry,
+    // so no retry to fail.
+    const paperclipRunId = body.runIdIssuedBy === "paperclip" ? runId : null;
+
     // Unknown template: 400, and record nothing.
     const template = findTemplate(body.templateId);
     if (template === null) {
@@ -788,7 +823,7 @@ export function createRuntime(deps: AppDeps): Runtime {
     // Every callback authenticates as the employee's own agent and carries the
     // run id header Paperclip reads.
     const call: PaperclipCall | null =
-      agentKey === null ? null : { apiKey: agentKey, runId };
+      agentKey === null ? null : { apiKey: agentKey, runId: paperclipRunId };
 
     const idemKey = buildIdempotencyKey({
       companyId,
@@ -990,6 +1025,7 @@ export function createRuntime(deps: AppDeps): Runtime {
         agentId,
         exposure,
         runId,
+        paperclipRunId,
         model,
         promptChars: resolvedPrompt.prompt.length + userMessage.length,
       });
@@ -998,7 +1034,7 @@ export function createRuntime(deps: AppDeps): Runtime {
         // The provider is NOT called. Nothing is spent on this run.
         let paused = false;
         if (pre.pause && agentId !== null) {
-          paused = await metering.pauseAgent(agentId, exposure, runId);
+          paused = await metering.pauseAgent(agentId, exposure, paperclipRunId);
         }
         await postNoticeComment({
           api: paperclipApi,
@@ -1187,7 +1223,7 @@ export function createRuntime(deps: AppDeps): Runtime {
           call,
           tenantId: extractTenantId(body.context),
           correlationId,
-          runId,
+          runId: paperclipRunId,
           agentId,
         });
         if (resolution.kind === "resolved") {
@@ -1205,7 +1241,11 @@ export function createRuntime(deps: AppDeps): Runtime {
       const runOutcome: RunOutcome = {
         correlationId,
         agentId,
-        runId,
+        // The recorder POSTs the answer as a Paperclip comment, so this must be
+        // the PAPERCLIP-scoped id. Logs and the cost outbox key keep the real
+        // `runId` — those are ours and a fabricated value there would only make
+        // our own traces lie.
+        runId: paperclipRunId,
         issueId: recordIssueId,
         templateId: template.id,
         templateVersion: template.version,
@@ -1272,7 +1312,7 @@ export function createRuntime(deps: AppDeps): Runtime {
           event: "transition",
           outcome: "conversation_issue_not_transitioned",
           correlationId,
-          runId,
+          runId: paperclipRunId,
           agentId,
           issueId: recordIssueId,
           detail:
@@ -1288,7 +1328,7 @@ export function createRuntime(deps: AppDeps): Runtime {
             call,
             logger,
             correlationId,
-            runId,
+            runId: paperclipRunId,
             agentId,
             reviewAssigneeUserId: config.handoff.reviewAssigneeUserId,
           });

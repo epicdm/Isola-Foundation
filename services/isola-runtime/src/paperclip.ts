@@ -165,17 +165,19 @@ export class HttpPaperclipApi implements PaperclipApi {
     /** Parse and return the response body. Implied for GET. */
     wantsJson = false,
   ): Promise<unknown> {
-    try {
-      return await this.attempt(method, path, body, call, true, wantsJson);
-    } catch (err) {
-      const retryWithoutRunId =
-        err instanceof PaperclipApiError &&
-        err.status === 500 &&
-        call.runId !== null &&
-        call.runId.length > 0;
-      if (!retryWithoutRunId) throw err;
-      return await this.attempt(method, path, body, call, false, wantsJson);
-    }
+    // NO RETRY-WITHOUT-THE-RUN-ID. Removed 2026-08-17: PROVENANCE OVER RETRY.
+    //
+    // This used to catch a 500 and retry with the header stripped. It was a
+    // workaround for sending an id we knew Paperclip had not issued, and it
+    // guaranteed a 500 plus a wasted round trip on EVERY customer reply — 53 of
+    // them on the comments endpoint in one window. Worse, it is a retry that
+    // CHANGES the request, which is a different request wearing a retry's
+    // clothes, and when the second attempt failed on transport the customer's
+    // answer was lost anyway.
+    //
+    // `call.runId` is now only ever a Paperclip-issued id (see app.ts), so there
+    // is nothing to strip and nothing to rescue.
+    return await this.attempt(method, path, body, call, true, wantsJson);
   }
 
   private async attempt(

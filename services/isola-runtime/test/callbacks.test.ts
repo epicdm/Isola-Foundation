@@ -115,14 +115,49 @@ describe("issue transition — the loop fix", () => {
     expect(logger.withOutcome("issue_transitioned")).toHaveLength(1);
   });
 
-  it("every callback authenticates as the employee's own agent and carries the run-id header", async () => {
+  it("every callback authenticates as the employee's own agent, and carries the run id WHEN PAPERCLIP ISSUED IT", async () => {
+    // This simulates Paperclip's own http adapter, which declares provenance in
+    // adapterConfig.payloadTemplate. Only then may the id be sent: it is written
+    // into two foreign keys pointing at a table only Paperclip populates.
+    const { server, paperclip } = await boot();
+    await invoke(server.url, {
+      bearer: INTERNAL_SECRET,
+      body: body({ runIdIssuedBy: "paperclip" }),
+    });
+
+    expect(paperclip.calls.length).toBeGreaterThan(0);
+    for (const call of paperclip.calls) {
+      expect(call.apiKey).toBe(AGENT_KEY_INTERNAL);
+      expect(call.runId).toBe("run-9");
+    }
+  });
+
+  it("THE GATEWAY PATH: no provenance -> no run id on any callback", async () => {
+    // The gateway sends its OWN delivery id. Forwarding it guaranteed a
+    // Paperclip 500 on every customer reply (53 measured in one window) and, on
+    // 2026-08-17, cost a customer an answer that had already been generated and
+    // billed. Absence of `runIdIssuedBy` means "not issued" — the safe default.
     const { server, paperclip } = await boot();
     await invoke(server.url, { bearer: INTERNAL_SECRET, body: body() });
 
     expect(paperclip.calls.length).toBeGreaterThan(0);
     for (const call of paperclip.calls) {
       expect(call.apiKey).toBe(AGENT_KEY_INTERNAL);
-      expect(call.runId).toBe("run-9");
+      expect(call.runId, "null is the honest value").toBeNull();
+    }
+  });
+
+  it("only the exact string counts — a near-miss is still not issued", async () => {
+    const { server, paperclip } = await boot();
+    for (const claim of ["Paperclip", "paperclip ", true, 1, "gateway"]) {
+      paperclip.calls.length = 0;
+      await invoke(server.url, {
+        bearer: INTERNAL_SECRET,
+        body: body({ runIdIssuedBy: claim }),
+      });
+      for (const call of paperclip.calls) {
+        expect(call.runId, JSON.stringify(claim)).toBeNull();
+      }
     }
   });
 
