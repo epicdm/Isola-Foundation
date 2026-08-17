@@ -278,11 +278,24 @@ export async function flushOutbox(options: FlushOptions): Promise<FlushSummary> 
  * everything still pending, ignoring the backoff clock — a restart is itself
  * evidence that the previous schedule is stale.
  */
+/**
+ * Was the delivery DEFINITELY refused without a side effect?
+ *
+ * Only a 4xx qualifies. A 5xx may mean "inserted, then failed to answer" — the
+ * FK rejection that took the front desk offline today surfaced as a 500 — and a
+ * timeout or transport fault says nothing at all.
+ */
+export function isDefiniteRejection(lastError: string | null): boolean {
+  if (lastError === null) return false;
+  return /\b4\d\d\b/.test(lastError);
+}
+
 export async function reconcileOutbox(
   options: Omit<FlushOptions, "reason" | "limit"> & { limit?: number },
 ): Promise<FlushSummary> {
   let revived = 0;
   let repaired = 0;
+  let held = 0;
   await options.store.transact((draft) => {
     const nowMs = options.now();
     for (const entry of Object.values(draft.outbox)) {
@@ -304,10 +317,26 @@ export async function reconcileOutbox(
       // that already resets the backoff clock above. If the failure is genuine it
       // simply re-fails after maxAttempts — bounded, and logged either way.
       if (entry.state === "failed") {
-        entry.state = "pending";
-        entry.attempts = 0;
-        entry.nextAttemptMs = nowMs;
-        revived += 1;
+        // AMBIGUITY MAY NOT AUTO-RETRY. Ruled 2026-08-17.
+        //
+        // Reviving blindly can DOUBLE-BILL: if Paperclip inserted the cost event
+        // and the response was lost, a re-post charges the customer twice, and
+        // no idempotency key is sent that would let Paperclip collapse them.
+        //
+        // Only a DEFINITE rejection is safe to retry — a 4xx means the request
+        // was refused without a side effect. A 5xx, a timeout or a dropped
+        // connection all mean "we do not know", and today's FK rejection
+        // surfaced as a 500, so status alone cannot be read as definite.
+        // Ambiguous entries stay failed and are FLAGGED every reconcile, so a
+        // human decides. Silence would be the same silent skip as before.
+        if (isDefiniteRejection(entry.lastError)) {
+          entry.state = "pending";
+          entry.attempts = 0;
+          entry.nextAttemptMs = nowMs;
+          revived += 1;
+        } else {
+          held += 1;
+        }
       }
 
       // REPAIR THE STORED PAYLOAD, not just the schedule.
@@ -352,6 +381,8 @@ export async function reconcileOutbox(
     // is being retried, and an operator must be able to see that happen.
     revivedFailed: revived,
     repairedPayloads: repaired,
+    // Undelivered money nobody may retry automatically. Non-zero needs a human.
+    heldAmbiguous: held,
     attempted: summary.attempted,
     delivered: summary.delivered,
     deferred: summary.deferred,

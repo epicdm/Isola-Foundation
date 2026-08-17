@@ -219,3 +219,20 @@ describe("collecting WITHOUT a question mark — review finding, 2026-08-17", ()
     ).toBe(true);
   });
 });
+
+describe("escalation matcher corpus — ruled additions, 2026-08-17", () => {
+  it("a courtesy close does not turn a commitment into an offer", () => {
+    // Reported by review; ruled into the corpus. This IS a handover.
+    expect(
+      detectHumanPromise("Would you like anything else before I connect you with a colleague?")
+        .promised,
+    ).toBe(true);
+  });
+
+  it("but a genuine request for permission still defers", () => {
+    // The discriminator is the courtesy close, not the question mark.
+    const v = detectHumanPromise("Would you like me to connect you with a colleague?");
+    expect(v.promised).toBe(false);
+    expect(v.deferred).toBe("asking_consent");
+  });
+});

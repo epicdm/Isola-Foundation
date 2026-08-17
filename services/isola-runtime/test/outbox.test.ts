@@ -11,6 +11,7 @@ import {
   backoffMs,
   dueEntries,
   flushOutbox,
+  isDefiniteRejection,
   outboxKey,
   pendingSpend,
   pruneDelivered,
@@ -379,7 +380,7 @@ describe("reconcileOutbox — the startup path", () => {
  */
 describe("a restart re-opens a failed cost event", () => {
   it("revives a failed entry to pending and resets its attempts", async () => {
-    const store = await seed([entry({ state: "failed", attempts: 8, lastError: "returned HTTP 500" })]);
+    const store = await seed([entry({ state: "failed", attempts: 8, lastError: "returned HTTP 422" })]);
     const logger = new CapturingLogger();
     await reconcileOutbox({
       store,
@@ -400,7 +401,8 @@ describe("a restart re-opens a failed cost event", () => {
   it("does not deliver a failed entry when revival is the only thing that could have", async () => {
     // Negative control for the test above: if `failed` were still terminal,
     // nothing would be attempted at all.
-    const store = await seed([entry({ state: "failed", attempts: 8 })]);
+    // A DEFINITE refusal: ambiguous ones are held, which is asserted separately.
+    const store = await seed([entry({ state: "failed", attempts: 8, lastError: "returned HTTP 422" })]);
     const logger = new CapturingLogger();
     const summary = await reconcileOutbox({
       store,
@@ -458,7 +460,7 @@ describe("the stored payload is repaired, not just rescheduled", () => {
    * The poison was in the DATA, not only in the code.
    */
   it("strips heartbeatRunId from an entry enqueued before the fix", async () => {
-    const stale = entry({ state: "failed", attempts: 8 });
+    const stale = entry({ state: "failed", attempts: 8, lastError: "returned HTTP 422" });
     (stale.event as unknown as Record<string, unknown>)["heartbeatRunId"] = "gateway-delivery-id";
     const store = await seed([stale]);
     const api = new StubPaperclipApi();
@@ -498,5 +500,52 @@ describe("the stored payload is repaired, not just rescheduled", () => {
       logger: logger.logger,
     });
     expect(logger.withOutcome("reconcile_complete")[0]!["repairedPayloads"]).toBe(0);
+  });
+});
+
+describe("ambiguous delivery failures may not auto-retry", () => {
+  /**
+   * Ruled 2026-08-17. Reviving blindly can DOUBLE-BILL: if Paperclip inserted
+   * the cost event and the response was lost, a re-post charges twice and no
+   * idempotency key exists to collapse them. Only a definite refusal is safe.
+   */
+  it("classifies only 4xx as definite", () => {
+    expect(isDefiniteRejection("returned HTTP 403")).toBe(true);
+    expect(isDefiniteRejection("returned HTTP 422")).toBe(true);
+    // Today's FK rejection arrived as a 500. Ambiguous by rule, even though we
+    // now know it never inserted — the rule cannot depend on hindsight.
+    expect(isDefiniteRejection("returned HTTP 500")).toBe(false);
+    expect(isDefiniteRejection("unexpected delivery fault (TypeError)")).toBe(false);
+    expect(isDefiniteRejection(null)).toBe(false);
+  });
+
+  it("holds an ambiguous failure and REPORTS it rather than reposting", async () => {
+    const store = await seed([
+      entry({ state: "failed", attempts: 8, lastError: "returned HTTP 500" }),
+    ]);
+    const logger = new CapturingLogger();
+    const api = new StubPaperclipApi();
+    await reconcileOutbox({
+      store, api, apiKeyFor: () => "agent-key", now: () => 2000, logger: logger.logger,
+    });
+
+    const state = await store.read();
+    expect(state.outbox[outboxKey("company-1", "agent-1", "run-1")]!.state).toBe("failed");
+    expect(api.costEvents, "money must not be re-posted on a maybe").toHaveLength(0);
+    const done = logger.withOutcome("reconcile_complete")[0]!;
+    expect(done["heldAmbiguous"]).toBe(1);
+    expect(done["revivedFailed"]).toBe(0);
+  });
+
+  it("still revives a DEFINITE refusal", async () => {
+    const store = await seed([
+      entry({ state: "failed", attempts: 8, lastError: "returned HTTP 422" }),
+    ]);
+    const logger = new CapturingLogger();
+    await reconcileOutbox({
+      store, api: new StubPaperclipApi(), apiKeyFor: () => "agent-key",
+      now: () => 2000, logger: logger.logger,
+    });
+    expect(logger.withOutcome("reconcile_complete")[0]!["revivedFailed"]).toBe(1);
   });
 });

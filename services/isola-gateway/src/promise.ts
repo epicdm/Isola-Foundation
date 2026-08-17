@@ -260,6 +260,10 @@ export function detectHumanPromise(replyText: string | null): PromiseVerdict {
   const askingConsent = sentencesOf(hay).some(
     (sentence) =>
       CONSENT_PENDING.some((q) => sentence.includes(q)) &&
+      // A courtesy close is not a request for permission to hand over. Review
+      // 2026-08-17: "Would you like anything else before I connect you with a
+      // colleague?" IS a commitment, and read as an offer it escalated nobody.
+      !COURTESY_CLOSE.some((c) => sentence.includes(c)) &&
       (ESCALATION_PHRASES.some((p) => sentence.includes(p)) ||
         HANDOVER_VERBS.some((v) => sentence.includes(v))),
   );

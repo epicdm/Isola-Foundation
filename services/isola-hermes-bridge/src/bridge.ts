@@ -50,6 +50,12 @@ export interface BridgeConfig {
   paperclipAgentKey: string;
   /** The manager charter. Read at boot; see readCharter for the TTL story. */
   charterPath: string | null;
+  /** Agent whose Paperclip instructions-bundle carries the live charter. */
+  paperclipAgentId: string | null;
+  /** File inside that bundle. One artifact, two consumers. */
+  charterFile: string;
+  /** How stale the cached charter may get before a re-read is attempted. */
+  charterTtlMs: number;
   requestTimeoutMs: number;
   /**
    * Shared secret Paperclip must present. Review 2026-08-17: /v1/invoke had NO
@@ -140,6 +146,61 @@ export function readCharter(path: string | null): string {
     /* fall through to last good */
   }
   return lastGoodCharter ?? FALLBACK;
+}
+
+/**
+ * R12 — THE PERSONA SHIM. One artifact, fetched, not duplicated.
+ *
+ * The charter lives in the agent's Paperclip instructions bundle, so the owner
+ * edits it where the agent lives and nothing has to be redeployed. This reads
+ * it on a TTL and KEEPS THE LAST GOOD COPY.
+ *
+ * Keep-last-good is the whole point. A charter that vanishes because Paperclip
+ * blinked would leave the agent answering as whatever the underlying runtime
+ * thinks it is — which is exactly the defect this fixes: running on the
+ * fallback, it inherited epic-operator's persona and told the owner it could
+ * provision tenants and grant minutes. It has no tools at all.
+ *
+ * A stale charter is safe. An ABSENT one is not.
+ */
+let charterCache: { text: string; fetchedAtMs: number } | null = null;
+
+export function resetCharterCache(): void {
+  charterCache = null;
+}
+
+export async function fetchCharter(
+  cfg: BridgeConfig,
+  now: () => number = Date.now,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ text: string; source: "fresh" | "cached" | "last_good" | "fallback" }> {
+  if (cfg.paperclipAgentId === null) {
+    return { text: readCharter(cfg.charterPath), source: "fallback" };
+  }
+  if (charterCache !== null && now() - charterCache.fetchedAtMs < cfg.charterTtlMs) {
+    return { text: charterCache.text, source: "cached" };
+  }
+  try {
+    const url =
+      `${cfg.paperclipBaseUrl}/api/agents/${cfg.paperclipAgentId}` +
+      `/instructions-bundle/file?path=${encodeURIComponent(cfg.charterFile)}`;
+    const res = await fetchImpl(url, {
+      headers: { authorization: `Bearer ${cfg.paperclipAgentKey}` },
+    });
+    if (res.ok) {
+      const json = (await res.json()) as Record<string, unknown>;
+      const raw = json["content"];
+      const text = typeof raw === "string" ? raw.trim() : "";
+      if (text.length > 0) {
+        charterCache = { text, fetchedAtMs: now() };
+        return { text, source: "fresh" };
+      }
+    }
+  } catch {
+    /* fall through to last good */
+  }
+  if (charterCache !== null) return { text: charterCache.text, source: "last_good" };
+  return { text: readCharter(cfg.charterPath), source: "fallback" };
 }
 
 export interface HermesReply {
@@ -305,7 +366,8 @@ export function createBridge(cfg: BridgeConfig, log: (e: Record<string, unknown>
         const issueId = extractIssueId(body.context);
         const base = { agentId: body.agentId ?? null, runId, issueId };
 
-        const reply = await askHermes(cfg, readCharter(cfg.charterPath), buildUserMessage(body.context));
+        const charter = await fetchCharter(cfg);
+        const reply = await askHermes(cfg, charter.text, buildUserMessage(body.context));
         if (!reply.ok || reply.text === null) {
           // FAIL LOUD, NOT FLUENT. Nothing is posted to the owner: a bridge that
           // invented an answer here would be the front desk's "$79.99/month"
@@ -319,15 +381,23 @@ export function createBridge(cfg: BridgeConfig, log: (e: Record<string, unknown>
         if (issueId === null) {
           // The answer exists but there is nowhere to put it. Say so — this is
           // the case that would otherwise look like a healthy silent success.
+          // FAILURE, not 200. Ruled 2026-08-17: a success code over a swallowed
+          // answer is the silent-success lie — Paperclip would record the run as
+          // fine while nobody ever saw the reply. The model was spent either
+          // way; the run must still be marked failed so it is visible.
           log({ ...base, outcome: "no_issue_to_answer", chars: reply.text.length });
-          res.writeHead(200, { "content-type": "application/json" });
-          res.end(JSON.stringify({ ok: true, posted: false }));
+          res.writeHead(502, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: false, posted: false, error: "no issue to answer on" }));
           return;
         }
 
         const posted = await postAnswer(cfg, issueId, runId, reply.text);
         log({
           ...base,
+          // Named so "the agent answered as itself" and "the agent answered as
+          // whatever the runtime thinks it is" are distinguishable in the log.
+          charterSource: charter.source,
+          charterChars: charter.text.length,
           outcome: posted.ok ? "answered" : "post_failed",
           postStatus: posted.status,
           chars: reply.text.length,

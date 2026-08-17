@@ -11,7 +11,9 @@ import {
   extractAssistantText,
   extractIssueId,
   postAnswer,
+  fetchCharter,
   readCharter,
+  resetCharterCache,
   timingSafeEqualStr,
   type BridgeConfig,
 } from "../src/bridge.js";
@@ -24,6 +26,9 @@ const cfg: BridgeConfig = {
   paperclipBaseUrl: "https://paperclip.example",
   paperclipAgentKey: "agent-key",
   charterPath: null,
+  paperclipAgentId: "AG",
+  charterFile: "SOUL.md",
+  charterTtlMs: 60_000,
   requestTimeoutMs: 5_000,
   inboundToken: null,
 };
@@ -207,5 +212,68 @@ describe("review findings, 2026-08-17", () => {
     expect(timingSafeEqualStr("abc123", "abc124")).toBe(false);
     expect(timingSafeEqualStr("abc123", "abc")).toBe(false);
     expect(timingSafeEqualStr("", "")).toBe(true);
+  });
+});
+
+describe("R12 — the persona shim", () => {
+  const ok = (content: string) =>
+    vi.fn(async () => new Response(JSON.stringify({ content }), { status: 200 }));
+
+  it("fetches the charter from the agent's own bundle, with its own key", async () => {
+    resetCharterCache();
+    const f = vi.fn(async (url: string, init: RequestInit) => {
+      expect(url).toContain("/api/agents/AG/instructions-bundle/file");
+      expect(url).toContain("path=SOUL.md");
+      expect((init.headers as Record<string, string>)["authorization"]).toBe("Bearer agent-key");
+      return new Response(JSON.stringify({ content: "REAL CHARTER" }), { status: 200 });
+    });
+    const r = await fetchCharter(cfg, () => 1000, f as unknown as typeof fetch);
+    expect(r.text).toBe("REAL CHARTER");
+    expect(r.source).toBe("fresh");
+  });
+
+  it("serves from cache inside the TTL and re-reads after it", async () => {
+    resetCharterCache();
+    const f = ok("V1");
+    await fetchCharter(cfg, () => 0, f as unknown as typeof fetch);
+    const cached = await fetchCharter(cfg, () => 59_000, f as unknown as typeof fetch);
+    expect(cached.source).toBe("cached");
+    expect(f).toHaveBeenCalledTimes(1);
+    await fetchCharter(cfg, () => 61_000, ok("V2") as unknown as typeof fetch);
+    const after = await fetchCharter(cfg, () => 61_100, f as unknown as typeof fetch);
+    expect(after.text).toBe("V2");
+  });
+
+  /**
+   * THE ONE THAT MATTERS. Without keep-last-good the agent falls back to a
+   * generic persona and starts describing the runtime's capabilities as its own
+   * — it told the owner it could provision tenants and grant minutes. It has no
+   * tools at all. A stale charter is safe; an absent one is not.
+   */
+  it("keeps the last good charter when Paperclip fails", async () => {
+    resetCharterCache();
+    await fetchCharter(cfg, () => 0, ok("REAL CHARTER") as unknown as typeof fetch);
+    for (const bad of [
+      vi.fn(async () => new Response("{}", { status: 500 })),
+      vi.fn(async () => new Response(JSON.stringify({ content: "" }), { status: 200 })),
+      vi.fn(async () => {
+        throw new Error("network");
+      }),
+    ]) {
+      const r = await fetchCharter(cfg, () => 999_999, bad as unknown as typeof fetch);
+      expect(r.text).toBe("REAL CHARTER");
+      expect(r.source).toBe("last_good");
+    }
+  });
+
+  it("falls back only when there has never been a good charter", async () => {
+    resetCharterCache();
+    const r = await fetchCharter(
+      cfg,
+      () => 0,
+      vi.fn(async () => new Response("{}", { status: 500 })) as unknown as typeof fetch,
+    );
+    expect(r.source).toBe("fallback");
+    expect(r.text).toContain("internal");
   });
 });
