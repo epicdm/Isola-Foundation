@@ -17,7 +17,7 @@
  *     could not be recorded, the customer is told nothing at all.
  */
 import type { Binding } from "./bindings.js";
-import { readConversationHistory } from "./chatwoot.js";
+import { readTurnHistory } from "./turns.js";
 import { detectHumanPromise } from "./promise.js";
 import type { ChatwootApi, ChatwootTarget, ConversationHistory } from "./chatwoot.js";
 import {
@@ -35,7 +35,7 @@ import {
 } from "./handoff.js";
 import { DELIVERY_ACTION, deliveryRef, type LedgerIdentity } from "./deliveryref.js";
 import type { Failpoint } from "./failpoint.js";
-import type { Ledger } from "./ledger.js";
+import type { Ledger, SqlClient } from "./ledger.js";
 import type { Logger } from "./log.js";
 import type { AgentRuntime } from "./runtime.js";
 import {
@@ -217,6 +217,8 @@ export interface DeliveryJob {
 }
 
 export interface PipelineDeps {
+  /** Conversation memory. Absent = the gateway answers exactly as it did before. */
+  turnStore?: SqlClient;
   config: GatewayConfig;
   chatwoot: ChatwootApi;
   runtime: AgentRuntime;
@@ -556,23 +558,33 @@ export async function processDelivery(
   // memory of this thread, which is exactly today's behaviour — it must never
   // cost the customer their reply. (conversations#show is also the call that
   // 500s once a team is assigned on some builds, so this WILL fail sometimes.)
+  // MEMORY, from the gateway's OWN ledger — not from Chatwoot.
+  // conversations#show returns one message, and the messages index 401s an
+  // AgentBot token (both measured 2026-08-17). The gateway already sees every
+  // turn, so it records them and reads them back here.
   let history: ConversationHistory | undefined;
-  try {
-    history = readConversationHistory(await deps.chatwoot.getConversationRecord(target));
-  } catch (err) {
-    deps.logger.warn({
-      ...base,
-      event: "context",
-      outcome: "history_unavailable",
-      detail: err instanceof Error ? err.message : "conversation read failed",
-    });
+  if (deps.turnStore !== undefined) {
+    try {
+      const h = await readTurnHistory(
+        deps.turnStore,
+        binding.chatwootAccountId,
+        job.conversationId,
+      );
+      history = { turns: h.turns, truncated: h.truncated };
+    } catch (err) {
+      deps.logger.warn({
+        ...base,
+        event: "context",
+        outcome: "history_unavailable",
+        detail: err instanceof Error ? err.message : "turn store read failed",
+      });
+    }
   }
 
   // OBSERVABILITY, and it is not decoration. A history of ZERO turns and a
   // working history were indistinguishable in the logs, so a fetch that
-  // silently returned nothing survived an entire live test looking green:
-  // `conversations#show` carries ONE message, not the thread, and nothing said
-  // so. If a state cannot be observed from outside, the process must declare it.
+  // silently returned nothing survived an entire live test looking green.
+  // If a state cannot be observed from outside, the process must declare it.
   deps.logger.info({
     ...base,
     event: "context",

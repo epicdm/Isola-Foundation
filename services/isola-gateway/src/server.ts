@@ -15,6 +15,7 @@ import { createPostgresOwnershipGate, migrateOwnershipStore } from "./ownership-
 import { createLogger } from "./log.js";
 import { createHandbackSweeper } from "./handback.js";
 import { createSweeper } from "./recovery.js";
+import { migrateTurnStore } from "./turns.js";
 import { SERVICE_VERSION } from "./version.js";
 
 const config = loadConfig(process.env);
@@ -104,7 +105,7 @@ const ledger = createLedger({
 // executor, so `pg` stays imported by exactly one module.
 const ownership = createPostgresOwnershipGate(ledger);
 
-const gateway = createGateway({ config, logger, ledger, ownership });
+const gateway = createGateway({ config, logger, ledger, ownership, turnStore: ledger });
 const server = createServer(gateway.handler);
 
 let handbackSweeper: { start(): void; stop(): void; sweep(): Promise<number> } | null = null;
@@ -134,6 +135,8 @@ async function boot(): Promise<void> {
     // are idempotent and additive, and nothing reads the ownership tables yet.
     stage = "conversation ownership store";
     await migrateOwnershipStore(ledger);
+    stage = "conversation turn store";
+    await migrateTurnStore(ledger);
     logger.info({ event: "boot", outcome: "ledger_ready", instanceId });
   } catch (err) {
     // Do not start serving with an unusable ledger: every delivery would be

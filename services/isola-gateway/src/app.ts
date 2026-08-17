@@ -41,9 +41,10 @@ import {
 import { createSafeFetch, type SafeFetch } from "./egress.js";
 import { createFailpoint, DISARMED, type Failpoint } from "./failpoint.js";
 import { idempotencyKey } from "./idempotency.js";
-import type { Ledger, ReserveResult } from "./ledger.js";
+import type { Ledger, ReserveResult, SqlClient } from "./ledger.js";
 import type { OwnershipGate } from "./ownership.js";
 import { constantTimeEquals } from "./signature.js";
+import { classifyTurn, recordTurn } from "./turns.js";
 import { createLogger, type Logger } from "./log.js";
 import { processDelivery, type DeliveryJob, type DeliveryMode } from "./pipeline.js";
 import { createAgentRuntime, type AgentRuntime } from "./runtime.js";
@@ -399,6 +400,14 @@ export interface GatewayDeps {
    * holding. `server.ts` builds the Postgres-backed one; tests inject a fake.
    */
   ownership: OwnershipGate;
+  /**
+   * The SQL surface for conversation memory. Separate from `ledger` on purpose:
+   * `Ledger` is a narrow delivery contract, and widening it to carry raw SQL
+   * would let any future caller run statements through the delivery port.
+   * Absent (as in most tests) means memory is simply not recorded — a gateway
+   * without it answers exactly as it did before.
+   */
+  turnStore?: SqlClient;
   safeFetch?: SafeFetch;
   /** Injected in tests; defaults to the allowlisted signed Magnus client. */
   personalLineSource?: PersonalLineSource;
@@ -530,6 +539,51 @@ export function createGateway(deps: GatewayDeps): Gateway {
     });
     routing = evaluated.routing;
     const decision = evaluated.decision;
+
+    // MEMORY. Record every real turn — the customer's, ours, and a HUMAN
+    // AGENT'S — before the switch below decides whether to reply. Suppressed
+    // deliveries carry turns too: an outgoing human reply is suppressed from
+    // triggering the bot, but the bot must still know what the human said.
+    // Never lets a memory failure cost a customer their reply.
+    if (decision.kind === "accept" || decision.kind === "suppressed") {
+      const turn = classifyTurn({
+        event: decision.payload.event,
+        messageType: decision.payload.messageType,
+        private: decision.payload.private,
+        content: decision.payload.content,
+        messageId: decision.payload.messageId,
+      });
+      if (
+        turn !== null &&
+        deps.turnStore !== undefined &&
+        decision.payload.conversationDisplayId !== null
+      ) {
+        const b = resolveBinding(
+          bindingStore.list(),
+          decision.payload.accountId,
+          decision.payload.inboxId,
+        );
+        if (b.kind === "ok") {
+          try {
+            await recordTurn(deps.turnStore, {
+              tenantId: b.binding.tenantId,
+              accountId: b.binding.chatwootAccountId,
+              conversationId: decision.payload.conversationDisplayId,
+              messageId: decision.payload.messageId as number,
+              role: turn.role,
+              content: turn.content,
+            });
+          } catch (err) {
+            logger.warn({
+              event: "turn",
+              correlationId,
+              outcome: "turn_record_failed",
+              detail: err instanceof Error ? err.message : "unknown",
+            });
+          }
+        }
+      }
+    }
 
     switch (decision.kind) {
       case "reject": {
@@ -728,7 +782,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
 
     track(
       processDelivery(
-        { config, chatwoot, runtime, logger, ledger, ownership: deps.ownership, failpoint, now },
+        { config, chatwoot, runtime, logger, ledger, ownership: deps.ownership, failpoint, now, turnStore: deps.turnStore },
         job,
       ).catch(
         (err: unknown) => {
