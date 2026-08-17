@@ -331,6 +331,49 @@ Carry forward the recorded reason on the catch-all: **repointed from `:3004` (v1
 
 ---
 
+## KNOWN ACCEPTED LOSSES AT THE 3742 CUTOVER — recorded 2026-08-17
+
+Enumerating bff-v2's inbound side effects (§d) established that **"it only replies"
+was a hypothesis and it was wrong** — ten distinct effects fire on an inbound
+WhatsApp message. Most are superseded by the new path. These are the ones that are
+**not**, recorded here so they are learned from us now rather than from an empty
+dashboard later.
+
+### 1. PostHog activation analytics — **KNOWN ACCEPTED LOSS**
+
+`fireAiRepliedAndActivated` (`app/api/whatsapp/webhook/route.ts` L901, L1139) stops
+firing for 3742 at cutover. **No equivalent exists in the new path**
+(Chatwoot → gateway → runtime → Paperclip).
+
+- **Not customer-facing. Not a blocker. Accepted deliberately, 2026-08-17.**
+- What is lost: the "AI replied / tenant activated" product-analytics signal for
+  EPIC's own front door. Other numbers still on bff-v2 are unaffected.
+- If this signal is later wanted, it is re-emitted from the gateway or the runtime,
+  not by keeping bff-v2 in the path.
+
+### 2. Paperclip conversation history splits at the cutover line — **NOT DATA LOSS**
+
+`paperclipMirrorInbound` (L160, fire-and-forget, runs **before** dedup) currently
+mirrors every inbound message into Paperclip company **`48f327a1` on the deepseek
+instance**. After cutover, `isolart_runtime` writes issues and cost-events to
+**`3ed3869b` on host03**.
+
+- **THE MOVE IS THE GOAL** — `3ed3869b` is the authoritative instance. Work tracking
+  does not stop; it lands where it should.
+- **THE SPLIT IS THE COST.** Conversations before the flip live on deepseek; after,
+  on host03. **Nothing is deleted and the legacy instance stays readable.**
+- **DO NOT READ THE GAP AS DATA LOSS**, and do not "fix" it by editing an agent's
+  `paperclipCompanyId` ahead of the cutover: `paperclipMirrorInbound` returns early
+  on an empty company id and 404s on a company that does not exist on the target,
+  so a well-meant field edit silently stops the mirror. **Let the cutover move it.**
+- Joined by step 6 of the sequence (agents migrate off `paperclip.epic.dm`).
+
+### Still `[U]`, carried not chased
+`reconcileInboundAttribution` (L1067) and `appendUserMessage` (L881–882) —
+continuity across the cutover unverified.
+
+---
+
 ## HARD PRECONDITIONS ON THE SERVICE — for ESTATE, alongside `replicas: 1`
 
 These are properties of the service, not deployment notes. Written here so they cannot be
