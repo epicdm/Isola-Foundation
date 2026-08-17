@@ -55,8 +55,16 @@ export interface GatewayConfig {
   ledgerRecoveryBatch: number;
   /**
    * HANDBACK — how long a conversation must be IDLE before the AI takes it back.
-   * Measured from the LAST MESSAGE, never from the moment of takeover: a human
-   * who is still replying keeps resetting it and is never interrupted.
+   *
+   * Measured from the LAST BUSINESS MESSAGE, never from the moment of takeover:
+   * a human who is still replying keeps resetting it and is never interrupted.
+   *
+   * CORRECTED 2026-08-17. This previously said "the LAST MESSAGE", and the code
+   * matched — it read Chatwoot's `last_activity_at`, which moves on ANY message.
+   * That meant a customer asking "are you still there?" reset their own handback
+   * clock: the more they chased, the longer they were ignored. Idleness is a
+   * property of the side that owes a reply, so only BUSINESS turns count.
+   *
    * 10 minutes matches the previous bff-v2 behaviour exactly. Restoring parity,
    * not seeking an optimum — do not tune it in the same change that ships it.
    */
