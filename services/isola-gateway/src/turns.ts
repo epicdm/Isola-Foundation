@@ -155,6 +155,50 @@ export async function readTurnHistory(
 }
 
 /**
+ * When the business last said something to this customer, in epoch ms.
+ *
+ * THIS IS THE IDLE CLOCK, and it exists because the obvious source is broken.
+ * The sweeper used to read `last_activity_at` from Chatwoot's `conversations#show`,
+ * which returns HTTP 500 for an AgentBot token once a team is assigned — and a
+ * team is assigned BY ESCALATION, so the endpoint breaks at exactly the moment
+ * the sweeper starts needing it. Measured 2026-08-17 on account 2: show → 500,
+ * while `conversations/2/labels` → 200 with the same token, so the credential is
+ * fine and the endpoint is not.
+ *
+ * Two properties this has and `last_activity_at` did not:
+ *
+ *  1. IT IS OURS. No third-party endpoint can strand a customer by failing.
+ *  2. IT MEASURES THE RIGHT SIDE. `last_activity_at` moves on ANY message, so a
+ *     customer sending "are you there?" pushed their own handback further away —
+ *     the more they chased, the longer they were ignored. Idleness is a property
+ *     of the party who owes a reply, so it is measured from the last BUSINESS
+ *     turn.
+ *
+ * During a human-held episode the bot is suppressed, so a `business` turn in
+ * that window is a human's. The one exception is the escalation line itself
+ * ("I'll connect you with a colleague"), which is the correct place to start
+ * the clock: it is the last thing the customer was told.
+ */
+export async function readLastBusinessTurnMs(
+  exec: SqlClient,
+  accountId: number,
+  conversationId: number,
+): Promise<number | null> {
+  const res: QueryResult<Record<string, unknown>> = await exec.query(
+    `SELECT max(created_at) AS last_business
+       FROM conversation_turn
+      WHERE chatwoot_account_id = $1
+        AND chatwoot_conversation_id = $2
+        AND role = 'business'`,
+    [accountId, conversationId],
+  );
+  const raw = (res.rows ?? [])[0]?.["last_business"];
+  if (raw === null || raw === undefined) return null;
+  const ms = raw instanceof Date ? raw.getTime() : Date.parse(String(raw));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
  * Decide whether a webhook payload is a turn worth recording, and as whom.
  *
  * FAIL CLOSED ON `private`: only an explicit boolean false is public. A missing,

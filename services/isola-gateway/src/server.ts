@@ -164,6 +164,9 @@ async function boot(): Promise<void> {
     exec: ledger,
     chatwoot: gateway.chatwoot,
     logger,
+    // The idle clock. Without it the sweeper depends on `conversations#show`,
+    // which 500s for a bot token exactly when a team has been assigned.
+    turnStore: ledger,
     idleMs: config.handbackIdleMs,
     intervalMs: config.handbackSweepIntervalMs,
     batch: config.handbackSweepBatch,

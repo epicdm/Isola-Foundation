@@ -38,7 +38,8 @@
 
 import type { ChatwootApi, ChatwootTarget } from "./chatwoot.js";
 import type { Logger } from "./log.js";
-import type { SqlExecutor } from "./ledger.js";
+import type { SqlClient, SqlExecutor } from "./ledger.js";
+import { readLastBusinessTurnMs } from "./turns.js";
 import {
   abortHandback,
   beginHandback,
@@ -207,6 +208,10 @@ export interface IdleCandidate {
   accountId: number;
   conversationId: number;
   inboxId: number | null;
+  /** When the human took/was asked for the conversation. The idle floor when no
+   *  business turn has been recorded — so a conversation escalated before the
+   *  turn store existed still has a clock, instead of being ineligible forever. */
+  ownershipChangedAtMs: number | null;
 }
 
 /**
@@ -222,7 +227,8 @@ export async function selectHumanHeldConversations(
 ): Promise<IdleCandidate[]> {
   const rows = await exec.query(
     `SELECT tenant_id, conversation_key, ownership_episode,
-            chatwoot_account_id, chatwoot_conversation_id, chatwoot_inbox_id
+            chatwoot_account_id, chatwoot_conversation_id, chatwoot_inbox_id,
+            ownership_changed_at
        FROM conversation_ownership
       WHERE ownership_state = ANY($1::text[])
       ORDER BY ownership_changed_at ASC NULLS FIRST
@@ -240,6 +246,7 @@ export async function selectHumanHeldConversations(
     accountId: Number(r["chatwoot_account_id"]),
     conversationId: Number(r["chatwoot_conversation_id"]),
     inboxId: r["chatwoot_inbox_id"] === null ? null : Number(r["chatwoot_inbox_id"]),
+    ownershipChangedAtMs: toEpochMs(r["ownership_changed_at"]),
   }));
 }
 
@@ -254,6 +261,13 @@ export function readConversationStatus(record: unknown): string | null {
   if (typeof payload !== "object" || payload === null) return null;
   const raw = (payload as Record<string, unknown>)["status"];
   return typeof raw === "string" ? raw : null;
+}
+
+/** Postgres may hand back a Date or a string depending on the driver. */
+export function toEpochMs(raw: unknown): number | null {
+  if (raw === null || raw === undefined) return null;
+  const ms = raw instanceof Date ? raw.getTime() : Date.parse(String(raw));
+  return Number.isFinite(ms) ? ms : null;
 }
 
 export function readLastActivityMs(record: unknown): number | null {
@@ -278,6 +292,9 @@ export interface HandbackSweeperDeps extends HandbackDeps {
    *  null when no binding matches — a row whose binding was removed must be
    *  skipped, never handed back with someone else's token. */
   resolveTarget(candidate: IdleCandidate): ChatwootTarget | null;
+  /** The gateway's own turn store, used as the idle clock. Optional so an
+   *  installation without it still sweeps on the Chatwoot clock. */
+  turnStore?: SqlClient;
 }
 
 export interface HandbackSweeper {
@@ -308,28 +325,86 @@ export function createHandbackSweeper(deps: HandbackSweeperDeps): HandbackSweepe
     try {
       const candidates = await selectHumanHeldConversations(deps.exec, deps.batch);
       for (const candidate of candidates) {
-        const target = deps.resolveTarget(candidate);
-        if (target === null) continue;
+        // EVERY SKIP BELOW IS LOGGED. The previous version `continue`d silently
+        // on four different paths, and the result was a sweeper that ran once a
+        // minute for nine hours, stranded a real customer, and reported nothing
+        // but "started". An unobservable loop is indistinguishable from a
+        // working one — that is the defect, not just the strand.
+        const skip = (reason: string, extra: Record<string, unknown> = {}): void => {
+          deps.logger.info({
+            event: "handback",
+            outcome: "sweep_skipped",
+            accountId: candidate.accountId,
+            conversationId: candidate.conversationId,
+            reason,
+            ...extra,
+          });
+        };
 
-        let record: unknown;
+        const target = deps.resolveTarget(candidate);
+        if (target === null) {
+          skip("no_binding");
+          continue;
+        }
+
+        // Chatwoot is consulted for the MANUAL trigger only, and its failure is
+        // no longer fatal. `conversations#show` returns 500 for an AgentBot
+        // token once a team is assigned, and escalation is what assigns the
+        // team — so this endpoint breaks precisely when the sweeper needs it.
+        let record: unknown = null;
+        let recordReadable = true;
         try {
           record = await deps.chatwoot.getConversationRecord(target);
         } catch {
-          continue; // unreadable is not idle
+          recordReadable = false;
         }
+
         // TRIGGER 1 — MANUAL. A human pressed "Mark as pending" in Chatwoot.
         // Chatwoot's status is already `pending` while the ownership store
         // still says a human holds it, so the two disagree and the AI stays
         // silent. An explicit gesture is not subject to the idle clock.
-        const status = readConversationStatus(record);
-        const manual = status === "pending";
+        const manual = recordReadable && readConversationStatus(record) === "pending";
 
-        // TRIGGER 2 — IDLE. Measured from the LAST MESSAGE, never from takeover.
-        const lastActivityMs = readLastActivityMs(record);
-        const idle =
-          lastActivityMs !== null && now() - lastActivityMs >= deps.idleMs;
+        // TRIGGER 2 — IDLE, on OUR clock. Measured from the last thing the
+        // BUSINESS said, so a customer chasing for an answer no longer pushes
+        // their own handback away. Falls back to Chatwoot's activity, then to
+        // when the human took the conversation — a conversation escalated
+        // before the turn store existed still has a floor rather than being
+        // ineligible for ever.
+        let idleSinceMs: number | null = null;
+        let clock = "none";
+        if (deps.turnStore !== undefined) {
+          try {
+            idleSinceMs = await readLastBusinessTurnMs(
+              deps.turnStore,
+              candidate.accountId,
+              candidate.conversationId,
+            );
+            if (idleSinceMs !== null) clock = "turn_store";
+          } catch {
+            idleSinceMs = null;
+          }
+        }
+        if (idleSinceMs === null && recordReadable) {
+          idleSinceMs = readLastActivityMs(record);
+          if (idleSinceMs !== null) clock = "chatwoot";
+        }
+        if (idleSinceMs === null) {
+          idleSinceMs = candidate.ownershipChangedAtMs;
+          if (idleSinceMs !== null) clock = "ownership_changed_at";
+        }
 
-        if (!manual && !idle) continue;
+        const idleForMs = idleSinceMs === null ? null : now() - idleSinceMs;
+        const idle = idleForMs !== null && idleForMs >= deps.idleMs;
+
+        if (!manual && !idle) {
+          skip(idleSinceMs === null ? "no_clock" : "not_idle_yet", {
+            clock,
+            idleForMs,
+            recordReadable,
+          });
+          continue;
+        }
 
         const result = await performHandback(deps, {
           conversation: candidate.conversation,
