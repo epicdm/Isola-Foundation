@@ -44,6 +44,7 @@ import { idempotencyKey } from "./idempotency.js";
 import type { Ledger, ReserveResult, SqlClient } from "./ledger.js";
 import type { OwnershipGate } from "./ownership.js";
 import { constantTimeEquals } from "./signature.js";
+import { checkSender, refusalText } from "./allowlist.js";
 import { classifyTurn, recordTurn } from "./turns.js";
 import { createLogger, type Logger } from "./log.js";
 import { processDelivery, type DeliveryJob, type DeliveryMode } from "./pipeline.js";
@@ -121,6 +122,11 @@ export type Outcome =
   /** Magnus is unreachable or not configured; no seat state can be reported. */
   | "voice_upstream_unavailable"
   | "rate_limited"
+  /**
+   * An INTERNAL line refused a sender who is not on its allowlist. A terminal
+   * outcome: no brain, no ledger content, one static line back.
+   */
+  | "rejected_sender"
   | "ok";
 
 /** Server-side only. The HTTP response never says which half failed. */
@@ -539,6 +545,57 @@ export function createGateway(deps: GatewayDeps): Gateway {
     });
     routing = evaluated.routing;
     const decision = evaluated.decision;
+
+    // ── THE INTERNAL ALLOWLIST ─────────────────────────────────────────────
+    //
+    // FIRST, and deliberately ahead of the turn ledger. A refused sender must
+    // leave NO content behind: not in the model's context, not in the memory
+    // table, not in an audit row that quotes them. The only trace is that
+    // somebody who was not staff messaged the staff line.
+    //
+    // This runs before the reply switch, so a refused sender never reaches the
+    // brain, never costs a token, and never wakes an agent that holds internal
+    // context. PUBLIC bindings are untouched — checkSender returns allowed for
+    // anything not INTERNAL.
+    if (decision.kind === "accept" && decision.binding.exposure === "INTERNAL") {
+      const b = decision.binding;
+      const verdict = checkSender(b, decision.payload.senderPhone);
+      if (!verdict.allowed) {
+        // ONE static line, then nothing. Best-effort: if Chatwoot refuses the
+        // send we still do not invoke — silence is the correct failure here.
+        let noticeSent = true;
+        try {
+          await chatwoot.postMessage(
+            {
+              accountId: b.chatwootAccountId,
+              conversationId: decision.conversationId,
+              accessToken: b.agentBotAccessToken,
+              ...(b.chatwootBaseUrl === undefined ? {} : { baseUrl: b.chatwootBaseUrl }),
+            },
+            refusalText(config.frontDoorNumber),
+            false,
+          );
+        } catch {
+          noticeSent = false;
+        }
+        finish(
+          200,
+          "rejected_sender",
+          {
+            tenantId: b.tenantId,
+            conversationId: decision.conversationId,
+            // The REASON, never the number. "not_allowlisted" and
+            // "empty_allowlist" need different operator responses and must not
+            // look alike; neither needs the sender's phone in a log.
+            reason: verdict.reason,
+            allowlistSize: b.allowedSenders.length,
+            noticeSent,
+          },
+          { status: "rejected_sender" },
+        );
+        return;
+      }
+    }
 
     // MEMORY. Record every real turn — the customer's, ours, and a HUMAN
     // AGENT'S — before the switch below decides whether to reply. Suppressed

@@ -155,6 +155,7 @@ export function rebuildPayload(
     attachmentTypes: readAttachmentTypes(message["attachments"]),
     contentType: readContentType(message["content_type"]),
     private: typeof privateRaw === "boolean" ? privateRaw : false,
+    senderPhone: null,
     senderType: sender === null ? null : (typeof sender["type"] === "string" ? sender["type"] : null),
     accountId: row.chatwootAccountId,
     inboxId: row.chatwootInboxId,

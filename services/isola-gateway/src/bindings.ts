@@ -58,6 +58,11 @@ export interface Binding {
   paperclipAgentId: string;
   templateId: string;
   exposure: Exposure;
+  /**
+   * Staff numbers permitted to reach an INTERNAL line. EMPTY MEANS NOBODY.
+   * Meaningless on a PUBLIC binding and ignored there.
+   */
+  allowedSenders: readonly string[];
   status: BindingStatus;
   /**
    * Lifecycle as supplied by the runtime projection, kept verbatim.
@@ -184,7 +189,20 @@ export function resolveBinding(
   if (binding.status !== "active") {
     return { kind: "retired", tenantId: binding.tenantId };
   }
-  if (binding.exposure !== "PUBLIC") {
+  // INTERNAL IS NO LONGER REFUSED HERE — the refusal moved, it did not vanish.
+  //
+  // This used to reject every non-PUBLIC binding, and `parseBindings` hardcoded
+  // PUBLIC so one could not exist anyway. That was the right default while there
+  // was no way to say WHO may use an internal line. There is now: an INTERNAL
+  // binding carries an allowlist, and `checkSender` refuses anyone not on it
+  // BEFORE the brain is invoked or any content is written.
+  //
+  // The safety property is unchanged in substance: an INTERNAL binding with an
+  // empty allowlist answers nobody. It is now refused per-SENDER and logged with
+  // a reason, instead of being invisible at boot — a misconfigured staff line
+  // that says "empty_allowlist" on every message is far easier to fix than one
+  // that silently never loaded.
+  if (binding.exposure !== "PUBLIC" && binding.exposure !== "INTERNAL") {
     return { kind: "not_public", tenantId: binding.tenantId, exposure: binding.exposure };
   }
   if (!isRoutableLifecycle(binding.lifecycle)) {
@@ -393,14 +411,38 @@ export function parseBindings(raw: string | null | undefined): BindingParseResul
     const labels = optionalLabels(entry, index, errors);
 
     const exposureRaw = entry["exposure"];
-    // The single hardest rule in this file. Anything other than the literal
-    // string "PUBLIC" is refused at boot, so an INTERNAL employee can never be
-    // wired to a publicly reachable inbox by configuration alone.
-    if (exposureRaw !== "PUBLIC") {
+    // Still the hardest rule in this file, now stated in two parts.
+    //
+    // It used to be "PUBLIC or nothing", because there was no way to say who may
+    // use an internal line. There is now, so INTERNAL is admissible — but ONLY
+    // with an allowlist, and an unknown exposure is still refused outright
+    // rather than defaulted. A typo must never become a routing decision.
+    if (exposureRaw !== "PUBLIC" && exposureRaw !== "INTERNAL") {
       errors.push(
-        `binding[${index}]: "exposure" must be exactly "PUBLIC" — this gateway is publicly reachable and must never serve an INTERNAL employee`,
+        `binding[${index}]: "exposure" must be exactly "PUBLIC" or "INTERNAL" — an unrecognised exposure is refused rather than defaulted`,
       );
     }
+    const exposureValue: Exposure = exposureRaw === "INTERNAL" ? "INTERNAL" : "PUBLIC";
+
+    // The allowlist. Absent is an empty list, and an empty list answers NOBODY —
+    // see checkSender(). Absent is NOT a boot error on purpose: the same
+    // reasoning as lifecycle below, a malformed entry must cost that binding its
+    // reachability, never take the gateway down. A non-array, or entries that
+    // are not strings, are refused loudly because that IS a config mistake with
+    // no safe reading.
+    let allowedSenders: readonly string[] = [];
+    const allowedRaw = entry["allowedSenders"];
+    if (allowedRaw !== undefined && allowedRaw !== null) {
+      if (!Array.isArray(allowedRaw) || allowedRaw.some((v) => typeof v !== "string")) {
+        errors.push(`binding[${index}]: "allowedSenders" must be an array of strings when present`);
+      } else {
+        allowedSenders = allowedRaw as string[];
+      }
+    }
+    // An INTERNAL binding with an empty list is NOT a parse error: it is the
+    // safe half-configured state and must be shippable. It must not be SILENT,
+    // though — the boot line reports exposure and allowlist size per binding,
+    // and every refused message logs `empty_allowlist` by name.
 
     const statusRaw = entry["status"];
     if (statusRaw !== "active" && statusRaw !== "retired") {
@@ -427,7 +469,11 @@ export function parseBindings(raw: string | null | undefined): BindingParseResul
       paperclipCompanyId === null ||
       paperclipAgentId === null ||
       templateId === null ||
-      exposureRaw !== "PUBLIC" ||
+      // A SECOND gate on exposure, and it must agree with the error above or a
+      // binding is silently dropped while `ok` stays true — which is exactly
+      // what happened when only the error message was updated: parse reported
+      // success and returned an empty list.
+      (exposureRaw !== "PUBLIC" && exposureRaw !== "INTERNAL") ||
       (statusRaw !== "active" && statusRaw !== "retired")
     ) {
       return;
@@ -443,7 +489,8 @@ export function parseBindings(raw: string | null | undefined): BindingParseResul
       paperclipCompanyId,
       paperclipAgentId,
       templateId,
-      exposure: "PUBLIC",
+      exposure: exposureValue,
+      allowedSenders,
       status: statusRaw,
       lifecycle,
       ...(chatwootBaseUrl === undefined ? {} : { chatwootBaseUrl }),

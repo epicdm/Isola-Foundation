@@ -95,6 +95,12 @@ export interface GatewayConfig {
    * KILL SWITCH. Defaults to FALSE, so the endpoint deploys inert and is
    * indistinguishable from an unknown route until deliberately enabled.
    */
+  /**
+   * The public number a refused INTERNAL sender is pointed at. Null omits the
+   * referral rather than inventing one — a wrong number in a refusal is worse
+   * than no number.
+   */
+  frontDoorNumber: string | null;
   voiceReadEnabled: boolean;
   /** Bearer required by the personal-line read. `null` means the route is 503. */
   voiceReadToken: string | null;
@@ -278,6 +284,7 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
     applyCustomAttributes: bool(env, "GATEWAY_APPLY_CUSTOM_ATTRIBUTES", true),
     answeredLabel: label(env, "GATEWAY_LABEL_ANSWERED", DEFAULT_ANSWERED_LABEL),
     escalatedLabel: label(env, "GATEWAY_LABEL_ESCALATED", DEFAULT_ESCALATED_LABEL),
+    frontDoorNumber: str(env, "GATEWAY_FRONT_DOOR_NUMBER"),
 
     bindings: parseBindings(env["GATEWAY_BINDINGS_JSON"]),
 

@@ -220,22 +220,29 @@ describe("POST /v1/chatwoot/agent-bot — binding refusal", () => {
     }
   });
 
-  it("refuses an INTERNAL binding even if one somehow reaches the store", async () => {
-    // Boot validation rejects this, so the only way to build it is to hand the
-    // store a binding directly — which is exactly what a future NocoBase store
-    // could do.
+  it("an INTERNAL binding REFUSES a sender who is not on its allowlist", async () => {
+    // THE END-TO-END SHAPE OF THE STAFF GATE. The brain is never invoked, no
+    // content is recorded, and the stranger gets exactly one static line.
     const { StaticBindingStore } = await import("../src/bindings.js");
-    const internal = { ...makeBinding(), exposure: "INTERNAL" as const };
+    const internal = {
+      ...makeBinding(),
+      exposure: "INTERNAL" as const,
+      allowedSenders: ["+1 767 555-0101"],
+    };
     const server = await startServer({
       bindingStore: new StaticBindingStore([internal]),
     });
     try {
       const res = await postWebhook(server.url, signRequest());
       expect(res.status).toBe(200);
-      expect(res.json["outcome"]).toBe("binding_not_public");
+      expect(res.json["outcome"]).toBe("rejected_sender");
       await server.gateway.drain();
-      expect(server.chatwoot.calls).toEqual([]);
+      // THE BRAIN IS NEVER REACHED. This is the assertion that matters: a
+      // stranger must not cost a token or wake an agent holding internal
+      // context.
       expect((server.runtime as StubAgentRuntime).requests).toEqual([]);
+      // Exactly one outbound call: the static refusal.
+      expect(server.chatwoot.calls).toHaveLength(1);
     } finally {
       await server.close();
     }
@@ -404,7 +411,7 @@ describe("the binding rules are unchanged on the handoff path", () => {
     const { StaticBindingStore } = await import("../src/bindings.js");
     const server = await startServer({
       bindingStore: new StaticBindingStore([
-        { ...makeBinding(), exposure: "INTERNAL" as const },
+        { ...makeBinding(), exposure: "INTERNAL" as const, allowedSenders: [] },
       ]),
     });
     try {
@@ -413,9 +420,9 @@ describe("the binding rules are unchanged on the handoff path", () => {
         signRequest({ body: attachmentOnlyPayload(["image"]) }),
       );
       expect(res.status).toBe(200);
-      expect(res.json["outcome"]).toBe("binding_not_public");
+      // An EMPTY allowlist refuses everyone — fail-closed means fail-closed.
+      expect(res.json["outcome"]).toBe("rejected_sender");
       await server.gateway.drain();
-      expect(server.chatwoot.calls).toEqual([]);
     } finally {
       await server.close();
     }

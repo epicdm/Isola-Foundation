@@ -44,6 +44,8 @@ export interface WebhookPayload {
    */
   private: boolean | null;
   senderType: string | null;
+  /** E.164-ish, as Chatwoot supplies it. Used ONLY by the INTERNAL allowlist. */
+  senderPhone: string | null;
   accountId: number | null;
   inboxId: number | null;
   /**
@@ -245,6 +247,14 @@ export function parseWebhookPayload(raw: Buffer): WebhookPayload | null {
     contentType: readContentType(parsed["content_type"]),
     private: typeof privateRaw === "boolean" ? privateRaw : null,
     senderType: sender === null ? null : readString(sender["type"]),
+    // `phone_number` is what a WhatsApp contact carries; `identifier` is the
+    // fallback Chatwoot uses for some channels. Neither is trusted for anything
+    // but the allowlist comparison, and a missing value means "unidentified",
+    // which checkSender refuses on an INTERNAL line.
+    senderPhone:
+      sender === null
+        ? null
+        : (readString(sender["phone_number"]) ?? readString(sender["identifier"])),
     accountId: account === null ? null : readInt(account["id"]),
     inboxId: inbox === null ? null : readInt(inbox["id"]),
     conversationDisplayId: conversation === null ? null : readInt(conversation["id"]),

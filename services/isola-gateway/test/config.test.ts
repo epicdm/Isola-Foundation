@@ -136,7 +136,9 @@ describe("loadConfig defaults", () => {
 describe("binding validation is a boot gate", () => {
   it("reports the errors as data rather than throwing", () => {
     const config = loadConfig({
-      GATEWAY_BINDINGS_JSON: JSON.stringify([{ ...makeBinding(), exposure: "INTERNAL" }]),
+      // An exposure nobody defined. INTERNAL became admissible 2026-08-17, so a
+      // recognised-but-internal binding is no longer the boot-gate example.
+      GATEWAY_BINDINGS_JSON: JSON.stringify([{ ...makeBinding(), exposure: "SEMI-PUBLIC" }]),
     });
     expect(config.bindings.ok).toBe(false);
     expect(configuredBindings(config)).toEqual([]);

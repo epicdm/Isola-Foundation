@@ -31,6 +31,7 @@ function binding(over: Partial<Binding> = {}): Binding {
     paperclipAgentId: "ag-1",
     templateId: "tpl@v1",
     exposure: "PUBLIC",
+    allowedSenders: [],
     status: "active",
     lifecycle: ROUTABLE_LIFECYCLE,
     ...over,
@@ -105,9 +106,16 @@ describe("resolveBinding — lifecycle gates routing", () => {
     expect(r.kind).toBe("not_accepted");
   });
 
-  it("still refuses INTERNAL exposure ahead of lifecycle", () => {
+  it("routes INTERNAL now — refusal moved to the per-sender allowlist", () => {
     const r = resolve(binding({ exposure: "INTERNAL", lifecycle: "accepted" }));
-    expect(r.kind).toBe("not_public");
+    expect(r.kind).toBe("ok");
+  });
+
+  it("but lifecycle STILL gates an INTERNAL binding — exposure grants nothing", () => {
+    // The old ordering comment stands: exposure passing never short-circuits
+    // readiness. An unaccepted internal agent is as unroutable as a public one.
+    expect(resolve(binding({ exposure: "INTERNAL", lifecycle: "staged-not-ready" })).kind)
+      .toBe("not_accepted");
   });
 });
 
@@ -143,9 +151,11 @@ describe("resolution precedence preserves the operator's disposition", () => {
     expect(resolve(binding({ status: "active", lifecycle: "staged-not-ready" })).kind).toBe("not_accepted");
   });
 
-  it("active + accepted + wrong exposure -> exposure denial", () => {
-    expect(resolve(binding({ status: "active", lifecycle: "accepted", exposure: "INTERNAL" })).kind)
-      .toBe("not_public");
+  it("active + accepted + UNRECOGNISED exposure -> exposure denial", () => {
+    // INTERNAL is admissible since 2026-08-17; an exposure nobody defined is not.
+    expect(
+      resolve(binding({ status: "active", lifecycle: "accepted", exposure: "SEMI" as never })).kind,
+    ).toBe("not_public");
   });
 
   it("active + accepted + eligible exposure -> proceeds", () => {
@@ -198,6 +208,7 @@ describe("parseBindings — lifecycle never breaks boot (inertness guarantee)", 
     paperclipAgentId: "ag-1",
     templateId: "tpl@v1",
     exposure: "PUBLIC",
+    allowedSenders: [],
     status: "retired",
   };
 
@@ -222,11 +233,16 @@ describe("parseBindings — lifecycle never breaks boot (inertness guarantee)", 
     if (r.ok) expect(r.bindings[0]?.lifecycle).toBe("weird");
   });
 
-  it("still refuses INTERNAL exposure at boot regardless of lifecycle", () => {
-    const r = parseBindings(
+  it("admits INTERNAL at boot; an UNKNOWN exposure is still refused", () => {
+    const admitted = parseBindings(
       JSON.stringify([{ ...base, exposure: "INTERNAL", lifecycle: "accepted" }]),
     );
-    expect(r.ok).toBe(false);
+    expect(admitted.ok).toBe(true);
+
+    const refused = parseBindings(
+      JSON.stringify([{ ...base, exposure: "SEMI-PUBLIC", lifecycle: "accepted" }]),
+    );
+    expect(refused.ok).toBe(false);
   });
 });
 

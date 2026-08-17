@@ -80,10 +80,17 @@ logger.info({
   runtimeConfigured: config.runtimeSecret !== null,
   bindingsTotal: bindings.length,
   bindingsActive: bindings.filter((b) => b.status === "active").length,
-  // Routing only. No secret, no token.
-  boundInboxes: bindings.map(
-    (b) => `${b.chatwootAccountId}/${b.chatwootInboxId} -> ${b.tenantId} (${b.status})`,
-  ),
+  // Routing only. No secret, no token — and for an INTERNAL line the allowlist
+  // SIZE, never its contents. A staff line that refuses everyone must be visible
+  // at boot ("INTERNAL, 0 allowed") rather than discovered when a staff member
+  // reports that nothing answers; printing the numbers themselves would put
+  // staff phone numbers in every log line, which is the opposite trade.
+  boundInboxes: bindings.map((b) => {
+    const base = `${b.chatwootAccountId}/${b.chatwootInboxId} -> ${b.tenantId} (${b.status})`;
+    return b.exposure === "INTERNAL"
+      ? `${base} [INTERNAL, ${b.allowedSenders.length} allowed]`
+      : base;
+  }),
   replayWindowSec: config.replayWindowSec,
   idempotencyTtlMs: config.idempotencyTtlMs,
   runtimeTimeoutMs: config.runtimeTimeoutMs,

@@ -41,11 +41,39 @@ describe("parseBindings", () => {
     });
   });
 
-  it("REJECTS a binding whose exposure is not PUBLIC", () => {
-    const result = parseBindings(json([{ ...makeBinding(), exposure: "INTERNAL" }]));
+  it("REJECTS a binding whose exposure is neither PUBLIC nor INTERNAL", () => {
+    // A typo must never become a routing decision. INTERNAL became admissible
+    // 2026-08-17 (gated per sender); anything unrecognised is still refused.
+    const result = parseBindings(json([{ ...makeBinding(), exposure: "PUBLIK" }]));
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.errors.join(" ")).toMatch(/must be exactly "PUBLIC"/);
+    expect(result.errors.join(" ")).toMatch(/must be exactly "PUBLIC" or "INTERNAL"/);
+  });
+
+  it("ACCEPTS an INTERNAL binding and carries its allowlist", () => {
+    const result = parseBindings(
+      json([{ ...makeBinding(), exposure: "INTERNAL", allowedSenders: ["+1 767 555-0101"] }]),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.bindings[0]!.exposure).toBe("INTERNAL");
+    expect(result.bindings[0]!.allowedSenders).toEqual(["+1 767 555-0101"]);
+  });
+
+  it("an INTERNAL binding with NO allowlist still parses — and answers nobody", () => {
+    // Shippable, because half-configured must be the SAFE state, not a boot
+    // failure that hides the line entirely. checkSender refuses every sender.
+    const result = parseBindings(json([{ ...makeBinding(), exposure: "INTERNAL" }]));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.bindings[0]!.allowedSenders).toEqual([]);
+  });
+
+  it("refuses a malformed allowlist rather than reading it loosely", () => {
+    for (const bad of [{ a: 1 }, [1, 2], ["ok", 5]]) {
+      const r = parseBindings(json([{ ...makeBinding(), allowedSenders: bad }]));
+      expect(r.ok, JSON.stringify(bad)).toBe(false);
+    }
   });
 
   it("rejects a duplicate (accountId, inboxId) pair", () => {
@@ -125,13 +153,20 @@ describe("resolveBinding", () => {
     });
   });
 
-  it("refuses an INTERNAL binding outright", () => {
-    // An INTERNAL employee must never serve a publicly reachable inbox.
-    const internal = { ...makeBinding(), exposure: "INTERNAL" } as Binding;
-    expect(resolveBinding([internal], 1, 7)).toEqual({
+  // CHANGED 2026-08-17. INTERNAL is now routable, gated per SENDER by the
+  // allowlist (see allowlist.test.ts). resolveBinding no longer refuses it; an
+  // unrecognised exposure still is, so a typo cannot become a routing decision.
+  it("routes an INTERNAL binding — the refusal moved to the sender gate", () => {
+    const internal = { ...makeBinding(), exposure: "INTERNAL", allowedSenders: [] } as Binding;
+    expect(resolveBinding([internal], 1, 7)).toEqual({ kind: "ok", binding: internal });
+  });
+
+  it("still refuses an exposure it does not recognise", () => {
+    const weird = { ...makeBinding(), exposure: "SEMI-PUBLIC" } as unknown as Binding;
+    expect(resolveBinding([weird], 1, 7)).toEqual({
       kind: "not_public",
-      tenantId: internal.tenantId,
-      exposure: "INTERNAL",
+      tenantId: weird.tenantId,
+      exposure: "SEMI-PUBLIC",
     });
   });
 });

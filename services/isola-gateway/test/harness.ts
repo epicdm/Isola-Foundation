@@ -259,6 +259,7 @@ export function makeBinding(overrides: Partial<Binding> = {}): Binding {
     paperclipAgentId: "agent-1",
     templateId: TEMPLATE_ID,
     exposure: "PUBLIC",
+    allowedSenders: [],
     status: "active",
     // A servable fixture must be `accepted`; lifecycle is a routing precondition,
     // not decoration. Tests that mean to exercise lifecycle override it explicitly
