@@ -187,6 +187,38 @@ const HANDOVER_VERBS = [
  * colleague. Anything else?" would never notify anybody, which is the original
  * defect this whole module exists to prevent.
  */
+/**
+ * ASKING FOR DETAILS WITHOUT A QUESTION MARK. Review 2026-08-17.
+ *
+ * openQuestions() only sees "?", so an imperative request slipped straight past
+ * it and escalated mid-collection — the owner's exact complaint, in a phrasing
+ * the first fix did not cover:
+ *
+ *   "Please send your name and callback number so I can have a colleague
+ *    call you."
+ *
+ * These are deliberately IMPERATIVE forms only. A commitment that merely
+ * mentions details it will forward — "I'll pass this to a colleague with your
+ * name, number and that you're asking about Internet" — must still escalate, so
+ * bare "your name" is NOT in this list.
+ */
+const REQUEST_FOR_DETAILS = [
+  "please send",
+  "please share",
+  "please provide",
+  "please confirm",
+  "send me your",
+  "share your",
+  "provide your",
+  "let me know your",
+  "may i have your",
+  "can you share",
+  "could you share",
+  "can you provide",
+  "could you provide",
+  "can you confirm your",
+];
+
 const COURTESY_CLOSE = [
   "anything else",
   "something else",
@@ -234,9 +266,9 @@ export function detectHumanPromise(replyText: string | null): PromiseVerdict {
 
   // Any open question that is not a courtesy close means the AI is still
   // gathering — the customer's answer is coming, and it must not be suppressed.
-  const stillCollecting = openQuestions(hay).some(
-    (q) => !COURTESY_CLOSE.some((c) => q.includes(c)),
-  );
+  const stillCollecting =
+    openQuestions(hay).some((q) => !COURTESY_CLOSE.some((c) => q.includes(c))) ||
+    REQUEST_FOR_DETAILS.some((r) => hay.includes(r));
 
   const matched = ESCALATION_PHRASES.filter((p) => hay.includes(p));
   if (matched.length === 0) return { promised: false, matched: [] };

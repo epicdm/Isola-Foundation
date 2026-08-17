@@ -12,6 +12,7 @@ import {
   extractIssueId,
   postAnswer,
   readCharter,
+  timingSafeEqualStr,
   type BridgeConfig,
 } from "../src/bridge.js";
 
@@ -24,6 +25,7 @@ const cfg: BridgeConfig = {
   paperclipAgentKey: "agent-key",
   charterPath: null,
   requestTimeoutMs: 5_000,
+  inboundToken: null,
 };
 
 describe("finding the issue to answer on", () => {
@@ -165,5 +167,45 @@ describe("the charter keeps last-good", () => {
     const text = readCharter("/definitely/not/a/path");
     expect(text.length).toBeGreaterThan(0);
     expect(text).toContain("internal");
+  });
+});
+
+describe("review findings, 2026-08-17", () => {
+  it("#3 was WRONG: a top-level issue beats a nested comment.issueId", () => {
+    // Reported as a bug; measured false. The explicit obj["issue"] check runs
+    // before the recursion, so the top-level issue wins.
+    expect(
+      extractIssueId({
+        comment: { issueId: "11111111-1111-1111-1111-111111111111" },
+        issue: { id: "22222222-2222-2222-2222-222222222222" },
+      }),
+    ).toBe("22222222-2222-2222-2222-222222222222");
+  });
+
+  it("#5: a hung Paperclip returns a failure instead of an unhandled rejection", async () => {
+    const hang = vi.fn(
+      (_u: string, init: RequestInit) =>
+        new Promise<Response>((_res, rej) => {
+          init.signal?.addEventListener("abort", () =>
+            rej(Object.assign(new Error("aborted"), { name: "AbortError" })),
+          );
+        }),
+    );
+    const r = await postAnswer(
+      { ...cfg, requestTimeoutMs: 30 },
+      "ISSUE",
+      "run-1",
+      "a",
+      hang as unknown as typeof fetch,
+    );
+    expect(r.ok).toBe(false);
+    expect(r.status).toBe(0);
+  });
+
+  it("#6: constant-time token compare rejects wrong and short tokens", () => {
+    expect(timingSafeEqualStr("abc123", "abc123")).toBe(true);
+    expect(timingSafeEqualStr("abc123", "abc124")).toBe(false);
+    expect(timingSafeEqualStr("abc123", "abc")).toBe(false);
+    expect(timingSafeEqualStr("", "")).toBe(true);
   });
 });

@@ -235,6 +235,10 @@ export function classifyTurn(payload: {
   content: string | null;
   messageId: number | null;
   senderType?: string | null;
+  /** Chatwoot id of the sending bot, when the sender is a bot. */
+  senderId?: number | null;
+  /** OUR agent bot's id, from the binding. */
+  ourAgentBotId?: number | null;
 }): { role: "customer" | "business"; author: TurnAuthor; content: string } | null {
   if (payload.event !== "message_created") return null;
   if (payload.messageId === null) return null;
@@ -248,12 +252,20 @@ export function classifyTurn(payload: {
     // `agent_bot` is us. Anything else that can post an outgoing public message
     // is a person. A missing sender type is UNKNOWN, never assumed to be the AI:
     // over-crediting the AI is exactly the error this field exists to prevent.
-    const author: TurnAuthor =
-      payload.senderType === "agent_bot"
-        ? "ai"
-        : typeof payload.senderType === "string" && payload.senderType.length > 0
-          ? "human"
-          : "unknown";
+    // "agent_bot" alone is not proof it is OURS. An inbox can carry another
+    // bot, and crediting its words to this agent is the same over-claim the
+    // author column exists to prevent — so when both ids are known and differ,
+    // the turn is attributed to that other bot, not to us.
+    let author: TurnAuthor;
+    if (payload.senderType === "agent_bot") {
+      const known =
+        typeof payload.senderId === "number" && typeof payload.ourAgentBotId === "number";
+      author = known && payload.senderId !== payload.ourAgentBotId ? "human" : "ai";
+    } else if (typeof payload.senderType === "string" && payload.senderType.length > 0) {
+      author = "human";
+    } else {
+      author = "unknown";
+    }
     return { role: "business", author, content: text };
   }
   // activity / template / anything else is not a turn

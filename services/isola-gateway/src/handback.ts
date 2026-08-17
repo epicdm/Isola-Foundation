@@ -393,6 +393,19 @@ export function createHandbackSweeper(deps: HandbackSweeperDeps): HandbackSweepe
           idleSinceMs = candidate.ownershipChangedAtMs;
           if (idleSinceMs !== null) clock = "ownership_changed_at";
         }
+        // FLOOR AT TAKEOVER. Review 2026-08-17: a business turn from a PREVIOUS
+        // episode is not evidence about this one. A human who takes a
+        // conversation over now, and has not replied yet, would otherwise be
+        // measured against yesterday's reply and have it snatched back on the
+        // very first sweep — the opposite of taking over.
+        if (
+          idleSinceMs !== null &&
+          candidate.ownershipChangedAtMs !== null &&
+          idleSinceMs < candidate.ownershipChangedAtMs
+        ) {
+          idleSinceMs = candidate.ownershipChangedAtMs;
+          clock = `${clock}+floored`;
+        }
 
         const idleForMs = idleSinceMs === null ? null : now() - idleSinceMs;
         const idle = idleForMs !== null && idleForMs >= deps.idleMs;

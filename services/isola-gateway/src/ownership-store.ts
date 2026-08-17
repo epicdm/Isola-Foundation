@@ -854,7 +854,28 @@ export function completeHandback(
   });
 }
 
-/** Reconciliation failed -> back to HUMAN_OWNED. The AI does not resume. */
+/**
+ * Reconciliation failed -> back to HUMAN_OWNED. The AI does not resume.
+ *
+ * `allowedFrom` INCLUDES THE POST-RECONCILIATION STATES, and that is the whole
+ * point of this function. Found by review 2026-08-17, and it was wrong in the
+ * most dangerous way — the caller's comment claimed the abort recovered the
+ * conversation, and it could not.
+ *
+ * `performHandback` runs begin -> complete -> settle BEFORE it asks Chatwoot to
+ * mark the conversation pending. So when that Chatwoot call fails, the store is
+ * already at AI_RESUMED (or AI_OWNED after settle) — never HANDING_BACK. With
+ * `allowedFrom: ["HANDING_BACK"]` the abort was REFUSED every time it was
+ * needed, leaving: Chatwoot still `open`, the store saying the AI owns it, and
+ * AI_OWNED absent from HANDBACK_ELIGIBLE_STATES so the sweeper would never look
+ * at it again. Every later customer message suppresses as `status_not_pending`.
+ * Permanently. That is the same strand that silenced a live conversation for
+ * nine hours this morning, reappearing on the failure edge of its own fix.
+ *
+ * Both AI_RESUMED -> HUMAN_OWNED and AI_OWNED -> HUMAN_OWNED are already legal
+ * in ALLOWED_TRANSITIONS, so this widens no authority; it lets the recovery path
+ * actually run.
+ */
 export function abortHandback(
   exec: SqlExecutor,
   input: {
@@ -872,7 +893,7 @@ export function abortHandback(
     operationKind: "handback_failed",
     toState: "HUMAN_OWNED",
     reason: input.reason,
-    allowedFrom: ["HANDING_BACK"],
+    allowedFrom: ["HANDING_BACK", "AI_RESUMED", "AI_OWNED"],
     expectedEpisode: input.episode,
     actorRef: input.actorRef,
     correlationId: input.correlationId ?? null,

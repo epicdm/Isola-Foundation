@@ -26,6 +26,19 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFileSync } from "node:fs";
+import { timingSafeEqual } from "node:crypto";
+
+/** Constant-time compare that does not leak length through early return. */
+export function timingSafeEqualStr(a: string, b: string): boolean {
+  const ab = Buffer.from(a, "utf8");
+  const bb = Buffer.from(b, "utf8");
+  if (ab.length !== bb.length) {
+    // Still do a compare so the timing does not distinguish "wrong length".
+    timingSafeEqual(ab, ab);
+    return false;
+  }
+  return timingSafeEqual(ab, bb);
+}
 
 export interface BridgeConfig {
   port: number;
@@ -38,6 +51,13 @@ export interface BridgeConfig {
   /** The manager charter. Read at boot; see readCharter for the TTL story. */
   charterPath: string | null;
   requestTimeoutMs: number;
+  /**
+   * Shared secret Paperclip must present. Review 2026-08-17: /v1/invoke had NO
+   * inbound auth and binds 0.0.0.0 on the overlay, so anything that could reach
+   * the network could spend Hermes tokens and post comments AS THIS AGENT using
+   * the stored Paperclip key. "Internal network" is not authentication.
+   */
+  inboundToken: string | null;
 }
 
 /**
@@ -214,17 +234,29 @@ export async function postAnswer(
   markdown: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ ok: boolean; status: number }> {
+  // BOUNDED AND CAUGHT. Review 2026-08-17: this call had neither a timeout nor a
+  // catch, so a hung Paperclip left the HTTP handler's promise rejected, the
+  // response never finished, and concurrent invocations piled up behind it.
   const headers: Record<string, string> = {
     "content-type": "application/json",
     authorization: `Bearer ${cfg.paperclipAgentKey}`,
   };
   if (runId !== null && runId.length > 0) headers["x-paperclip-run-id"] = runId;
-  const res = await fetchImpl(`${cfg.paperclipBaseUrl}/api/issues/${issueId}/comments`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ body: markdown }),
-  });
-  return { ok: res.ok, status: res.status };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), cfg.requestTimeoutMs);
+  try {
+    const res = await fetchImpl(`${cfg.paperclipBaseUrl}/api/issues/${issueId}/comments`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ body: markdown }),
+      signal: ctrl.signal,
+    });
+    return { ok: res.ok, status: res.status };
+  } catch {
+    return { ok: false, status: 0 };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export interface InvokeBody {
@@ -243,6 +275,15 @@ export function createBridge(cfg: BridgeConfig, log: (e: Record<string, unknown>
     if (req.method !== "POST" || req.url !== "/v1/invoke") {
       res.writeHead(404).end();
       return;
+    }
+    if (cfg.inboundToken !== null) {
+      const got = req.headers["x-bridge-token"];
+      const presented = Array.isArray(got) ? got[0] : got;
+      if (typeof presented !== "string" || !timingSafeEqualStr(presented, cfg.inboundToken)) {
+        log({ outcome: "unauthorized" });
+        res.writeHead(401).end();
+        return;
+      }
     }
 
     let raw = "";

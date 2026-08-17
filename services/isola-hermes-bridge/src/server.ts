@@ -18,6 +18,10 @@ const cfg: BridgeConfig = {
   paperclipAgentKey: fromFile(process.env["PAPERCLIP_AGENT_KEY_FILE"], "PAPERCLIP_AGENT_KEY"),
   charterPath: process.env["CHARTER_PATH"] ?? null,
   requestTimeoutMs: Number(process.env["REQUEST_TIMEOUT_MS"] ?? 110_000),
+  inboundToken:
+    process.env["BRIDGE_TOKEN_FILE"] === undefined
+      ? null
+      : fromFile(process.env["BRIDGE_TOKEN_FILE"], "BRIDGE_TOKEN"),
 };
 
 const log = (e: Record<string, unknown>): void => {
@@ -34,6 +38,7 @@ createBridge(cfg, log).listen(cfg.port, "0.0.0.0", () => {
     hermesBaseUrl: cfg.hermesBaseUrl,
     paperclipBaseUrl: cfg.paperclipBaseUrl,
     modelPinned: cfg.hermesModel !== null,
+    inboundAuth: cfg.inboundToken !== null,
     charterChars: readCharter(cfg.charterPath).length,
   });
 });

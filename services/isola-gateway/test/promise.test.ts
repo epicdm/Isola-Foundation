@@ -199,3 +199,23 @@ describe("DO NOT HAND OVER MID-COLLECTION — owner report, 6737, 2026-08-17", (
     ).toBe(true);
   });
 });
+
+describe("collecting WITHOUT a question mark — review finding, 2026-08-17", () => {
+  it("does not escalate on an imperative request for details", () => {
+    const v = detectHumanPromise(
+      "Please send your name and callback number so I can have a colleague call you.",
+    );
+    expect(v.promised).toBe(false);
+    expect(v.deferred).toBe("still_collecting");
+  });
+
+  it("STILL escalates when the reply merely mentions details it will forward", () => {
+    // The commitment turn names the same words ("your name", "number") but asks
+    // for nothing. Deferring here would mean never escalating at all.
+    expect(
+      detectHumanPromise(
+        "I'll pass this to a colleague with your name, number and that you're asking about Internet.",
+      ).promised,
+    ).toBe(true);
+  });
+});
