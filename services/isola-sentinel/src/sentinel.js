@@ -65,6 +65,14 @@ const CFG = {
     process.env.SENTINEL_EGRESS_CLOSE_CONDITION ||
     "open until the Compose migration moves isola_chat and isola_chatwoot-sidekiq onto declared networks",
   ledgerUrl: readFileOr("SENTINEL_LEDGER_URL_FILE", process.env.SENTINEL_LEDGER_URL),
+  // The Chatwoot database, read-only. Used for the outbound-failure signal.
+  chatwootUrl: readFileOr("SENTINEL_CHATWOOT_URL_FILE", process.env.SENTINEL_CHATWOOT_URL),
+  failedOutboundWindowMs: Number(process.env.SENTINEL_FAILED_OUTBOUND_WINDOW_MS || 900_000),
+  // A CONNECT through the egress proxy to a host that MUST be allowed.
+  egressProxyHost: process.env.SENTINEL_EGRESS_PROXY_HOST || "",
+  egressProxyPort: Number(process.env.SENTINEL_EGRESS_PROXY_PORT || 8888),
+  egressProxyAllowed: (process.env.SENTINEL_EGRESS_PROXY_ALLOWED || "graph.facebook.com,lookaside.fbsbx.com")
+    .split(",").map((s) => s.trim()).filter(Boolean),
   smtpHost: process.env.SENTINEL_SMTP_HOST || "",
   smtpPort: Number(process.env.SENTINEL_SMTP_PORT || 2525),
   smtpUser: process.env.SENTINEL_SMTP_USER || "",
@@ -175,6 +183,164 @@ async function checkStuckDeliveries() {
   } finally {
     await client.end().catch(() => {});
   }
+}
+
+/**
+ * OUTBOUND ATTEMPTED AND NEVER DELIVERED — the missing twin of the stuck-delivery check.
+ *
+ * checkStuckDeliveries asks "was an inbound accepted and never answered". This asks the
+ * same question from the other side. Between them they cover the whole conversation.
+ *
+ * WHY IT IS GENERAL AND NOT A PROXY CHECK. Chatwoot's send path ends in:
+ *
+ *     handle_error(response, message)  ->  message.status = :failed; message.save!
+ *     ...and RETURNS NIL WITHOUT RAISING.
+ *
+ * SendReplyJob therefore completes successfully, Sidekiq never sees a failure, and there
+ * is NO RETRY. That path is taken for ANY non-2xx from Meta — an expired token, a
+ * rejected template, a rate limit, a flagged number, a closed 24-hour window, a proxy
+ * denial, or a cause nobody has thought of yet. Every one of them silently marks a
+ * customer's reply failed with nobody watching.
+ *
+ * This is a PRE-EXISTING property of Chatwoot, true on deepseek today. It was not
+ * introduced by the egress proxy; the proxy work is how it was found.
+ *
+ * A proxy-specific probe would catch exactly one of those causes. This catches all of
+ * them — and `external_error` says which, so the alert carries its own diagnosis.
+ *
+ * NOTE ON THE SCHEMA, VERIFIED NOT ASSUMED: `external_error` is NOT a column. Chatwoot
+ * stores it in the `content_attributes` jsonb. Message.statuses failed=3;
+ * Message.message_types outgoing=1, template=3 — read from the running app, because a
+ * wrong enum here would make this check silently count nothing.
+ */
+async function checkFailedOutbound() {
+  const key = "failed_outbound";
+  if (!CFG.chatwootUrl) return { key, ok: true, summary: "chatwoot db not configured", skipped: true };
+  const client = new Client({ connectionString: CFG.chatwootUrl, connectionTimeoutMillis: 10_000 });
+  try {
+    await client.connect();
+    const { rows } = await client.query(
+      `SELECT count(*)::int AS failed,
+              coalesce(
+                string_agg(DISTINCT nullif(content_attributes->>'external_error',''), ' | '),
+                '(no external_error recorded)'
+              ) AS reasons,
+              min(inbox_id) AS an_inbox
+         FROM messages
+        WHERE message_type IN (1, 3)
+          AND status = 3
+          AND created_at > now() - ($1 || ' milliseconds')::interval`,
+      [String(CFG.failedOutboundWindowMs)],
+    );
+    const r = rows[0];
+    if (r.failed > 0) {
+      return {
+        key,
+        ok: false,
+        summary: `${r.failed} outbound message${r.failed === 1 ? "" : "s"} FAILED and will not be retried`,
+        detail:
+          `EPIC tried to reply to a customer and the reply did not go out.\n\n` +
+          `Reason(s) Chatwoot recorded:\n  ${r.reasons}\n\n` +
+          `Example inbox: ${r.an_inbox ?? "n/a"}. Window: last ${Math.round(CFG.failedOutboundWindowMs / 60000)} min.\n\n` +
+          `THERE IS NO RETRY. Chatwoot's handle_error marks the message failed and\n` +
+          `returns without raising, so Sidekiq never sees a failure. The message is\n` +
+          `lost unless a human resends it.\n\n` +
+          `If the reason mentions a proxy or 403 Filtered, the egress allowlist is\n` +
+          `wrong — check the egress_proxy_refused alert, which names which host.`,
+      };
+    }
+    return { key, ok: true, summary: "no failed outbound messages" };
+  } catch (e) {
+    return {
+      key: "chatwoot_db_unreachable", ok: false,
+      summary: `chatwoot database unreachable: ${e.message}`,
+      detail: "The sentinel cannot read `messages`, so it CANNOT see a failed reply. Blind, not healthy.",
+    };
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
+/**
+ * THE EGRESS PROXY, PROBED THE ONLY WAY THAT MEANS ANYTHING: can it still reach a host
+ * that MUST be allowed?
+ *
+ * Not "is the container up" — that was true through both of this month's outages. And
+ * not "is the proxy reachable" either: a proxy that answers but refuses graph.facebook.com
+ * is the failure that loses messages, because a 403 is a real HTTP response and Chatwoot
+ * treats it as a permanent Meta error rather than a transport fault.
+ *
+ * ASYMMETRY, STATED SO IT IS NOT ASSUMED AWAY:
+ *   This catches UNDER-permissive drift — a lost filter file, a typo, a host that moves.
+ *   It does NOT catch OVER-permissive drift. Adding a host to the allowlist refuses
+ *   nothing and fires nothing.
+ *   Over-permissive drift is covered instead by image_drift: the filter is BAKED INTO
+ *   THE IMAGE, so it cannot be changed without producing a new image id, which the
+ *   declared-vs-running walk already compares.
+ *   Residual gap, named rather than papered over: editing /etc/tinyproxy/filter inside
+ *   a running container changes no image id. Nothing here detects that.
+ */
+function checkEgressProxy() {
+  const key = "egress_proxy_refused";
+  if (!CFG.egressProxyHost) return { key, ok: true, summary: "egress proxy not configured", skipped: true };
+  const host = CFG.egressProxyAllowed[0];
+  return new Promise((resolve) => {
+    const req = http.request({
+      host: CFG.egressProxyHost, port: CFG.egressProxyPort,
+      method: "CONNECT", path: `${host}:443`, timeout: 15_000,
+    });
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+
+    // THE STATUS CODE MUST BE CHECKED HERE, AND THIS IS WHY.
+    //
+    // Node fires 'connect' for ANY response to a CONNECT request — including
+    // tinyproxy's 403 "Filtered". It does NOT emit 'response' for CONNECT at all.
+    // The first version of this check resolved ok:true from 'connect' without reading
+    // res.statusCode, and put the refusal logic in a 'response' handler that can never
+    // run. THE CHECK WAS STRUCTURALLY INCAPABLE OF FAILING.
+    //
+    // Caught only by firing it on purpose: probing example.com reported "TUNNEL OK"
+    // from the sentinel while rails got 403 and the proxy's own log said
+    // `Proxying refused on filtered domain "example.com"` for every attempt. The proxy
+    // was right; the instrument was wrong. A monitor that cannot report failure is
+    // worse than no monitor, because its silence reads as health.
+    const judge = (res, socket) => {
+      if (socket) socket.destroy();
+      if (res.statusCode === 200) {
+        return done({ key, ok: true, summary: `egress proxy tunnels to ${host}` });
+      }
+      done({
+        key, ok: false,
+        summary: `egress proxy REFUSED an allowed host (${host}: HTTP ${res.statusCode})`,
+        detail:
+          `cw-egress-proxy answered but would not tunnel to ${host}, which is on the\n` +
+          `allowlist. Chatwoot cannot reach Meta.\n\n` +
+          `THIS LOSES MESSAGES RATHER THAN DELAYING THEM. A 403 is a real HTTP response,\n` +
+          `so Chatwoot's handle_error marks the reply permanently failed and Sidekiq does\n` +
+          `not retry. Contrast a proxy that is DOWN: that raises a connection error, which\n` +
+          `Sidekiq retries 3 times over 1-4 minutes and usually survives.\n\n` +
+          `Likely cause: /etc/tinyproxy/filter missing or wrong. FilterDefaultDeny Yes\n` +
+          `means an absent filter denies everything — fail-closed for security, LOSSY for\n` +
+          `delivery. Those are not the same word.`,
+      });
+    };
+    req.on("connect", (res, socket) => judge(res, socket));
+    req.on("response", (res) => judge(res, null)); // not emitted for CONNECT; kept as a belt
+    req.on("error", (e) => done({
+      key, ok: false,
+      summary: `egress proxy unreachable (${e.code || e.message})`,
+      detail:
+        `cw-egress-proxy did not answer at ${CFG.egressProxyHost}:${CFG.egressProxyPort}.\n\n` +
+        `Chatwoot cannot reach Meta at all: no sends, no media, no health checks. The\n` +
+        `customer-visible symptom is "messages stop going out", which points at Meta or\n` +
+        `at Chatwoot and NOT at a small container nobody remembers adding.\n\n` +
+        `Sends raise a connection error on this path, so Sidekiq retries 3 times over\n` +
+        `roughly 1-4 minutes. A short restart is survivable; a long outage is not.`,
+    }));
+    req.on("timeout", () => { req.destroy(); done({ key, ok: false, summary: "egress proxy timed out" }); });
+    req.end();
+  });
 }
 
 async function checkHttp(target) {
@@ -410,6 +576,10 @@ async function sendEmail(subject, body) {
 async function runOnce() {
   const results = [];
   results.push(await checkStuckDeliveries());
+  // Inbound accepted-and-unanswered, then outbound attempted-and-undelivered. The same
+  // question from both sides; together they cover the whole conversation.
+  results.push(await checkFailedOutbound());
+  results.push(await checkEgressProxy());
   results.push(await checkReceivablesOutput());
   results.push(checkEgressExposure());
   results.push(await checkRestartPolicyDrift());

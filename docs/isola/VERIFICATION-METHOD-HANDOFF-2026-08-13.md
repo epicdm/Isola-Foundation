@@ -1,5 +1,14 @@
 # Verification method — handoff, 2026-08-13
 
+> **All twelve rules are instances of one error:**
+> ## Concluding from the artefact in front of you rather than the one that would settle it.
+>
+> The host file instead of the file the process reads. The container's logs instead of the
+> rows the service wrote. The dev database instead of production. The first twenty results
+> instead of all 735. Each rule below is that mistake wearing different clothes, and each was
+> found the same way — by asking what evidence would actually decide the question, and
+> noticing it was not the evidence in hand.
+
 Rules earned during one session, each by being violated first. They are ordered by how much
 time they cost when ignored.
 
@@ -110,6 +119,25 @@ provides none. Rewritten, not run.
 
 Same family: an acceptance suite recording fewer checks than the contract names must fail the
 gate, and NOT-RUN is never PASS.
+
+## 11b. Container logs are not service history
+
+Rule 2 says verify as the *process* sees it. Its missing sibling: **one container's logs are
+not the service's history.** A container is a process instance; the service outlived it.
+
+`isola-runtime` was read as idle from a single container's logs. The service had in fact run
+**~24 hours on real traffic — 54 idempotency records, 32 conversation mappings — and then
+stopped.** The logs of the container that happened to be running said none of that, and
+nothing about them looked partial.
+
+The durable record is the one that survives a restart: rows in the database, not the ring
+buffer of whichever instance is up. Before concluding a service is idle, unused, or dead,
+check what it *wrote*, not what its current container remembers. `docker logs` has no
+memory of the container it replaced.
+
+Same shape as the other correction from that pass: **a negative was stated about host03's
+routers without ever having searched for the hostname.** Both are the same error —
+concluding from the artefact in front of you rather than the one that would settle it.
 
 ## 12. Redact inside the read, never after
 

@@ -111,8 +111,16 @@ const RULES = [
     // character so there is no boundary before SECRET. That miss was found by
     // review, not by the tests here — `AWS_SECRET_ACCESS_KEY=` is not an
     // attack, it is Tuesday.
+    //
+    // MULTI-SEGMENT PREFIX FIX 2026-08-16 — the single `_?` above only tolerates
+    // ONE underscore-delimited segment before the keyword. PAPERCLIP_API_TOKEN
+    // has two ("PAPERCLIP_" + "API_") and leaked in plaintext because of it —
+    // `\b` never anchors between them since `_` is a word character throughout,
+    // so the regex could never reach "TOKEN" as the keyword. Any real two-plus
+    // segment key name (STRIPE_WEBHOOK_SECRET, SERVICE_ACCOUNT_KEY, ...) had the
+    // same hole. `(?:[A-Za-z0-9]+_)*` allows zero or more such segments.
     name: 'assignment',
-    re: /\b([A-Za-z0-9]*_?)(secret|secretkey|secret_key|password|passwd|pwd|token|api_?key|access_?key|access_?token|refresh_?token|auth_?token|client_?secret|private_?key|sessionkey|session_key|accesskeyid|secretaccesskey)([A-Za-z0-9_]*)(\s*[:=]\s*)(?!\$\{?[A-Za-z_])(?!%[A-Za-z_])(["']?)([^\s"',;]{4,})\5/gi,
+    re: /\b((?:[A-Za-z0-9]+_)*)(secret|secretkey|secret_key|password|passwd|pwd|token|api_?key|access_?key|access_?token|refresh_?token|auth_?token|client_?secret|private_?key|sessionkey|session_key|accesskeyid|secretaccesskey)([A-Za-z0-9_]*)(\s*[:=]\s*)(?!\$\{?[A-Za-z_])(?!%[A-Za-z_])(["']?)([^\s"',;]{4,})\5/gi,
     replace: (_m, pre, key, post, sep, quote) =>
       pre + key + post + sep + quote + '[REDACTED:' + key.toLowerCase() + ']' + quote,
   },

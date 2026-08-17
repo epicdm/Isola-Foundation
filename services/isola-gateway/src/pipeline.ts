@@ -17,7 +17,9 @@
  *     could not be recorded, the customer is told nothing at all.
  */
 import type { Binding } from "./bindings.js";
-import type { ChatwootApi, ChatwootTarget } from "./chatwoot.js";
+import { readConversationHistory } from "./chatwoot.js";
+import { detectHumanPromise } from "./promise.js";
+import type { ChatwootApi, ChatwootTarget, ConversationHistory } from "./chatwoot.js";
 import {
   filterApprovedAttributes,
   filterApprovedLabels,
@@ -156,6 +158,7 @@ export function renderFailureNote(args: {
 export function buildRuntimeContext(
   binding: Binding,
   payload: WebhookPayload,
+  history?: ConversationHistory,
 ): Record<string, unknown> {
   return {
     source: "chatwoot",
@@ -169,6 +172,14 @@ export function buildRuntimeContext(
       messageId: payload.messageId,
       customAttributes: payload.customAttributes,
     },
+    // PRIOR TURNS. Absent until 2026-08-17: the model saw ONE message and
+    // nothing before it, so it greeted a customer mid-thread as a stranger and
+    // re-asked for details it had just been given. Measured as
+    // `contextOriginalBytes` FLAT across eight turns of one conversation.
+    // Excludes private notes by construction — see `readConversationHistory`.
+    ...(history === undefined
+      ? {}
+      : { history: history.turns, historyTruncated: history.truncated }),
     message: {
       role: "customer",
       content: payload.content ?? "",
@@ -540,12 +551,42 @@ export async function processDelivery(
   // the runtime call idempotent across those retries too.
   const runId = job.deliveryId ?? correlationId;
 
+  // PRIOR TURNS, from the conversation record Chatwoot already gives us.
+  // DEGRADES, NEVER FAILS: an unreadable conversation costs the model its
+  // memory of this thread, which is exactly today's behaviour — it must never
+  // cost the customer their reply. (conversations#show is also the call that
+  // 500s once a team is assigned on some builds, so this WILL fail sometimes.)
+  let history: ConversationHistory | undefined;
+  try {
+    history = readConversationHistory(await deps.chatwoot.getConversationRecord(target));
+  } catch (err) {
+    deps.logger.warn({
+      ...base,
+      event: "context",
+      outcome: "history_unavailable",
+      detail: err instanceof Error ? err.message : "conversation read failed",
+    });
+  }
+
+  // OBSERVABILITY, and it is not decoration. A history of ZERO turns and a
+  // working history were indistinguishable in the logs, so a fetch that
+  // silently returned nothing survived an entire live test looking green:
+  // `conversations#show` carries ONE message, not the thread, and nothing said
+  // so. If a state cannot be observed from outside, the process must declare it.
+  deps.logger.info({
+    ...base,
+    event: "context",
+    outcome: history === undefined ? "history_absent" : "history_built",
+    historyMessageCount: history?.turns.length ?? 0,
+    historyTruncated: history?.truncated ?? false,
+  });
+
   const result = await deps.runtime.invoke({
     templateId: binding.templateId,
     exposure: "PUBLIC",
     agentId: binding.paperclipAgentId,
     runId,
-    context: buildRuntimeContext(binding, payload),
+    context: buildRuntimeContext(binding, payload, history),
   });
 
   // `result.outcome` has already been derived from the runtime's structured
@@ -626,6 +667,60 @@ export async function processDelivery(
     }
 
     const alreadyPresent = sent.kind === "already_present" || sent.kind === "skipped";
+
+    // THE AGENT PROMISED A HUMAN. Honour it.
+    // The reply is already with the customer — escalating AFTER the send is
+    // deliberate: the promise has been made, so the worst outcome is a promise
+    // nobody hears. Escalating before the send would risk the reverse.
+    const promise = detectHumanPromise(answer);
+    if (promise.promised) {
+      deps.logger.info({
+        ...base,
+        event: "promise",
+        outcome: "human_promised",
+        matchedPhrases: promise.matched,
+        detail: "the reply promised a human; escalating so someone is actually told",
+      });
+      const visible = await escalate(
+        deps,
+        job,
+        target,
+        writeDeps,
+        writes,
+        "agent_requested_human",
+      );
+      await annotate(deps, job, target, writeDeps, writes, "escalated");
+      deps.logger.info({
+        ...base,
+        event: "delivery",
+        outcome: "replied_and_escalated",
+        runtimeOutcome: result.outcome,
+        runtimeCorrelationId: result.correlationId,
+        answerChars: answer.length,
+        messagePostedNow: sent.kind === "sent",
+        chatwootMessageId: sent.kind === "skipped" ? null : sent.messageId,
+        escalationVisible: visible,
+        matchedPhrases: promise.matched,
+        durationMs: deps.now() - job.startedAtMs,
+      });
+      // DO NOT COMPLETE AN INVISIBLE ESCALATION.
+      // If neither the status change nor the assignment landed, ownership has
+      // already suppressed the AI and Chatwoot shows nothing: the conversation
+      // is owned by NOBODY. Leaving the delivery unfinished keeps the ledger row
+      // claimed so the recovery sweeper retries it. This mirrors the guard the
+      // failure path above already had — review 2026-08-17 found this branch
+      // finishing unconditionally, which is the exact defect this work removes.
+      if (visible) await finish("replied");
+      return {
+        outcome: "replied",
+        runtimeOutcome: result.outcome,
+        customerMessageSent: !alreadyPresent,
+        escalated: true,
+        handoffBlocked: false,
+        needsRetry: !visible,
+      };
+    }
+
     await annotate(deps, job, target, writeDeps, writes, "replied");
     deps.logger.info({
       ...base,

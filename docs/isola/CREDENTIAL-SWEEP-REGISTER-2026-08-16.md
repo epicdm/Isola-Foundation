@@ -2,6 +2,68 @@
 
 **Status: OPEN. Nothing in this file has been rotated.**
 
+> ### REGISTER LANGUAGE — no row is ever "purged" as a resolution
+>
+> A purge removes a value from files that existed **at scan time**, in the **roots the
+> scan walked**. It cannot bind a concurrent writer, and it does not change the
+> credential. So rows say **CONTAINED AT `<UTC timestamp>`, roots: `<paths>`** — never
+> "purged", never "resolved", never "closed".
+>
+> **THE ROOTS ARE PART OF THE CLAIM.** A purge that walked three trees says nothing
+> about a fourth. **THE TIMESTAMP IS PART OF THE CLAIM TOO**: a verification of a
+> mutable system decays, and must be re-stated or re-run, never inherited. Proven the
+> hard way on C-10 — `0 remaining` was true when written and false forty minutes on.
+>
+> **Only ROTATION closes a row.** Containment is a statement about a moment.
+>
+> ### STANDARD CHECKS — every row answers these
+>
+> 1. **Where does it live**, and **does the git work tree IGNORE it?**
+>    **A CREDENTIAL IN A GIT WORK TREE IS ONE COMMAND FROM PERMANENT.** Everything else
+>    in this register is containable by a purge; a *committed* credential is not
+>    contained, it is **distributed** — into every clone, every fork, every mirror, and
+>    into history that rewriting only partly reaches. That makes ignore-file coverage a
+>    **control, not tidiness.** Two rows already hit this class at the same workspace
+>    root: C-09 (`magnus.txt`, money-moving) and the `.paperclip-cli-approval-url.txt`
+>    find (an approval URL **is** a credential — the token rides in the query string).
+>    Both were untracked **and un-ignored**, one `git add -A` from permanent, in a tree
+>    **shared by two agent lanes**.
+> 2. **What does it grant**, and what depends on it.
+> 3. **Placement decision** — never merely reissue into the same bad location.
+> 4. **Was it used**, answered honestly (a live credential in daily use has no unused
+>    baseline, and that is a real answer, not a clean bill).
+>
+> ### API, NOT SQL — and the reason is encoding, not style
+>
+> **The database does not store the value. It stores a representation the application
+> knows how to interpret.** Writing past the application produces a row that **looks
+> right and behaves wrong** — and every shape-based check passes. Three instances on
+> 2026-08-16, which is why this is a law and not a preference:
+>
+> - `agent_bots.secret` is **ActiveRecord-encrypted JSON**. Reading the raw column
+>   yields ciphertext that is the right length and the right shape and would have
+>   failed HMAC verification **silently**, surfacing later as "the bot does not respond".
+> - `agent_api_keys.key_hash` is a **sha256 hash**. A SQL insert could not have produced
+>   a working key **at all** — Paperclip's own `POST /api/agents/{id}/keys` was the only
+>   instrument that could.
+> - Chatwoot's `provider_config` and Paperclip's `adapter_config` are **jsonb blobs that
+>   accumulate secrets** — which is separately why `SELECT *` on them is a credential
+>   read (X-03).
+>
+> **The distinction the next person needs**, so this is not read as a flat ban: the
+> `jsonb_set` used to correct `adapter_config.url` was a **plain string field**, applied
+> in a transaction that aborted unless the current value matched exactly, with all nine
+> keys verified intact afterwards. **That is not the same class as writing an ENCODED
+> field.** The rule protects fields whose encoding the application owns —
+> encrypted, hashed, or derived. Prefer the API always; understand that for an encoded
+> field it is not a preference but the only thing that works.
+>
+> **Standard scan roots** used by every containment claim below, unless a row says
+> otherwise:
+> `C:/Users/girau/.claude/projects/C--epic-workspace-Isola-Foundation` (ALL sessions,
+> including other lanes' transcripts and subagent files) and this session's scratch +
+> tool-results tree. Depth 4.
+
 Owner ruling, 2026-08-16, recorded not argued: **all compromised secrets rotate in
 one sweep, as the last thing before go-live.** Not piecemeal, not mid-build.
 Rotating during the build makes every subsequent failure ambiguous — was it the
@@ -78,6 +140,7 @@ under pressure:
 | **PLACEMENT DECISION** | **No placement change. The placement is already correct** — injected at provision time from the approved secret store, never committed. This is the one row where the failure was **not** where the secret lived but **how the live file was read**. Rotate the value; change nothing structural. |
 | **Control added** | The read discipline is now enforced rather than remembered: `CREDENTIAL_SURFACE_RE` covers `.ya?ml` with the full reader set, so a raw read of a provisioned `.paperclip.yaml` is rewritten through the redactor. Verified — `Authorization: "Bearer rtp_…"` → `Authorization: "Bearer [REDACTED:bearer]"`. Nothing else would have caught it: a provisioned yaml is not `SECRET_FILE`-shaped and the committed template is clean. |
 | **Was it used?** | **Not checked.** Unlike C-01/C-02/C-03 I have run no usage probe for this token. Doing so needs the Paperclip request log or equivalent. **Recorded as an open question, not as a negative.** |
+| **RE-EXPOSED 2026-08-16, ESTATE lane, different vector** | Same value, confirmed by byte-match. This time via `SELECT *`-shaped Postgres read of `agents.adapter_config` on `isola_ai-db` (host03) while verifying fd2867d1's binding — not a yaml read, so C-04's own "control added" (the yaml-reader redactor) does not cover this vector. **Purged**: byte-level in-place patch (same method as C-01's SIP-secret purge), needle assembled from fragments, run against every `.claude/projects/C--epic-workspace-Isola-Foundation` transcript and this session's scratch/tool-results roots. 10 occurrences overwritten across 4 files — **3 of those 4 files were prior sessions, not this one**, confirming the token had already leaked before tonight. 0 remaining after a re-read verification pass. **New standing law from this exposure**: `SELECT *` on a table with a config/secret-bearing column is a credential read — enumerate columns, never wildcard. Not yet enforced by any hook; Bash-only guard coverage (see "Coverage boundary" below) would not catch a `psql` SELECT either way, since the sensitive text arrives via a remote container's stdout, not a local credential-surface file. |
 
 ### C-09 — Magnus API key + secret in a plaintext file at the workspace root
 
@@ -93,6 +156,90 @@ under pressure:
 | **Why it was worse than first recorded** | The file was **untracked AND un-ignored inside a git work tree rooted at `C:\epic-workspace`**. A single `git add -A` in that repo would have committed a money-moving credential — and this workspace is shared by two agent lanes. |
 | **Was it used?** | **Not answerable by this method, and that is the honest status — not "clean".** This is a live operational credential in daily use by bff-v2, so there is no unused baseline against which misuse would stand out. A usage probe cannot separate legitimate traffic from abuse here. |
 
+### C-10 — Paperclip **board** token (`pcp_board_…`) in bff-v2's `.env` — HIGHEST PRIVILEGE FOUND TO DATE
+
+| field | value |
+|---|---|
+| **What it is** | `PAPERCLIP_API_TOKEN=pcp_board_…`, a board-level Paperclip credential — the level above an agent key. Per the isola-runtime deploy comments, an **agent key cannot mutate without a run id Paperclip never issues (verified 401→500 both call sites, 2026-08-15)**, which is exactly why the runtime instead holds a board-scoped key for write-backs. A board token has no such restriction: it is the level that can write agent **instructions**, the thing agent keys are 403'd from. **This is the highest-privilege credential found in this register so far — worse than C-09's money-moving Magnus key**, because it is unscoped write access to an entire agent platform (create/edit/pause/instruct every agent, not adjust one numeric field. |
+| **Where it lives** | `/opt/bff-v2/.env` on deepseek, line 125, alongside `PAPERCLIP_API_URL=http://127.0.0.1:3200` — deepseek's own compose Paperclip (`paperclip-paperclip-1`, company `48f327a1-…`, 14 agents, 167 issues), **not** the host03 instance. |
+| **Exposed** | 2026-08-16, by me (ESTATE lane), reading `PAPERCLIP_API_URL` from bff-v2's `.env` for the four-pointer Paperclip-instance resolution (see below). Ran through `secret-redact.js` in the same pipeline, but **the redactor did not match this line** — `PAPERCLIP_API_TOKEN` is not one of its known key-name patterns, so the value passed through in clear. |
+| **Why the guard/redactor missed it** | Key-name-pattern miss — the same failure class VOICE's redactor closed hours earlier for `AWS_SECRET_ACCESS_KEY=` (underscores breaking a `\b` boundary, plus bare prefixed tokens). **This is a cross-lane propagation gap, not a local one**: a fix made to one copy of a shared-class control did not reach the other copy, and the class reappeared — this time on a board token. Recorded as a floor item, trigger "next time either redactor is opened" — not fixed tonight; VOICE's fix is already written and tested (195 green) and should be the one ported, not reinvented here. |
+| **Depends on it** | bff-v2's Paperclip integration on deepseek (persona/agent reads for voice, per VOICE lane's R1 work). Rotating affects that path only — confirmed unrelated to the host03 WhatsApp/gateway path, which uses its own separate credential chain (`PAPERCLIP_API_KEY_FILE` swarm secret on `isolart_runtime`, already tracked, not this token). |
+| **PLACEMENT DECISION** | Deferred to the sweep per the standing rule (value unchanged today, so not yet a rotation). Placement question to resolve at sweep time: **does bff-v2 need board-level access at all**, or does its actual usage (persona/agent reads) fit an agent-scoped or read-scoped credential instead — narrowing this the same way C-09's AMI end-state narrows `ami-listener`. |
+| **Was it used illegitimately?** | Not checked — this is bff-v2's live, in-daily-use credential for its own Paperclip integration, so (same as C-09) there is no unused baseline to probe against. |
+| **Purged** | Same run as C-04's re-exposure purge, same method. 7 occurrences overwritten across 3 files — **2 of the 3 were prior sessions**, meaning this token was also already exposed before tonight, independent of this read. 0 remaining after verification. |
+| **CONTAINMENT STATUS** | **CONTAINED AT 2026-08-16T15:38:05Z**, standard roots. NOT resolved, NOT closed — the credential is unchanged and remains valid. **Source-stop in force from 2026-08-16: `/opt/bff-v2/.env` is not to be read again by either lane, for any reason.** Every fact needed from it is already recorded (`PAPERCLIP_API_URL=http://127.0.0.1:3200`, `PAPERCLIP_FANOUT_ENABLED=1`, and this token's existence and privilege level). |
+| **Why the freeze still holds for THIS row, reasoning recorded so it can be challenged** | The obvious response to "purging cannot hold this" is *rotate it now*. Deliberately not doing that: `pcp_board_…` is **bff-v2's live credential for its own Paperclip integration** — fanout, tenant provisioning, admin teardown, skills catalogue, EMA dispatch. Rotating means changing a live service's config on deepseek **and restarting it, mid-cutover** — precisely what the owner's freeze exists to prevent — while the exposure is to **local transcripts, not the internet**. So: contain the symptom, stop the source, rotate on the owner's day. **TRIGGER NAMED IN ADVANCE: if this token is exposed a FOURTH time after the source-stop is in force, the source-stop has failed and a SCOPED rotation exception goes to the owner — this one credential, not the sweep.** |
+| **THE PURGE DID NOT HOLD — and this is the row's most important line** | A later **independent verify-only scan** (no patching, with two known-positive controls in the same run) found the token **back: 7 fresh occurrences in `…/fef820c8-….jsonl`, a DIFFERENT session's transcript, mtime 15:14:59Z — after my purge completed at ~14:25.** That is a **concurrent lane** (VOICE, by timing and subject) that read the same `/opt/bff-v2/.env` independently and was still writing. Re-purged; all six session-exposed values now verify absent against a proven-working scanner. **LAW: a purge is scoped to what exists at scan time and to the roots it walks. It cannot bind a concurrent writer, and a lane that re-derives the value re-exposes it minutes later.** The earlier `remaining=0` was true when written and false forty minutes on. **Purging is containment, never remediation — only rotation ends this row**, and this token is now the strongest argument in the register for that, because it is the highest-privilege credential in it and has now been independently exposed by two lanes. |
+| **Second-order note** | The background purge process reported `exit code 127` to the harness — an artifact of the `Stop-Process` used to clear it after it hung on a stdout pipe with its work already complete (4.3s CPU over 74 minutes). **The failure code described the kill, not the purge**; believing it would have re-run a completed job, and disbelieving the *summary* is what surfaced the genuine re-exposure above. Verify the check before believing it about the system — in both directions. |
+
+### C-11 — Two Chatwoot agent-bot secret/token pairs, read via unredacted `cat` of a swarm secret
+
+| field | value |
+|---|---|
+| **What it is** | Two `agentBotSecret` / `agentBotAccessToken` pairs from `isolagw_gateway`'s live `GATEWAY_BINDINGS_JSON_FILE` — one per bound tenant (`isola-uat-a` → Chatwoot inbox 4; `epic-frontdesk-6737` → the **legacy** Chatwoot at `inbox.epic.dm`, inbox 46). |
+| **What they grant** | The bot secret authenticates the gateway's agent-bot identity to Chatwoot for that inbox (message read/write as the bot). Scoped per-tenant, not estate-wide. |
+| **Where it lives** | Swarm secret `gateway_bindings`, mounted at `/run/secrets/gateway_bindings` inside `isolagw_gateway`. Immutable by design — minting `isola_gw_bindings_v3` (in progress) will carry these same two entries forward unchanged plus one new one. |
+| **Exposed** | 2026-08-16, by me (ESTATE), running `docker exec … cat /run/secrets/gateway_bindings` directly — **the exact mistake the C-04 re-exposure entry above had just identified as a new law** (`SELECT *`/wildcard-shaped reads on config-bearing stores are credential reads). I read this file straight, not through `secret-redact.js`, immediately after writing that law down. `isola-guard`'s `credential-surface-redact` pattern does not currently match `/run/secrets/*` paths, so nothing stopped it. |
+| **CONTAINED AT 2026-08-16T15:38:05Z**, standard roots | Byte-level, needles from fragments. `uat-a` secret: 2 files, 6 occurrences. `uat-a` token: 1 file, 2 occurrences. `frontdesk-6737` secret: **5 files (including two other sessions' subagent transcripts and an ssh-deepseek tool-result file), 20 occurrences** — already broadly exposed before today. `frontdesk-6737` token: 4 files, 8 occurrences. All four verified absent by an **independent verify-only scan carrying two known-positive controls in the same run** — without those controls a zero would not have been evidence. **NOT resolved: these credentials are unchanged and remain valid.** Source-stop: `/run/secrets/*` is not to be read again by either lane; ask for the key NAME and its presence instead. |
+| **PLACEMENT DECISION** | Deferred to sweep, not rotated tonight (freeze holds). Structural gap to close regardless of rotation timing: **extend `isola-guard`'s credential-surface pattern to `/run/secrets/*` and any `docker exec … cat` of a mounted secret**, the same class of miss as C-02's `sed`-on-SIP-config gap that got closed same day. |
+| **Was it used?** | Not checked — live in-use gateway credentials for two active tenants, no unused baseline to probe against, same as C-09/C-10. |
+
+### C-12 — Paperclip AGENT-SCOPED read-only key for the voice context path (CREATED 2026-08-16, deliberately)
+
+**This row is not an exposure. It is a credential we created on purpose to retire the use
+of a higher-privilege one.** Creating a credential is not a rotation, so the freeze is
+untouched — same reasoning as the Magnus IP scoping and the C-01 deploy-key decision.
+
+| field | value |
+|---|---|
+| **What it is** | Paperclip **agent-scoped** API key, `pcp_…` (**not** `pcp_board_…`), id `f11aaba3-b029-4f0c-bcc1-dc45f765c90c`, name `voice-context-readonly-2026-08-16`, minted on agent `fd2867d1` in company `3ed3869b` on the **host03** Paperclip. |
+| **Why it exists** | The voice persona proof previously required a **board** token to read an instructions bundle — the highest-privilege credential we own, used for a read. C-10 is the same class of defect. This key retires that collision permanently. |
+| **Minted through the API, not SQL** | `POST /api/agents/{id}/keys` → `201`. Keys are stored as a `sha256` **hash** (`agent_api_keys.key_hash`), so a SQL insert could not have produced a usable key anyway — the engine's own endpoint is the only correct instrument. |
+| **Where it lives** | `/home/epicdm/.isola/voice-paperclip-agent-readonly.key` on **deepseek**, `0600`, owner `epicdm` (the user running bff-v2), 52 bytes. Directory `0700`. **Additive only** — one new file; nothing repointed, nothing restarted, nothing on deepseek modified. |
+| **Never materialised** | Minted, property-tested and transported in one pipeline: the new token was written to **stdout only** and piped directly into the destination file, while every diagnostic went to **stderr**. It was never printed, never in argv, never in a shell variable. The board token used to mint it was read from its mounted file inside the process and scrubbed from every echo. |
+| **SCOPE PROVEN — BOTH HALVES** | **CAN read:** `GET /api/agents/fd2867d1/instructions-bundle` → **200**, `entryFile=AGENTS.md`, 1 file, 866 bytes. **CANNOT write:** `PUT /api/agents/{id}/instructions-bundle/file` → **403** `"Only board-authenticated callers can manage instructions path or bundle configuration"`. **Read-only BY CONSTRUCTION, not by convention**: `assertCanManageInstructionsPath` is a hard `actor.type !== "board" → forbidden` type check, and independently, an agent key cannot mutate at all without an `X-Paperclip-Run-Id` Paperclip never issues (measured 2026-08-15). Two independent mechanisms, neither a flag. |
+| **The write probe was aimed at the RETIRED agent on purpose** | `5e2d5fba` ("RETIRED - do not use"), not the live customer-facing agent. The guard runs *before* any bundle logic, so a 403 there proves the guard for every agent in the company — while a surprise **success** would have landed on a retired agent instead of production. **A permission probe should never be aimed at a live customer surface.** |
+| **Positive control in the same run** | `GET .../instructions-bundle` on the same probe agent **with the board token** → **200**. Without it, the 403 could have been a dead endpoint or a broken auth path rather than a scoped refusal. |
+| **OPEN RESIDUAL — TRIGGER: AT THE HIRE** | The key's actor identity is `fd2867d1` — the live front-desk agent — because that is the persona the voice path reads and it keeps audit attribution honest. Least privilege would prefer a **dedicated read-only identity**, which means hiring a new agent (**TYPE 1**, board approval is on). Deliberately not done: the residual is bounded and stated, and it is cheaper to fix at hire time than to hold the launch for. Note the read guard is **company-scoped** — this key can read any agent's bundle in `3ed3869b`, not only `fd2867d1`. **Carried open. Re-point this key at the dedicated identity when the next agent is hired.** |
+| **Revocation** | `agent_api_keys.revoked_at` via Paperclip's own key-revocation route; the row is listed by `GET /api/agents/{id}/keys`. |
+
+### C-13 — Four Meta system-user tokens for `EPIC_BFF_WA`, pasted into a lane transcript
+
+| field | value |
+|---|---|
+| **What they are** | Four successive Meta **system-user access tokens** for `EPIC_BFF_WA` (`122102823939422508`) on app `EPIC_BFF`. Tokens 1–3 lacked `business_management` and **were never usable** for the write they were issued for; token 4 carries it and performed the phone-level override. |
+| **What they grant** | Tokens 1–3: read of the WABA/phone objects. Token 4: additionally **write** of phone-level webhook configuration on WABA `227366173803234` — i.e. it can redirect where a live customer number's messages are delivered. |
+| **Exposed** | 2026-08-16, pasted by the owner directly into the ESTATE lane transcript, at the PM's explicit instruction. |
+| **ACCEPTED METHOD — named rather than pretended away** | `decision-meta-token-least-privilege-2026-07-24` says "never place either token in chat, Port, Git or logs." **A LANE TRANSCRIPT IS A LOG.** The rule was bent, deliberately, and the practice that honours it is the one executed four times: **paste → straight to a `0600` root-owned file on host03 → byte-level purge of every transcript copy → verify 0 remaining with a controls-proven scanner → then use it only from the file, never in `argv`.** Placements: 201/197/203/199 bytes. Purges: 2, 2, 2 and 3 occurrences, **0 remaining each**. |
+| **RESIDUAL, stated not hidden** | **Seconds of exposure in a transcript**, between the paste arriving and the purge completing — plus whatever the harness may have flushed elsewhere in that window. Contained and verified, **not** eliminated. An exception practised without being named is how a rule dies; this row is the naming. |
+| **Cheaper alternative for next time** | The owner places the token into a `0600` file on host03 himself and tells the lane the path. Same outcome, zero transcript exposure. **Preferred for any future token.** |
+| **CONTAINED AT 2026-08-16T18:22Z**, standard roots | Not resolved — tokens 1–3 remain valid credentials that were never revoked, and token 4 is in active use. |
+
+### C-14 — Agent bot 3's HMAC secret, **EXPOSED BY A DEPENDENCY'S OWN LOGGING**
+
+> **THIS ROW IS ITS OWN CATEGORY, and the category is the finding.** Not a paste, not a
+> command, not a wildcard read — **a third-party application logged our secret on its own
+> initiative.** Chatwoot's ActiveJob logger prints the full job arguments of
+> `AgentBots::WebhookJob`, and `secret:` is one of them, in cleartext, on every enqueue.
+>
+> **SOURCE-STOP DISCIPLINE CANNOT PREVENT THIS CLASS.** We did not read anything we
+> shouldn't have; the dependency wrote it where we were already looking. **You cannot
+> avoid it — you can only detect it.** Detection therefore means the scanner must run over
+> **logs we do not write**, which is a different control from every other row here.
+
+| field | value |
+|---|---|
+| **What it is** | The HMAC signing secret for agent bot 3 ("Isola Front Desk Agent"), account 2, inbox 7 — the credential the gateway verifies inbound Chatwoot webhooks against. |
+| **Where it leaked** | `isola_chatwoot-sidekiq` job logs, `[ActiveJob] [AgentBots::WebhookJob] … {secret: "…", delivery_id: …}` — emitted on **every** agent-bot dispatch, i.e. once per customer message. Surfaced into the transcript while reading those logs to diagnose the probe. |
+| **Why the redactor missed it** | Ruby hash syntax `secret: "…"` in an application log line; the redactor's patterns target env-assignment and URL-credential shapes. |
+| **CONTAINED AT 2026-08-16T18:42Z**, standard roots | 4 occurrences, 1 file, **0 remaining**, verified. **NOT resolved — the secret is unchanged and Chatwoot will log it again on the next message.** |
+| **⛔ NOT ROTATION-CLOSEABLE** | **This entry survives its own remediation and MUST NOT be ticked off on rotation day.** Rotating the secret fixes a *disclosure*; it does nothing about a *disclosure process*. The replacement secret is logged by the identical code path on the very next customer message. **C-14 is the first entry in this register that rotation does not close.** |
+| **It is a RATE, not an event** | Chatwoot logs it on **every** agent-bot dispatch — **once per customer message**. So the exposure grows in exact proportion to the thing we are trying to make succeed: **every customer we win writes the credential to disk again.** |
+| **GATE TEST → FLOOR, with a hard boundary** | (1) normal use triggers it? **YES, every message.** (2) exposes customer data to the internet? **NO** — the log is on host03; reading it needs host access, and an attacker with host access has already won by a shorter route. (3) launching makes it unfixable? **NO.** ⇒ **FLOOR. Launch is not held for it.** |
+| **⚠ STANDING PROHIBITION — the control that KEEPS it a floor** | **CHATWOOT LOGS DO NOT LEAVE host03** — not to a vendor, not to a bucket, not to a log-shipper, not to an APM agent, not to a support bundle or an EasyPanel log export, not pasted into a ticket or a screenshot — **until C-14 is closed at the mechanism.** The instant those logs leave the host, a local credential becomes a remote one and **this entry converts from floor to GATE**. The conversion is invisible because nobody thinks of "turn on logging" as a security decision. Without this prohibition, C-14 is a gate we have not noticed yet. |
+| **PLACEMENT DECISION — three candidate fixes, FILED NOT SCHEDULED** | (1) upstream patch so Chatwoot filters job arguments; (2) redaction at the log sink; (3) a mechanism that removes the secret from the dispatch path entirely. **Start none of them now.** Until one lands, treat sidekiq job logs as a credential-bearing surface and read them only through the redactor, with `secret:`-style Ruby hash syntax added to its patterns. |
+
 ### Carried forward — already-known items that belong in the same sweep
 
 These are recorded in Port and must not be re-derived at sweep time. **I have not
@@ -106,6 +253,26 @@ re-verified their current state in this session** — each is marked with its so
 | C-08 | `bff-v2-staging` / `bff-v2-native-test` `CLAWITH_INTERNAL_SECRET` | `.env` rotated 2026-07-22; the pm2 processes were never relaunched, so the **old values may still be live in memory**. Blocked on a sanctioned restart mechanism. | Resolve the restart path as part of the sweep — a rotated file with a stale process is a rotation that did not happen. |
 
 ---
+
+## Cross-lane propagation items — a fix to a shared-class control must reach every copy
+
+**These are NOT to be fixed by ESTATE.** `isola-guard.js` and its redactor are the
+VOICE lane's files. Each row names the gap and the trigger so VOICE takes it in one
+pass rather than three. Recorded because the alternative — patching another lane's
+security control unannounced — is its own defect (the same reasoning that left
+`~/.claude/hooks/enforce-safety.js` reported rather than edited).
+
+| id | gap | evidence | trigger |
+|---|---|---|---|
+| **X-01** | `secret-redact.js` does not match `PAPERCLIP_API_TOKEN=`, because the key name is not in its pattern set. | C-10: a **board-level** Paperclip token passed through the redactor in clear, on 2026-08-16, in the same pipeline that correctly redacted `DATABASE_URL`'s password two commands earlier. | Same class VOICE closed hours earlier for `AWS_SECRET_ACCESS_KEY=` (underscores breaking `\b`, plus bare prefixed tokens). **Port VOICE's existing fix — do not reinvent it here.** Next time either redactor is opened. |
+| **X-02 — ★ TOP OF THE FLOOR QUEUE** | `isola-guard.js`'s `CREDENTIAL_SURFACE_RE` covers neither **`/run/secrets/*`** nor **`/opt/*/.env`** — two path classes whose *entire purpose* is holding secrets, invisible to the control built to catch secret reads. | C-11: `docker exec … cat /run/secrets/gateway_bindings` ran unwrapped and printed two live Chatwoot bot secret/token pairs. C-10: a board token came out of `/opt/bff-v2/.env` and was then **independently re-derived by a second lane**, defeating the purge. Nothing intercepted either. | Add both path classes (and `docker exec … cat` of a mounted secret) alongside X-01, in one pass. **Ranked first with a reason, not a schedule: the source-stop discipline is the only other control, and discipline failed three times on 2026-08-16. This is the last remaining guard gap that costs us on a normal day.** Same shape as the `sed`-on-SIP-config gap C-02 closed the day it was found. |
+| **X-03** | No control covers a **`SELECT *`-shaped database read** of a config/secret-bearing column. The guard reads command *text*; a `psql` SELECT is not a credential-surface file, and the sensitive text arrives as a remote container's stdout. | C-04's re-exposure: `agents.adapter_config` carried a runtime bearer in a JSON `headers.Authorization` field. | Likely unfixable by pattern-matching alone — recorded as the reason the **standing law** (enumerate columns, never wildcard) has to carry the weight instead. Floor. |
+
+> **The pattern across all four exposures on 2026-08-16 is one sentence: every leak
+> came from a READ, not a write.** The guards were built around mutation. The
+> inversion this implies — *the redacted path is the default and an unredacted read
+> is the exception needing a reason* — is the shape the next iteration of the read
+> tooling should take. Not work for tonight; recorded so it is not rediscovered.
 
 ## Detection already in place — what replaced rotation tonight
 

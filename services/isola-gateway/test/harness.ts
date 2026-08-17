@@ -418,6 +418,7 @@ export interface RecordedChatwootCall {
     | "reconcile"
     | "conversation_read"
     | "toggle_status"
+    | "toggle_status_pending"
     | "assignment"
     | "labels_read"
     | "labels_write"
@@ -444,6 +445,7 @@ export class StubChatwootApi implements ChatwootApi {
   /** Fails a PRIVATE note specifically. */
   privateNoteFailure: ChatwootApiError | null = null;
   openConversationFailure: ChatwootApiError | null = null;
+  pendConversationFailure: ChatwootApiError | null = null;
   assignTeamFailure: ChatwootApiError | null = null;
   labelReadFailure: ChatwootApiError | null = null;
   attributeReadFailure: ChatwootApiError | null = null;
@@ -570,6 +572,19 @@ export class StubChatwootApi implements ChatwootApi {
       accessToken: target.accessToken,
     });
     if (this.openConversationFailure) throw this.openConversationFailure;
+  }
+
+  /** Handback's Chatwoot half. Recorded as its own call kind so a test can tell
+   * a hand-BACK from a take-OVER — both are `toggle_status` on the wire. */
+  async pendConversation(target: ChatwootTarget): Promise<void> {
+    await this.pause();
+    this.calls.push({
+      kind: "toggle_status_pending",
+      accountId: target.accountId,
+      conversationId: target.conversationId,
+      accessToken: target.accessToken,
+    });
+    if (this.pendConversationFailure) throw this.pendConversationFailure;
   }
 
   async assignTeam(target: ChatwootTarget, teamId: number): Promise<void> {

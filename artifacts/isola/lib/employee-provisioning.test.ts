@@ -104,10 +104,36 @@ describe('buildHirePayload', () => {
     expect(() => buildHirePayload({ ...baseOpts, sidecar: wrong })).toThrow(ProvisioningError);
   });
 
-  it('refuses a non-https runtime url so the bearer is never sent in clear', () => {
+  it('allows plain http only to a dot-free Docker service alias', () => {
+    // Paperclip and the runtime share the EasyPanel container network, so the bearer
+    // never crosses a routable link. This address is not resolvable from outside.
     expect(() =>
-      buildHirePayload({ ...baseOpts, sidecar: INTERNAL, runtimeUrl: 'http://isola-runtime/v1/invoke' }),
-    ).toThrow(/https/);
+      buildHirePayload({
+        ...baseOpts, sidecar: INTERNAL, runtimeUrl: 'http://isola_isola-runtime:3000/v1/invoke',
+      }),
+    ).not.toThrow();
+  });
+
+  it.each([
+    ['http://isola-runtime.saas00.epic.dm/v1/invoke', 'public dotted host'],
+    ['http://10.11.2.227:3000/v1/invoke', 'private IP literal'],
+    ['http://127.0.0.1:3000/v1/invoke', 'loopback literal'],
+    ['ftp://isola-runtime/v1/invoke', 'non-http scheme'],
+    ['not a url', 'unparseable'],
+  ])('refuses %s (%s)', (url) => {
+    // A dotted name is refused even when it looks private: DNS can be repointed later
+    // and the bearer would start crossing a real network with nothing to notice it.
+    expect(() => buildHirePayload({ ...baseOpts, sidecar: INTERNAL, runtimeUrl: url })).toThrow(
+      ProvisioningError,
+    );
+  });
+
+  it('still allows https to a public host', () => {
+    expect(() =>
+      buildHirePayload({
+        ...baseOpts, sidecar: INTERNAL, runtimeUrl: 'https://isola-runtime.saas00.epic.dm/v1/invoke',
+      }),
+    ).not.toThrow();
   });
 
   it('refuses an empty bearer', () => {

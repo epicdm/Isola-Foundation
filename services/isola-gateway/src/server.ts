@@ -13,6 +13,7 @@ import { bootWarnings, configuredBindings, loadConfig } from "./config.js";
 import { createLedger } from "./ledger.js";
 import { createPostgresOwnershipGate, migrateOwnershipStore } from "./ownership-store.js";
 import { createLogger } from "./log.js";
+import { createHandbackSweeper } from "./handback.js";
 import { createSweeper } from "./recovery.js";
 import { SERVICE_VERSION } from "./version.js";
 
@@ -106,6 +107,8 @@ const ownership = createPostgresOwnershipGate(ledger);
 const gateway = createGateway({ config, logger, ledger, ownership });
 const server = createServer(gateway.handler);
 
+let handbackSweeper: { start(): void; stop(): void; sweep(): Promise<number> } | null = null;
+
 const sweeper = createSweeper({
   config,
   ledger,
@@ -150,6 +153,43 @@ async function boot(): Promise<void> {
   logger.info({ event: "boot", outcome: "recovery_sweep", resumed });
   sweeper.start();
 
+  // HANDBACK — the IDLE trigger. Without this a conversation a human took over
+  // stays HUMAN_OWNED forever and the AI never answers that customer again.
+  // The manual trigger ("Mark as pending" in Chatwoot) is handled on the
+  // webhook path; this is the one that needs a clock.
+  handbackSweeper = createHandbackSweeper({
+    exec: ledger,
+    chatwoot: gateway.chatwoot,
+    logger,
+    idleMs: config.handbackIdleMs,
+    intervalMs: config.handbackSweepIntervalMs,
+    batch: config.handbackSweepBatch,
+    resolveTarget: (candidate) => {
+      const binding = gateway.bindingStore
+        .list()
+        .find(
+          (b) =>
+            b.chatwootAccountId === candidate.accountId &&
+            b.tenantId === candidate.conversation.tenantId,
+        );
+      // No binding -> skip. Never hand back with another tenant's token.
+      if (binding === undefined) return null;
+      return {
+        accountId: candidate.accountId,
+        conversationId: candidate.conversationId,
+        accessToken: binding.agentBotAccessToken,
+        ...(binding.chatwootBaseUrl === undefined ? {} : { baseUrl: binding.chatwootBaseUrl }),
+      };
+    },
+  });
+  handbackSweeper.start();
+  logger.info({
+    event: "boot",
+    outcome: "handback_sweeper_started",
+    idleMs: config.handbackIdleMs,
+    intervalMs: config.handbackSweepIntervalMs,
+  });
+
   server.listen(config.port, "0.0.0.0", () => {
     logger.info({ event: "listening", outcome: "listening", port: config.port });
   });
@@ -160,6 +200,7 @@ void boot();
 function shutdown(signal: string): void {
   logger.info({ event: "shutdown", outcome: "shutdown", signal });
   sweeper.stop();
+  handbackSweeper?.stop();
   server.close(() => {
     // An ACKed delivery is never retried by Chatwoot, so finish what we owe.
     void gateway

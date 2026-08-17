@@ -85,6 +85,43 @@ export interface BuildHireOptions {
 export class ProvisioningError extends Error {}
 
 /**
+ * The bearer travels in this URL's `Authorization` header on every run, so the transport
+ * must not be readable by anything outside the host.
+ *
+ * Two shapes are accepted:
+ *  - `https://…` — anything, because TLS protects the bearer;
+ *  - `http://<name>[:port]` where `<name>` contains no dot — a Docker/Swarm service alias,
+ *    which is only resolvable on the container network and never routable from outside.
+ *
+ * Plain `http://` to a dotted host or an IP literal is refused: that is the case where the
+ * bearer would cross a real network in clear. A dotted name is refused even if it looks
+ * private, because DNS can be repointed and we would not notice.
+ */
+export function assertRuntimeUrlIsSafe(runtimeUrl: string, templateKey: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(runtimeUrl);
+  } catch {
+    throw new ProvisioningError(`template ${templateKey}: runtimeUrl is not a valid URL`);
+  }
+
+  if (parsed.protocol === 'https:') return;
+
+  if (parsed.protocol !== 'http:') {
+    throw new ProvisioningError(`template ${templateKey}: runtimeUrl must be http or https`);
+  }
+  // `URL.hostname` strips the port and lowercases; IPv6 literals keep their brackets.
+  const host = parsed.hostname;
+  const isDockerAlias = !host.includes('.') && !host.includes(':') && !host.startsWith('[');
+  if (!isDockerAlias) {
+    throw new ProvisioningError(
+      `template ${templateKey}: plain http is only allowed to a dot-free Docker service alias ` +
+        `(got "${host}"); use https for any routable host so the bearer is not sent in clear`,
+    );
+  }
+}
+
+/**
  * Build the `POST /api/companies/{id}/agent-hires` body for a template.
  *
  * Fails closed in three ways that matter:
@@ -117,10 +154,7 @@ export function buildHirePayload(opts: BuildHireOptions): HireInput {
   if (!opts.runtimeBearer) {
     throw new ProvisioningError(`template ${sidecar.templateKey}: missing runtime bearer`);
   }
-  if (!/^https:\/\//.test(opts.runtimeUrl)) {
-    // Plain HTTP would put the bearer on the wire in clear between Paperclip and the runtime.
-    throw new ProvisioningError(`template ${sidecar.templateKey}: runtimeUrl must be https`);
-  }
+  assertRuntimeUrlIsSafe(opts.runtimeUrl, sidecar.templateKey);
 
   return {
     name: opts.instanceName,

@@ -94,6 +94,9 @@ export interface ChatwootApi {
    */
   getConversationRecord(target: ChatwootTarget): Promise<unknown>;
   openConversation(target: ChatwootTarget): Promise<void>;
+  /** Hand the conversation back to the bot. See the implementation for why
+   * `pending` and not a new label or status. */
+  pendConversation(target: ChatwootTarget): Promise<void>;
   assignTeam(target: ChatwootTarget, teamId: number): Promise<void>;
   getLabels(target: ChatwootTarget): Promise<string[]>;
   setLabels(target: ChatwootTarget, labels: string[]): Promise<void>;
@@ -200,6 +203,94 @@ export interface ScannedMessage {
 }
 
 const ACTIVITY_MESSAGE_TYPE = 2;
+const INCOMING_MESSAGE_TYPE = 0;
+
+/**
+ * One prior turn, as the model should see it.
+ *
+ * `role` is the CUSTOMER's or OURS. Chatwoot `message_type` 0 is incoming (the
+ * customer), 1 is outgoing (us — the bot or a human agent, indistinguishable
+ * here and deliberately so: from the customer's side both are "the business").
+ */
+export interface HistoryTurn {
+  role: "customer" | "business";
+  content: string;
+}
+
+export interface ConversationHistory {
+  turns: HistoryTurn[];
+  /** True when older turns were dropped to fit the window. */
+  truncated: boolean;
+}
+
+/** Newest-first scan, oldest dropped first. See `readConversationHistory`. */
+export const HISTORY_MAX_TURNS = 20;
+export const HISTORY_MAX_CHARS = 8000;
+
+/**
+ * Prior turns for the model, from the SAME conversation record that
+ * `reconcileDeliveryRef` already reads — no new endpoint, no new permission.
+ * (An agent bot cannot list `/messages` — 401 — but conversations#show carries
+ * them, which is why reconciliation works today.)
+ *
+ * THREE THINGS ARE EXCLUDED, AND THE FIRST IS A SAFETY PROPERTY:
+ *
+ *   1. PRIVATE NOTES. `private: true` is staff-only — the handoff note names
+ *      what a colleague should pick up and may quote internal context. Sending
+ *      it to the model would put internal notes one paraphrase away from the
+ *      customer. Excluded by construction here, not by a caller remembering.
+ *   2. ACTIVITY LINES. "Conversation was marked open by system…" is Chatwoot
+ *      talking to staff, not a turn.
+ *   3. EMPTY CONTENT. Attachments arrive with no text; a blank turn teaches the
+ *      model nothing and wastes the window.
+ *
+ * BOUNDED, and the boundary is stated rather than discovered: at most
+ * HISTORY_MAX_TURNS turns and HISTORY_MAX_CHARS characters. When the window is
+ * exceeded the OLDEST turns are dropped — recent context is what a front desk
+ * needs — and `truncated` says so. No marker is injected into the text: a
+ * marker is content the model can echo to a customer.
+ */
+export function readConversationHistory(record: unknown): ConversationHistory {
+  if (!isRecord(record)) return { turns: [], truncated: false };
+  const list = record["messages"];
+  if (!Array.isArray(list)) return { turns: [], truncated: false };
+
+  const all: HistoryTurn[] = [];
+  for (const entry of list) {
+    if (!isRecord(entry)) continue;
+    if (entry["message_type"] === ACTIVITY_MESSAGE_TYPE) continue;
+    // FAIL CLOSED ON `private`, exactly as webhook.ts does.
+    // Only an EXPLICIT boolean false is public. A missing, null, or string
+    // flag is treated as private, because the cost of guessing wrong is a
+    // staff-only handover note reaching the model and, one paraphrase later,
+    // the customer. Found by review 2026-08-17: `=== true` let every malformed
+    // shape through while the claim in the doc comment said "by construction".
+    if (entry["private"] !== false) continue;
+    const content = entry["content"];
+    if (typeof content !== "string") continue;
+    const text = content.trim();
+    if (text.length === 0) continue;
+    all.push({
+      role: entry["message_type"] === INCOMING_MESSAGE_TYPE ? "customer" : "business",
+      content: text,
+    });
+  }
+
+  let truncated = false;
+  let turns = all;
+  if (turns.length > HISTORY_MAX_TURNS) {
+    turns = turns.slice(turns.length - HISTORY_MAX_TURNS);
+    truncated = true;
+  }
+  let total = turns.reduce((n, t) => n + t.content.length, 0);
+  while (total > HISTORY_MAX_CHARS && turns.length > 1) {
+    total -= turns[0]!.content.length;
+    turns = turns.slice(1);
+    truncated = true;
+  }
+  return { turns, truncated };
+}
+
 
 function readScannedMessage(entry: unknown): ScannedMessage | null {
   if (!isRecord(entry)) return null;
@@ -442,6 +533,24 @@ export class HttpChatwootApi implements ChatwootApi {
       "POST",
       this.conversationPath(target, "/toggle_status"),
       { status: "open" },
+      target.accessToken,
+      target.baseUrl,
+    );
+  }
+
+  /**
+   * The inverse of `openConversation`, and the only Chatwoot-side half of a
+   * handback. `pending` is Chatwoot's own word for "the bot owns this": the
+   * gateway already suppresses on `status_not_pending`, and Chatwoot's
+   * bot-handoff banner moves pending -> open when a human takes over. Setting
+   * it back is that gesture in reverse, so both guards agree without inventing
+   * a new meaning for an existing control.
+   */
+  async pendConversation(target: ChatwootTarget): Promise<void> {
+    await this.request(
+      "POST",
+      this.conversationPath(target, "/toggle_status"),
+      { status: "pending" },
       target.accessToken,
       target.baseUrl,
     );
