@@ -495,7 +495,7 @@ accepted 8/8 and this does not reopen it.
 | Test Agent control | **NOT BUILT — required:** a portal control that creates a real Chatwoot conversation on the tenant's PUBLIC inbox via the proven gateway binding, and renders the reply in the portal |
 | Open Inbox control | **NOT BUILT — required:** a portal link (or SSO handoff) into the tenant's Chatwoot workspace. OWNER DECISION 9 — Chatwoot login vs embedded view is undecided |
 | Chatwoot destination | **EXISTS** — `https://isola-chat.saas00.epic.dm`, Chatwoot v4.16.1, **account 3 · team 4 · inbox 4 · AgentBot 1** |
-| Chatwoot deep-link path | > **UNVERIFIED:** the exact in-app path for account 3 / inbox 4 has not been read off the deployed instance. Do not publish a deep link until it has been. |
+| Chatwoot deep-link path | **VERIFIED 2026-08-17, owner-observed.** `{base}/app/accounts/{account}/inbox/{inbox}` — docs-derived from Chatwoot's own repository, then confirmed by the owner clicking the deployed Open-Inbox button and landing on the correct inbox. Live as `CHATWOOT_INBOX_URL_TEMPLATE` on `isola-portal-api`. See UNVERIFIED 3 in §11 for the full record. The standing rule that produced this — *do not publish a deep link until the path has been read off the deployed instance* — was honoured: until the click, the portal linked to the instance root instead. |
 | Gateway | **EXISTS** — `https://isola-gw.saas00.epic.dm` (public), durable delivery ledger, reserve-before-ACK |
 
 ### Preconditions
@@ -848,7 +848,26 @@ rulings needed to run the sessions at all.
 
 > **UNVERIFIED 2:** The portal's concrete route paths (sign-up, verification, sign-in, company setup). Not read off pinned commit `931ad3fea9ef291d2a167d6f497ef240802780c4`. No route string is printed in this document for that reason.
 
-> **UNVERIFIED 3:** The Chatwoot in-app deep-link path for account 3 / inbox 4. Not read off the deployed instance.
+> ~~**UNVERIFIED 3:** The Chatwoot in-app deep-link path for account 3 / inbox 4. Not read off the deployed instance.~~
+>
+> **RESOLVED 2026-08-17 — OWNER-OBSERVED.** The path is
+> `{base}/app/accounts/{account}/inbox/{inbox}`. Derived from Chatwoot's own
+> repository (a Playwright test in `chatwoot/chatwoot` navigates to
+> `/app/accounts/2/inbox/${inbox.id}`), then **confirmed by the owner clicking
+> the deployed Open-Inbox button and landing on the correct inbox**. Live as
+> `CHATWOOT_INBOX_URL_TEMPLATE` on `isola-portal-api`.
+>
+> **The click is the verification, not the docs.** Docs told us the shape;
+> only the click proved this deployment honours it. Until that click the
+> portal linked to the Chatwoot instance root — right product, user picks the
+> destination — rather than publishing a path nobody had exercised. That
+> fallback is still in the code and is what should happen again if this
+> template is ever cleared.
+>
+> Note the original wording said "account 3 / inbox 4". Those were the
+> synthetic checkpoint coordinates. The verified live coordinates are
+> **account 2, inbox 7 (6737) and inbox 8 (3742)**; the template is
+> account/inbox agnostic, so it covers both.
 
 > **UNVERIFIED 4:** Whether a transactional email provider is configured and delivering for the portal. `Dockerfile.render` is required precisely because transactional email silently breaks otherwise — a live risk for acceptance row 2.
 
