@@ -81,6 +81,14 @@ export interface PromiseVerdict {
   promised: boolean;
   /** The phrases that matched, for the log line. Never the customer's text. */
   matched: string[];
+  /**
+   * Set when a promise WAS detected but escalation was held back. This is not a
+   * cosmetic field: a deferral that nobody can see is the same silent skip that
+   * let the handback sweeper strand a customer for nine hours. If a conversation
+   * defers repeatedly and never commits, that is visible here before it becomes
+   * a customer promised a callback nobody heard about.
+   */
+  deferred?: "asking_consent" | "still_collecting";
 }
 
 /**
@@ -153,6 +161,49 @@ const HANDOVER_VERBS = [
   "get someone",
 ];
 
+/**
+ * THE AI IS STILL COLLECTING. DO NOT HAND OVER MID-QUESTION.
+ *
+ * Measured live on 6737, 2026-08-17, the owner's words: "it passes the call to
+ * the human too quick, it did so BEFORE it got all my info". The reply was:
+ *
+ *   "I don't have current pricing available here, but a colleague can confirm
+ *    that for you. What service are you most interested in? I'll pass along your
+ *    name, number, and which plan you'd like priced."
+ *
+ * `a colleague can` matched. The consent rule did not save it, because that
+ * sentence asks no permission — it states a fact. But the AI was plainly
+ * mid-collection: it had just asked which service, and promised to pass the
+ * details along ONCE IT HAD THEM. Escalating there threw away the customer's
+ * next message ("Internet") and handed a human a request with none of the
+ * information the AI was in the middle of gathering.
+ *
+ * A HANDOVER IS TERMINAL. You do not ask the customer a question after hanging
+ * up. So an open question means the AI still holds the conversation, whatever
+ * else the reply says.
+ *
+ * The exception is a courtesy close — "anything else?" — which is asked AFTER a
+ * handover, not instead of one. Without that exception, "I'm passing this to a
+ * colleague. Anything else?" would never notify anybody, which is the original
+ * defect this whole module exists to prevent.
+ */
+const COURTESY_CLOSE = [
+  "anything else",
+  "something else",
+  "any other questions",
+  "anything more",
+  "help with anything",
+];
+
+/** Questions the reply puts to the customer, normalised. */
+export function openQuestions(text: string): string[] {
+  return text
+    .split("\n")
+    .flatMap((line) => line.split(/(?<=\?)/))
+    .map((s) => s.trim())
+    .filter((s) => s.endsWith("?"));
+}
+
 /** Split on sentence enders, keeping it crude on purpose — see the note above. */
 export function sentencesOf(text: string): string[] {
   return text
@@ -181,7 +232,18 @@ export function detectHumanPromise(replyText: string | null): PromiseVerdict {
         HANDOVER_VERBS.some((v) => sentence.includes(v))),
   );
 
+  // Any open question that is not a courtesy close means the AI is still
+  // gathering — the customer's answer is coming, and it must not be suppressed.
+  const stillCollecting = openQuestions(hay).some(
+    (q) => !COURTESY_CLOSE.some((c) => q.includes(c)),
+  );
+
   const matched = ESCALATION_PHRASES.filter((p) => hay.includes(p));
-  if (askingConsent) return { promised: false, matched: [] };
-  return { promised: matched.length > 0, matched };
+  if (matched.length === 0) return { promised: false, matched: [] };
+
+  // DEFERRED, NOT DROPPED. The phrases are still reported so the log shows a
+  // promise was made and deliberately held, not that nothing happened.
+  if (askingConsent) return { promised: false, matched, deferred: "asking_consent" };
+  if (stillCollecting) return { promised: false, matched, deferred: "still_collecting" };
+  return { promised: true, matched };
 }

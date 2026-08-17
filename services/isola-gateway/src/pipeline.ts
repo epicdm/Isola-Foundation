@@ -685,6 +685,24 @@ export async function processDelivery(
     // deliberate: the promise has been made, so the worst outcome is a promise
     // nobody hears. Escalating before the send would risk the reverse.
     const promise = detectHumanPromise(answer);
+    // A DEFERRAL IS NOT A NON-EVENT. The reply named a human but the AI is still
+    // asking the customer something, so handing over now would suppress the
+    // answer it just asked for. Logged, because a deferral nobody can see is the
+    // same silent skip that let the handback sweeper strand a customer for nine
+    // hours — and because repeated deferrals with no commitment is exactly the
+    // shape of "a promise nobody was told about" reappearing.
+    if (promise.deferred !== undefined) {
+      deps.logger.info({
+        ...base,
+        event: "promise",
+        outcome: "escalation_deferred",
+        matchedPhrases: promise.matched,
+        reason: promise.deferred,
+        detail:
+          "the reply named a human but is still asking the customer; the AI keeps the " +
+          "conversation so the answer is not suppressed",
+      });
+    }
     if (promise.promised) {
       deps.logger.info({
         ...base,

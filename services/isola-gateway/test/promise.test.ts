@@ -14,8 +14,15 @@ describe("detectHumanPromise — the live sentence that escaped", () => {
       "Good question — I don't have pricing details here, but I'd be happy to " +
       "have a colleague confirm current prices for you. Could you share your " +
       "name and a callback number so they can reach out?";
+    // CHANGED 2026-08-17 on the owner's report: "it passes the call to the human
+    // too quick, it did so BEFORE it got all my info". This reply ASKS for the
+    // name and callback number. Escalating here suppressed the customer's answer
+    // — the very details the human would need. The promise is DEFERRED, not
+    // dropped: the phrases are still reported and the deferral is logged, and the
+    // commitment turn that follows escalates normally.
     const v = detectHumanPromise(live);
-    expect(v.promised).toBe(true);
+    expect(v.promised).toBe(false);
+    expect(v.deferred).toBe("still_collecting");
     expect(v.matched).toContain("have a colleague");
   });
 
@@ -69,9 +76,13 @@ describe("matching survives real formatting", () => {
   });
 
   it("survives smart quotes and em dashes", () => {
-    expect(
-      detectHumanPromise("Happy to connect you with someone — what’s your number?").promised,
-    ).toBe(true);
+    // Still asking for the number, so escalation defers — but the MATCH must
+    // survive the punctuation, which is what this test is really about.
+    const v = detectHumanPromise("Happy to connect you with someone — what’s your number?");
+    expect(v.matched).toContain("connect you with");
+    expect(v.deferred).toBe("still_collecting");
+    // Same sentence, no question: the punctuation still normalises and it fires.
+    expect(detectHumanPromise("Happy to connect you with someone — done.").promised).toBe(true);
   });
 
   it("normalises whitespace, quotes and dashes", () => {
@@ -144,5 +155,47 @@ describe("the offer that used to escalate", () => {
     expect(detectHumanPromise("Great — I'll connect you with a colleague now.").promised).toBe(
       true,
     );
+  });
+});
+
+describe("DO NOT HAND OVER MID-COLLECTION — owner report, 6737, 2026-08-17", () => {
+  /**
+   * "it passes the call to the human too quick, it did so BEFORE it got all my
+   * info". Verbatim reply that escalated:
+   */
+  const COLLECTING =
+    "I don't have current pricing available here, but a colleague can confirm " +
+    "that for you. What service are you most interested in? I'll pass along your " +
+    "name, number, and which plan you'd like priced.";
+
+  it("does not escalate while the AI is still asking for details", () => {
+    expect(detectHumanPromise(COLLECTING).promised).toBe(false);
+  });
+
+  it("escalates once the questions stop and the AI commits", () => {
+    // The same conversation, one turn later, after "Internet" was answered.
+    expect(
+      detectHumanPromise(
+        "Thanks Eric. I'll pass this to a colleague with your name, number and " +
+          "that you're asking about Internet.",
+      ).promised,
+    ).toBe(true);
+  });
+
+  it("a courtesy close does NOT block a real handover", () => {
+    // Otherwise "I'm passing this on. Anything else?" would notify nobody —
+    // the exact defect this module exists to prevent.
+    expect(
+      detectHumanPromise("I'm passing this to a colleague. Anything else I can help with?")
+        .promised,
+    ).toBe(true);
+  });
+
+  it("is not vacuous — the same text without the question escalates", () => {
+    expect(
+      detectHumanPromise(
+        "I don't have current pricing available here, but a colleague can confirm that for you.",
+      ).promised,
+    ).toBe(true);
   });
 });
