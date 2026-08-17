@@ -205,3 +205,32 @@ payment · broad launch · merging to a protected branch.
 Enforcement is deterministic, not advisory: `.claude/hooks/` blocks builds in live
 checkouts, secret reads/writes, writes into live checkouts and build output, Meta
 mutations, and prohibited schema commands. Run `node .claude/hooks/selftest.js` to verify.
+
+## 8. The Register Law — ratified 2026-08-17
+
+Port entity: `dec-register-write-and-read-law-2026-08-17`.
+
+> **The register is only useful if it's both written and read.**
+
+**DUTY 1 — READ BEFORE BUILD.** Any new mechanism, pattern, integration or component
+starts with a Port query for prior art (components, decisions, defects, ideas). *"No prior
+art found"* is a **claim**, and it names the search that was run.
+*Evidence:* the R12 persona shim was derived from scratch while `isola-runtime`'s
+instructions-provider precedent — same fetch, same 60s TTL, same fail-closed ladder — sat
+in Port the whole time.
+
+**DUTY 2 — WRITE WITH THE WORK.** Every ratification, supersession, built outcome, defect
+and retirement names its Port write **in the same dispatch or report that carries it**. A
+decision or a build that has not reached Port **is not done**.
+*Evidence:* a Hermes re-ratification was filed in the project register and its Port write
+was never ordered. Port then spent a day asserting a freeze the owner had lifted, and
+nearly reversed correct work.
+
+**ENFORCEMENT — THE FOOTER.** Every lane report and every PM dispatch ends with one line:
+
+```
+PORT: read <what was checked> · wrote <entities>
+```
+
+or, when genuinely nothing applies, `PORT: no register impact`. Silence is never ambiguous
+again. Reports without the footer bounce, exactly as reports without lane + HEAD do.
