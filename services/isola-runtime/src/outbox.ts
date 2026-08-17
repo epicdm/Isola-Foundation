@@ -282,6 +282,7 @@ export async function reconcileOutbox(
   options: Omit<FlushOptions, "reason" | "limit"> & { limit?: number },
 ): Promise<FlushSummary> {
   let revived = 0;
+  let repaired = 0;
   await options.store.transact((draft) => {
     const nowMs = options.now();
     for (const entry of Object.values(draft.outbox)) {
@@ -308,6 +309,25 @@ export async function reconcileOutbox(
         entry.nextAttemptMs = nowMs;
         revived += 1;
       }
+
+      // REPAIR THE STORED PAYLOAD, not just the schedule.
+      //
+      // The event body was serialised into the outbox at ENQUEUE time, so an
+      // entry created before the heartbeatRunId fix still carries the fabricated
+      // id and will keep failing the foreign key no matter how often it is
+      // revived. Measured 2026-08-17: reviving alone produced
+      // `revivedFailed:1, delivered:0, deferred:1` — the retry failed exactly as
+      // before, because the poison is in the DATA, not only in the code.
+      //
+      // The field can never be legitimate here (this runtime holds no
+      // Paperclip-issued run id and there is no route to obtain one), so
+      // stripping it from stored entries is the same correction as not writing
+      // it. The run stays traceable through the outbox key and the
+      // x-paperclip-run-id header.
+      if (entry.event.heartbeatRunId !== undefined) {
+        delete entry.event.heartbeatRunId;
+        repaired += 1;
+      }
     }
     // A run that was in flight when the process died can never complete. Drop
     // the claim so the work is not blocked forever by a stale lease, but keep
@@ -331,6 +351,7 @@ export async function reconcileOutbox(
     // Never silent: reviving a failed entry means a previously abandoned charge
     // is being retried, and an operator must be able to see that happen.
     revivedFailed: revived,
+    repairedPayloads: repaired,
     attempted: summary.attempted,
     delivered: summary.delivered,
     deferred: summary.deferred,

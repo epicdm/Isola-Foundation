@@ -288,7 +288,10 @@ describe("reconcileOutbox — the startup path", () => {
     });
 
     expect(summary.delivered).toBe(1);
-    expect(api.costEvents.map((e) => e.heartbeatRunId)).toEqual(["a"]);
+    // The right entry was delivered — identified by the outbox key, NOT by
+    // heartbeatRunId, which is stripped on the way out (see the repair below).
+    expect(api.costEvents).toHaveLength(1);
+    expect(api.costEvents.map((e) => e.heartbeatRunId)).toEqual([undefined]);
     expect(logger.withOutcome("reconcile_complete")).toHaveLength(1);
     const state = await store.read();
     expect(state.outbox[outboxKey("company-1", "agent-1", "a")]!.state).toBe("delivered");
@@ -441,5 +444,59 @@ describe("a restart re-opens a failed cost event", () => {
     expect(done.state).toBe("delivered");
     expect(done.attempts, "a delivered entry must not be rewritten").toBe(1);
     expect(api.costEvents, "and must never be re-billed").toHaveLength(0);
+  });
+});
+
+describe("the stored payload is repaired, not just rescheduled", () => {
+  /**
+   * Reviving alone was not enough. The event body is serialised into the outbox
+   * at ENQUEUE time, so an entry written before the heartbeatRunId fix still
+   * carried the fabricated id and failed the foreign key on every retry.
+   *
+   * Measured on the live runtime 2026-08-17, after deploying the code fix alone:
+   *   {"outcome":"reconcile_complete","revivedFailed":1,"delivered":0,"deferred":1}
+   * The poison was in the DATA, not only in the code.
+   */
+  it("strips heartbeatRunId from an entry enqueued before the fix", async () => {
+    const stale = entry({ state: "failed", attempts: 8 });
+    (stale.event as unknown as Record<string, unknown>)["heartbeatRunId"] = "gateway-delivery-id";
+    const store = await seed([stale]);
+    const api = new StubPaperclipApi();
+    const logger = new CapturingLogger();
+
+    await reconcileOutbox({
+      store,
+      api,
+      apiKeyFor: () => "agent-key",
+      now: () => 2000,
+      logger: logger.logger,
+    });
+
+    expect(api.costEvents).toHaveLength(1);
+    expect(
+      Object.prototype.hasOwnProperty.call(api.costEvents[0]!, "heartbeatRunId"),
+      "a fabricated run id must never reach Paperclip, even from stored state",
+    ).toBe(false);
+    const done = logger.withOutcome("reconcile_complete")[0]!;
+    expect(done["repairedPayloads"]).toBe(1);
+    expect(done["revivedFailed"]).toBe(1);
+  });
+
+  it("reports zero repairs when the stored payloads are already clean", async () => {
+    // NOTE: the `entry()` helper still seeds heartbeatRunId, because most tests
+    // here predate the fix and describe historical entries. A genuinely clean
+    // payload — one enqueued by the corrected metering path — has no such field.
+    const clean = entry({});
+    delete (clean.event as unknown as Record<string, unknown>)["heartbeatRunId"];
+    const store = await seed([clean]);
+    const logger = new CapturingLogger();
+    await reconcileOutbox({
+      store,
+      api: new StubPaperclipApi(),
+      apiKeyFor: () => "agent-key",
+      now: () => 2000,
+      logger: logger.logger,
+    });
+    expect(logger.withOutcome("reconcile_complete")[0]!["repairedPayloads"]).toBe(0);
   });
 });
