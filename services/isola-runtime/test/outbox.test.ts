@@ -360,3 +360,86 @@ describe("reconcileOutbox — the startup path", () => {
     expect(state.reservations).toEqual({});
   });
 });
+
+/**
+ * A FAILED COST EVENT MUST NOT BRICK THE RUNTIME.
+ *
+ * `failed` was terminal: selectDue only ever picks `pending`, so an entry that
+ * exhausted its attempts could never be retried — while still counting toward
+ * the undelivered-age watchdog that gates invocation. The runtime refused to
+ * call the model, permanently, and fixing the CAUSE could not heal it, because
+ * /data is a persistent volume that outlives the deploy.
+ *
+ * Measured 2026-08-17: one 1-cent event, failed at 12:26 on a Paperclip foreign
+ * key rejection, took the customer-facing 6737 front desk offline. Nothing in
+ * the system could recover on its own.
+ */
+describe("a restart re-opens a failed cost event", () => {
+  it("revives a failed entry to pending and resets its attempts", async () => {
+    const store = await seed([entry({ state: "failed", attempts: 8, lastError: "returned HTTP 500" })]);
+    const logger = new CapturingLogger();
+    await reconcileOutbox({
+      store,
+      api: new StubPaperclipApi(),
+      apiKeyFor: () => "agent-key",
+      now: () => 2000,
+      logger: logger.logger,
+    });
+
+    const state = await store.read();
+    const revived = state.outbox[outboxKey("company-1", "agent-1", "run-1")]!;
+    // It was picked up and delivered in the very same startup flush — which is
+    // only possible if it became eligible again.
+    expect(revived.state).toBe("delivered");
+    expect(logger.withOutcome("reconcile_complete")[0]!["revivedFailed"]).toBe(1);
+  });
+
+  it("does not deliver a failed entry when revival is the only thing that could have", async () => {
+    // Negative control for the test above: if `failed` were still terminal,
+    // nothing would be attempted at all.
+    const store = await seed([entry({ state: "failed", attempts: 8 })]);
+    const logger = new CapturingLogger();
+    const summary = await reconcileOutbox({
+      store,
+      api: new StubPaperclipApi(),
+      apiKeyFor: () => "agent-key",
+      now: () => 2000,
+      logger: logger.logger,
+    });
+    expect(summary.attempted, "a terminal failed entry would give attempted=0").toBe(1);
+  });
+
+  it("reports zero when there is nothing to revive, so the field is not noise", async () => {
+    const store = await seed([entry({ state: "pending" })]);
+    const logger = new CapturingLogger();
+    await reconcileOutbox({
+      store,
+      api: new StubPaperclipApi(),
+      apiKeyFor: () => "agent-key",
+      now: () => 2000,
+      logger: logger.logger,
+    });
+    expect(logger.withOutcome("reconcile_complete")[0]!["revivedFailed"]).toBe(0);
+  });
+
+  it("leaves a delivered entry alone — revival is not resurrection", async () => {
+    const store = await seed([
+      entry({ state: "delivered", deliveredAtMs: 900, attempts: 1 }),
+    ]);
+    const logger = new CapturingLogger();
+    const api = new StubPaperclipApi();
+    await reconcileOutbox({
+      store,
+      api,
+      apiKeyFor: () => "agent-key",
+      now: () => 2000,
+      logger: logger.logger,
+    });
+
+    const state = await store.read();
+    const done = state.outbox[outboxKey("company-1", "agent-1", "run-1")]!;
+    expect(done.state).toBe("delivered");
+    expect(done.attempts, "a delivered entry must not be rewritten").toBe(1);
+    expect(api.costEvents, "and must never be re-billed").toHaveLength(0);
+  });
+});

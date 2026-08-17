@@ -281,10 +281,33 @@ export async function flushOutbox(options: FlushOptions): Promise<FlushSummary> 
 export async function reconcileOutbox(
   options: Omit<FlushOptions, "reason" | "limit"> & { limit?: number },
 ): Promise<FlushSummary> {
+  let revived = 0;
   await options.store.transact((draft) => {
     const nowMs = options.now();
     for (const entry of Object.values(draft.outbox)) {
       if (entry.state === "pending") entry.nextAttemptMs = nowMs;
+      // REVIVE FAILED ENTRIES. `failed` was a terminal state with NO route back:
+      // the sweep only ever selects `pending` (see selectDue), so an entry that
+      // exhausted its attempts stayed failed for the life of the volume — and it
+      // still counted toward the undelivered-age watchdog. The runtime therefore
+      // refused to invoke the model, permanently, with no operator path to clear
+      // it short of hand-editing the state file.
+      //
+      // Measured 2026-08-17: ONE 1-cent event, failed at 12:26 on a Paperclip
+      // foreign-key rejection, took the customer-facing 6737 front desk offline.
+      // Fixing the cause would NOT have healed it — the poisoned entry outlives
+      // the deploy, because /data is a persistent volume.
+      //
+      // A restart is normally a NEW BUILD, i.e. exactly the event that can change
+      // the outcome. So a restart re-opens the question, on the same reasoning
+      // that already resets the backoff clock above. If the failure is genuine it
+      // simply re-fails after maxAttempts — bounded, and logged either way.
+      if (entry.state === "failed") {
+        entry.state = "pending";
+        entry.attempts = 0;
+        entry.nextAttemptMs = nowMs;
+        revived += 1;
+      }
     }
     // A run that was in flight when the process died can never complete. Drop
     // the claim so the work is not blocked forever by a stale lease, but keep
@@ -305,6 +328,9 @@ export async function reconcileOutbox(
   options.logger.info({
     event: "reconcile",
     outcome: "reconcile_complete",
+    // Never silent: reviving a failed entry means a previously abandoned charge
+    // is being retried, and an operator must be able to see that happen.
+    revivedFailed: revived,
     attempted: summary.attempted,
     delivered: summary.delivered,
     deferred: summary.deferred,

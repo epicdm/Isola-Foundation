@@ -787,7 +787,37 @@ export class MeteringService {
     const event: CostEventPayload = {
       agentId: args.agentId,
       ...(args.issueId !== null && args.issueId.length > 0 ? { issueId: args.issueId } : {}),
-      ...(args.runId !== null && args.runId.length > 0 ? { heartbeatRunId: args.runId } : {}),
+      // heartbeatRunId is DELIBERATELY NOT SENT. See below.
+      //
+      // `args.runId` is the GATEWAY'S delivery id — a UUID this runtime minted.
+      // `cost_events.heartbeat_run_id` is a FOREIGN KEY into Paperclip's
+      // `heartbeat_runs`, a table Paperclip populates when PAPERCLIP runs an
+      // agent. This runtime is an external executor: it calls the model itself
+      // and only reports the cost afterwards, so it never holds a
+      // Paperclip-issued run id and there is no endpoint to obtain one —
+      // Paperclip exposes no heartbeat/run creation route (checked 2026-08-17).
+      //
+      // Sending our own id was a FALSE CLAIM, and the FK correctly refused it:
+      //   insert into "cost_events" ... violates foreign key constraint
+      //   "cost_events_heartbeat_run_id_heartbeat_runs_id_fk"
+      //
+      // This is CLAUDE.md law 10 exactly — "with a run id Paperclip never
+      // issued it gets 500" — and the consequence was not a lost metric. The
+      // event stuck in the outbox, and once the oldest undelivered event passed
+      // the age limit the runtime FAILED CLOSED and refused to invoke the model
+      // at all. On 2026-08-17 a SINGLE UNDELIVERED CENT took the customer-facing
+      // front desk offline: 6737 answered nothing, because a 1c cost event from
+      // 12:23 could not be written.
+      //
+      // What is lost by omitting it: Paperclip counts distinct runs with
+      // `count(distinct heartbeat_run_id)`, which ignores NULL, so run-COUNT
+      // metrics undercount. Cost totals are unaffected. That is strictly better
+      // than the event never landing at all.
+      //
+      // The run is still traceable: the `x-paperclip-run-id` header still
+      // carries it (Paperclip's auth reads it and does not FK it), the outbox
+      // key is `companyId|agentId|runId`, and `issueId` below is a real
+      // Paperclip id. Restore this field ONLY with an id Paperclip issued.
       billingCode: args.card.profile,
       provider: this.d.options.provider,
       // A synthetic figure is never billed to the real provider.

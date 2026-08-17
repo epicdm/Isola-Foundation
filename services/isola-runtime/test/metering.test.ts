@@ -168,7 +168,23 @@ describe("sub-cent accumulation over HTTP", () => {
     const event = paperclip.costEvents[0]!;
     expect(event.agentId).toBe("agent-7");
     expect(event.issueId).toBe("ISSUE-4821");
-    expect(event.heartbeatRunId).toBe("run-4");
+    // NEVER send heartbeatRunId. It is a FOREIGN KEY into Paperclip's
+    // `heartbeat_runs`, and this runtime never holds an id Paperclip issued —
+    // it executes the model itself and reports cost afterwards.
+    //
+    // This assertion previously read `.toBe("run-4")` and PASSED, because the
+    // harness's fake Paperclip has no foreign key. The real one does:
+    //   violates foreign key constraint
+    //   "cost_events_heartbeat_run_id_heartbeat_runs_id_fk"
+    // The test asserted conformance to a schema it was not actually testing
+    // against — the fake accepted precisely what production refused.
+    //
+    // The cost of getting this wrong was not a metric. The event stuck in the
+    // outbox, aged past the delivery limit, and the runtime failed closed and
+    // stopped invoking the model: one undelivered cent took the 6737 front desk
+    // offline on 2026-08-17.
+    expect(event.heartbeatRunId).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(event, "heartbeatRunId")).toBe(false);
     expect(event.provider).toBe("deepseek");
     expect(event.biller).toBe("deepseek");
     expect(event.billingType).toBe("metered_api");
