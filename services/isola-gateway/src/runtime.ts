@@ -20,8 +20,8 @@
  * reply, and it never re-uses the runtime's error strings as an answer.
  *
  * Verified isola-runtime contract (`POST /v1/invoke`):
- *   Authorization: Bearer <RUNTIME_SECRET_PUBLIC>
- *   body {templateId, exposure: "PUBLIC", agentId, runId, context, responseMode}
+ *   Authorization: Bearer <the runtime secret for THIS gateway's exposure class>
+ *   body {templateId, exposure, agentId, runId, context, responseMode}
  *   200 -> {ok, outcome, correlationId, completionState, contractVersion, answerText}
  *   504 -> model_timeout
  *   502 -> provider_error OR persistence_failed OR invalid_output
@@ -32,6 +32,7 @@
  * cannot classify a failure. `completionState` in the body is the authority and
  * this client prefers it; the status is the fallback for a body without one.
  */
+import type { Exposure } from "./bindings.js";
 import type { SafeFetch } from "./egress.js";
 import { EgressBlockedError } from "./errors.js";
 
@@ -51,7 +52,21 @@ export type RuntimeOutcome =
 
 export interface AgentRuntimeRequest {
   templateId: string;
-  exposure: "PUBLIC";
+  /**
+   * THE BINDING'S exposure — never a constant.
+   *
+   * This was typed as the literal `"PUBLIC"` while PUBLIC was the only exposure
+   * that existed. That looked like a safe narrowing and was the opposite: when
+   * the first INTERNAL binding arrived, the type made the CORRECT value a
+   * compile error, so the call site kept sending `"PUBLIC"` and the runtime
+   * refused every internal invocation with `exposure_mismatch` (403). Measured
+   * on 9043, 2026-08-18 — the line never answered once.
+   *
+   * The runtime treats this field as ADVISORY and the credential as the
+   * authority: the body can only narrow, never widen. Sending the binding's own
+   * exposure is therefore always safe, and sending a constant never is.
+   */
+  exposure: Exposure;
   agentId: string;
   runId: string;
   context: Record<string, unknown>;

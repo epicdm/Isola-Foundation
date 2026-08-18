@@ -595,7 +595,10 @@ export async function processDelivery(
 
   const result = await deps.runtime.invoke({
     templateId: binding.templateId,
-    exposure: "PUBLIC",
+    // THE BINDING'S exposure, not a constant. A hardcoded "PUBLIC" here made
+    // every INTERNAL invocation fail closed with 403 exposure_mismatch — see
+    // the note on AgentRuntimeRequest.exposure in runtime.ts.
+    exposure: binding.exposure,
     agentId: binding.paperclipAgentId,
     runId,
     context: buildRuntimeContext(binding, payload, history),
