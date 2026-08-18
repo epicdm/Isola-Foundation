@@ -258,6 +258,52 @@ untouched — same reasoning as the Magnus IP scoping and the C-01 deploy-key de
 | **ROTATION-CLOSEABLE — with one extra step** | Rotating bot 4's credentials closes the credential half. The **binding entry itself must also not be carried forward** into the re-minted public store. Both, or the row stays open: a fresh secret copied into the same stale entry is the same finding with a newer value. |
 | **Why it was not fixed on discovery** | Re-minting the public store requires reconstructing bot credentials for its four surviving bindings, which span **two Chatwoot instances** (`isola-chat.saas00.epic.dm` and `inbox.epic.dm`) — one of which includes inbox 46, the live Front Desk. A wrong credential there is a customer-facing outage. Rotation day reissues all of them from known-good sources anyway, so the safe moment and the cheap moment are the same moment. |
 
+#### C-15 — REQUIRED PROCEDURE for re-minting the public binding store
+
+> **Written on 2026-08-18, in advance and on purpose.** Rotation day should EXECUTE a
+> written procedure, not improvise one under time pressure with the front desk live.
+> This is the deferred half of C-15; it is not optional, and it is not a suggestion
+> about how one might approach it.
+
+1. **Snapshot first, so the change is nameable afterwards.** Record the current secret
+   version (`isola_gw_bindings_v7`) and its binding COUNT from the gateway's boot line.
+   A change you cannot describe afterwards cannot be rolled back with confidence.
+2. **Gather credentials for every surviving binding, from whichever host actually
+   serves it.** MEASURED 2026-08-18, so rotation day does not re-derive it: the
+   `isola-chat.saas00.epic.dm` instance holds accounts **1, 2 and 3** only. Account
+   **5 does not exist there** — API `404` and no database row — so binding **`5/46`
+   (epic-frontdesk-6737, the LIVE front desk) is served by a different host** and
+   needs its own admin token. Bindings `2/7`, `2/8`, `2/10` and `3/4` are on
+   `isola-chat`.
+   **If a token for the host serving `5/46` is unavailable, STOP.** Reconstructing a
+   live binding from inference is how inbox 46 breaks, and inbox 46 is Customer Zero's
+   front desk.
+   *Caveat recorded deliberately:* this was established by showing account 5 is absent
+   from our instance, **not** by reading the binding's own `chatwootBaseUrl` — that
+   field is not exposed by `GET /v1/bindings` and the secret is unreadable. Exposing
+   `chatwootBaseUrl` in the audit view would turn this deduction into a read, and is
+   the same class of gap as the allowlist one closed on 2026-08-18.
+   *Beware the ambiguous negative:* account **3 returned `401`, which is TOKEN SCOPE,
+   not absence** — it exists. An empty or refused listing must never be read as
+   "not there" without a second, authoritative check.
+3. **Mint the new version with the `2/10` entry ABSENT.** Never carry it forward. A
+   fresh secret dropped into the same stale entry is the same finding with a newer
+   value — see the rotation-closeable row above.
+4. **KEEP v7 MOUNTED AND AVAILABLE FOR INSTANT ROLLBACK.** Swarm secrets are immutable
+   and versioned; the old one does not disappear when a new one is deployed. Rollback
+   is a stack edit plus one deploy, measured in seconds. Do not delete v7 in the same
+   maintenance window.
+5. **Fire a per-inbox SIGNATURE PROBE immediately after cutover** — one signed webhook
+   per surviving binding, aimed at a non-existent conversation id so no message can
+   reach a real person. A reconstructed credential that is wrong surfaces as `401
+   signature_mismatch` **within seconds**, instead of as customer complaints hours
+   later. This exact failure mode was diagnosed on 2026-08-18 and is well understood.
+6. **VERIFY THE SURVIVORS, NOT ONLY THE DELETION.** All four remaining bindings must
+   answer. Confirming that inbox 10 is gone proves half the change; proving the other
+   four still work is the other half. *(Law §2.21's sibling — the deletion was never
+   the risky part.)*
+7. **Only then** consider retiring v7.
+
 ### Carried forward — already-known items that belong in the same sweep
 
 These are recorded in Port and must not be re-derived at sweep time. **I have not

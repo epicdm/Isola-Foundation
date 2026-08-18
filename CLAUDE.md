@@ -163,6 +163,20 @@ acceptance, audit correlation, suspension/rollback.
    Corollary: **the copy you forget is the one with no owner watching it.** The stale
    copy here was only caught because an unrelated measurement printed the other
    gateway's bindings — not by any check that existed.
+22. **An authorization is scoped to the operation AS DESCRIBED.** When measurement
+   shows the real operation differs materially from the framing the authorization was
+   given on, **the authorization does not transfer — stop and re-ask.**
+   Measured 2026-08-18: the PM authorized *"remove one stale binding"* from the public
+   gateway. The measured operation was *"re-mint an entire Swarm secret store,
+   reconstructing bot credentials for four live bindings across two Chatwoot
+   instances, one of them the live front desk."* Same sentence, different blast
+   radius. The write was refused and the refusal was ratified.
+   **Corollary, for the authorizing side, and it is half the law:** when a write is
+   authorized, what is authorized is **the operation as described**. If the executor
+   discovers it is bigger, **refusing is compliance, not obstruction** — and a
+   *smaller* measured operation equally needs a fresh authorization, never a revived
+   old one. An authorization is not a token to be spent on whatever the task turns
+   out to be.
 
 ## 3. The 9 questions — answer before implementing
 
