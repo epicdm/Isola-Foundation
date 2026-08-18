@@ -75,19 +75,15 @@ export function checkSender(
 }
 
 /**
- * The one thing a refused sender is told.
+ * A REFUSED SENDER IS TOLD NOTHING. Ruled by the owner 2026-08-17.
  *
- * Static, and it says nothing about what this line is FOR beyond "staff". It
- * does not confirm whether the number is in use, does not name the agent, and
- * does not vary by reason — a message that differed between "not on the list"
- * and "list is empty" would let an outsider probe the configuration.
+ * There is no `refusalText` here on purpose. An INTERNAL line is never given to
+ * a customer, so a reply helps nobody — and it confirms to a stranger that the
+ * number is live and monitored. The earlier version sent one static line
+ * pointing at the front door; that made sense when the refusal was imagined as a
+ * mis-dialled customer, and it is the wrong trade for a staff line.
  *
- * It DOES point at the front door, because the likeliest refused sender is a
- * customer who found the wrong number, and leaving them with a dead end is the
- * failure this whole programme is against.
+ * Silence to the SENDER only. `app.ts` still logs the refusal with its reason
+ * and the allowlist size, and the brain is never invoked. If this is ever
+ * wanted again, it belongs as an opt-in per BINDING, not as a default.
  */
-export function refusalText(frontDoorNumber: string | null): string {
-  const base = "This line is for EPIC staff.";
-  if (frontDoorNumber === null || frontDoorNumber.trim().length === 0) return base;
-  return `${base} For business enquiries please message ${frontDoorNumber.trim()}.`;
-}

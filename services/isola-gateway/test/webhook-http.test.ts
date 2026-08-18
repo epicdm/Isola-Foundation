@@ -241,8 +241,9 @@ describe("POST /v1/chatwoot/agent-bot — binding refusal", () => {
       // stranger must not cost a token or wake an agent holding internal
       // context.
       expect((server.runtime as StubAgentRuntime).requests).toEqual([]);
-      // Exactly one outbound call: the static refusal.
-      expect(server.chatwoot.calls).toHaveLength(1);
+      // NOTHING is sent back. Ruled 2026-08-17: a reply would confirm to a
+      // stranger that the number is live. Silent to the sender, logged for us.
+      expect(server.chatwoot.calls, "a refused sender gets no message at all").toEqual([]);
     } finally {
       await server.close();
     }

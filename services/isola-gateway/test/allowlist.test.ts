@@ -12,7 +12,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { checkSender, normalisePhone, refusalText } from "../src/allowlist.js";
+import { checkSender, normalisePhone } from "../src/allowlist.js";
 
 const INTERNAL = (allowedSenders: string[]) =>
   ({ exposure: "INTERNAL" as const, allowedSenders });
@@ -100,19 +100,18 @@ describe("INTERNAL lines refuse by default", () => {
   });
 });
 
-describe("the refusal text", () => {
-  it("says one thing, and the same thing whatever the reason", () => {
-    // A message that differed between "not on the list" and "list is empty"
-    // would let an outsider probe the configuration.
-    const a = refusalText("+1 767 555-3742");
-    expect(a).toContain("for EPIC staff");
-    expect(a).toContain("3742");
-    expect(a).not.toMatch(/allowlist|internal|agent|manager/i);
-  });
-
-  it("omits the referral rather than inventing one", () => {
-    for (const none of [null, "", "   "]) {
-      expect(refusalText(none)).toBe("This line is for EPIC staff.");
-    }
+describe("a refused sender is told NOTHING", () => {
+  /**
+   * Ruled 2026-08-17. There is no refusal message to assert, which is the point:
+   * a reply would confirm to a stranger that the number is live and monitored,
+   * and an INTERNAL line is never given to a customer.
+   *
+   * The behaviour is asserted where it happens — webhook-http.test.ts proves the
+   * gateway makes NO outbound call on a refusal. This block exists so the
+   * decision is visible from the module that decides it.
+   */
+  it("exports no refusal text at all", async () => {
+    const mod = (await import("../src/allowlist.js")) as Record<string, unknown>;
+    expect(mod["refusalText"], "silence is the behaviour, not a configurable message").toBeUndefined();
   });
 });

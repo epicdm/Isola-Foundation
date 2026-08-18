@@ -44,7 +44,7 @@ import { idempotencyKey } from "./idempotency.js";
 import type { Ledger, ReserveResult, SqlClient } from "./ledger.js";
 import type { OwnershipGate } from "./ownership.js";
 import { constantTimeEquals } from "./signature.js";
-import { checkSender, refusalText } from "./allowlist.js";
+import { checkSender } from "./allowlist.js";
 import { classifyTurn, recordTurn } from "./turns.js";
 import { createLogger, type Logger } from "./log.js";
 import { processDelivery, type DeliveryJob, type DeliveryMode } from "./pipeline.js";
@@ -561,23 +561,20 @@ export function createGateway(deps: GatewayDeps): Gateway {
       const b = decision.binding;
       const verdict = checkSender(b, decision.payload.senderPhone);
       if (!verdict.allowed) {
-        // ONE static line, then nothing. Best-effort: if Chatwoot refuses the
-        // send we still do not invoke — silence is the correct failure here.
-        let noticeSent = true;
-        try {
-          await chatwoot.postMessage(
-            {
-              accountId: b.chatwootAccountId,
-              conversationId: decision.conversationId,
-              accessToken: b.agentBotAccessToken,
-              ...(b.chatwootBaseUrl === undefined ? {} : { baseUrl: b.chatwootBaseUrl }),
-            },
-            refusalText(config.frontDoorNumber),
-            false,
-          );
-        } catch {
-          noticeSent = false;
-        }
+        // SILENCE. Ruled by the owner 2026-08-17.
+        //
+        // An INTERNAL line is never advertised to a customer, so there is nobody
+        // to help by replying — and a reply CONFIRMS to a stranger that the
+        // number is live and monitored. Saying nothing is the smaller surface.
+        //
+        // Silent to the sender, NOT silent to us: the refusal is logged with its
+        // reason, and the brain is never invoked. "No message was sent" must
+        // never mean "nothing was recorded".
+        //
+        // KNOWN COST, accepted deliberately: a NEW staff member who is not yet
+        // onboarded gets nothing back and cannot tell whether the line is broken
+        // or they are simply not on it. That is a real support burden and the
+        // reason onboarding has to keep pace with hiring.
         finish(
           200,
           "rejected_sender",
@@ -585,11 +582,9 @@ export function createGateway(deps: GatewayDeps): Gateway {
             tenantId: b.tenantId,
             conversationId: decision.conversationId,
             // The REASON, never the number. "not_allowlisted" and
-            // "empty_allowlist" need different operator responses and must not
-            // look alike; neither needs the sender's phone in a log.
+            // "empty_allowlist" need different operator responses.
             reason: verdict.reason,
             allowlistSize: b.allowedSenders.length,
-            noticeSent,
           },
           { status: "rejected_sender" },
         );
