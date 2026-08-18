@@ -210,6 +210,15 @@ acceptance, audit correlation, suspension/rollback.
    That is accidental containment, and it **disappears the moment the timeout is raised**
    — which it must be, for any agent that uses tools. **Scope the toolset BEFORE raising
    the timeout**, never after.
+   **Corollary — a success banner is a claim about INTENT, not a measurement of STATE.**
+   `✓ Disabled: image_gen, isola-ops:system_health` reported both as applied. Only
+   re-reading the config showed what actually happened: the built-in toolset was scoped
+   to the platform as asked, while the MCP tool was written to that server's
+   **profile-global** `tools.exclude` — the `--platform` flag was accepted, echoed back
+   as applied, and silently ignored. It removed the tool from the owner's CLI and
+   Telegram, which the containment was explicitly required not to touch. Same family as
+   the law above: **the system's own description of itself is not evidence.** Read the
+   substrate after every write that claims success.
 
 > **Where these laws come from.** Every law in this section was written after the
 > thing it forbids had already happened here — and laws 21, 22 and 23 were each
