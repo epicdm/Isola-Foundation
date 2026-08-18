@@ -542,5 +542,40 @@ export function redactBinding(binding: Binding): Record<string, unknown> {
     agentBotAccessToken: "[redacted]",
     agentBotSecretConfigured: binding.agentBotSecret.length > 0,
     agentBotAccessTokenConfigured: binding.agentBotAccessToken.length > 0,
+    // ── WHO MAY REACH AN INTERNAL LINE ───────────────────────────────────
+    //
+    // This was omitted entirely until 2026-08-18 — not the values, not even a
+    // count. An operator could not answer "who can talk to the staff agent?"
+    // from the deployed state at all.
+    //
+    // The cost was measured, not hypothesised. A non-staff number was found on
+    // the internal allowlist, and because the list could not be READ, it had to
+    // be diagnosed by ARITHMETIC (deployed size 7, minus the 5 active Odoo
+    // employees with a usable number) and by firing a synthetic probe to see
+    // whether the gate fired at all. A security list nobody can enumerate is a
+    // security list nobody can audit.
+    //
+    // Full numbers are NEVER returned: they are staff personal phone numbers,
+    // and an admin endpoint is not a reason to hand them out. Last four digits
+    // plus a length identify an entry to someone who already knows the number —
+    // enough to answer "is MY number on this list?" and "does this list have an
+    // entry that should not be here?" — without the response becoming a staff
+    // directory.
+    allowedSendersCount: binding.allowedSenders.length,
+    allowedSenders: binding.allowedSenders.map(maskSender),
   };
+}
+
+/**
+ * Last four digits and a digit count. Never the number.
+ *
+ * An entry that cannot be parsed is reported as `unparseable` rather than
+ * dropped: a malformed allowlist entry admits nobody (see checkSender), and
+ * silently hiding it from the audit view would make a broken list look like a
+ * short one.
+ */
+export function maskSender(raw: string): string {
+  const digits = String(raw ?? "").replace(/\D+/g, "");
+  if (digits.length < 7) return "unparseable";
+  return `…${digits.slice(-4)} (${digits.length}d)`;
 }
