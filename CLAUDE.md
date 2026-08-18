@@ -177,6 +177,28 @@ acceptance, audit correlation, suspension/rollback.
    *smaller* measured operation equally needs a fresh authorization, never a revived
    old one. An authorization is not a token to be spent on whatever the task turns
    out to be.
+23. **An ambiguous negative is not a finding.** A zero, a `401`, an empty result or a
+   missing row has **at least two explanations**: the thing is absent, *or the
+   instrument could not see it*. Separate them before reporting — and **if you cannot
+   separate them, report the ambiguity, not the conclusion.**
+   Both of 2026-08-18's instances, named because both were caught late and by luck:
+   **(a)** zero `rejected_sender` events were read as *"no non-staff sender has
+   tried"*. The truth was the opposite and worse — a non-staff sender **had** tried
+   and was **admitted**. The refusal never fired because there was nothing it was
+   willing to refuse.
+   **(b)** account 3 returned `401` and was nearly reported as *"the account does not
+   exist on this instance"*. It was **token scope**. It exists.
+   Corollary — **this is Law 11's other half.** A check that has never fired proves
+   nothing; and **a check that fires zero proves nothing until you can say what a
+   non-zero would have looked like.** If you cannot describe the positive case
+   concretely, you are not reading a result, you are reading your own assumption.
+
+> **Where these laws come from.** Every law in this section was written after the
+> thing it forbids had already happened here — and laws 21, 22 and 23 were each
+> filed by the lane that made the mistake, catching itself and reporting it before
+> anyone asked. That is the reason this register is worth keeping: it is not a list
+> of rules handed down, it is the estate's own scar tissue, and a lane that hides a
+> near miss removes the only evidence the next lane will get.
 
 ## 3. The 9 questions — answer before implementing
 
