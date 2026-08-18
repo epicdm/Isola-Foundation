@@ -219,6 +219,27 @@ acceptance, audit correlation, suspension/rollback.
    Telegram, which the containment was explicitly required not to touch. Same family as
    the law above: **the system's own description of itself is not evidence.** Read the
    substrate after every write that claims success.
+   **Corollary — a setting that requires ANOTHER setting to take effect is a silently
+   ignored setting.** `platforms.api_server.port: 8646` was written, survived, and was
+   ignored: the port is only read once the platform block also declares `enabled: true`.
+   The gateway bound the default 8642 and said nothing. Same family as the `--platform`
+   flag accepted and discarded. **Pin twice and verify the binding** — the config states
+   intent, the bound socket states fact.
+25. **What you didn't declare, you may still have INHERITED.** Creating a new instance
+   from a parent, template or clone starts **everything the parent starts**, unless it is
+   explicitly disabled. After creating any new profile, service or clone, **enumerate
+   what it STARTED — not what you configured.**
+   Measured 2026-08-18: a newly created Hermes profile, whose config declared only
+   `api_server`, inherited Telegram and began polling **the same bot token as
+   `epic-operator`** — two consumers competing for the owner's messages. Nothing in the
+   declared config asked for that; it came from outside the file. Killed within ~25
+   seconds, and the profile's own store recorded **0 messages**, so nothing was consumed.
+   It is now disabled explicitly in BOTH `config.yaml` and `.env`, because one of them
+   alone is a wish.
+   The general shape: **absence of configuration is not absence of behaviour.** A fresh
+   thing is not an empty thing. Sibling of §2.21 (enumerate every copy of what you fix)
+   and §2.24 (capability is not prose) — all three are the same failure to distinguish
+   what was *declared* from what is *true*.
 
 > **Where these laws come from.** Every law in this section was written after the
 > thing it forbids had already happened here — and laws 21, 22 and 23 were each
