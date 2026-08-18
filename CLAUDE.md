@@ -121,7 +121,7 @@ acceptance, audit correlation, suspension/rollback.
    246 XCD / 458,701.86 — wrong — alongside 2 USD / 971.17, *identical to the truth*. The
    matching leg made a wrong leg look like a definition problem rather than a wrong
    database, and cost real time.
-13. **A test that passes because nothing happened is not a test that the wrong thing
+19. **A test that passes because nothing happened is not a test that the wrong thing
    didn't happen.** Every absence-assertion needs a **positive control in the same
    harness** — a companion proving the thing CAN happen there. Without it, a broken
    fixture, a refused request or an empty database makes every "did not occur" test
@@ -136,6 +136,19 @@ acceptance, audit correlation, suspension/rollback.
    image that predated several merges — including its own `.test.env` — went red on
    CI's first run against the actual repo. Same family as the busybox grep, the
    ghost-id probe, and the gate that rejected its own source data.
+20. **Test the PATH, not the pieces.** A suite that calls functions directly does not
+   prove the route works. Measured by VOICE 2026-08-18: its canary could **mint** an
+   access link and was then **refused its own page** — with **13/13 green**. The mint
+   gated on `userId`; the render gated on `sipUsername`. One allowlist, two identity
+   keys, zero failing tests, because no test ever traversed mint→render as a user
+   does. Fixed at 17/17 by testing the route.
+   **Corollary — the multi-gate rule.** When a feature has more than one gate, a test
+   must assert that every gate keys on the **same field**, and must carry a **control
+   proving those field names are genuinely distinct** — otherwise the assertion passes
+   trivially when both sides happen to read the same variable in the harness.
+   Sibling of "a green probe against the wrong code path is not reachability" (§2.11's
+   family) and of the wrong-surface law: each is the same error at a different layer —
+   **something green was measured, but not the thing that has to work.**
 
 ## 3. The 9 questions — answer before implementing
 
