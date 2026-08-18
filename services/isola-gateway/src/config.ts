@@ -232,7 +232,19 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
 
     runtimeBaseUrl,
     runtimeInvokePath: str(env, "RUNTIME_INVOKE_PATH") ?? DEFAULT_RUNTIME_INVOKE_PATH,
-    runtimeSecret: str(env, "RUNTIME_SECRET_PUBLIC"),
+    // THE CREDENTIAL THIS GATEWAY PRESENTS, and it decides what it may invoke.
+    //
+    // The runtime treats the credential as the authority on exposure class:
+    // "the credential remains the thing that actually decides; the body can only
+    // narrow, never widen". A gateway holding the PUBLIC secret can invoke only
+    // PUBLIC templates, and one holding the INTERNAL secret only INTERNAL ones.
+    //
+    // `RUNTIME_SECRET` is the neutral name and wins. `RUNTIME_SECRET_PUBLIC`
+    // remains for the existing public deployment. The rename exists because the
+    // internal gateway would otherwise be configured through a variable called
+    // PUBLIC while presenting the internal credential — a name that lies to the
+    // next reader about which side of the boundary the service is on.
+    runtimeSecret: str(env, "RUNTIME_SECRET") ?? str(env, "RUNTIME_SECRET_PUBLIC"),
     runtimeTimeoutMs: int(env, "GATEWAY_RUNTIME_TIMEOUT_MS", DEFAULT_RUNTIME_TIMEOUT_MS),
 
     adminToken: str(env, "GATEWAY_ADMIN_TOKEN"),

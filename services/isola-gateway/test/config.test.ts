@@ -195,3 +195,19 @@ describe("approvedLabels", () => {
     expect(approvedLabels(config, makeBinding({ labels: ["vip-lane"] }))).toContain("vip-lane");
   });
 });
+
+describe("the credential this gateway presents decides what it may invoke", () => {
+  it("prefers the neutral RUNTIME_SECRET when both are set", () => {
+    const c = loadConfig({ RUNTIME_SECRET: "neutral", RUNTIME_SECRET_PUBLIC: "legacy" });
+    expect(c.runtimeSecret).toBe("neutral");
+  });
+
+  it("still accepts RUNTIME_SECRET_PUBLIC alone, so the public deployment is unchanged", () => {
+    // The existing public gateway sets only this. It must keep working untouched.
+    expect(loadConfig({ RUNTIME_SECRET_PUBLIC: "legacy" }).runtimeSecret).toBe("legacy");
+  });
+
+  it("is null when neither is set, so every invocation fails closed", () => {
+    expect(loadConfig({}).runtimeSecret).toBeNull();
+  });
+});
