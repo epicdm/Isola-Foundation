@@ -102,7 +102,7 @@ describe("a declared brain is actually used", () => {
     const client = sel.pick("isola-internal-manager@v1");
     expect(client, "must NOT be the default client").not.toBe(sel.base);
     await ask(client as never);
-    expect(calls[0]!.url).toBe("http://hermes-tunnel:8645/v1/chat/completions");
+    expect(calls[0]!.url).toBe("http://hermes-tunnel:8646/v1/chat/completions");
     expect(calls[0]!.auth, "and not the DeepSeek credential").toBe("Bearer test-key");
   });
 

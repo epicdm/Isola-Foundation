@@ -173,15 +173,33 @@ const TEMPLATE_LIST: readonly TemplateEntry[] = Object.freeze([
     systemPrompt: FRONT_DESK_PROMPT,
   } satisfies TemplateEntry),
   /**
-   * THE OWNER'S INTERNAL MANAGER. The first template to declare its own brain.
+   * THE INTERNAL MANAGER. The first template to declare its own brain.
    *
-   * Hermes `epic-operator` is OpenAI-compatible (`/v1/chat/completions`, bearer
-   * auth — measured 2026-08-17), which is why this needs no new transport: the
-   * same client speaks to it and to DeepSeek.
+   * Hermes is OpenAI-compatible (`/v1/chat/completions`, bearer auth — measured
+   * 2026-08-17), which is why this needs no new transport: the same client
+   * speaks to it and to DeepSeek.
+   *
+   * IT NO LONGER POINTS AT THE OWNER'S PROFILE, AND THAT IS THE POINT.
+   * Until 2026-08-18 this reached `epic-operator` on :8645 — a profile whose
+   * `api_server` platform resolved terminal, code_execution, file, web, browser
+   * and five MCP servers, restrained only by charter text. A staff WhatsApp
+   * message provably reached a live Odoo tool through it.
+   *
+   * It now reaches `epic-internal-readonly-odoo` on :8646 — a PERMISSION CLASS
+   * (see dec-runtime-profiles-split-by-permission-class-2026-08-18), not an
+   * agent's private profile. That profile declares ZERO built-in toolsets and
+   * exactly one MCP server whose allowlist is five business reads.
+   *
+   * The port is PINNED in that profile's config; Hermes otherwise assigns
+   * gateway ports by CLI start order, so a restart could leave this pointing at
+   * a different profile's brain.
    *
    * Reached through `hermes-tunnel`, an SSH local-forward whose key is
-   * restricted server-side to `permitopen="127.0.0.1:8645"` — one port, one
-   * host, no shell.
+   * restricted server-side to `permitopen="127.0.0.1:8646"` — ONE port, one
+   * host, no shell. Verified as a matched pair 2026-08-18: traffic to :8646
+   * returns 401 from the gateway; traffic to :8645 is refused outright. Note
+   * the listener alone proves nothing — `permitopen` is enforced when a channel
+   * OPENS, so the pair must push real traffic.
    *
    * The prompt below is a FLOOR, not the charter. The real charter is AGENTS.md
    * in this agent's Paperclip bundle, fetched at reply time by the instructions
@@ -194,7 +212,7 @@ const TEMPLATE_LIST: readonly TemplateEntry[] = Object.freeze([
     version: "v1",
     exposure: "INTERNAL",
     model: "hermes",
-    modelBaseUrl: "http://hermes-tunnel:8645",
+    modelBaseUrl: "http://hermes-tunnel:8646",
     modelApiKeyEnv: "HERMES_API_KEY",
     timeoutMs: 120_000,
     maxContextBytes: DEFAULT_MAX_CONTEXT_BYTES,
