@@ -31,12 +31,31 @@ describe("allowlist parsing", () => {
     expect(parseAllowlist("")).toEqual([]);
   });
 
-  it("derives the default allowlist from the model and Paperclip base URLs", () => {
+  it("derives the default allowlist from the model, Paperclip, and hosts a template declares", () => {
     const config = loadConfig({
       MODEL_BASE_URL: "https://api.deepseek.com/v1",
       PAPERCLIP_BASE_URL: "https://paperclip.example.test",
     });
-    expect(config.egressAllowlist).toEqual(["api.deepseek.com", "paperclip.example.test"]);
+    // A template that declares its own brain contributes its host, so the
+    // declared runtime is reachable through safeFetch. Least privilege: exactly
+    // the hosts in declared use, never a pattern.
+    expect(config.egressAllowlist).toEqual([
+      "api.deepseek.com",
+      "paperclip.example.test",
+      "hermes-tunnel",
+    ]);
+  });
+
+  it("but an EXPLICIT allowlist is still authoritative and is NOT widened", () => {
+    // An operator who sets EGRESS_ALLOWLIST means that list. Silently unioning a
+    // template host into it would widen a security control behind their back; a
+    // template whose host is absent simply fails closed at safeFetch, visibly.
+    const config = loadConfig({
+      MODEL_BASE_URL: "https://api.deepseek.com/v1",
+      EGRESS_ALLOWLIST: "api.deepseek.com",
+    });
+    expect(config.egressAllowlist).toEqual(["api.deepseek.com"]);
+    expect(config.egressAllowlist).not.toContain("hermes-tunnel");
   });
 
   it("lets EGRESS_ALLOWLIST replace the derived list entirely", () => {

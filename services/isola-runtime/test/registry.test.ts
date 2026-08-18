@@ -10,10 +10,11 @@ import { renderContext } from "../src/context.js";
 import { bootWarnings, loadConfig } from "../src/config.js";
 
 describe("registry shape", () => {
-  it("holds exactly the two ratified templates at the exact ids", () => {
+  it("holds exactly the ratified templates at the exact ids", () => {
     expect(allTemplates().map((t) => t.id)).toEqual([
       "epic-staff-operations-coordinator@v1",
       "isola-ai-sales-front-desk-agent@v1",
+      "isola-internal-manager@v1",
     ]);
     expect(healthTemplateSummary()).toEqual([
       {
@@ -22,6 +23,7 @@ describe("registry shape", () => {
         exposure: "INTERNAL",
       },
       { id: "isola-ai-sales-front-desk-agent@v1", version: "v1", exposure: "PUBLIC" },
+      { id: "isola-internal-manager@v1", version: "v1", exposure: "INTERNAL" },
     ]);
   });
 
@@ -46,8 +48,37 @@ describe("registry shape", () => {
     for (const template of allTemplates()) {
       expect(template.systemPrompt.length).toBeGreaterThan(500);
       expect(template.maxContextBytes).toBe(24 * 1024);
-      expect(template.timeoutMs).toBe(60_000);
-      expect(template.model).toBe("deepseek-chat");
+    }
+  });
+
+  /**
+   * THE "6737 AND 3742 ARE UNTOUCHED" GUARANTEE, stated as a property of the
+   * registry rather than as a hope. A template that declares no brain must be
+   * byte-identical to what it was before the menu existed.
+   */
+  it("a template that declares NO brain keeps the exact previous defaults", () => {
+    const inherited = allTemplates().filter((t) => t.modelBaseUrl === undefined);
+    expect(inherited.length, "the pre-existing templates must still inherit").toBeGreaterThan(0);
+    for (const t of inherited) {
+      expect(t.model, t.id).toBe("deepseek-chat");
+      expect(t.timeoutMs, t.id).toBe(60_000);
+      expect(t.modelApiKeyEnv, t.id).toBeUndefined();
+    }
+    // The customer-facing templates are specifically in that set.
+    const ids = inherited.map((t) => t.id);
+    expect(ids).toContain("isola-ai-sales-front-desk-agent@v1");
+    expect(ids).toContain("epic-staff-operations-coordinator@v1");
+  });
+
+  it("a template that DOES declare a brain names its credential by env var, never inline", () => {
+    const overridden = allTemplates().filter((t) => t.modelBaseUrl !== undefined);
+    expect(overridden.map((t) => t.id)).toEqual(["isola-internal-manager@v1"]);
+    for (const t of overridden) {
+      expect(t.modelApiKeyEnv, "a template is checked into git — no inline secret").toBeTruthy();
+      // Nothing that looks like a credential may appear in a template.
+      const blob = JSON.stringify(t);
+      expect(blob).not.toMatch(/Bearer\s+\S+/);
+      expect(blob).not.toMatch(/[A-Za-z0-9_\-]{32,}/);
     }
   });
 

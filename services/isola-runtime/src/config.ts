@@ -4,6 +4,7 @@
  */
 import type { Exposure } from "./registry.js";
 import { hostOf, parseAllowlist } from "./egress.js";
+import { templateModelHosts } from "./registry.js";
 import type { RateOverrides } from "./money.js";
 import { DEFAULT_HANDOFF, type HandoffPolicy } from "./callbacks.js";
 import { isIssueStatus } from "./paperclip.js";
@@ -198,9 +199,25 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
     : null;
 
   const explicitAllowlist = parseAllowlist(env["EGRESS_ALLOWLIST"]);
-  const derivedAllowlist = [hostOf(modelBaseUrl), hostOf(paperclipBaseUrl)].filter(
-    (h): h is string => h !== null,
-  );
+  // A template that declares its own brain must be reachable, or the call fails
+  // closed at safeFetch — which is exactly what the FIRST reachability probe of
+  // the Hermes tunnel missed: a raw fetch() from inside the container returned
+  // 200 while the real call path, which goes through safeFetch, would have been
+  // refused. A GREEN PROBE AGAINST THE WRONG CODE PATH IS NOT REACHABILITY.
+  //
+  // Derived from the templates themselves, so the allowlist is exactly the hosts
+  // in declared use — never a pattern, never a wildcard. Adding a template adds
+  // its host and nothing else.
+  const templateHosts = templateModelHosts();
+  const derivedAllowlist = [
+    hostOf(modelBaseUrl),
+    hostOf(paperclipBaseUrl),
+    ...templateHosts,
+  ].filter((h): h is string => h !== null);
+  // EXPLICIT STAYS AUTHORITATIVE. An operator who sets EGRESS_ALLOWLIST means
+  // that list and no other — silently unioning a template's host into it would
+  // widen a security control behind their back. A template whose host is absent
+  // simply fails closed at safeFetch, which is the correct and visible outcome.
   const egressAllowlist =
     explicitAllowlist.length > 0
       ? explicitAllowlist

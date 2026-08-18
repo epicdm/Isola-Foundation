@@ -36,6 +36,22 @@ export interface TemplateEntry {
   readonly version: string;
   readonly exposure: Exposure;
   readonly model: string;
+  /**
+   * WHICH BRAIN. Absent means the process-wide default — that is the whole
+   * safety property: every template that existed before this field keeps the
+   * exact client, endpoint and request it had.
+   *
+   * Added 2026-08-17 because the runtime menu bound only at the Paperclip layer:
+   * anything reachable over WhatsApp always got this process's single model
+   * endpoint, whatever Paperclip said the agent's runtime was. The 9043 internal
+   * line answered in the CUSTOMER front desk's voice on DeepSeek while carrying
+   * the manager's agent id — fluent, plausible, and the wrong runtime.
+   *
+   * `modelApiKeyEnv` names the environment variable holding the credential; the
+   * VALUE never appears in a template. A template is checked into git.
+   */
+  readonly modelBaseUrl?: string;
+  readonly modelApiKeyEnv?: string;
   readonly timeoutMs: number;
   readonly maxContextBytes: number;
   readonly toolPolicy: ToolPolicy;
@@ -55,6 +71,22 @@ export interface TemplateMetadata {
 }
 
 const DEFAULT_MAX_CONTEXT_BYTES = 24 * 1024; // 24 KiB
+
+/**
+ * The floor the internal manager answers with if its Paperclip charter has never
+ * been fetched. Deliberately MORE restrictive than the charter: if the persona
+ * is missing, the safe failure is an agent that under-claims, not one that
+ * inherits whatever the underlying runtime thinks it is. Running on its fallback
+ * once already, this agent told the owner it could provision tenants and grant
+ * minutes. It has no tools at all.
+ */
+const INTERNAL_MANAGER_FLOOR_PROMPT = `You are the internal manager for the owner of EPIC Communications Inc. You are INTERNAL ONLY and never speak to a customer.
+
+You have NO TOOLS. You cannot provision anything, grant anything, set a flag, open a ticket, write to Odoo, send a message, or change any system. There is no approval card and no confirm gate for you. If asked to DO something, say plainly that you cannot do it yet, and offer what you can: think it through, draft it, or write down what needs to happen so a person can act.
+
+Never describe a capability you do not have. A confident claim that you can act is worse than saying nothing, because it may be relied on and nothing will have happened.
+
+Answer short and concrete. If you do not know, say so.`;
 const DEFAULT_TEMPLATE_TIMEOUT_MS = 60_000;
 
 const OPERATIONS_COORDINATOR_PROMPT = `You are the EPIC Staff Operations Coordinator, an internal-only assistant for EPIC Communications staff. You are not customer-facing and you must never address a customer directly.
@@ -140,7 +172,53 @@ const TEMPLATE_LIST: readonly TemplateEntry[] = Object.freeze([
     toolPolicy: NO_TOOLS,
     systemPrompt: FRONT_DESK_PROMPT,
   } satisfies TemplateEntry),
+  /**
+   * THE OWNER'S INTERNAL MANAGER. The first template to declare its own brain.
+   *
+   * Hermes `epic-operator` is OpenAI-compatible (`/v1/chat/completions`, bearer
+   * auth — measured 2026-08-17), which is why this needs no new transport: the
+   * same client speaks to it and to DeepSeek.
+   *
+   * Reached through `hermes-tunnel`, an SSH local-forward whose key is
+   * restricted server-side to `permitopen="127.0.0.1:8645"` — one port, one
+   * host, no shell.
+   *
+   * The prompt below is a FLOOR, not the charter. The real charter is AGENTS.md
+   * in this agent's Paperclip bundle, fetched at reply time by the instructions
+   * provider; this text is what answers if that fetch has never succeeded, and
+   * it is deliberately more restrictive than the charter rather than less.
+   */
+  Object.freeze({
+    id: "isola-internal-manager@v1",
+    name: "isola-internal-manager",
+    version: "v1",
+    exposure: "INTERNAL",
+    model: "hermes",
+    modelBaseUrl: "http://hermes-tunnel:8645",
+    modelApiKeyEnv: "HERMES_API_KEY",
+    timeoutMs: 120_000,
+    maxContextBytes: DEFAULT_MAX_CONTEXT_BYTES,
+    toolPolicy: NO_TOOLS,
+    systemPrompt: INTERNAL_MANAGER_FLOOR_PROMPT,
+  } satisfies TemplateEntry),
 ]);
+
+/**
+ * Hosts that templates declare as their own brain. Feeds the egress allowlist so
+ * a declared runtime is reachable through safeFetch and an undeclared one is not.
+ */
+export function templateModelHosts(): string[] {
+  const hosts: string[] = [];
+  for (const t of TEMPLATE_LIST) {
+    if (t.modelBaseUrl === undefined) continue;
+    try {
+      hosts.push(new URL(t.modelBaseUrl).hostname);
+    } catch {
+      /* a malformed template URL must not take the process down at boot */
+    }
+  }
+  return hosts;
+}
 
 const BY_ID: ReadonlyMap<string, TemplateEntry> = new Map(
   TEMPLATE_LIST.map((t) => [t.id, t]),

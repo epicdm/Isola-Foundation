@@ -373,6 +373,37 @@ export function createRuntime(deps: AppDeps): Runtime {
       safeFetch,
     });
 
+  /**
+   * WHICH BRAIN SERVES THIS TEMPLATE.
+   *
+   * THE DEFAULT IS UNTOUCHED, and that is the guarantee this function exists to
+   * make: a template with no `modelBaseUrl` gets `modelClient` — the same object
+   * built above, the same endpoint, the same request. 6737 and 3742 are that
+   * case. `test/model-menu.test.ts` sabotage-verifies it.
+   *
+   * Clients are cached per endpoint so a template does not construct one per
+   * request, and an override with no resolvable credential FAILS CLOSED to an
+   * error rather than silently falling back to the default provider — sending a
+   * staff conversation to the customer brain is precisely the defect this fixes.
+   */
+  const overrideClients = new Map<string, ModelClient>();
+  const clientForTemplate = (template: TemplateEntry): ModelClient => {
+    const base = template.modelBaseUrl;
+    if (base === undefined) return modelClient;
+    const cached = overrideClients.get(base);
+    if (cached !== undefined) return cached;
+    const keyEnv = template.modelApiKeyEnv;
+    const apiKey = keyEnv === undefined ? null : (process.env[keyEnv] ?? null);
+    if (apiKey === null) {
+      throw new ModelProviderError(
+        `template ${template.id} declares modelBaseUrl but ${keyEnv ?? "no credential"} is unset`,
+      );
+    }
+    const made = createOpenAiCompatibleClient({ baseUrl: base, apiKey, safeFetch });
+    overrideClients.set(base, made);
+    return made;
+  };
+
   const recorder =
     deps.recorder ??
     createRecorder({
@@ -1148,7 +1179,7 @@ export function createRuntime(deps: AppDeps): Runtime {
       let invalidOutput = false;
 
       try {
-        const result = await modelClient.complete({
+        const result = await clientForTemplate(template).complete({
           model,
           timeoutMs,
           messages: [
@@ -1422,6 +1453,14 @@ export function createRuntime(deps: AppDeps): Runtime {
         exposure,
         ...(inline ? { responseMode, completionState } : {}),
         model,
+        // WHICH BRAIN AND WHICH CHARTER SERVED THIS ANSWER.
+        // Added 2026-08-17 after the 9043 internal line answered in the CUSTOMER
+        // front desk's voice, on DeepSeek, while carrying the manager's agent id.
+        // Nothing in the log said which runtime or which persona had served it, so
+        // a fluent answer from the wrong brain was indistinguishable from a right
+        // one. These two fields are what make that visible without reading the text.
+        brain: template.modelBaseUrl ?? "default",
+        charterSource: resolvedPrompt.source,
         contextTruncated: rendered.truncated,
         contextOriginalBytes: rendered.originalBytes,
         contextEmittedBytes: rendered.emittedBytes,
