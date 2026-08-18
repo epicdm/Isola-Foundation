@@ -193,6 +193,24 @@ acceptance, audit correlation, suspension/rollback.
    non-zero would have looked like.** If you cannot describe the positive case
    concretely, you are not reading a result, you are reading your own assumption.
 
+24. **PROMPTS ARE NOT PERMISSIONS.** A charter that says an agent has *"NO tools of any
+   kind"* is **documentation, not a control**. Capability is whatever the toolset grants,
+   and it changes when config changes while the prose stays frozen.
+   Measured 2026-08-18: the 9043 staff line's floor prompt asserted it had no tools. Its
+   platform resolved `terminal`, `code_execution`, `file`, `web`, `browser`, `port-io`,
+   `isola-ops`, `staff-ops` and `odoo-epic` — and had **used** them: 28 tool messages in
+   Hermes' own store, including shell results with `exit_code` and a filesystem `ls`. A
+   staff WhatsApp message asking *"how are sales today?"* caused a live Odoo tool call.
+   The sentence was true when written and had been false ever since the path was wired.
+   **Never accept an agent's own account of its powers, and never accept a charter as
+   evidence of restriction — RESOLVE THE TOOLSET.** Sibling of *measure the hop, not the
+   prose*.
+   **Corollary — a timeout is not a security control.** The only thing limiting blast
+   radius here was a 60s client timeout that killed tool-using loops before they finished.
+   That is accidental containment, and it **disappears the moment the timeout is raised**
+   — which it must be, for any agent that uses tools. **Scope the toolset BEFORE raising
+   the timeout**, never after.
+
 > **Where these laws come from.** Every law in this section was written after the
 > thing it forbids had already happened here — and laws 21, 22 and 23 were each
 > filed by the lane that made the mistake, catching itself and reporting it before
