@@ -52,7 +52,16 @@ export interface BridgeConfig {
   charterPath: string | null;
   /** Agent whose Paperclip instructions-bundle carries the live charter. */
   paperclipAgentId: string | null;
-  /** File inside that bundle. One artifact, two consumers. */
+  /**
+   * File inside that bundle. ONE NAME, CANONICAL: `AGENTS.md`, for every agent.
+   *
+   * Ruled 2026-08-17. This defaulted to `SOUL.md` while isola-runtime's own
+   * instructions-provider fetched `AGENTS.md`, so the SAME agent had two charter
+   * files with different names on two paths — one read by the Paperclip issue
+   * path, the other by the channel path. Two sources of truth for a persona is
+   * how an agent develops two personalities, and nothing would have reported the
+   * divergence.
+   */
   charterFile: string;
   /** How stale the cached charter may get before a re-read is attempted. */
   charterTtlMs: number;

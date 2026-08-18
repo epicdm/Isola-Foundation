@@ -18,7 +18,7 @@ const cfg: BridgeConfig = {
   paperclipAgentKey: fromFile(process.env["PAPERCLIP_AGENT_KEY_FILE"], "PAPERCLIP_AGENT_KEY"),
   charterPath: process.env["CHARTER_PATH"] ?? null,
   paperclipAgentId: process.env["PAPERCLIP_AGENT_ID"] ?? null,
-  charterFile: process.env["CHARTER_FILE"] ?? "SOUL.md",
+  charterFile: process.env["CHARTER_FILE"] ?? "AGENTS.md",
   charterTtlMs: Number(process.env["CHARTER_TTL_MS"] ?? 60_000),
   requestTimeoutMs: Number(process.env["REQUEST_TIMEOUT_MS"] ?? 110_000),
   inboundToken:

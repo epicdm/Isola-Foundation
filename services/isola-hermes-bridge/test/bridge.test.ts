@@ -27,7 +27,7 @@ const cfg: BridgeConfig = {
   paperclipAgentKey: "agent-key",
   charterPath: null,
   paperclipAgentId: "AG",
-  charterFile: "SOUL.md",
+  charterFile: "AGENTS.md",
   charterTtlMs: 60_000,
   requestTimeoutMs: 5_000,
   inboundToken: null,
@@ -222,8 +222,9 @@ describe("R12 — the persona shim", () => {
   it("fetches the charter from the agent's own bundle, with its own key", async () => {
     resetCharterCache();
     const f = vi.fn(async (url: string, init: RequestInit) => {
+      // ONE canonical charter filename across both paths — see BridgeConfig.
       expect(url).toContain("/api/agents/AG/instructions-bundle/file");
-      expect(url).toContain("path=SOUL.md");
+      expect(url).toContain("path=AGENTS.md");
       expect((init.headers as Record<string, string>)["authorization"]).toBe("Bearer agent-key");
       return new Response(JSON.stringify({ content: "REAL CHARTER" }), { status: 200 });
     });
