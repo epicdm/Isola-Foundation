@@ -240,6 +240,24 @@ untouched — same reasoning as the Magnus IP scoping and the C-01 deploy-key de
 | **⚠ STANDING PROHIBITION — the control that KEEPS it a floor** | **CHATWOOT LOGS DO NOT LEAVE host03** — not to a vendor, not to a bucket, not to a log-shipper, not to an APM agent, not to a support bundle or an EasyPanel log export, not pasted into a ticket or a screenshot — **until C-14 is closed at the mechanism.** The instant those logs leave the host, a local credential becomes a remote one and **this entry converts from floor to GATE**. The conversion is invisible because nobody thinks of "turn on logging" as a security decision. Without this prohibition, C-14 is a gate we have not noticed yet. |
 | **PLACEMENT DECISION — three candidate fixes, FILED NOT SCHEDULED** | (1) upstream patch so Chatwoot filters job arguments; (2) redaction at the log sink; (3) a mechanism that removes the secret from the dispatch path entirely. **Start none of them now.** Until one lands, treat sidekiq job logs as a credential-bearing surface and read them only through the redactor, with `secret:`-style Ruby hash syntax added to its patterns. |
 
+### C-15 — Agent bot 4's HMAC secret and access token sit in the **internet-facing** gateway's binding store
+
+> **NOT AN INCIDENT AND NOT URGENT.** Nothing leaked outside the estate, no third party
+> logged anything, and the credential is doing its job where it belongs. This row exists
+> because the credential for the **INTERNAL staff line** has a second copy in the store of
+> the gateway that is **reachable from the internet**, and rotation day is the moment that
+> costs nothing to fix.
+
+| field | value |
+|---|---|
+| **What it is** | The HMAC signing secret **and** the Application-API access token for agent bot 4 ("Isola Internal Manager Bot"), account 2, inbox 10 — the 9043 staff line. |
+| **Where the second copy lives** | `isola_gw_bindings_v7`, the **public** gateway's binding store, in a `2/10 -> epic-internal-manager` entry that predates the 2026-08-17 split into separate public and internal gateways. The internal gateway's own copy (`isola_gwint_bindings_v4`) is the one actually in use. |
+| **How it was found** | Not by a check. It surfaced while reading the public gateway's boot line during an unrelated template reconciliation on 2026-08-18. See law §2.21 — *when you fix a list, enumerate every place that list exists*. |
+| **Why it is a FLOOR, not a gate** | The public gateway holds the **PUBLIC** runtime credential, so even if it were handed traffic for inbox 10 the runtime refuses with `exposure_mismatch` — measured behaviour, not theory. And Chatwoot agent bot 4's `outgoing_url` points at `isolagwint_gateway`, so nothing routes there today. The isolation ruled on 2026-08-17 is what makes this a housekeeping item instead of an exposure. |
+| **The other half of the same entry** | That stale binding also carries a **stale allowlist** — 7 entries minted before the 2026-08-18 rebuild, therefore still containing the non-staff number removed that day. Inert for the same reason, and removed by the same fix. |
+| **ROTATION-CLOSEABLE — with one extra step** | Rotating bot 4's credentials closes the credential half. The **binding entry itself must also not be carried forward** into the re-minted public store. Both, or the row stays open: a fresh secret copied into the same stale entry is the same finding with a newer value. |
+| **Why it was not fixed on discovery** | Re-minting the public store requires reconstructing bot credentials for its four surviving bindings, which span **two Chatwoot instances** (`isola-chat.saas00.epic.dm` and `inbox.epic.dm`) — one of which includes inbox 46, the live Front Desk. A wrong credential there is a customer-facing outage. Rotation day reissues all of them from known-good sources anyway, so the safe moment and the cheap moment are the same moment. |
+
 ### Carried forward — already-known items that belong in the same sweep
 
 These are recorded in Port and must not be re-derived at sweep time. **I have not

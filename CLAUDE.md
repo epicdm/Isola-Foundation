@@ -149,6 +149,20 @@ acceptance, audit correlation, suspension/rollback.
    Sibling of "a green probe against the wrong code path is not reachability" (§2.11's
    family) and of the wrong-surface law: each is the same error at a different layer —
    **something green was measured, but not the thing that has to work.**
+21. **When you fix a list, enumerate every place that list exists.** A remediation
+   applied to one store while an identical stale copy lives in another is **not a
+   remediation — it is a moved problem.** Measured 2026-08-18: a non-staff number was
+   removed from the internal line's allowlist by re-minting
+   `isola_gwint_bindings_v4`, and an untouched copy of the same binding — same inbox,
+   same bot secret, same stale 7-entry allowlist — sat in the internet-facing
+   gateway's `isola_gw_bindings_v7` the whole time. The fix was verified thoroughly
+   **on one side**, and nobody asked *where else does this live?*
+   Generalizes to **allowlists, secrets, config and feature flags**. The enumeration
+   is part of the fix, not a follow-up: before declaring a list remediated, name every
+   store that holds a copy and say what happened to each one.
+   Corollary: **the copy you forget is the one with no owner watching it.** The stale
+   copy here was only caught because an unrelated measurement printed the other
+   gateway's bindings — not by any check that existed.
 
 ## 3. The 9 questions — answer before implementing
 
