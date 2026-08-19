@@ -1,0 +1,4 @@
+# These files are byte-exact rollback copies of live agent instruction bundles.
+# A checkout that rewrites line endings breaks the recorded sha256 and makes the
+# paste-back a DIFFERENT file from what was live. No conversion, ever.
+* -text
