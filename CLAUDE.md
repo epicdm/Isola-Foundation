@@ -241,6 +241,57 @@ acceptance, audit correlation, suspension/rollback.
    and §2.24 (capability is not prose) — all three are the same failure to distinguish
    what was *declared* from what is *true*.
 
+26. **A containment that leaves a false assurance in place is not a containment.**
+   When you disable a capability, **the surface must say so honestly.** Removing the
+   function but leaving reassuring copy has not contained the problem — it has replaced
+   a broken feature with a lie, which is worse, because the broken feature at least
+   fails visibly. Every disablement answers: what does the user now SEE, and is it true?
+   Silence filled with comfort is the failure mode; fail-closed means the surface says
+   *"this is not available"*, never *"sit tight, something is coming"*.
+   **Corollary to §2.21** — *a secret can sit anywhere in a request line*: path, query,
+   header, body or fragment. Redaction written for query parameters only is redaction
+   for one hiding place. Enumerate the SHAPES, not just the copies.
+   **Corollary to §2.24** — *an async reload will lie to you for a second or two.*
+   Verifying immediately after `systemctl reload nginx` can hit a worker still serving
+   the old config; a verification that races the thing it verifies is not a
+   measurement. Re-check after the workers have cycled.
+   **Corollary, added 2026-08-19 after it cost us twice — A FAIL-CLOSED RULE NEEDS A
+   MECHANISM TO FAIL WITH.** Before ruling "must refuse", check whether a refusal path
+   exists. The runtime was ruled to refuse booting without a budget ceiling and had
+   only *warnings* — nothing that could refuse — so the mechanism (`bootErrors()`,
+   exiting non-zero) was part of the work, not an afterthought. A rule that names a
+   consequence the system cannot produce is a wish.
+27. **A field's name is a claim; its write-site is the truth.** *(three parts, one night)*
+   **(a)** Before citing a flag as evidence, **read the code that SETS it**.
+   `verified=true` meant only "the OTP was accepted" — rows carrying it came from runs
+   where SIP registration still failed with *Wrong password*. `xmlFetched=true` meant
+   only "a config fetch occurred". A column called `verified` verifies whatever its
+   author decided to verify, which may not be your question.
+   **(b)** **A read taken after you mutated the thing is not a measurement of its
+   history.** A reset deleted 13 activation rows; the survivor was then reported as
+   "the first ever verified" when it was merely the only one left. If you have written
+   to or truncated a store during a session, any historical claim about it must come
+   from a pre-mutation snapshot, and must say so.
+   **(c)** **A guard that inspects prose instead of operations protects nothing.** A
+   safety hook blocked a Port write because the DOCUMENTATION contained "destroy" near
+   "Magnus" — while the actual delete operations it exists to prevent had already run
+   unimpeded. A guard that fires on the description of an action and not the action is
+   theatre: it produces the feeling of protection at the moment protection has already
+   failed. **Guards must bind to operations.**
+28. **A test can only protect a decision someone made.** A passing test encodes intent,
+   so a test written around behaviour nobody chose does not protect the system — it
+   **preserves the accident** and makes it costly to fix. When a test asserts something
+   surprising, ask who decided it and when; if the answer is "nobody", **the test is the
+   defect's bodyguard**. Measured 2026-08-19: `"treats an absent or zero budget as
+   unlimited"` passed for as long as it existed, and was the reason an unbounded-spend
+   default survived review.
+   **Corollary — a sabotage test without a control cannot distinguish "refuses
+   correctly" from "refuses everything".** Every negative proof needs its positive twin
+   in the same run.
+   **Corollary — RED TESTS CAN BE EVIDENCE.** Thirteen tests turning red when a required
+   env var was withheld is the proof that the service now refuses to run unconfigured:
+   the failure IS the measurement.
+
 > **Where these laws come from.** Every law in this section was written after the
 > thing it forbids had already happened here — and laws 21, 22 and 23 were each
 > filed by the lane that made the mistake, catching itself and reporting it before
