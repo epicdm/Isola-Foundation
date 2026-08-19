@@ -37,6 +37,33 @@ TO ROLL BACK
   Everything below the BEGIN line is byte-for-byte what was live. Paste it back
   into the same file in Paperclip, whole, and 6737 returns to this exact behaviour.
 
+THE SAME FALSE PROMISE LIVES IN A SECOND FIELD — EDIT IT IN THE SAME SITTING
+  Fixing §1 and §6 below leaves the agent's own `capabilities` field still asserting
+  it. A capabilities field is exactly what a future audit reads as evidence.
+
+  fd2867d1 capabilities, CURRENT TEXT, verbatim:
+    "Answers customer questions from approved business information, qualifies leads,
+     captures name/contact/request, escalates to a human and resumes only after
+     explicit handback."
+
+  The false half is "resumes only after explicit handback" — there is no handback
+  signal anywhere in the system. It is §6's rule restated on another surface.
+
+AND WHILE YOU ARE IN THERE — THE INTERNAL AGENT (9043) HAS TWO WRONG FIELDS
+  a60770e9 capabilities, CURRENT TEXT, verbatim:
+    "Internal-only manager for the owner. Thinks on Hermes (epic-operator). Answers
+     questions about the business, drafts and structures work, and keeps track of
+     what the owner has asked for. No customer contact. No Odoo tools at v1."
+
+  Both errors matter, in opposite directions:
+  · "No Odoo tools at v1" is FALSE — 9 Odoo tools are registered and have executed.
+    Its charter says the same thing, which is why it refused a real staff question
+    on 2026-08-19 at 16:18. It is obeying an instruction that is out of date.
+  · "Thinks on Hermes (epic-operator)" is FALSE and is the more dangerous one.
+    It runs on the profile `epic-internal-readonly-odoo`. `epic-operator` is YOUR
+    profile, with the full toolset. Anyone auditing this field would conclude the
+    internal agent runs with owner-level tools. It does not.
+
 === BEGIN PRISTINE BUNDLE — line 1 of the file is the next line ===
 # EPIC Business Front Desk
 
