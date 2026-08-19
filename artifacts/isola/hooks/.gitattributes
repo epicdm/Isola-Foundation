@@ -1,0 +1,4 @@
+# Byte-exact snapshots of a safety control, recorded with sha256 hashes.
+# A checkout that rewrites line endings breaks those hashes and makes a rollback
+# copy a DIFFERENT file from the one that was live. No conversion, ever.
+* -text
