@@ -879,5 +879,39 @@ try {
   /* nothing to clean */
 }
 
+// 2026-08-19 — CHAIN THE USER-HOME HOOK'S OWN SUITE.
+//
+// This selftest exercises isola-guard.js and isola-stop-gate.js, both of which live in
+// this repository. It does NOT reach ~/.claude/hooks/enforce-safety.js, which is a third
+// enforcing hook living outside the repo — and CLAUDE.md used to point here as though
+// running this verified everything. Somebody following the documented procedure would
+// have verified two of three hooks and believed they had checked all of them.
+//
+// It cannot be bundled here (it is per-machine and not version-controlled), so this
+// chains its own suite when present and says so plainly when it is absent. An absent
+// hook is reported, never silently treated as a pass: "no result" is not "passed".
+const os = require('os');
+const homeHookTest = path.join(os.homedir(), '.claude', 'hooks', 'enforce-safety.test.js');
+let homeHookFailed = 0;
+try {
+  if (require('fs').existsSync(homeHookTest)) {
+    console.log('\n--- user-home hook: ' + homeHookTest);
+    const r = spawnSync(process.execPath, [homeHookTest], { encoding: 'utf8' });
+    const out = (r.stdout || '') + (r.stderr || '');
+    const summary = out.split('\n').filter((l) => /passed,|FAILURE/.test(l)).pop() || '(no summary line)';
+    const bad = /[1-9]\d* failed/.test(summary) || r.status !== 0;
+    if (bad) homeHookFailed = 1;
+    console.log((bad ? '  FAIL  ' : '  PASS  ') + 'enforce-safety.test.js — ' + summary.trim());
+  } else {
+    console.log('\n--- user-home hook: NOT INSTALLED on this machine (' + homeHookTest + ')');
+    console.log('  NOT RUN  enforce-safety.js is unverified here. This is a per-machine hook;');
+    console.log('           its absence means this machine does not have that enforcement.');
+  }
+} catch (e) {
+  homeHookFailed = 1;
+  console.log('  FAIL  could not run the user-home hook suite: ' + (e && e.message));
+}
+failed += homeHookFailed;
+
 console.log('\n' + (failed ? failed + ' FAILURE(S)' : 'all ' + (cases.length + stopCases.length) + ' checks passed'));
 process.exit(failed ? 1 : 0);

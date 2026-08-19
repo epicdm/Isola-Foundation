@@ -364,9 +364,34 @@ payment · broad launch · merging to a protected branch.
 `/isola-test-matrix` · `/isola-port-closeout` · `/isola-ui-convergence` ·
 `/isola-deploy-readiness` · `/isola-incident`
 
-Enforcement is deterministic, not advisory: `.claude/hooks/` blocks builds in live
-checkouts, secret reads/writes, writes into live checkouts and build output, Meta
-mutations, and prohibited schema commands. Run `node .claude/hooks/selftest.js` to verify.
+Enforcement is deterministic, not advisory — and it lives in **two** places. Verifying one
+does not verify the other.
+
+**Project hooks — `.claude/hooks/`, version-controlled with this repo.** `isola-guard.js`
+and `isola-stop-gate.js` block builds in live checkouts, secret reads/writes, writes into
+live checkouts and build output, Meta mutations, and prohibited schema commands. Run
+`node .claude/hooks/selftest.js` to verify; it exercises exactly those two files, and then
+chains the user-home hook's own suite if that hook is installed.
+
+**User-home hook — `~/.claude/hooks/enforce-safety.js`, NOT in this repository.** It gates
+destructive shell, SQL and container operations, and it is the hook whose refusal reads
+`BLOCKED by Isola safety hook`. Verify it directly with
+`node ~/.claude/hooks/enforce-safety.test.js`; it also writes `enforce-safety.log` beside
+itself, which is the record of every block, exemption and allow.
+
+**Two cautions follow from where it lives.** Because it is outside the repository it is
+**per-machine**: not reviewed in a PR, and it may differ between lanes — so a lane cannot
+assume another lane is subject to the same rules. And it gates only what it is given: as of
+2026-08-19 it applies its rules to shell invocations and file writes, and deliberately not
+to records such as register entries or API calls. A record is not an operation; matching one
+against command patterns blocked four Port writes before it was fixed
+(`def-enforce-safety-guard-binds-to-vocabulary-not-operations-2026-08-19`,
+`dec-enforce-safety-gated-to-operations-2026-08-19`).
+
+**If a guard blocks a document rather than an operation, stop and report it. Do not reword
+to get through** — a register that has learned to avoid its own vocabulary can no longer say
+plainly what it decided about the operations it exists to govern, and writing around a guard
+is one step from disabling it.
 
 ## 8. The Register Law — ratified 2026-08-17
 
