@@ -1028,7 +1028,15 @@ export function createRuntime(deps: AppDeps): Runtime {
       // Resolved BEFORE the budget preflight so the reservation is costed against
       // the prompt actually sent. Never throws: an unreachable Paperclip yields the
       // fail-closed prompt, which escalates instead of answering.
+      // PHASE TIMING. `durationMs` alone cannot say WHERE a slow reply went, and
+      // that gap cost a whole trace: three hypotheses (MCP respawn, first-run
+      // init, a slow Paperclip host) were each probed and eliminated, because the
+      // only number available was the total. These three marks are emitted on the
+      // invoke line so the next question is answered by reading a log rather than
+      // by instrumenting under pressure.
+      const tCharterStart = now();
       const resolvedPrompt = await instructions.resolve(template.id, template.systemPrompt);
+      const charterMs = now() - tCharterStart;
       if (resolvedPrompt.source === "fail_closed") {
         logger.error({
           event: "instructions",
@@ -1177,6 +1185,13 @@ export function createRuntime(deps: AppDeps): Runtime {
        * the inline contract reports them apart.
        */
       let invalidOutput = false;
+      // Wall time of the brain round-trip, including any agent loop and tool
+      // calls the runtime cannot see from here. Measured around the call rather
+      // than inferred from a downstream accounting table: `first_seen` there may
+      // be usage-WRITE time, not call-start, and a duration derived from two
+      // timestamps whose meanings were never checked is not a measurement.
+      let brainMs = 0;
+      const tBrainStart = now();
 
       try {
         const result = await clientForTemplate(template).complete({
@@ -1187,6 +1202,7 @@ export function createRuntime(deps: AppDeps): Runtime {
             { role: "user", content: userMessage },
           ],
         });
+        brainMs = now() - tBrainStart;
         status = "succeeded";
         content = result.content;
         httpStatus = 200;
@@ -1202,6 +1218,10 @@ export function createRuntime(deps: AppDeps): Runtime {
           };
         }
       } catch (err) {
+        // Recorded on the FAILURE path too. A timeout's brainMs is the most
+        // useful number there is when asking whether the ceiling is wrong or the
+        // upstream is; omitting it would leave exactly the case we most need.
+        brainMs = now() - tBrainStart;
         // NEVER fabricate an answer here. The write-back says the run failed.
         if (err instanceof ModelTimeoutError) {
           status = "timed_out";
@@ -1297,6 +1317,8 @@ export function createRuntime(deps: AppDeps): Runtime {
       // HTTP status. It is logged and surfaced as `recorded:false`.
       let recorded = false;
       let recorderError: string | null = null;
+      /** Wall time of the Paperclip write-back. 0 when no record was attempted. */
+      let recordMs = 0;
       if (conversationFailure !== null) {
         // There is no issue to write to. The recorder is not called: it would
         // fail on the missing {issueId} anyway, and reporting the real reason is
@@ -1315,7 +1337,9 @@ export function createRuntime(deps: AppDeps): Runtime {
         });
       } else {
         try {
+          const tRecordStart = now();
           await recorder.record(runOutcome);
+          recordMs = now() - tRecordStart;
           recorded = recorder.kind !== "null";
           if (recorder.kind === "null") recorderError = "no recorder configured";
         } catch (err) {
@@ -1461,6 +1485,14 @@ export function createRuntime(deps: AppDeps): Runtime {
         // one. These two fields are what make that visible without reading the text.
         brain: template.modelBaseUrl ?? "default",
         charterSource: resolvedPrompt.source,
+        // WHERE THE TIME WENT. `durationMs` is the total; these three name the
+        // legs, so "why was that slow" is a log read and not an investigation.
+        // They do not have to sum to durationMs — the remainder is this service's
+        // own work (context render, budget preflight, ledger) and a growing
+        // remainder is itself the finding.
+        charterMs,
+        brainMs,
+        recordMs,
         contextTruncated: rendered.truncated,
         contextOriginalBytes: rendered.originalBytes,
         contextEmittedBytes: rendered.emittedBytes,
