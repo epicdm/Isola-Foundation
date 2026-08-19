@@ -27,8 +27,18 @@ export const DEFAULT_ALERT_PCT = 80;
 export const CHARS_PER_TOKEN_ESTIMATE = 4;
 
 export interface BudgetInputs {
-  /** Paperclip's monthly budget. `null` or <= 0 means "no budget configured". */
+  /**
+   * Paperclip's monthly budget. `null` or <= 0 means "Paperclip has no ceiling
+   * for this agent" — which is NOT the same as "no ceiling applies". See
+   * `fallbackCents`.
+   */
   budgetCents: number | null;
+  /**
+   * The ceiling applied when Paperclip supplies none. Finite and positive,
+   * sourced from `RUNTIME_BUDGET_FALLBACK_CENTS`, which has no default: the
+   * service refuses to boot without it rather than choose a money figure.
+   */
+  fallbackCents: number;
   /** Paperclip's canonical spend for the period. */
   spentCents: number;
   /** Outbox entries Paperclip has not confirmed. */
@@ -53,10 +63,34 @@ export type BudgetVerdict =
     };
 
 export function evaluateBudget(inputs: BudgetInputs): BudgetVerdict {
-  const budgetCents = inputs.budgetCents;
-  if (budgetCents === null || !Number.isFinite(budgetCents) || budgetCents <= 0) {
-    return { kind: "unlimited" };
-  }
+  /**
+   * NO CEILING FROM PAPERCLIP MEANS THE FALLBACK CEILING, NEVER "UNLIMITED".
+   *
+   * Until 2026-08-19 this branch returned `{ kind: "unlimited" }`, so `null`,
+   * `0` and any non-finite value all disabled enforcement before it ran. The
+   * internal manager sat at `budgetMonthlyCents: 0` and spent freely; nothing
+   * was broken, the ceiling was simply never reached.
+   *
+   * THE ABSENT CASE IS THE ONE THAT MATTERS. `budgetMonthlyCents` arrives from
+   * Paperclip as `number | null`, so an agent Paperclip holds no budget for —
+   * i.e. every newly created agent — took the same branch. Nobody decided that
+   * new agents have no spending limit; it arrived as a fall-through.
+   * **A DEFAULT THAT PERMITS IS A POLICY NOBODY DECIDED.**
+   *
+   * Refusing outright would be the other error: it would take every agent
+   * relying on the implicit "unlimited" offline at once, the internal line and
+   * the customer front desk together. A finite fallback is the only option that
+   * leaves nothing unguarded AND nothing newly refused.
+   *
+   * `fallbackCents` has NO default in config — a missing value refuses to boot
+   * rather than inventing a ceiling, because a number this one silently
+   * substitutes is a money figure nobody chose.
+   */
+  const supplied = inputs.budgetCents;
+  const budgetCents =
+    supplied === null || !Number.isFinite(supplied) || supplied <= 0
+      ? inputs.fallbackCents
+      : supplied;
 
   const budgetMicrocents = centsToMicrocents(budgetCents);
   const effectiveMicrocents =

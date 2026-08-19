@@ -74,6 +74,11 @@ export interface RuntimeConfig {
 
   // ---- budget ------------------------------------------------------------
   budgetEnforcement: boolean;
+  /**
+   * Ceiling applied when Paperclip supplies none. `null` means the operator did
+   * not set it, which is a BOOT FAILURE rather than a default — see bootErrors.
+   */
+  budgetFallbackCents: number | null;
   budgetAlertPct: number;
   budgetRefreshMs: number;
   pauseOnExhausted: boolean;
@@ -148,6 +153,19 @@ function intAllowZero(env: EnvRecord, key: string, fallback: number): number {
  * from zero: unset falls through to the built-in rate card, and an explicit 0
  * means the operator is asserting this token class is free.
  */
+/**
+ * A positive integer with NO fallback. Returns null when absent or unusable so
+ * the caller can refuse to boot, rather than substituting a value. Used for
+ * settings where an invented number would itself be the defect.
+ */
+function positiveIntOrNull(env: EnvRecord, key: string): number | null {
+  const raw = str(env, key);
+  if (raw === null) return null;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
 function price(env: EnvRecord, key: string): number | null {
   const raw = str(env, key);
   if (raw === null) return null;
@@ -291,6 +309,12 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
     syntheticPricing: bool(env, "RUNTIME_SYNTHETIC_PRICING", false),
 
     budgetEnforcement: bool(env, "RUNTIME_BUDGET_ENFORCEMENT", true),
+    // NO DEFAULT, deliberately. This is the ceiling applied to any agent
+    // Paperclip has no budget for, which is every newly created agent. A number
+    // this file invented would be a money figure nobody decided — the same
+    // fall-through that made "no budget" mean "no limit" until 2026-08-19.
+    // Missing or unparseable => boot refuses (see the fatal check below).
+    budgetFallbackCents: positiveIntOrNull(env, "RUNTIME_BUDGET_FALLBACK_CENTS"),
     budgetAlertPct: pct(env, "RUNTIME_BUDGET_ALERT_THRESHOLD_PCT", DEFAULT_BUDGET_ALERT_PCT),
     budgetRefreshMs: intAllowZero(env, "RUNTIME_BUDGET_REFRESH_MS", DEFAULT_BUDGET_REFRESH_MS),
     pauseOnExhausted: bool(env, "RUNTIME_PAUSE_ON_EXHAUSTED", true),
@@ -331,6 +355,29 @@ export function hasAnyCredential(config: RuntimeConfig): boolean {
  * Boot-time warnings. Returns a list of category strings — never a value.
  * Callers log these once at boot.
  */
+/**
+ * FATAL configuration problems. Non-empty means the process must not start.
+ *
+ * Distinct from `bootWarnings` on purpose: a warning describes a service that
+ * runs in a degraded but understood state, and this list describes one that
+ * would run while silently deciding something it has no right to decide.
+ *
+ * The first entry is the budget fallback. Until 2026-08-19 an agent with no
+ * Paperclip budget was treated as unlimited, so the absence of a number WAS a
+ * policy — one nobody chose. Booting with an invented ceiling would repeat that
+ * with a different value; booting without one would restore the hole. Refusing
+ * is the only option that neither invents nor permits.
+ */
+export function bootErrors(config: RuntimeConfig): string[] {
+  const errors: string[] = [];
+  if (config.budgetEnforcement && config.budgetFallbackCents === null) {
+    errors.push(
+      "RUNTIME_BUDGET_FALLBACK_CENTS is unset or not a positive integer. It is the monthly ceiling applied to any agent Paperclip has no budget for — which is every newly created agent. This service will not invent a money figure: set it explicitly (owner-owned value) or disable enforcement deliberately with RUNTIME_BUDGET_ENFORCEMENT=false.",
+    );
+  }
+  return errors;
+}
+
 export function bootWarnings(config: RuntimeConfig): string[] {
   const warnings: string[] = [];
   if (config.secrets.INTERNAL === null) {

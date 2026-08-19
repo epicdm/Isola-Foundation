@@ -46,6 +46,13 @@ export const BASE_ENV: EnvRecord = {
   // No test may write to a real state directory or depend on one left behind by
   // another test. Tests that exercise the file backend build their own store.
   RUNTIME_STATE_BACKEND: "memory",
+  // REQUIRED IN PRODUCTION, so required here. The ceiling applied to any agent
+  // Paperclip has no budget for — which is every agent in this harness. Adding
+  // it made thirteen tests go from red to green, and that is the point: without
+  // it the runtime REFUSES rather than permitting, which is the whole change.
+  // A harness that supplied a permissive default would have hidden exactly the
+  // behaviour these tests now depend on.
+  RUNTIME_BUDGET_FALLBACK_CENTS: "5000",
 };
 
 export function envConfig(overrides: EnvRecord = {}): RuntimeConfig {

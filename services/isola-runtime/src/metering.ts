@@ -87,6 +87,13 @@ export interface MeteringOptions {
   rateOverrides: RateOverrides;
   syntheticEnabled: boolean;
   alertPct: number;
+  /**
+   * The ceiling applied when Paperclip supplies none (null / 0 / non-finite).
+   * Not a default in the usual sense: it is what stands between an agent with
+   * no configured budget and an unbounded spend, so config refuses to boot
+   * without it.
+   */
+  budgetFallbackCents: number;
   budgetRefreshMs: number;
   budgetEnforcement: boolean;
   pauseOnExhausted: boolean;
@@ -105,6 +112,12 @@ export interface MeteringOptions {
 export const DEFAULT_METERING_OPTIONS: MeteringOptions = Object.freeze({
   companyIdDefault: null,
   provider: "deepseek",
+  // 0 REFUSES, it does not permit. evaluateBudget treats a zero ceiling as
+  // exhausted, so anyone adopting these defaults without choosing a real number
+  // gets a hard stop rather than an unbounded agent. The permissive version of
+  // this constant is exactly the fall-through that made "no budget" mean "no
+  // limit" until 2026-08-19.
+  budgetFallbackCents: 0,
   rateOverrides: {
     inputPerMtokCents: null,
     cachedInputPerMtokCents: null,
@@ -533,6 +546,10 @@ export class MeteringService {
         reservedMicrocents,
         requestMicrocents: estimate,
         alertPct: this.d.options.alertPct,
+        // Applied when Paperclip supplies no ceiling. See budget.ts: absent and
+        // zero both used to mean "unlimited", so a new agent was unguarded by
+        // fall-through rather than by decision.
+        fallbackCents: this.d.options.budgetFallbackCents,
       });
 
       if (verdict.kind === "unlimited") {

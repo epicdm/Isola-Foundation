@@ -6,13 +6,25 @@
 import { createServer } from "node:http";
 
 import { createRuntime } from "./app.js";
-import { bootWarnings, loadConfig } from "./config.js";
+import { bootErrors, bootWarnings, loadConfig } from "./config.js";
 import { createLogger } from "./log.js";
 import { healthTemplateSummary } from "./registry.js";
 import { SERVICE_VERSION } from "./version.js";
 
 const config = loadConfig(process.env);
 const logger = createLogger();
+
+// FATAL FIRST, and it exits rather than degrades. A warning means "running,
+// understood, worse than ideal". These mean "would run while silently deciding
+// something it has no right to decide" — a money ceiling nobody chose being the
+// first of them. Loud and dead beats quiet and permissive.
+const fatal = bootErrors(config);
+if (fatal.length > 0) {
+  for (const detail of fatal) {
+    logger.error({ event: "boot", outcome: "boot_refused", detail });
+  }
+  process.exit(1);
+}
 
 for (const warning of bootWarnings(config)) {
   logger.warn({ event: "boot_warning", outcome: "boot_warning", detail: warning });

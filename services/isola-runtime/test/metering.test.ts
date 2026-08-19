@@ -368,6 +368,50 @@ describe("budget thresholds", () => {
     expect(logger.withOutcome("budget_alert")).toHaveLength(0);
   });
 
+  /**
+   * THE SABOTAGE PROOF FOR THE FALLBACK CEILING.
+   *
+   * Paperclip supplies NO budget here — the exact state the internal manager was
+   * found in (`budgetMonthlyCents: 0`) and the state every newly created agent
+   * starts in. Before 2026-08-19 that meant "unlimited" and this request would
+   * have succeeded. A money control that has never refused anything is unproven,
+   * so this fires it.
+   */
+  it("SABOTAGE: no Paperclip budget + spend past the FALLBACK ceiling => 402, provider untouched", async () => {
+    const paperclip = new StubPaperclipApi();
+    // No ceiling from Paperclip, and prior spend already past the fallback.
+    paperclip.budget = { budgetMonthlyCents: null, spentMonthlyCents: 50 };
+    const { server, model, logger } = await boot({
+      paperclip,
+      env: { RUNTIME_BUDGET_FALLBACK_CENTS: "10" },
+    });
+
+    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+
+    expect(res.status).toBe(402);
+    expect(res.json["outcome"]).toBe("budget_exhausted");
+    // THE ASSERTION THAT MATTERS: refused before any money was spent.
+    expect(model.calls).toHaveLength(0);
+    expect(logger.withOutcome("budget_exhausted")[0]!["providerCalled"]).toBe(false);
+  });
+
+  it("POSITIVE CONTROL: the same agent with spend UNDER the fallback still runs", async () => {
+    // Without this, the test above would pass just as well against a runtime
+    // that refused everything — which is the failure mode the owner's ruling
+    // exists to avoid ("no agent starts refusing on deploy").
+    const paperclip = new StubPaperclipApi();
+    paperclip.budget = { budgetMonthlyCents: null, spentMonthlyCents: 1 };
+    const { server, model } = await boot({
+      paperclip,
+      env: { RUNTIME_BUDGET_FALLBACK_CENTS: "5000" },
+    });
+
+    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+
+    expect(res.status).toBe(200);
+    expect(model.calls).toHaveLength(1);
+  });
+
   it("rejects at 100% BEFORE calling the provider, and pauses the employee", async () => {
     const paperclip = new StubPaperclipApi();
     paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 100 };
@@ -706,6 +750,7 @@ describe("budget arithmetic", () => {
   it("counts undelivered, accrued and reserved on top of Paperclip's figure", () => {
     const verdict = evaluateBudget({
       budgetCents: 100,
+      fallbackCents: 5000,
       spentCents: 50,
       localUndeliveredCents: 20,
       localAccruedMicrocents: 5 * MICROCENTS_PER_CENT,
@@ -718,25 +763,68 @@ describe("budget arithmetic", () => {
     if (verdict.kind !== "unlimited") expect(verdict.usedPct).toBe(80);
   });
 
-  it("treats an absent or zero budget as unlimited", () => {
-    for (const budgetCents of [null, 0, -5]) {
-      expect(
-        evaluateBudget({
-          budgetCents,
-          spentCents: 1_000_000,
-          localUndeliveredCents: 0,
-          localAccruedMicrocents: 0,
-          reservedMicrocents: 0,
-          requestMicrocents: 0,
-          alertPct: 80,
-        }).kind,
-      ).toBe("unlimited");
+  /**
+   * THIS TEST USED TO ASSERT THE DEFECT. Until 2026-08-19 it read "treats an
+   * absent or zero budget as unlimited" and passed — the behaviour was written
+   * down, agreed with the code, and was still wrong. A test can only protect a
+   * decision someone made; nobody decided that new agents have no ceiling.
+   */
+  it("applies the FALLBACK ceiling when Paperclip supplies no budget — never unlimited", () => {
+    for (const budgetCents of [null, 0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const verdict = evaluateBudget({
+        budgetCents,
+        fallbackCents: 5000,
+        spentCents: 1_000_000, // far past any sane ceiling
+        localUndeliveredCents: 0,
+        localAccruedMicrocents: 0,
+        reservedMicrocents: 0,
+        requestMicrocents: 0,
+        alertPct: 80,
+      });
+      expect(verdict.kind, `budgetCents=${String(budgetCents)}`).toBe("exhausted");
+      // And it reports the ceiling it actually enforced, so an operator reading
+      // the refusal is not left guessing which number stopped the run.
+      if (verdict.kind !== "unlimited") expect(verdict.budgetCents).toBe(5000);
     }
+  });
+
+  it("an agent WITHIN the fallback still runs — the fallback guards, it does not block", () => {
+    // The other half of the ruling: nothing that was working may start refusing
+    // on deploy. A brand-new agent with no Paperclip budget and trivial spend
+    // must proceed exactly as before.
+    const verdict = evaluateBudget({
+      budgetCents: null,
+      fallbackCents: 5000,
+      spentCents: 6, // the internal manager's real spend when this was found
+      localUndeliveredCents: 0,
+      localAccruedMicrocents: 0,
+      reservedMicrocents: 0,
+      requestMicrocents: 1 * MICROCENTS_PER_CENT,
+      alertPct: 80,
+    });
+    expect(verdict.kind).toBe("ok");
+  });
+
+  it("a zero FALLBACK refuses rather than permitting — fail closed at the last resort", () => {
+    // If the fallback itself is ever 0 (config bug, adopted default), the safe
+    // failure is refusal. This is what stops the hole reopening one layer down.
+    const verdict = evaluateBudget({
+      budgetCents: null,
+      fallbackCents: 0,
+      spentCents: 0,
+      localUndeliveredCents: 0,
+      localAccruedMicrocents: 0,
+      reservedMicrocents: 0,
+      requestMicrocents: 0,
+      alertPct: 80,
+    });
+    expect(verdict.kind).toBe("exhausted");
   });
 
   it("is exhausted exactly at 100%, not only past it", () => {
     const verdict = evaluateBudget({
       budgetCents: 100,
+      fallbackCents: 5000,
       spentCents: 100,
       localUndeliveredCents: 0,
       localAccruedMicrocents: 0,

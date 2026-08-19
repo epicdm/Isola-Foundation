@@ -460,6 +460,11 @@ export function createRuntime(deps: AppDeps): Runtime {
     rateOverrides: config.rateOverrides,
     syntheticEnabled: config.syntheticPricing,
     alertPct: config.budgetAlertPct,
+    // Non-null by the time we get here: bootErrors refuses to start the process
+    // when enforcement is on and this is unset. The `?? 0` is unreachable and
+    // deliberately NOT a permissive value — 0 would be rejected by
+    // evaluateBudget's own guard rather than becoming "unlimited" again.
+    budgetFallbackCents: config.budgetFallbackCents ?? 0,
     budgetRefreshMs: config.budgetRefreshMs,
     budgetEnforcement: config.budgetEnforcement,
     pauseOnExhausted: config.pauseOnExhausted,
