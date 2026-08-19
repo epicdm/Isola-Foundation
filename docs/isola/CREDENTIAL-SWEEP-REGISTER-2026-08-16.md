@@ -240,7 +240,34 @@ untouched — same reasoning as the Magnus IP scoping and the C-01 deploy-key de
 | **⚠ STANDING PROHIBITION — the control that KEEPS it a floor** | **CHATWOOT LOGS DO NOT LEAVE host03** — not to a vendor, not to a bucket, not to a log-shipper, not to an APM agent, not to a support bundle or an EasyPanel log export, not pasted into a ticket or a screenshot — **until C-14 is closed at the mechanism.** The instant those logs leave the host, a local credential becomes a remote one and **this entry converts from floor to GATE**. The conversion is invisible because nobody thinks of "turn on logging" as a security decision. Without this prohibition, C-14 is a gate we have not noticed yet. |
 | **PLACEMENT DECISION — three candidate fixes, FILED NOT SCHEDULED** | (1) upstream patch so Chatwoot filters job arguments; (2) redaction at the log sink; (3) a mechanism that removes the secret from the dispatch path entirely. **Start none of them now.** Until one lands, treat sidekiq job logs as a credential-bearing surface and read them only through the redactor, with `secret:`-style Ruby hash syntax added to its patterns. |
 
-### C-15 — Agent bot 4's HMAC secret and access token sit in the **internet-facing** gateway's binding store
+### C-15 — ~~Agent bot 4's credentials in the public gateway's binding store~~ — **WITHDRAWN 2026-08-19, THE PREMISE WAS FALSE**
+
+> **THIS ROW WAS WRONG AND IS RETAINED AS A CORRECTION, NOT AS A FINDING.**
+> Re-measured 2026-08-19 by parsing the public gateway's boot line as JSON:
+> `bindingsTotal: 4`, and the `2/10` internal binding is **NOT** among them —
+> only `3/4`, `5/46`, `2/7`, `2/8`. Secret `isola_gw_bindings_v7` unchanged, task
+> running 35 hours, so that boot line is current.
+>
+> **The original finding came from a bracket-greedy regex** (`\[[^]]*\]`) run
+> across a loop over BOTH gateways: the internal gateway's
+> `2/10 -> epic-internal-manager (active) [INTERNAL, 7 allowed]` was spliced into
+> output attributed to the public one. The allowlist annotation contains the very
+> bracket the pattern terminated on.
+>
+> Everything downstream of it was therefore reasoning about a fact that did not
+> exist: the deferral to rotation day, the written re-mint procedure, and the
+> "two Chatwoot instances make this dangerous" risk assessment. The PROCEDURE
+> below is still worth keeping — it is correct for any future re-mint of that
+> store — but it is no longer needed for this reason.
+>
+> **The lesson is Law 23's family at one remove:** the earlier reading was not an
+> ambiguous negative, it was an ambiguous POSITIVE — a match that appeared to
+> confirm something and was an artefact of the instrument. A finding produced by
+> a regex should be re-derived with a parser before it earns a register row.
+
+<details><summary>Original row, preserved unmodified</summary>
+
+### C-15 (as originally filed) — Agent bot 4's HMAC secret and access token sit in the **internet-facing** gateway's binding store
 
 > **NOT AN INCIDENT AND NOT URGENT.** Nothing leaked outside the estate, no third party
 > logged anything, and the credential is doing its job where it belongs. This row exists
@@ -257,6 +284,8 @@ untouched — same reasoning as the Magnus IP scoping and the C-01 deploy-key de
 | **The other half of the same entry** | That stale binding also carries a **stale allowlist** — 7 entries minted before the 2026-08-18 rebuild, therefore still containing the non-staff number removed that day. Inert for the same reason, and removed by the same fix. |
 | **ROTATION-CLOSEABLE — with one extra step** | Rotating bot 4's credentials closes the credential half. The **binding entry itself must also not be carried forward** into the re-minted public store. Both, or the row stays open: a fresh secret copied into the same stale entry is the same finding with a newer value. |
 | **Why it was not fixed on discovery** | Re-minting the public store requires reconstructing bot credentials for its four surviving bindings, which span **two Chatwoot instances** (`isola-chat.saas00.epic.dm` and `inbox.epic.dm`) — one of which includes inbox 46, the live Front Desk. A wrong credential there is a customer-facing outage. Rotation day reissues all of them from known-good sources anyway, so the safe moment and the cheap moment are the same moment. |
+
+</details>
 
 #### C-15 — REQUIRED PROCEDURE for re-minting the public binding store
 
