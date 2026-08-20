@@ -579,3 +579,234 @@ export function maskSender(raw: string): string {
   if (digits.length < 7) return "unparseable";
   return `…${digits.slice(-4)} (${digits.length}d)`;
 }
+
+// ---------------------------------------------------------------------------
+// ADDITIVE BOOT-TIME OVERLAY
+// ---------------------------------------------------------------------------
+//
+// WHY THIS EXISTS
+//   The four live bindings arrive in one `GATEWAY_BINDINGS_JSON` bundle whose
+//   secret carries every credential. Adding a fifth binding therefore meant
+//   re-minting a secret holding the credentials of the LIVE front desk — an
+//   operation refused, and the refusal ratified, on 2026-08-18. The overlay
+//   exists so a NEW binding can be added without reopening that bundle.
+//
+// WHAT IT IS NOT
+//   Not a runtime API, not a second writable store, not a migration. It is read
+//   ONCE at startup and folded into the same immutable `StaticBindingStore`.
+//   There is no hot reload and no binding-write endpoint.
+//
+// WHY REFERENCES RESOLVE THROUGH THE ENVIRONMENT AND NOT THE FILESYSTEM
+//   This is the only publicly exposed Isola component, and `src/app.ts`
+//   advertises "no filesystem access at all (nothing imports node:fs)". Reading
+//   secret files from inside the application would trade that standing
+//   structural guarantee for a packaging convenience — the exact trade
+//   `entrypoint.sh` was written to avoid.
+//
+//   So a credential still arrives as its OWN secret file under the deployment's
+//   fixed secret root, and `entrypoint.sh` materialises it by the convention
+//   that already governs every other secret here:
+//
+//       GATEWAY_BINDING_SECRET_CANARY_A_FILE=/run/secrets/<name>
+//         ->  GATEWAY_BINDING_SECRET_CANARY_A=<contents>
+//
+//   The manifest names the LOGICAL reference `canary-a`. It never names a path.
+//   Traversal is therefore not defended against — it is IMPOSSIBLE BY
+//   CONSTRUCTION, because no value from the manifest ever reaches a filesystem
+//   call. A rejected `../` here is a rejected identifier, not a rejected path.
+
+/** `GATEWAY_BINDING_SECRET_` — the one prefix an overlay reference can reach. */
+export const OVERLAY_SECRET_ENV_PREFIX = "GATEWAY_BINDING_SECRET_";
+
+/**
+ * A logical secret reference: letters, digits, `_`, `-` and `.` only, so a
+ * separator, a traversal segment, a scheme or a URL cannot be expressed at all.
+ */
+const SECRET_REF = /^[A-Za-z0-9_.-]{1,64}$/;
+
+/** Refuses material large enough to be a file someone pointed at by mistake. */
+const MAX_SECRET_CHARS = 4096;
+
+/** Resolves a logical reference to credential material, or null if absent. */
+export type SecretResolver = (ref: string) => string | null | undefined;
+
+/** `canary-a` -> `GATEWAY_BINDING_SECRET_CANARY_A`. */
+export function secretEnvName(ref: string): string {
+  return OVERLAY_SECRET_ENV_PREFIX + ref.replace(/[.-]/g, "_").toUpperCase();
+}
+
+/** The production resolver: the environment `entrypoint.sh` materialised. */
+export function envSecretResolver(env: Record<string, string | undefined>): SecretResolver {
+  return (ref) => env[secretEnvName(ref)] ?? null;
+}
+
+const REF_FIELDS = ["agentBotSecretRef", "agentBotAccessTokenRef"] as const;
+const INLINE_CREDENTIAL_FIELDS = ["agentBotSecret", "agentBotAccessToken"] as const;
+
+/**
+ * Resolve one reference field, or push the reason it was refused.
+ *
+ * Every failure here is a BOOT REFUSAL, never a skipped binding. A binding that
+ * silently vanished because its secret was missing would look identical to a
+ * binding nobody configured, and the operator would debug the wrong thing.
+ */
+function resolveRef(
+  entry: Record<string, unknown>,
+  field: string,
+  index: number,
+  resolve: SecretResolver,
+  errors: string[],
+): string | null {
+  const raw = entry[field];
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    errors.push(`overlay[${index}]: ${field} is required and must be a non-empty string`);
+    return null;
+  }
+  const ref = raw.trim();
+  // `..` is refused explicitly even though no path is ever built from this, so
+  // the intent of the refusal is legible to whoever reads the error.
+  if (!SECRET_REF.test(ref) || ref.includes("..")) {
+    errors.push(
+      `overlay[${index}]: ${field} is not a valid secret reference (letters, digits, "_", "-", "." only; no separators, no "..")`,
+    );
+    return null;
+  }
+  const resolved = resolve(ref);
+  if (resolved === null || resolved === undefined) {
+    errors.push(
+      `overlay[${index}]: ${field} references a secret that is not configured (expected ${secretEnvName(ref)})`,
+    );
+    return null;
+  }
+  // Only the deployment-format terminal newline is removed. Nothing else about
+  // the credential is altered — a secret is bytes, not a trimmed string.
+  const value = resolved.replace(/\r?\n$/, "");
+  if (value.length === 0) {
+    errors.push(`overlay[${index}]: ${field} references a secret that is empty`);
+    return null;
+  }
+  if (value.length > MAX_SECRET_CHARS) {
+    errors.push(
+      `overlay[${index}]: ${field} references a secret longer than ${MAX_SECRET_CHARS} characters`,
+    );
+    return null;
+  }
+  return value;
+}
+
+/**
+ * Parse and strictly validate `GATEWAY_BINDINGS_OVERLAY_JSON`.
+ *
+ * Overlay-specific rules are checked FIRST and, if any fails, the schema pass is
+ * skipped entirely — that keeps every reported index the index the operator can
+ * count to in their own manifest.
+ *
+ * Schema validation is then delegated to `parseBindings`, UNCHANGED, so an
+ * overlay binding and a boot binding can never diverge in what they accept.
+ */
+export function parseOverlayBindings(
+  raw: string | null | undefined,
+  resolve: SecretResolver,
+): BindingParseResult {
+  if (raw === null || raw === undefined || raw.trim().length === 0) {
+    return { ok: true, bindings: [] };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, errors: ["GATEWAY_BINDINGS_OVERLAY_JSON is not valid JSON"] };
+  }
+  if (!Array.isArray(parsed)) {
+    return { ok: false, errors: ["GATEWAY_BINDINGS_OVERLAY_JSON must be a JSON array"] };
+  }
+
+  const errors: string[] = [];
+  const materialised: Record<string, unknown>[] = [];
+
+  parsed.forEach((entry, index) => {
+    if (!isRecord(entry)) {
+      errors.push(`overlay[${index}]: must be a JSON object`);
+      return;
+    }
+
+    // An inline credential is refused even when it would have been valid. The
+    // point of the overlay is that the manifest is not secret material, and a
+    // manifest that MAY carry a credential is one that eventually does.
+    for (const field of INLINE_CREDENTIAL_FIELDS) {
+      if (field in entry) {
+        errors.push(
+          `overlay[${index}]: must not contain the inline credential field "${field}" — use "${field}Ref"`,
+        );
+      }
+    }
+
+    const secret = resolveRef(entry, "agentBotSecretRef", index, resolve, errors);
+    const token = resolveRef(entry, "agentBotAccessTokenRef", index, resolve, errors);
+    if (secret === null || token === null) return;
+
+    const rest: Record<string, unknown> = { ...entry };
+    for (const field of REF_FIELDS) delete rest[field];
+    materialised.push({ ...rest, agentBotSecret: secret, agentBotAccessToken: token });
+  });
+
+  if (errors.length > 0) return { ok: false, errors };
+
+  // Same validator, same rules. Only the error prefix differs, so an operator
+  // can tell which document a complaint came from.
+  const schema = parseBindings(JSON.stringify(materialised));
+  if (!schema.ok) {
+    return { ok: false, errors: schema.errors.map((e) => e.replace(/^binding\[/, "overlay[")) };
+  }
+  return schema;
+}
+
+/**
+ * Fold the overlay into the boot bundle.
+ *
+ * BOOT BINDINGS COME FIRST AND ARE NEVER REPLACED. An overlay record colliding
+ * with one on either key is a boot refusal, not an override — the overlay adds
+ * a binding, and a mechanism that could silently substitute the live front
+ * desk's credentials would be a different and far more dangerous mechanism.
+ */
+export function mergeBindingSources(
+  base: BindingParseResult,
+  overlay: BindingParseResult,
+): BindingParseResult {
+  const errors: string[] = [];
+  if (!base.ok) errors.push(...base.errors);
+  if (!overlay.ok) errors.push(...overlay.errors);
+  if (!base.ok || !overlay.ok) return { ok: false, errors };
+
+  const tenants = new Map<string, string>();
+  const pairs = new Map<string, string>();
+  for (const b of base.bindings) {
+    tenants.set(b.tenantId, "a boot binding");
+    pairs.set(`${b.chatwootAccountId}:${b.chatwootInboxId}`, "a boot binding");
+  }
+
+  overlay.bindings.forEach((b, index) => {
+    const tenantOwner = tenants.get(b.tenantId);
+    if (tenantOwner !== undefined) {
+      errors.push(
+        `overlay[${index}]: tenantId "${b.tenantId}" is already declared by ${tenantOwner}; the overlay may add a binding, never replace one`,
+      );
+    } else {
+      tenants.set(b.tenantId, `overlay[${index}]`);
+    }
+
+    const key = `${b.chatwootAccountId}:${b.chatwootInboxId}`;
+    const pairOwner = pairs.get(key);
+    if (pairOwner !== undefined) {
+      errors.push(
+        `overlay[${index}]: (chatwootAccountId, chatwootInboxId) pair ${key} is already declared by ${pairOwner}; the overlay may add a binding, never replace one`,
+      );
+    } else {
+      pairs.set(key, `overlay[${index}]`);
+    }
+  });
+
+  if (errors.length > 0) return { ok: false, errors };
+  return { ok: true, bindings: [...base.bindings, ...overlay.bindings] };
+}

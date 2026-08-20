@@ -1,7 +1,7 @@
 # Gateway binding control path — the substrate that is missing
 
-**Packet 5B, 2026-08-20. Read-only investigation. NO CODE WAS CHANGED, and this
-document explains why that is the correct outcome rather than an incomplete one.**
+**Packet 5B, 2026-08-20 — read-only investigation, no code changed.**
+**Packet 5C, 2026-08-20 — the additive overlay implemented; see §6.**
 
 ---
 
@@ -146,3 +146,153 @@ in a database.
 - No dynamic binding write path — its precondition fails.
 - No credential store, no encryption scheme.
 - No production, Docker, secret, Chatwoot or binding mutation of any kind.
+
+---
+
+# 6. The additive boot-time overlay — implemented, Packet 5C, 2026-08-20
+
+## 6.1 Why bindings stay deploy-time during commissioning
+
+§3 above establishes that a dynamic binding's *credential* cannot be dynamic
+with today's substrate. The PM ruled accordingly: **bindings and credentials
+remain deploy-time for Foundation Commissioning.** The overlay does not change
+that. What it changes is the *blast radius of adding one*.
+
+Before: adding a fifth binding meant re-minting the single secret that carries
+the credentials of all four live bindings — including the 6737 front desk. That
+operation was refused, and the refusal ratified, on 2026-08-18.
+
+After: a new binding arrives as its own manifest entry plus its own secret
+files. **The live bundle is never reopened.**
+
+## 6.2 Base bundle versus additive overlay
+
+| | base bundle | overlay |
+|---|---|---|
+| variable | `GATEWAY_BINDINGS_JSON` (`_FILE` supported) | `GATEWAY_BINDINGS_OVERLAY_JSON` (`_FILE` supported) |
+| required | no — absent means zero bindings, boot succeeds, every webhook fails closed | no — absent means the overlay does not exist |
+| carries credentials | yes, inline | **never** — references only |
+| may replace a binding | n/a | **no, and the attempt refuses startup** |
+
+The four current bindings **do not need converting**. The overlay is additive,
+not a migration, and with no overlay configured the parse is byte-for-byte the
+previous behaviour — proven by the 583 pre-existing tests continuing to pass
+unchanged.
+
+## 6.3 Secret-reference format
+
+An overlay record is an ordinary binding with the two credential fields removed
+and replaced by:
+
+```json
+{ "agentBotSecretRef": "canary-a", "agentBotAccessTokenRef": "canary-a.token" }
+```
+
+A reference is a **logical identifier**: `[A-Za-z0-9_.-]{1,64}`, and `..` is
+refused explicitly. It is *not* a path, and no value from the manifest ever
+reaches a filesystem call.
+
+## 6.4 The fixed secret root, and one deliberate deviation — FOR PM REVIEW
+
+Packet 5C specified that the application read the referenced secret files
+directly from a fixed root. **It does not, and this is the one place the
+implementation departs from the dispatch.**
+
+`src/app.ts` advertises *"no filesystem access at all (nothing imports
+node:fs)"*, and `test/no-direct-network.test.ts` **enforces it** — one of a
+table of forbidden primitives alongside `child_process`, `vm`, `worker_threads`
+and MCP clients. `entrypoint.sh` exists precisely so a deployment concern never
+buys its convenience with that guarantee.
+
+So the credential still arrives as its own secret file under the deployment's
+fixed root, and `entrypoint.sh` materialises it by the convention that already
+governs every other secret in this service:
+
+```
+GATEWAY_BINDING_SECRET_CANARY_A_FILE=/run/secrets/<name>
+  ->  GATEWAY_BINDING_SECRET_CANARY_A=<contents>
+```
+
+`canary-a` → `GATEWAY_BINDING_SECRET_CANARY_A` (uppercased; `.` and `-` become
+`_`).
+
+This satisfies every security requirement the packet listed, and satisfies two
+of them **more strictly than the specified design would have**:
+
+- *"must not become a way to select arbitrary host files"* — it cannot select
+  any file at all. There is no file selection in the application.
+- *"validate the resolved location remains inside the root"* — there is no
+  resolved location to validate. **Traversal is impossible by construction
+  rather than by validation**, and a validation that never has to run is worth
+  more than one that does.
+
+The trade: a credential referenced this way sits in the process environment.
+That is **the existing, ratified posture** — `GATEWAY_BINDINGS_JSON` already
+carries all four live credentials the same way — so this is not a regression.
+If the PM still prefers a direct file read, only the resolver changes:
+`envSecretResolver` is a one-function seam behind the `SecretResolver` type, and
+the manifest contract above would not change at all.
+
+## 6.5 Startup merge order
+
+1. Parse and validate the base bundle **exactly as before** — unchanged code.
+2. Parse the overlay: reject inline credentials, validate every reference,
+   resolve each one, strip only a terminal newline.
+3. Validate overlay records against the **same** `parseBindings` schema, so an
+   overlay binding can never be laxer than a boot binding.
+4. Merge, **boot bindings first**.
+5. Hand the combined, frozen list to the same `StaticBindingStore`.
+
+## 6.6 Collision policy
+
+An overlay record refuses startup if it collides with a boot binding — or with
+another overlay record — on either key:
+
+- `tenantId`, the binding identifier;
+- `(chatwootAccountId, chatwootInboxId)`, the routing key.
+
+**The overlay may add a binding. It may never replace one.** A mechanism that
+could silently substitute the live front desk's credentials would be a
+different and far more dangerous mechanism than the one this packet was asked
+for.
+
+## 6.7 Failure behaviour
+
+Every overlay problem is a **boot refusal**, never a skipped binding: a missing
+reference, an unconfigured secret, a blank secret, an oversized secret, an
+invalid reference, an inline credential, a collision, or any schema violation.
+`server.ts` already exits non-zero on `!config.bindings.ok`, so this inherits
+the existing gate with no change.
+
+A binding that silently vanished because its secret was missing would look
+identical to a binding nobody configured, and the operator would debug the
+wrong thing.
+
+Error strings name the **field, the index and the variable to set** — never a
+value. Tests assert that no refusal quotes the credential it refused.
+
+## 6.8 What deployment will later require
+
+Not performed here; no deploy is authorised by this packet.
+
+- one secret file per credential, mounted under the deployment's fixed root;
+- `GATEWAY_BINDING_SECRET_<REF>_FILE` per credential;
+- `GATEWAY_BINDINGS_OVERLAY_JSON` (or its `_FILE`) carrying the manifest, which
+  is **not** secret material and may be reviewed in the open;
+- **the existing live binding secret is not touched.**
+
+No real secret name or value appears in this document, deliberately.
+
+## 6.9 Rollback
+
+Code-only, and independently reversible. Reverting the commit removes the
+overlay parse and restores `bindings: parseBindings(...)`. Operationally the
+overlay is inert until `GATEWAY_BINDINGS_OVERLAY_JSON` is set, so **unsetting
+one variable is a complete rollback** with no code change at all.
+
+## 6.10 There is still no runtime binding API
+
+`GET /v1/bindings` remains **GET-only**; every write verb still answers 405.
+The overlay is read once at startup. There is no hot reload, no CRUD endpoint,
+no second writable store and no Postgres binding metadata. Adding a binding is
+still a deploy — it is simply no longer a deploy that reopens the live bundle.

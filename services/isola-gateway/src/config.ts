@@ -6,7 +6,14 @@
  * `server.ts` is the only place that decides to refuse to boot.
  */
 import { hostOf, parseAllowlist } from "./egress.js";
-import { parseBindings, type Binding, type BindingParseResult } from "./bindings.js";
+import {
+  envSecretResolver,
+  mergeBindingSources,
+  parseBindings,
+  parseOverlayBindings,
+  type Binding,
+  type BindingParseResult,
+} from "./bindings.js";
 import { isFailpointName, type FailpointName } from "./failpoint.js";
 import { parseVoiceSeats, type SeatParseResult } from "./voice.js";
 
@@ -291,7 +298,16 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
     answeredLabel: label(env, "GATEWAY_LABEL_ANSWERED", DEFAULT_ANSWERED_LABEL),
     escalatedLabel: label(env, "GATEWAY_LABEL_ESCALATED", DEFAULT_ESCALATED_LABEL),
 
-    bindings: parseBindings(env["GATEWAY_BINDINGS_JSON"]),
+    // The boot bundle first, then the OPTIONAL additive overlay. With no
+    // overlay configured this is byte-for-byte the previous behaviour: the
+    // overlay parses to zero bindings and the merge returns the base list.
+    // An overlay record may only ADD — colliding on tenantId or on the
+    // (account, inbox) routing key refuses startup rather than replacing a
+    // live binding.
+    bindings: mergeBindingSources(
+      parseBindings(env["GATEWAY_BINDINGS_JSON"]),
+      parseOverlayBindings(env["GATEWAY_BINDINGS_OVERLAY_JSON"], envSecretResolver(env)),
+    ),
 
     // The SAME boolean the egress derivation above used. Do not re-read it.
     voiceReadEnabled,
