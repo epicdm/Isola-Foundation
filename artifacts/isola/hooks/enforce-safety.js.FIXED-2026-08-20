@@ -1,0 +1,374 @@
+#!/usr/bin/env node
+/*
+ * Isola safety hook — PreToolUse enforcement (Claude Code / Cowork).
+ * Wired via .claude/settings.json (project) and ~/.claude/settings.json (global, all sessions).
+ * Protocol: read the tool call JSON on stdin; exit 2 + stderr = BLOCK the tool (Claude sees the reason);
+ *           exit 0 = allow. Fail-OPEN on any error so a bug here can never block legitimate work.
+ *
+ * Doctrine: change through the validated UI/API layer; never raw, un-gated, irreversible prod ops.
+ * v2: logs EVERY invocation (ALLOW/BLOCK) to enforce-safety.log next to this script, so "the hook
+ *     fired" is PROVABLE from the real path, not inferred. An empty log after a session == not wired.
+ *
+ * ---------------------------------------------------------------------------------------
+ * THREAT MODEL — THIS HOOK CATCHES MISTAKES, NOT ADVERSARIES.
+ *
+ * It exists to stop a wrong command typed in good faith by a tired human or an agent that
+ * misread the situation. Anything that WANTS past it can get past it in one line. Known
+ * gaps, stated here so nobody relies on this for a threat it never covered:
+ *
+ *   1. ENCODED EXECUTION. `echo <base64> | base64 -d | sh` contains no forbidden text.
+ *      A text-matching guard cannot see it. Unfixable at this layer.
+ *   2. RUNTIME STRING TRANSFORMATION. `sed 's/^# //' script | sh`, `node -e "eval(...)"`.
+ *      Text that looks like a comment here can be turned into a command later.
+ *   3. COST. Huge or deeply-nested inputs are scanned repeatedly; walk() can throw and
+ *      fall back.
+ *   4. toLowerCase() IS NOT COMMAND NORMALISATION. No unicode confusables, no shell
+ *      quoting, no variable expansion, no command substitution.
+ *
+ * A control states its own threat model in its own file, or somebody eventually relies on
+ * it for something it never did. This comment is the control's only durable interface.
+ * ---------------------------------------------------------------------------------------
+ *
+ * NOTE (2026-08-19): the TEST SENTINEL described here has been REMOVED — the wiring it
+ *       existed to confirm has been confirmed for months, and its only lifetime effect was
+ *       to block a register write. See the removal note at the rule list.
+ *       The rules are SHAPE-based (they require the destructive SQL/command structure), not
+ *       bare substrings, so normal text mentioning "drop"/"delete" does not trip them.
+ *       They are applied to SHELL INVOCATIONS and to FILE WRITES — see the tool gate
+ *       below. Records (register entries, API calls, task updates) are excluded entirely.
+ *       A document is not a command, and matching one against command patterns blocked
+ *       four register writes before this was fixed.
+ *
+ * NOTE (2026-08-20): the line above used to claim the rules applied ONLY to shell
+ *       invocations. THE CODE NEVER DID THAT — file writes were in scope the whole time,
+ *       deliberately, and the comment was simply wrong. A field's name is a claim; its
+ *       write-site is the truth, and that applies to a control's own documentation too.
+ *       Corrected while adding executionOnly, which is what the sentence now describes
+ *       for the one rule that carries it.
+ */
+const fs = require("fs");
+const path = require("path");
+const LOG = path.join(__dirname, "enforce-safety.log");
+function log(line) { try { fs.appendFileSync(LOG, new Date().toISOString() + " " + line + "\n"); } catch (e) {} }
+
+let raw = "";
+process.stdin.on("data", (d) => (raw += d));
+process.stdin.on("end", () => {
+  let inp = {};
+  try { inp = JSON.parse(raw || "{}"); } catch (e) { log("PARSE-ERROR allow"); process.exit(0); } // fail-open
+  const tool = inp.tool_name || "?";
+  const ti = inp.tool_input || {};
+  let blob = "";
+  try { blob = JSON.stringify(ti).toLowerCase(); } catch (e) { log("STRINGIFY-ERROR allow tool=" + tool); process.exit(0); }
+
+  // 2026-08-19 — GATE BY TOOL. THE RULES BELOW DESCRIBE OPERATIONS; APPLY THEM TO OPERATIONS.
+  //
+  // `tool_name` was captured on the line above and never used. Every rule was therefore
+  // applied to the string values of EVERY tool input, so a DOCUMENT was matched against
+  // COMMAND patterns. It blocked two register writes on one night: one recording a decision
+  // to PRESERVE a host, one DOCUMENTING THIS HOOK. Neither ran a command or touched a host.
+  // Filed as def-enforce-safety-guard-binds-to-vocabulary-not-operations-2026-08-19.
+  //
+  // This is the same family as the 2026-08-16 comment exoneration above, one level out: that
+  // fix stopped a COMMENT inside a command from being read as a command; this one stops a
+  // DOCUMENT from being read as a command at all. The rules themselves are correct and are
+  // deliberately left untouched — the bug was never what they say, only where they applied.
+  //
+  // WHY IT MATTERS BEYOND THE NUISANCE: a guard that fires on prose forces euphemism into
+  // the safety register, and a register that has learned to avoid its own vocabulary cannot
+  // say plainly what it decided about the operations it exists to govern. It is also one
+  // step from the habit this file already warns about — writing around a guard.
+  //
+  // A call counts as a shell invocation when the tool NAME is a known shell/exec tool, or
+  // when the input carries a top-level `command` string (the convention MCP exec tools
+  // follow, so a remote-ssh style tool is caught by shape even if its name is unfamiliar).
+  //
+  // CONSERVATIVE IN THE SAFE DIRECTION, because a false negative here is far worse than a
+  // false positive: if a call is shell-shaped but its command is NOT in a top-level
+  // `command` field, the old behaviour is kept and every string value is scanned.
+  const SHELL_TOOL_NAME = /^(bash|powershell|shell|sh|zsh|cmd)$|ssh|exec|terminal/i;
+  const commandField = typeof ti.command === "string" ? ti.command : null;
+  const isShellCall = SHELL_TOOL_NAME.test(tool) || commandField !== null;
+
+  // FILE WRITES STAY IN SCOPE, DELIBERATELY, AND THIS IS NARROWER THAN IT FIRST LOOKS.
+  // Six existing tests assert that WRITING a file containing a destructive command is
+  // blocked — a decision someone made on purpose, with the comment exoneration built
+  // around it. Gating those out would have been a silent reduction of a real protection,
+  // discovered only because the suite was run before the change was trusted. So the gate
+  // admits file writes and excludes everything else: a register entry, an API call, a
+  // task update. Those are RECORDS, not operations, and matching a record against a
+  // command pattern is the defect this change exists to remove.
+  const FILE_WRITE_TOOL = /^(write|edit|multiedit|notebookedit)$/i;
+  const isFileWrite = FILE_WRITE_TOOL.test(tool);
+
+  // 2026-08-20 — AN INERT WRITE IS NOT AN EXECUTION.
+  //
+  // The 2026-08-19 gate above kept file writes in scope, and that was right for the
+  // rules whose danger is the CONTENT (a recursive remove aimed at a protected path is
+  // dangerous to have sitting in a file someone will later run). It was wrong for the
+  // container-teardown rule, whose danger is entirely in the RUNNING.
+  //
+  // The cost was measured on 2026-08-20: a twenty-step operator runbook could not be
+  // written, because its own fenced examples quote the verbs the operator must type.
+  // THE ESTATE COULD NOT WRITE DOWN HOW TO SAFELY PERFORM THE OPERATIONS THIS HOOK
+  // EXISTS TO GOVERN. That is not a nuisance; a control that forbids its own
+  // documentation makes the estate less safe, not more.
+  //
+  // So a rule may now declare itself executionOnly, and exactly one does. Every other
+  // rule keeps the 2026-08-19 behaviour, byte for byte: writing a file containing a
+  // recursive remove against a protected path is STILL blocked, and its test still
+  // passes unchanged. That test is the control proving this change is narrow rather
+  // than a quiet exemption for file writes in general.
+  const isInertWrite = isFileWrite && !isShellCall;
+
+  if (!isShellCall && !isFileWrite) { log("ALLOW-NON-OPERATION tool=" + tool); process.exit(0); }
+
+  // 2026-08-14 REPURPOSE EXEMPTION — host 66.118.37.96 is being retired/rebuilt (Coolify stack
+  // decommissioned, box handed to freqtrade). Destructive docker ops are permitted ONLY when the
+  // command explicitly names that host. Every other host stays fully protected — notably
+  // 66.118.37.12 (prod BFF + Chatwoot) and any voice/runtime container.
+  // REMOVE this constant once .96 is rebuilt.
+  const REPURPOSE_HOST = /66\.118\.37\.96/;
+
+  // 2026-08-16 COMMENT EXONERATION.
+  // This hook blocked a script because of the script's own COMMENT: a line stating that the
+  // file contained no container-teardown verbs itself contained those verbs, and the rule
+  // reads command TEXT and cannot tell a comment from a command.
+  // (It then blocked the edit that added THIS comment, for the same reason. Twice in a row
+  //  is not a coincidence; it is the defect demonstrating itself.)
+  //
+  // Why fix it rather than live with it: A GUARD THAT FIRES ON COMMENTS TRAINS PEOPLE TO
+  // WRITE AROUND IT, AND WRITING AROUND A GUARD IS ONE STEP FROM DISABLING IT.
+  //
+  // Conservative by construction, because a FALSE NEGATIVE in a safety hook is far worse
+  // than a false positive:
+  //   * only WHOLE LINES whose first non-space character is '#', '//' or '*' are removed.
+  //     A line starting with '#' is never executed by a shell, so this cannot hide a live
+  //     command.
+  //   * trailing comments are deliberately NOT stripped — that would need quote-aware
+  //     parsing, and getting it wrong would hide a live command.
+  //   * the stripped text is used ONLY TO EXONERATE. A rule must still match the full blob
+  //     first, and every exoneration is logged, so a comment-shaped bypass attempt is
+  //     visible in the log rather than silent.
+  //   * if stripping throws, it falls back to the full blob — fail SAFE, not fail open.
+  // ALSO 2026-08-16 — A PRE-EXISTING FALSE NEGATIVE, FOUND BY WRITING THE FIRST TEST.
+  //
+  // Rules used to be matched against JSON.stringify(tool_input), in which a newline is the
+  // TWO CHARACTERS backslash + n. So a destructive verb sitting at the START of a line read
+  // as "n" glued to the front of the word, the \b word boundary failed, and THE RULE DID
+  // NOT MATCH. A command as ordinary as one at line start in a script was slipping through;
+  // it only ever matched when something (a space, "sudo") sat between the newline and the
+  // verb. That is a hole in a safety guard, not a cosmetic issue.
+  //
+  // Fix: walk the tool input and collect its actual STRING VALUES, joined with REAL
+  // newlines. This restores word boundaries at line starts, and makes line-based comment
+  // detection meaningful — over the escaped blob the first content line was glued to the
+  // JSON prefix, so a leading "//" was never at the start of a line.
+  const textOf = (() => {
+    // Prefer the command itself. A shell call also carries a `description`, and prose in
+    // that field is not an operation — matching it is the same defect one field over.
+    if (commandField !== null) return commandField.toLowerCase();
+    try {
+      const out = [];
+      (function walk(v) {
+        if (typeof v === "string") out.push(v);
+        else if (Array.isArray(v)) v.forEach(walk);
+        else if (v && typeof v === "object") Object.values(v).forEach(walk);
+      })(ti);
+      return out.join("\n").toLowerCase();
+    } catch (e) {
+      return blob; // fail SAFE: fall back to the old, over-broad text
+    }
+  })();
+
+  // Shell line-continuations are joined BEFORE anything is split into lines: a command
+  // written as `docker \<newline>stop x` is ONE command, and per-line matching would
+  // otherwise never see it. CRLF and lone CR are normalised for the same reason.
+  const norm = (s) => String(s).replace(/\\\r?\n/g, " ").replace(/\r\n?/g, "\n");
+
+  // A comment marker must be followed by WHITESPACE. `//bin/sh -c '...'` resolves like
+  // /bin/sh on Linux and executes — treating a bare `//` as a comment made that a bypass.
+  const COMMENT_LINE = /^\s*(#(\s|$)|\/\/(\s|$)|\*(\s|$))/;
+
+  // 2026-08-20 — RUNNING A SCRIPT IS RUNNING WHAT IS INSIDE IT.
+  //
+  // This is the COMPENSATING CONTROL for executionOnly above, and it must be read
+  // together with it. Relaxing the write path without this would open a real hole:
+  // write teardown.sh (now allowed, because a file is inert), then run it (previously
+  // invisible, because the hook only ever saw the seven characters of the invocation).
+  // The protection is not removed, it is MOVED TO THE EXECUTION BOUNDARY, which is
+  // where it belonged.
+  //
+  // Deliberately narrow, because a hook that reads files is a hook that can be slow or
+  // wrong: only when the command actually invokes a script (an interpreter, a source,
+  // or a direct ./path), only the first few paths, only files that exist and are small,
+  // and any error at all falls straight through to the unscanned text. It is also NOT
+  // recursive — a script that invokes another script is one level deep. Stated here so
+  // nobody mistakes this for a general static analyser.
+  const scriptLines = [];
+  if (isShellCall) {
+    try {
+      const INVOKE = /(?:^|[\s;&|(])(?:(?:sudo\s+)?(?:sh|bash|zsh|dash|ash|ksh|pwsh|powershell(?:\.exe)?)(?:\s+-[a-z]*)*\s+|source\s+|\.\s+)([^\s;&|"'`]+)|(?:^|[\s;&|(])(\.\/[^\s;&|"'`]+)/gi;
+      const seen = new Set();
+      let m;
+      while ((m = INVOKE.exec(textOf)) !== null && seen.size < 5) {
+        const p = m[1] || m[2];
+        if (!p || seen.has(p)) continue;
+        seen.add(p);
+        try {
+          const st = fs.statSync(p);
+          if (st.isFile() && st.size > 0 && st.size < 262144) {
+            scriptLines.push(...norm(fs.readFileSync(p, "utf8").toLowerCase()).split("\n"));
+            log("SCAN-SCRIPT tool=" + tool + " path=" + p + " bytes=" + st.size);
+          }
+        } catch (e) { /* unreadable or absent: nothing to add, fall through */ }
+      }
+    } catch (e) { /* fail through to the unscanned text */ }
+  }
+
+  const allLines = norm(textOf).split("\n").concat(scriptLines);
+  const codeLines = allLines.filter((l) => !COMMENT_LINE.test(l));
+
+  // Per LINE is still too coarse. Both of these put the exemption token on the same line
+  // as the destructive command, so a line-scoped exemption still lets them through:
+  //     docker <teardown> prod-bff   # unifi
+  //     echo 66.118.37.96; ssh 66.118.37.12 '<teardown> prod-bff'
+  // So the unit of judgement is a COMMAND SEGMENT, and the text an exemption may be read
+  // from has any trailing comment removed. Stripping there is fail-safe: it can only make
+  // an exemption HARDER to satisfy, never easier.
+  // SEPARATOR SET. A bare newline already separates, because these arrays are
+  // newline-split before this runs. `|` and `&` did NOT, and both disarmed the guard:
+  //     <teardown> prod-bff | tee unifi.log
+  //     <teardown> prod-bff & echo unms
+  // Two-character operators must be tried FIRST or the single-character alternatives
+  // shred them. Splitting more finely is safe in the exemption direction by the same
+  // asymmetry used below: more segments means an exemption token covers less. It cannot
+  // break a conjunctive match, because an rm, its flag and its path are never separated
+  // by a pipe.
+  const SEPARATORS = /&&|\|\||;|\||&/;
+  const segsOf = (arr) => arr.flatMap((l) => l.split(SEPARATORS));
+  const codeSegs = segsOf(codeLines);
+  const allSegs = segsOf(allLines);
+  const exemptText = (s) => s.replace(/\s#.*$/, "");
+
+  // 2026-08-16 — REWRITTEN AFTER AN ADVERSARIAL REVIEW FOUND MULTIPLE ONE-LINE BYPASSES.
+  //
+  // Rules are now evaluated PER LINE, and exemptions apply only to the SAME LINE as the
+  // match. Previously `unless` and the (?!...unifi...) lookahead were tested against the
+  // WHOLE input, so both of these sailed through:
+  //     echo retiring 66.118.37.96; ssh 66.118.37.12 'docker <teardown> prod-bff'
+  //     docker <teardown> prod-bff   # unifi
+  // An exemption that can be satisfied by unrelated text elsewhere in the payload is not
+  // an exemption, it is an opt-out anybody can type.
+  //
+  // Patterns widened to the forms that actually appear in the wild — aliases and flag
+  // orderings that are identical in effect and were entirely uncovered.
+  const PROTECTED_PATH = /\/(opt|home|srv|etc|data|var|root)\b/;
+  const FORBIDDEN = [
+    // 2026-08-19 — SENTINEL RULE REMOVED. It was scaffolding by its own admission
+    // ("test trigger; remove after wiring confirmed") and the wiring is long since
+    // confirmed. Removal cost, measured rather than assumed: the token it matched exists
+    // NOWHERE in the codebase, so it guarded no call site; and across 86,773 log lines it
+    // produced exactly ONE block in its lifetime — a Port register write, on 2026-08-19.
+    // It never once blocked an operation.
+    { id: "sql-drop", test: (l) => /\bdrop\s+(table|database|schema|index|view|sequence|owned|materialized\s+view)\b/.test(l),
+      why: "Destructive SQL (DROP). Use a reviewed migration through the validated path." },
+
+    { id: "sql-truncate", test: (l) => /\btruncate\s+(table\s+)?[a-z0-9_".]/.test(l),
+      why: "Destructive SQL (TRUNCATE)." },
+
+    // The semicolon requirement missed `psql -c "delete from users"`, which Postgres runs
+    // perfectly happily. The real predicate is "a DELETE FROM with no WHERE on that line".
+    { id: "sql-delete-nowhere",
+      test: (l) => /\bdelete\s+from\s+(only\s+)?[a-z0-9_".]+/.test(l) && !/\bwhere\b/.test(l),
+      why: "DELETE FROM with no WHERE — refuses unscoped row deletion." },
+
+    // Aliases that were completely uncovered and are identical in effect:
+    //   docker-compose down · docker compose rm · docker container stop
+    //   docker stack rm · docker service rm
+    // executionOnly (2026-08-20): the danger here is the RUNNING, not the writing.
+    // The pattern below is unchanged, byte for byte — only where it applies changed.
+    { id: "docker-teardown", executionOnly: true,
+      test: (l) => /\bdocker(-compose)?\s+(container\s+|compose\s+|stack\s+|service\s+)?(rm|kill|stop|down)\b/.test(l),
+      unlessLine: (l) => REPURPOSE_HOST.test(l) || /\b(unifi|unms)\b/.test(l),
+      why: "Destructive docker op. Voice/runtime containers must be RELOADED, not destroyed." },
+
+    // 2026-08-20 — NEW, AND IT CLOSES A REAL GAP RATHER THAN TIGHTENING A COVERED ONE.
+    // The teardown pattern above requires rm/kill/stop/down, so every prune subcommand
+    // sailed straight through. A prune takes no target: it removes whatever the daemon
+    // currently considers unused, which on a 55-service host is decided by timing rather
+    // than by intent. That is the widest blast radius available from a single line, and
+    // it was the one thing not covered.
+    { id: "docker-prune",
+      test: (l) => /\bdocker\s+(system|volume|image|container|network|builder)\s+prune\b/.test(l),
+      unlessLine: (l) => REPURPOSE_HOST.test(l),
+      why: "Broad docker prune removes whatever the daemon deems unused — untargeted by construction. Remove named resources instead." },
+
+    { id: "pm2-teardown", test: (l) => /\bpm2\s+(delete|del|kill)\b/.test(l),
+      why: "pm2 delete/kill can take down prod. Use restart through the gate." },
+
+    // `rm -fr`, `rm -r -f`, `rm -rf --  /path` are all the same act. Predicate instead of
+    // one brittle literal: an rm, a recursive flag, and a protected path on the one line.
+    { id: "rm-recursive-system-path",
+      test: (l) => /\brm\b/.test(l) && /\s-{1,2}[a-z]*r/.test(l) && PROTECTED_PATH.test(l),
+      why: "rm -rf on a real system path." },
+
+    { id: "magnus-destroy", test: (l) => /(liberar.*destroy|magnus.*destroy)/.test(l),
+      why: "Magnus = liberar, NOT destroy (voice-moat rule)." },
+  ];
+  for (const f of FORBIDDEN) {
+    // A rule whose danger is the running, evaluated against something that does not run.
+    // Logged, not silent: an allowance nobody can see is an allowance nobody can audit.
+    if (f.executionOnly && isInertWrite) {
+      log("ALLOW-INERT-WRITE tool=" + tool + " rule=" + f.id + " (a written file is not an execution)");
+      continue;
+    }
+
+    // Per command segment, and the exemption must be satisfied BY THAT SEGMENT.
+    const hitLines = codeSegs.filter((s) => f.test(s));
+    const live = hitLines.filter((s) => !(f.unlessLine && f.unlessLine(exemptText(s))));
+
+    if (live.length > 0) {
+      log("BLOCK tool=" + tool + " rule=" + f.id + " reason=" + f.why);
+      // 2026-08-19 — REPORT THE FILE THAT ACTUALLY RAN, AND THE RULE THAT FIRED.
+      // This message named a project-relative path (`.claude/hooks/...`) while the file
+      // doing the blocking lives in the user's home directory. Anyone debugging a block
+      // was sent to a path that does not exist, and CLAUDE.md 7 compounded it by pointing
+      // its verification command at the project hooks, which never reach this file.
+      // `__filename` cannot drift from reality. The rule id is included for the same
+      // reason: knowing WHICH rule fired is half of knowing where to look.
+      process.stderr.write(
+        "BLOCKED by Isola safety hook [rule: " + f.id + "]: " + f.why +
+        "\nDoctrine: change through the validated UI/API layer; gate destructive prod ops." +
+        "\n(source: " + __filename + ")"
+      );
+      process.exit(2);
+    }
+    if (hitLines.length > 0) {
+      log("ALLOW-EXEMPT tool=" + tool + " rule=" + f.id + " (exemption present on the matching line)");
+      continue;
+    }
+
+    // Not in any code line. If it appears in a COMMENT line, that is the one path where
+    // the hook declines to block something that matched — logged loudly, kept auditable.
+    if (allSegs.some((s) => f.test(s))) {
+      log("ALLOW-COMMENT-ONLY tool=" + tool + " rule=" + f.id + " (match appears only in a comment line)");
+      continue;
+    }
+
+    // NO WHOLE-BLOB BACKSTOP, DELIBERATELY.
+    //
+    // Rules are now PREDICATES, and several are conjunctive — the recursive-remove rule
+    // asks for an `rm`, a recursive flag, AND a protected path. Testing a conjunction
+    // against one giant string satisfies it from three unrelated fragments in different
+    // parts of the file. This test suite tripped it on itself: prose in a header comment,
+    // a flag in one payload, and a path in another, hundreds of lines apart.
+    //
+    // The blob only ever added JSON keys and ESCAPED text. The escaped form was the
+    // original false negative, and textOf fixes that properly by restoring real newlines.
+    // So the blob now contributes nothing but false positives, and a guard that cries
+    // wolf gets worked around. If walk() throws, textOf already falls back to blob.
+  }
+  log("ALLOW tool=" + tool);
+  process.exit(0);
+});

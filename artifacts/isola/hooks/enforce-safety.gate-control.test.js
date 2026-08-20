@@ -77,9 +77,36 @@ expect("recursive remove on a protected path", bash(RECURSIVE), BLOCK);
 expect("destructive DDL", bash(DDL), BLOCK);
 expect("unscoped row removal", bash(UNSCOPED), BLOCK);
 
-console.log("STILL BLOCKS — a file write can create an operation:");
-expect("teardown written into a file", write(TEARDOWN), BLOCK);
-expect("recursive remove written into a file", write(RECURSIVE), BLOCK);
+// 2026-08-20 — SUPERSEDED IN ONE DIRECTION, BY OWNER DECISION (Packet 5M-RR).
+//
+// This section used to assert that writing teardown into a file BLOCKS. That decision
+// cost the estate its ability to write an operator runbook: a twenty-step migration
+// procedure could not be saved, because its fenced examples quote the verbs the operator
+// must type. A control that forbids its own documentation makes the estate less safe.
+//
+// The teardown rule is now executionOnly. The line below is INVERTED rather than deleted,
+// so the change is visible to whoever reads this file next instead of looking like
+// coverage that quietly evaporated.
+//
+// NOTHING WAS GIVEN UP. The protection moved to the execution boundary and is re-asserted
+// immediately below: writing the script is allowed, RUNNING it is not. And the recursive
+// remove case is deliberately unchanged — it still blocks on a file write, which is the
+// control proving only ONE rule changed scope rather than file writes being exempted.
+console.log("A WRITTEN FILE IS NOT AN EXECUTION — but only for the rule whose danger is the running:");
+expect("teardown written into a file is now ALLOWED (executionOnly)", write(TEARDOWN), ALLOW);
+expect("NARROWNESS CONTROL: recursive remove written into a file still BLOCKS", write(RECURSIVE), BLOCK);
+
+console.log("THE PROTECTION MOVED, IT DID NOT VANISH — running the written script is refused:");
+{
+  const fs2 = require("fs");
+  const os2 = require("os");
+  const path2 = require("path");
+  const dir = fs2.mkdtempSync(path2.join(os2.tmpdir(), "gatectl-"));
+  const script = path2.join(dir, "cleanup.sh").replace(/\\/g, "/");
+  fs2.writeFileSync(script, "#!/bin/sh\n" + TEARDOWN + "\n");
+  expect("running the script whose contents hold the teardown", bash("sh " + script), BLOCK);
+  try { fs2.unlinkSync(script); fs2.rmdirSync(dir); } catch (e) {}
+}
 
 console.log("NO LONGER OVER-BLOCKS — a register entry is a record, not an operation:");
 expect("register prose naming a teardown", port(`We decided NOT to run ${TEARDOWN}.`), ALLOW);

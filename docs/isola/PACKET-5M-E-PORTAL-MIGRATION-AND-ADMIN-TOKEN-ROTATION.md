@@ -1,0 +1,571 @@
+# Packet 5M-E — portal-api migration and GATEWAY_ADMIN_TOKEN rotation
+
+**Status: NOT EXECUTED.** This document is the procedure. Packets 5M-R and 5M-RR were
+repository, build and Port work only. Nothing here has been run.
+
+**Why this exists.** `isola_isola-portal-api` holds six credentials as plaintext
+environment variables, one of which is the live gateway administrator token. An EasyPanel
+app service cannot mount a Docker secret — measured against the panel's own OpenAPI:
+app-service mount types are exactly `bind`, `volume` and `file`, and `file` requires
+inline `content`, which is the same plaintext class, persisted. So the token cannot be
+rotated while it lives there, because rotating it would mean writing a fresh production
+credential into another plaintext field. Moving the service to a hand-managed Swarm stack
+is what unblocks the rotation. Steps 19–22 then perform it.
+
+**Authority.** Steps 7, 12, 15, 18, 19, 20, 21 and 22 mutate production. Each requires the
+owner's explicit go-ahead **for the operation as described**. If a step's measured blast
+radius differs materially from what is written here, STOP and re-ask. Refusing is
+compliance, not obstruction; an authorization is not a token to be spent on whatever the
+task turns out to be.
+
+**Owner-only throughout:** creating or destroying any credential, any Meta asset change,
+any real customer contact, and the retirement in step 18.
+
+---
+
+## Fixed inputs
+
+| Thing | Value |
+|---|---|
+| Portal release commit | `23c669f` — branch `foundation/portal-secret-files`, parent `cfcbe4f` |
+| Portal image to build | `isola-portal-api:23c669f` |
+| Gateway release commit | `b05abf1` — branch `feat/credential-rotation-grace-2026-08-20` |
+| Gateway image (built, verified) | `isola-gateway:admingrace-b05abf1`, id `e1ea6bc0d41d` |
+| Live service being replaced | `isola_isola-portal-api` |
+| New stack / service | `isolaportal` / `isolaportal_api` |
+| Public hostname | `isola-portal.saas00.epic.dm` |
+| Host | `epicadmin@66.118.37.110` (host03) |
+| Traefik dynamic config | `/etc/easypanel/traefik/config/main.yaml` |
+
+### Secret mappings, by name only
+
+Six Swarm secrets carry the six credential-bearing variables. No value appears in this
+document, in any command argument, or in any transcript.
+
+| Env pointer | Swarm secret (external) | Mounted as |
+|---|---|---|
+| `DJANGO_SECRET_KEY_FILE` | `isola_portal_django_secret_key_v1` | `/run/secrets/portal_django_secret_key` |
+| `HASHID_FIELD_SALT_FILE` | `isola_portal_hashid_salt_v1` | `/run/secrets/portal_hashid_salt` |
+| `DATABASE_URL_FILE` | `isola_portal_database_url_v1` | `/run/secrets/portal_database_url` |
+| `REDIS_CONNECTION_FILE` | `isola_portal_redis_connection_v1` | `/run/secrets/portal_redis_connection` |
+| `PAPERCLIP_BOARD_TOKEN_FILE` | `isola_portal_paperclip_board_token_v1` | `/run/secrets/portal_paperclip_board_token` |
+| `ISOLA_GATEWAY_ADMIN_TOKEN_FILE` | `isola_portal_gateway_admin_token_v1` | `/run/secrets/portal_gateway_admin_token` |
+
+> **Discrepancy, recorded rather than papered over.** The packet commissioning this
+> runbook asked for **eight** portal secret mappings. Measurement of the live service
+> finds **six** credential-bearing variables, listed above. The number eight matches the
+> renderer's **exclusion set** — those six plus `DEPLOY_TIMESTAMP` and `GIT_SHA`, which
+> are EasyPanel build metadata and not credentials. Two secrets are not being created to
+> satisfy a count. **If the owner believes two further credentials exist, name them before
+> step 7 and this table is extended.**
+
+---
+
+## A. Pre-flight (steps 1–5) — no production change
+
+### 1. Capture the baseline you may have to restore
+
+```bash
+sudo mkdir -p /opt/isola/backup
+sudo docker service inspect isola_isola-portal-api \
+  > /opt/isola/backup/portal-api-baseline-$(date +%Y%m%d-%H%M%S).json
+sudo cp /etc/easypanel/traefik/config/main.yaml \
+  /opt/isola/backup/main.yaml.$(date +%Y%m%d-%H%M%S)
+sudo docker service ls --format '{{.Name}} {{.Replicas}}' | grep portal
+```
+
+**Expect:** `isola_isola-portal-api 1/1`, and both files written.
+
+**Do not proceed without them.** The baseline JSON is the only complete record of the live
+environment. Step 9 reads the live service; after step 18 that source is gone. This file
+IS the EasyPanel recovery record referenced in step 18.
+
+### 2. Verify the release you are about to deploy
+
+```bash
+git -C <isola-portal> rev-parse HEAD          # expect 23c669f...
+git -C <isola-portal> status --porcelain      # expect EMPTY
+git -C <isola-portal> archive --format=tar HEAD -- packages/backend > /tmp/rel.tar
+sha256sum /tmp/rel.tar
+```
+
+Record the sha. Use `git archive`, **never** `tar` of the working tree: on a Windows
+checkout `core.autocrlf` smudges shell scripts to CRLF, and a carriage-returned shebang
+does not execute in a Linux container. That mistake produced a false test failure during
+5M-R and cost a rebuild to identify.
+
+### 3. Drift check — is the live service still what the baseline describes?
+
+```bash
+sudo docker service inspect isola_isola-portal-api \
+  --format '{{.Version.Index}} {{.UpdatedAt}} {{.Spec.TaskTemplate.ContainerSpec.Image}}'
+sudo docker service inspect isola_isola-portal-api \
+  --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+  | cut -d= -f1 | sort > /tmp/keys.now
+```
+
+**Expect:** 39 key names, and an `UpdatedAt` you can account for. If the service has been
+redeployed since 5M-R, the env set may have changed — re-run step 9's completeness
+assertion before trusting the rendered stack. **A stale render is the failure mode that
+takes a service down quietly.**
+
+### 4. Confirm the execution window
+
+Confirm with the owner, in writing, before any mutation:
+
+- the operation is *"replace the EasyPanel portal-api service with a hand-managed
+  secret-backed Swarm stack, then rotate the gateway administrator token"*;
+- **downtime is accepted** — update order is `stop-first` by design, because the container
+  is stateless (`mounts: []`) but a `start-first` roll would put two tasks through the
+  startup script at once;
+- the window is now, and a person is available for the full soak in step 17.
+
+**Do not begin outside an agreed window.** Steps 15–18 change what the public hostname
+serves.
+
+### 5. Verify prerequisites
+
+```bash
+sudo docker network ls --format '{{.Name}}' | grep -E '^easypanel$|^easypanel-isola$'
+sudo docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep isola-gateway
+df -h /var/lib/docker | tail -1
+```
+
+**Expect:** both networks present; `isola-gateway:admingrace-b05abf1` present with id
+`e1ea6bc0d41d`; disk headroom for one image.
+
+---
+
+## B. EasyPanel token handoff (step 6) — owner
+
+### 6. `/run/ep.key` requirements
+
+Some steps may need the EasyPanel API to read or adjust the panel's own view of the
+service. If so, the owner stages a **temporary** token at `/run/ep.key` and the following
+rules apply without exception:
+
+- the file is created by the owner, not by the operator, and not by an agent;
+- **never interpolate the token into a command argument, a URL, a header written on a
+  command line, or an environment variable** — read it inside the HTTP client from the
+  file;
+- never print it, never copy it into a document, a log, a Port entity or a transcript;
+- it is revoked in **step 23**, and its absence is proven there;
+- if no step actually requires the panel API, **do not stage it at all**. A credential
+  that was never created cannot leak.
+
+The panel's `listUsers` procedure **must not be called**: it is documented as returning
+users without their passwords and in fact returns a live API token. That is a recorded P0.
+
+---
+
+## C. Build (steps 7–8)
+
+### 7. Create the six external secrets — OWNER ONLY
+
+Each value is the one the live service uses **today**, taken from the step-1 baseline.
+
+```bash
+printf '%s' "<value>" | sudo docker secret create isola_portal_django_secret_key_v1 -
+printf '%s' "<value>" | sudo docker secret create isola_portal_hashid_salt_v1 -
+printf '%s' "<value>" | sudo docker secret create isola_portal_database_url_v1 -
+printf '%s' "<value>" | sudo docker secret create isola_portal_redis_connection_v1 -
+printf '%s' "<value>" | sudo docker secret create isola_portal_paperclip_board_token_v1 -
+printf '%s' "<value>" | sudo docker secret create isola_portal_gateway_admin_token_v1 -
+```
+
+Use `printf '%s'`, not `echo`, and run in a shell with history disabled.
+**Trailing newline matters:** `config/secret_files.py` strips exactly one trailing `\n` or
+`\r\n` and nothing else, so a value pasted with an extra blank line is wrong by one byte
+and fails authentication in a way that looks like a bad credential rather than a bad paste.
+
+Verify by name only:
+
+```bash
+sudo docker secret ls --format '{{.Name}}' | grep isola_portal_
+```
+
+**Expect:** exactly six names. Do not attempt to read a value; `docker secret inspect` does
+not return one.
+
+**Rollback:** remove any secret created in error and create it again. Secrets are
+immutable — a wrong value is replaced by creating a `_v2` and swapping, never by editing.
+
+### 8. Ship, verify integrity, and build
+
+```bash
+scp /tmp/rel.tar epicadmin@66.118.37.110:/tmp/rel.tar
+ssh epicadmin@66.118.37.110
+D=/opt/isola-portal-build/23c669f
+sudo mkdir -p $D && sudo tar -xf /tmp/rel.tar -C $D --strip-components=2
+sha256sum /tmp/rel.tar                                  # MUST equal step 2
+printf 'a\r\nb\r\n' > /tmp/ctl
+tr -cd '\r' < /tmp/ctl | wc -c                          # control: MUST print 2
+tr -cd '\r' < $D/scripts/runtime/run_migrations.sh | wc -c   # MUST print 0
+rm -f /tmp/ctl
+cd $D && sudo docker build -t isola-portal-api:23c669f -f Dockerfile .
+sudo docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep 23c669f
+```
+
+**Expect:** sha identical to step 2; the control reads `2`; the script reads `0`; the build
+exits 0; an image id is printed. **If the control does not read 2 the check is blind** —
+fix the check before believing it about the file.
+
+**Record the image id in the Port evidence entity.** There is no registry on this host, so
+the tag is the only provenance, and a tag can be moved.
+
+**Rollback:** nothing to roll back; no production object has changed.
+
+---
+
+## D. Render and validate (steps 9–11) — no production change
+
+### 9. Render the stack from the live service
+
+```bash
+cd $D/deploy && chmod +x render-portal-stack.sh
+sudo bash render-portal-stack.sh 23c669f > /opt/isola/isola-portal-api-stack.yml
+```
+
+**Expect:** exit 0, and a `carried keys:` line on stderr naming 29 keys.
+
+A Swarm stack inherits **nothing** from EasyPanel. The live service carries 39 environment
+variables and the committed template declares three plus the six pointers, so the env block
+is generated rather than transcribed — hand-transcription would put live configuration in
+git and guarantee drift.
+
+**If the renderer refuses,** it has found a secret-shaped value in a key that is not on the
+exclusion list. That is the script working. Classify the key, add it to `EXCLUDE_SECRET`,
+deliver it as a secret, and extend the table at the top of this document. **Do not widen
+the heuristic to make the refusal go away.**
+
+### 10. Assert that nothing was silently lost
+
+```bash
+sudo docker service inspect isola_isola-portal-api \
+  --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+  | cut -d= -f1 | grep -v '^$' | sort -u > /tmp/live.keys
+grep -oE '^      [A-Z][A-Z0-9_]*:' /opt/isola/isola-portal-api-stack.yml \
+  | tr -d ' :' | sort -u > /tmp/rendered.keys
+printf '%s\n' DJANGO_SECRET_KEY HASHID_FIELD_SALT DATABASE_URL REDIS_CONNECTION \
+  ISOLA_GATEWAY_ADMIN_TOKEN PAPERCLIP_BOARD_TOKEN DEPLOY_TIMESTAMP GIT_SHA \
+  | sort -u > /tmp/excluded.keys
+comm -23 /tmp/live.keys /tmp/rendered.keys | comm -23 - /tmp/excluded.keys
+```
+
+**Expect:** EMPTY output — every live key is either rendered or deliberately excluded.
+
+**Prove the comparison is not blind before trusting an empty result:**
+
+```bash
+grep -v DJANGO_ALLOWED_HOSTS /tmp/rendered.keys > /tmp/sab.keys
+comm -23 /tmp/live.keys /tmp/sab.keys | comm -23 - /tmp/excluded.keys
+```
+
+**Expect:** it prints `DJANGO_ALLOWED_HOSTS`. If it prints nothing, the assertion above
+proved nothing.
+
+### 11. Validate as Swarm, not as YAML
+
+```bash
+sudo docker stack config -c /opt/isola/isola-portal-api-stack.yml > /dev/null; echo "exit=$?"
+for K in DJANGO_SECRET_KEY DATABASE_URL ISOLA_GATEWAY_ADMIN_TOKEN PAPERCLIP_BOARD_TOKEN; do
+  echo "$K plaintext: $(grep -cE "^      $K:" /opt/isola/isola-portal-api-stack.yml)"
+done
+grep -cE '^      API_URL:' /opt/isola/isola-portal-api-stack.yml
+```
+
+**Expect:** `exit=0`; each credential key `0`; the last line `1` as a positive control
+proving the grep can see a key that should be present. A YAML parse alone is not the
+schema Swarm applies.
+
+---
+
+## E. Shadow (steps 12–14)
+
+### 12. Deploy the shadow, routing disabled — OWNER
+
+Confirm the Traefik labels in the stack are still commented out, then:
+
+```bash
+sudo docker stack deploy -c /opt/isola/isola-portal-api-stack.yml isolaportal
+sudo docker service ls --format '{{.Name}} {{.Replicas}}' \
+  | grep -E 'isolaportal_api|isola_isola-portal-api'
+```
+
+**Expect:** `isolaportal_api 1/1` **and** `isola_isola-portal-api 1/1`. The EasyPanel
+service keeps serving every real request throughout this phase.
+
+`PORTAL_RUN_MIGRATIONS: "false"` is what makes this safe. The startup script does not only
+migrate — it also seeds Customer Zero and initialises subscriptions, plans, locales and two
+translation imports, all of which write. With the switch false, the shadow verifies the
+schema is current and **refuses to start if migrations are pending**, rather than booting
+against a schema its code does not match.
+
+**If it prints `REFUSING TO START`:** migrations are pending. That is correct behaviour,
+not a fault. Go to step 13.
+
+**Rollback:** remove the `isolaportal` stack. Nothing public has changed and the EasyPanel
+service never stopped serving.
+
+### 13. Only if migrations are pending — run them as the one owner
+
+```bash
+sudo docker service scale isola_isola-portal-api=0     # stop the other owner first
+sudo docker run --network easypanel-isola \
+  -e DATABASE_URL_FILE=/run/secrets/portal_database_url \
+  --mount type=bind,source=/dev/null,target=/dev/null \
+  isola-portal-api:23c669f python manage.py isola_migrate
+sudo docker service scale isola_isola-portal-api=1
+```
+
+> The secret is not available to a plain `docker run`; in practice run this as a one-shot
+> service on the `isolaportal` stack, or temporarily set `PORTAL_RUN_MIGRATIONS=true` on
+> the shadow **while the EasyPanel service is scaled to zero**. Either way the rule is the
+> same: **exactly one migration owner at a time.**
+
+**Expect:** `Migration lock acquired` → `Migrations complete` → `Migration lock released`.
+
+**If it prints `REFUSED: another migration owner already holds the advisory lock`,** a
+second owner is running. Find it and stop it. **Do not retry past this** — the lock is a
+Postgres session-level advisory lock held by the connection, so it is telling you a fact
+about the database, not reporting a transient error.
+
+**Rollback:** scale the EasyPanel service back to 1. Migrations that already applied are
+forward-only; a schema rollback needs the database backup, which is why step 1 exists.
+
+### 14. Prove the shadow is actually ready, and accept it
+
+```bash
+sudo docker run --network easypanel-isola --entrypoint sh curlimages/curl:latest -c \
+  "curl -s -o /dev/null -w '%{http_code}' http://isolaportal_api:80/healthz"
+```
+
+**Expect:** `200`.
+
+`/healthz` proves Django routed the request, Postgres answered a query, and Redis completed
+a set/get round trip. A TCP connect would have proved only that a socket opened — a task
+with a dead database would report healthy and `failure_action: rollback` would have nothing
+to act on. `503` means a dependency is genuinely unreachable from the new stack: check the
+network attachments before changing anything else.
+
+**Portal acceptance, before it serves anyone.** Exercise these directly against
+`isolaportal_api`, not through the public hostname, which still points at EasyPanel:
+
+1. one unauthenticated route returns its normal response;
+2. one **authenticated** read returns real data for a known operator;
+3. one call on a path that uses `ISOLA_GATEWAY_ADMIN_TOKEN`, proving the credential
+   resolved **from its file** — this is the whole point of the migration;
+4. the service log contains no credential value and no `ImproperlyConfigured`.
+
+**Do not proceed if any of the four fails.**
+
+---
+
+## F. Cutover (steps 15–17)
+
+### 15. Enable the route — OWNER
+
+Uncomment the `labels:` block in `/opt/isola/isola-portal-api-stack.yml`, then:
+
+```bash
+sudo docker stack deploy -c /opt/isola/isola-portal-api-stack.yml isolaportal
+```
+
+**The priority is not decoration.** EasyPanel does not route this service with Docker
+labels: it writes a **file-provider** router into `/etc/easypanel/traefik/config/main.yaml`
+as `https-isola_isola-portal-api-0`, with rule
+``Host(`isola-portal.saas00.epic.dm`) && PathPrefix(`/`)`` and `priority: 0`. Traefik reads
+`0` as *unset* and derives the priority from the **rule length** — about 53 for that rule.
+So "any positive number beats 0" is false. The label router states **`priority: 1000`**
+explicitly, far above any length-derived value, so the winner is stated rather than
+computed.
+
+### 16. Prove which service is actually serving
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://isola-portal.saas00.epic.dm/healthz
+sudo docker service logs isolaportal_api --since 2m | tail -5
+sudo docker service logs isola_isola-portal-api --since 2m | tail -5
+```
+
+**Expect:** `200`, with the request appearing in **`isolaportal_api`'s** log and **not** in
+the EasyPanel service's.
+
+A `200` on its own does not prove which service answered — both are healthy right now, and
+that is exactly the ambiguity to resolve. **Read the logs.**
+
+**Rollback:** re-comment the labels and redeploy. Traefik's file-provider router resumes
+serving from EasyPanel within seconds. **This is the last stage with a free rollback.**
+
+### 17. Soak
+
+Leave both services running for at least one business hour. Watch:
+
+```bash
+sudo docker service ps isolaportal_api --no-trunc | head -5
+sudo docker service logs isolaportal_api --since 60m | grep -ciE '5[0-9][0-9]|traceback'
+```
+
+**Expect:** no restarts, and a 5xx/traceback count you can account for. Do not proceed to
+retirement during the soak. **Do not retire on the same day if the soak was interrupted.**
+
+---
+
+## G. Retire the EasyPanel service (step 18)
+
+### 18. Scale to zero — do not delete — OWNER
+
+```bash
+sudo docker service scale isola_isola-portal-api=0
+curl -s -o /dev/null -w '%{http_code}\n' https://isola-portal.saas00.epic.dm/healthz
+sudo docker service ls --format '{{.Name}} {{.Replicas}}' | grep portal
+```
+
+**Expect:** `200`, `isolaportal_api 1/1`, `isola_isola-portal-api 0/0`.
+
+**Scale to zero; do not delete the service.** A scaled-to-zero service keeps its full
+definition, including the environment that is the live record of the pre-migration
+configuration. Together with the step-1 baseline JSON that is the **EasyPanel recovery
+record**, and it is what makes the rollback below real rather than aspirational.
+
+**Rollback:** scale it back to 1, re-comment the new stack's labels, redeploy.
+
+---
+
+## H. Rotate GATEWAY_ADMIN_TOKEN (steps 19–23) — the point of all of it
+
+The gateway accepts a CURRENT and a NEXT administrator token simultaneously. Measured over
+HTTP against image `e1ea6bc0d41d` on 2026-08-20: with both set, both return `200` and a
+third value returns `401`; with NEXT unset, the grace value returns `401` while CURRENT
+still returns `200`; NEXT identical to CURRENT, or NEXT without CURRENT, **refuses to boot
+with exit 1**. Those refusals are real because `bootErrors()` was added as part of that
+work — a rule naming a consequence the system cannot produce is a wish.
+
+### 19. Introduce the new token as NEXT — OWNER
+
+1. Generate a new token and create it as `isola_gateway_admin_token_v2`.
+2. Add it to the **gateway** as `GATEWAY_ADMIN_TOKEN_NEXT`, keeping v1 as
+   `GATEWAY_ADMIN_TOKEN`. Edit `/opt/isola/isola-gw-stack.yml` and redeploy the gateway
+   stack.
+
+**Rollback:** remove the NEXT reference and redeploy. v1 is still CURRENT, so nothing that
+works today stops working.
+
+### 20. Prove the overlap, credential by credential — OWNER
+
+Before changing any consumer:
+
+```bash
+curl -s -o /dev/null -w 'v1=%{http_code}\n' -H "Authorization: Bearer <v1>" \
+  http://<gateway>:8080/v1/bindings
+curl -s -o /dev/null -w 'v2=%{http_code}\n' -H "Authorization: Bearer <v2>" \
+  http://<gateway>:8080/v1/bindings
+curl -s -o /dev/null -w 'bad=%{http_code}\n' -H "Authorization: Bearer not-a-real-value" \
+  http://<gateway>:8080/v1/bindings
+```
+
+**Expect:** `v1=200`, `v2=200`, `bad=401`.
+
+All three lines are required. Two 200s without the 401 cannot distinguish "both credentials
+are accepted" from "this endpoint accepts anything".
+
+Run these from a host that is not the operator's workstation if the token would otherwise
+appear in a local shell history. **The token still appears in a process argument here,
+which is the one place this document tolerates it** — prefer a client that reads the value
+from a file if one is available.
+
+### 21. Point the portal at v2 — OWNER
+
+1. Change the `isolaportal` stack's secret source for target `portal_gateway_admin_token`
+   from `isola_gateway_admin_token_v1` to `isola_gateway_admin_token_v2`.
+2. Redeploy the stack.
+3. Re-run **step 14 acceptance item 3** — the gateway-backed call must still succeed.
+
+**Rollback:** point the secret source back at v1 and redeploy. Both values are accepted at
+this moment, so this rollback cannot fail closed.
+
+### 22. Promote v2, withdraw v1, and prove the withdrawal — OWNER
+
+1. Set `GATEWAY_ADMIN_TOKEN` to v2 on the gateway, remove `GATEWAY_ADMIN_TOKEN_NEXT`,
+   redeploy.
+2. Prove it, **with the positive control in the same run**:
+
+```bash
+curl -s -o /dev/null -w 'old=%{http_code}\n' -H "Authorization: Bearer <v1>" \
+  http://<gateway>:8080/v1/bindings     # expect 401
+curl -s -o /dev/null -w 'new=%{http_code}\n' -H "Authorization: Bearer <v2>" \
+  http://<gateway>:8080/v1/bindings     # expect 200
+```
+
+**The second line is not optional.** A `401` on its own is an ambiguous negative: it proves
+the old value fails, not that the gateway still works. Without the control, a gateway that
+refuses *everything* passes this step.
+
+3. **Zero-reference cleanup.** Before removing the superseded secret, enumerate every store
+   that holds a copy:
+
+```bash
+sudo docker secret ls --format '{{.Name}}' | grep gateway_admin
+grep -rl 'isola_gateway_admin_token_v1' /opt/isola/*.yml
+sudo docker service ls --format '{{.Name}}' | while read S; do
+  sudo docker service inspect "$S" --format '{{.Name}} {{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{.SecretName}} {{end}}' \
+    | grep gateway_admin_token_v1
+done
+```
+
+**Expect:** no service references v1. Only then remove it:
+
+```bash
+sudo docker secret rm isola_gateway_admin_token_v1
+sudo docker secret ls --format '{{.Name}}' | grep -c gateway_admin_token_v1   # expect 0
+```
+
+A credential removed from one store while an identical copy lives in another is not a
+rotation; it is a moved problem. **The enumeration is part of the fix, not a follow-up.**
+
+**Rollback after step 22:** none for the credential itself — v1 is gone. This is the point
+of no return, which is why step 20's overlap proof and step 21's acceptance must both have
+passed first.
+
+### 23. Revoke the temporary EasyPanel token
+
+If `/run/ep.key` was staged in step 6:
+
+```bash
+sudo shred -u /run/ep.key 2>/dev/null || sudo rm -f /run/ep.key
+ls -la /run/ep.key            # expect: No such file or directory
+```
+
+Then **revoke the token in the panel** so the file's absence is not the only control, and
+prove the revocation by making one authenticated call that now fails. A deleted file is
+containment; revocation is remediation, and a value that existed on disk must be assumed
+compromised.
+
+---
+
+## Stop conditions
+
+Stop and ask the owner if any of these occur:
+
+- the shadow refuses to start for any reason other than pending migrations;
+- `isola_migrate` reports another lock owner;
+- step 10 lists any unaccounted key, or its sabotage control prints nothing;
+- the renderer refuses on a key you cannot confidently classify;
+- step 16 shows the EasyPanel service still answering after cutover;
+- step 20 does not produce exactly `200 / 200 / 401`;
+- the soak in step 17 shows any restart or unexplained 5xx;
+- any measured operation turns out to be materially larger than what step 4 authorized —
+  an authorization covers **the operation as described**, and a bigger one needs a new ask.
+
+## Reporting
+
+On completion, one dispatch containing:
+
+- the result per step, with the measured values, not adjectives;
+- the portal image id built in step 8 and the gateway image id in force;
+- the acceptance results from step 14 and the overlap/withdrawal proofs from steps 20 and 22;
+- the zero-reference enumeration from step 22 and what each store now holds;
+- confirmation that `/run/ep.key` is absent and its token revoked;
+- **owner-conveyance count** — how many decisions were escalated and what each returned;
+- a Port write recording the outcome, the evidence, and any defect found;
+- the footer: `PORT: read <what> · wrote <entities>`.
