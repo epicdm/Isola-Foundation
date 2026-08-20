@@ -15,6 +15,20 @@ export interface RuntimeConfig {
   port: number;
   /** Per-exposure bearer credentials. `null` means "not configured". */
   secrets: Readonly<Record<Exposure, string | null>>;
+  /**
+   * ROTATION GRACE — a SECOND accepted value per exposure class.
+   *
+   * It exists because the gateway and this service live in DIFFERENT STACKS and
+   * cannot be rolled atomically. Without an overlap, replacing a shared secret
+   * means an interval where the caller presents the new value and the callee
+   * still expects the old one — and on the public path that is every customer
+   * message failing closed.
+   *
+   * It grants NOTHING a class did not already have: a NEXT value resolves to the
+   * SAME exposure as the CURRENT value beside it. Absent means absent — with no
+   * NEXT configured the resolver behaves exactly as it did before.
+   */
+  secretsNext: Readonly<Record<Exposure, string | null>>;
   modelBaseUrl: string;
   modelApiKey: string | null;
   /** Env override for the model name; `null` means "use the template's model". */
@@ -251,6 +265,10 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
       INTERNAL: str(env, "RUNTIME_SECRET_INTERNAL"),
       PUBLIC: str(env, "RUNTIME_SECRET_PUBLIC"),
     }),
+    secretsNext: Object.freeze({
+      INTERNAL: str(env, "RUNTIME_SECRET_INTERNAL_NEXT"),
+      PUBLIC: str(env, "RUNTIME_SECRET_PUBLIC_NEXT"),
+    }),
     modelBaseUrl,
     modelApiKey: str(env, "MODEL_API_KEY"),
     modelNameOverride: str(env, "MODEL_NAME"),
@@ -375,6 +393,38 @@ export function bootErrors(config: RuntimeConfig): string[] {
       "RUNTIME_BUDGET_FALLBACK_CENTS is unset or not a positive integer. It is the monthly ceiling applied to any agent Paperclip has no budget for — which is every newly created agent. This service will not invent a money figure: set it explicitly (owner-owned value) or disable enforcement deliberately with RUNTIME_BUDGET_ENFORCEMENT=false.",
     );
   }
+
+  // ── ROTATION GRACE VALIDATION ─────────────────────────────────────────────
+  //
+  // Every way grace can be mis-configured is a BOOT REFUSAL, never a warning. A
+  // half-configured overlap does not announce itself: the service starts, serves
+  // normally, and fails only on the day the old credential is withdrawn — which
+  // is the worst possible moment to find out.
+  for (const cls of ["INTERNAL", "PUBLIC"] as Exposure[]) {
+    const current = config.secrets[cls];
+    const next = config.secretsNext[cls];
+    if (next === null) continue;
+
+    if (current === null) {
+      errors.push(
+        `RUNTIME_SECRET_${cls}_NEXT is set but RUNTIME_SECRET_${cls} is not. A grace value alone must never bring an exposure class to life: that would make the rotation credential the ONLY credential, which is the opposite of an overlap.`,
+      );
+    } else if (current === next) {
+      errors.push(
+        `RUNTIME_SECRET_${cls}_NEXT is identical to RUNTIME_SECRET_${cls}. That is not an overlap, and it hides a copy-paste mistake behind a service that still starts.`,
+      );
+    }
+
+    // The boundary this service exists to enforce must survive rotation: a NEXT
+    // value for one class may never also satisfy the other.
+    const other: Exposure = cls === "INTERNAL" ? "PUBLIC" : "INTERNAL";
+    if (next === config.secrets[other] || next === config.secretsNext[other]) {
+      errors.push(
+        `RUNTIME_SECRET_${cls}_NEXT collides with a ${other} credential. One token would satisfy both exposure classes and the boundary would not exist.`,
+      );
+    }
+  }
+
   return errors;
 }
 

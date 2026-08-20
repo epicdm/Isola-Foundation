@@ -33,6 +33,15 @@ export interface GatewayConfig {
 
   /** Bearer required by `GET /v1/bindings`. `null` means that endpoint is 503. */
   adminToken: string | null;
+  /**
+   * ROTATION GRACE for the admin token — a SECOND accepted value.
+   *
+   * The admin token has more than one holder (the portal API calls this
+   * service), and they are deployed independently. Without an overlap, rotating
+   * it means an interval where a legitimate client is refused. Absent means
+   * absent: with no NEXT configured the check behaves exactly as before.
+   */
+  adminTokenNext: string | null;
 
   egressAllowlist: string[];
 
@@ -249,6 +258,7 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
     runtimeTimeoutMs: int(env, "GATEWAY_RUNTIME_TIMEOUT_MS", DEFAULT_RUNTIME_TIMEOUT_MS),
 
     adminToken: str(env, "GATEWAY_ADMIN_TOKEN"),
+    adminTokenNext: str(env, "GATEWAY_ADMIN_TOKEN_NEXT"),
 
     egressAllowlist,
 
@@ -340,6 +350,32 @@ export function approvedLabels(config: GatewayConfig, binding?: Binding): string
  * Boot-time warnings. Category strings only — never a value. `server.ts` logs
  * these once at boot.
  */
+/**
+ * FATAL boot conditions. The service must EXIT NON-ZERO on any of these.
+ *
+ * This function did not exist before rotation grace was added, and adding it was
+ * part of the work rather than an afterthought: a rule that says "refuse" needs
+ * a mechanism that CAN refuse. Warnings were the only thing here, and a warning
+ * is not a refusal.
+ */
+export function bootErrors(config: GatewayConfig): string[] {
+  const errors: string[] = [];
+
+  if (config.adminTokenNext !== null) {
+    if (config.adminToken === null) {
+      errors.push(
+        "GATEWAY_ADMIN_TOKEN_NEXT is set but GATEWAY_ADMIN_TOKEN is not. A grace value alone must never be the only accepted credential — that is a rotation with nothing to roll back to.",
+      );
+    } else if (config.adminToken === config.adminTokenNext) {
+      errors.push(
+        "GATEWAY_ADMIN_TOKEN_NEXT is identical to GATEWAY_ADMIN_TOKEN. That is not an overlap, and it hides a copy-paste mistake behind a service that still starts.",
+      );
+    }
+  }
+
+  return errors;
+}
+
 export function bootWarnings(config: GatewayConfig): string[] {
   const warnings: string[] = [];
   const bindings = configuredBindings(config);

@@ -53,7 +53,13 @@ export function resolveCredential(
 ): AuthResult {
   const internal = config.secrets.INTERNAL;
   const publicSecret = config.secrets.PUBLIC;
+  // ROTATION GRACE. A second accepted value per class, so the sender and the
+   // receiver can be rolled separately without an interval where they disagree.
+  const internalNext = config.secretsNext.INTERNAL;
+  const publicNext = config.secretsNext.PUBLIC;
 
+  // Keyed on the CURRENT secrets only. A NEXT value alone must never bring a
+  // class to life — bootErrors() refuses that configuration outright.
   if (internal === null && publicSecret === null) {
     return { kind: "not_configured" };
   }
@@ -61,11 +67,22 @@ export function resolveCredential(
   const token = extractBearer(headerValue);
   if (token === null) return { kind: "unauthorized" };
 
-  const internalMatch = internal !== null && constantTimeEquals(token, internal);
-  const publicMatch = publicSecret !== null && constantTimeEquals(token, publicSecret);
+  // Still no early exit: every configured value is compared, every time, so the
+  // number of comparisons does not reveal which one matched.
+  const internalCurrent = internal !== null && constantTimeEquals(token, internal);
+  const internalGrace = internalNext !== null && constantTimeEquals(token, internalNext);
+  const publicCurrent = publicSecret !== null && constantTimeEquals(token, publicSecret);
+  const publicGrace = publicNext !== null && constantTimeEquals(token, publicNext);
 
-  // If the operator set both secrets to the same value the boundary does not
-  // exist. Refuse rather than silently picking one. bootWarnings() flags this.
+  // A NEXT value resolves to the SAME exposure as the CURRENT value beside it.
+  // Grace widens nothing.
+  const internalMatch = internalCurrent || internalGrace;
+  const publicMatch = publicCurrent || publicGrace;
+
+  // If one token satisfies both classes the boundary does not exist. Refuse
+  // rather than silently picking one. This now also catches a NEXT value that
+  // collides with the other class, which is the way grace could have quietly
+  // dissolved the boundary. bootErrors() refuses that config at startup too.
   if (internalMatch && publicMatch) return { kind: "unauthorized" };
   if (internalMatch) return { kind: "ok", credentialExposure: "INTERNAL" };
   if (publicMatch) return { kind: "ok", credentialExposure: "PUBLIC" };

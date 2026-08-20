@@ -27,7 +27,7 @@ import type { CostEventPayload } from "../src/state.js";
  * string literals so no scanner ever has to decide whether they are real.
  * None of these values exists in any environment.
  */
-const placeholder = (label: string): string =>
+export const placeholder = (label: string): string =>
   ["not", "a", "real", "credential", label].join("-") + "-" + "0".repeat(16);
 
 export const INTERNAL_SECRET = placeholder("internal");
