@@ -3,10 +3,33 @@
 **Produced 2026-08-19 11:33 AST (15:33 UTC) by ESTATE, read-only, from Chatwoot
 account 2 / inbox 7. Nothing was sent, replied to, assigned or resolved.**
 
-These customers were told a colleague would contact them. **No colleague was
-contacted, because nothing was passed to anyone** — every conversation on this
-inbox is `pending / UNASSIGNED`. The promise was made by the AI front desk with
-no mechanism behind it.
+> ## ⚠️ CORRECTED 2026-08-19 23:5x — READ BEFORE USING THIS SHEET
+>
+> The original version of this sheet said *"nothing was passed to anyone"* and
+> *"the promise was made with no mechanism behind it."* **That was wrong.**
+>
+> The AI **did** escalate. It reopened each conversation, assigned it to the
+> **`escalations` team**, and applied the `isola-ai-escalated` label — in the same
+> minute it told the customer. The original check looked at `assignee_id` (an
+> individual), found NULL, and missed `team_id`.
+>
+> **Oreanna — escalated 08-18 16:42. Yvonne — escalated 08-18 20:31.** The promises
+> were true.
+>
+> **What actually failed:** the `escalations` team has two members — Eric (confirmed)
+> and Phillip (**unconfirmed, has never been able to log in**). The queue was real
+> and nobody was watching it.
+>
+> **The one genuinely false claim is conversation 17** — it was never escalated, yet
+> the customer was told *"A colleague is handling this for you now."*
+>
+> Everything below about **who is waiting and what they asked for remains accurate**
+> and still needs a human.
+
+These customers were told a colleague would contact them. **A colleague did not
+contact them** — but not because nothing was passed. Two of the three were routed
+correctly into the `escalations` team and sat there unattended; the third was
+never escalated at all.
 
 All times are **AST (UTC-4)**, local Dominica time. Elapsed is from the moment
 the promise was made.
@@ -110,16 +133,28 @@ it remotely?"*
 
 ---
 
-## The defect this sheet is evidence of
+## What this sheet is actually evidence of — corrected
 
-The three bot-made promises use the words **"passed this conversation to a team
-member"**, **"a colleague is handling this for you now"** and **"they'll reach
-out"**. None of that happened, and none of it *could* have happened: there is no
-assignment, no queue, and no route from the AI to a person.
+Not a false promise. **An escalation queue with nobody attending it.**
 
-Staff do in fact see these messages — they reply from the handset via WhatsApp
-coexistence — so *"someone from EPIC will help you"* is true. **"I have passed
-this to them" is the false part.** Fix the sentence, not the mechanism.
+| conversation | escalated? | outcome |
+|---|---|---|
+| 14 Oreanna | ✅ team `escalations`, 08-18 16:42 | routed correctly, unattended 23h |
+| 15 Yvonne | ✅ team `escalations`, 08-18 20:31 | routed correctly, unattended 19h |
+| 17 "x" | ❌ **never escalated** | told *"a colleague is handling this"* — untrue |
 
-Ratified 2026-08-19. Charter change, owner-loaded, blocked on the
-instructions-bundle write path (E-2).
+**And the loop demonstrably works.** On 2026-08-19 a customer ("Flo") was escalated
+at 17:14 and **Veronica picked it up at 17:15 and resolved it at 17:16** — twenty-four
+minutes after she first confirmed her Chatwoot account. AI answers → AI escalates →
+human resolves, on the live customer line.
+
+So the fix is not "change the sentence." It is:
+
+1. **Staff the `escalations` team.** Two members today, one of whom cannot log in.
+2. **Find out why conversation 17 didn't escalate** when the two either side of it did.
+3. **Answer these four people.**
+
+Charter edits 3–5 were applied 2026-08-19 23:41 and verified on disk. Note that the
+new §6 wording now *understates* the escalation capability — it forbids the agent
+from saying it passed anything, which it does. That needs a further, deliberate
+correction; see `def-frontdesk-false-handoff-promise-2026-08-19`.
