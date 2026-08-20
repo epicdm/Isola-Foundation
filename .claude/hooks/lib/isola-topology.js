@@ -146,6 +146,28 @@ const DESTRUCTIVE_RULES = [
     ),
     why: 'Destructive container op. Runtime containers must be reloaded, not torn down.',
   },
+  // 2026-08-20 (Packet 5M-RN) — DESTRUCTIVE NETWORK OPERATIONS.
+  //
+  // container-destroy above matches the verb directly after the CLI name, so every
+  // subcommand form slipped past it — network removal among them. Neither this guard
+  // nor the user-home guard refused it, and the network the estate is wired through
+  // was one unguarded line from being removed.
+  //
+  // This surface is execution-only by construction: the write path exits before the
+  // exec rules are consulted, so documentation quoting these commands is unaffected
+  // without needing a flag.
+  //
+  // Verbs only — ls, inspect, connect, disconnect and create are untouched.
+  {
+    id: 'network-destroy',
+    re: new RegExp(
+      '\\b' + CLI.container + '\\s+network\\s+(' +
+        [VERB.remove, tok('rem', 'ove'), tok('pru', 'ne')].join('|') + ')\\b',
+      'i'
+    ),
+    why: 'Destructive docker network operation. Removing a network disconnects every container attached to it. Remove a named network only under explicit authorization.',
+  },
+
   {
     id: 'process-manager-destroy',
     re: new RegExp('\\b' + CLI.proc + '\\s+(' + VERB.purge + '|' + VERB.terminate + ')\\b', 'i'),

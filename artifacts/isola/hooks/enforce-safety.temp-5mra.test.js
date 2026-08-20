@@ -24,7 +24,12 @@ const { spawnSync } = require("child_process");
 const path = require("path");
 
 const HOOK = process.env.HOOK_PATH || path.join(__dirname, "enforce-safety.js");
-const MODE = process.env.EXPECT === "removed" ? "removed" : "installed";
+// DEFAULT IS "removed", because that is the permanent end state: the one-use key was
+// destroyed on 2026-08-20 and nothing should ever find it installed again. Defaulting to
+// "installed" would leave this suite permanently red, and a permanently red suite is one
+// nobody reads. Pass EXPECT=installed only while a temporary authorization is genuinely
+// in place, which should be minutes, not days.
+const MODE = process.env.EXPECT === "installed" ? "installed" : "removed";
 
 const SSH = "ssh -o BatchMode=yes epicadmin@66.118.37.110 ";
 const OPT = "/o" + "pt/isola-portal-build/";
@@ -56,29 +61,14 @@ function expect(label, actual, wanted) {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}  (exit ${actual}, wanted ${wanted})`);
 }
 const BLOCK = 2, ALLOW = 0;
-let gaps = 0;
-// A KNOWN, FILED GAP IS NOT A PASS AND NOT A FAILURE.
+// 2026-08-20 (Packet 5M-RN): the three network cases below were reported as GAP here
+// while neither guard covered destructive docker network operations. Both guards now
+// refuse them, so they are ordinary expectations again and the gap-reporting helper has
+// been REMOVED.
 //
-// docker network removal is matched by NOTHING in the permanent guard: the teardown
-// pattern optional-subcommand group covers container/compose/stack/service and not
-// network. So while the temporary authorization is installed its companion rule refuses
-// these, and once it is removed they are permitted again — including against
-// easypanel-isola, the network the estate runs on.
-//
-// Reporting that as FAIL would leave this suite permanently red, and a permanently red
-// suite is a suite nobody reads. Reporting it as PASS would bury a live gap. So it is
-// counted and named on every run, and it stops being a gap the day the pattern covers
-// network removal — at which point these become ordinary expectations.
-function gapAware(label, actual, wantedInstalled, wantedRemoved) {
-  const wanted = MODE === "installed" ? wantedInstalled : wantedRemoved;
-  if (actual === wanted) { pass++; console.log(`  PASS  ${label}  (exit ${actual}, wanted ${wanted})`); return; }
-  if (MODE === "removed" && actual === ALLOW) {
-    gaps++;
-    console.log(`  GAP   ${label}  (exit ${actual}) — permanent guard does not cover docker network removal; see def-enforce-safety-guard-no-network-removal-coverage-2026-08-20`);
-    return;
-  }
-  fail++; console.log(`  FAIL  ${label}  (exit ${actual}, wanted ${wanted})`);
-}
+// Deliberately removed rather than left in place. A helper that turns a failure into a
+// "known gap" is what would absorb the regression if that rule were ever reverted: the
+// suite would stay green and report the hole as expected behaviour.
 const bash = (c) => run("Bash", { command: c });
 const write = (c) => run("Write", { file_path: "/tmp/doc.md", content: c });
 
@@ -90,11 +80,7 @@ expect("teardown of a production service by name", bash("sudo docker service rm 
 
 console.log(`THE EIGHT AUTHORIZED LINES (${MODE}):`);
 const want = MODE === "installed" ? ALLOW : BLOCK;
-AUTHORIZED.forEach((c, i) => {
-  const label = `authorized line ${i + 1}`;
-  if (i === 4) gapAware(label, bash(c), ALLOW, BLOCK);   // the network line
-  else expect(label, bash(c), want);
-});
+AUTHORIZED.forEach((c, i) => expect(`authorized line ${i + 1}`, bash(c), want));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MUTATION CONTROLS. Every one must be REFUSED in BOTH modes. If any is ever
@@ -106,8 +92,8 @@ expect("container id: last character changed",
   bash(SSH + "'sudo docker stop -t 10 257ec32169d7 2d299bf1f469 8d7bab88ffa1 57c1bb921fb1'"), BLOCK);
 expect("container id: one character changed mid-line in a removal",
   bash(SSH + "'sudo docker rm c14e1354d7cd 452366bb5465 d051e229b499 4ceb0297463d 8d7bab88ffa2 b86ffa0bc76e'"), BLOCK);
-gapAware("network id: one character changed",
-  bash(SSH + "'sudo docker network rm 0e18a618cd03'"), BLOCK, BLOCK);
+expect("network id: one character changed",
+  bash(SSH + "'sudo docker network rm 0e18a618cd03'"), BLOCK);
 expect("directory path: one character appended",
   bash(SSH + "'sudo " + RMC + " -rf " + OPT + "a441934x'"), BLOCK);
 
@@ -117,8 +103,8 @@ expect("production runtime container id substituted",
   bash(SSH + "'sudo docker stop -t 10 ca27c7faa2fe'"), BLOCK);
 expect("production portal container id substituted",
   bash(SSH + "'sudo docker rm 5403d275599a'"), BLOCK);
-gapAware("production network name substituted",
-  bash(SSH + "'sudo docker network rm easypanel-isola'"), BLOCK, BLOCK);
+expect("production network name substituted",
+  bash(SSH + "'sudo docker network rm easypanel-isola'"), BLOCK);
 
 expect("extra target appended to an authorized removal",
   bash(SSH + "'sudo docker rm 257ec32169d6 2d299bf1f469 1863725cd5c3 e8306325b2cc 450c1208e7ff f88cba0178ad 6f82145bc683'"), BLOCK);
@@ -154,5 +140,5 @@ expect("writing a recursive remove at a protected path still blocks",
   write("#!/bin/sh\n" + RMC + " -rf " + "/o" + "pt/bff-v2\n"), BLOCK);
 
 console.log("");
-console.log(`  ${pass} passed, ${fail} failed, ${gaps} known-gap`);
+console.log(`  ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
