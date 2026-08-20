@@ -95,19 +95,31 @@ sudo docker service ls --format '{{.Name}} {{.Replicas}}' | grep portal
 environment. Step 9 reads the live service; after step 18 that source is gone. This file
 IS the EasyPanel recovery record referenced in step 18.
 
-### 2. Verify the release you are about to deploy
+### 2. Verify the release, and ship the WHOLE monorepo as build context
 
 ```bash
 git -C <isola-portal> rev-parse HEAD          # expect 23c669f...
 git -C <isola-portal> status --porcelain      # expect EMPTY
-git -C <isola-portal> archive --format=tar HEAD -- packages/backend > /tmp/rel.tar
+git -C <isola-portal> archive --format=tar HEAD > /tmp/rel.tar   # WHOLE REPO, not a subtree
 sha256sum /tmp/rel.tar
 ```
 
-Record the sha. Use `git archive`, **never** `tar` of the working tree: on a Windows
-checkout `core.autocrlf` smudges shell scripts to CRLF, and a carriage-returned shebang
-does not execute in a Linux container. That mistake produced a false test failure during
-5M-R and cost a rebuild to identify.
+Record the sha. **The context is the monorepo root, not `packages/backend`.** An
+earlier version of this step archived `packages/backend` alone; that produced a
+context in which the production Dockerfile cannot even resolve its `COPY` paths.
+See step 8 for why.
+
+Still verify the release tree and the absence of unrelated change:
+
+```bash
+git -C <isola-portal> diff --name-only cfcbe4f..23c669f          # expect only the release files
+git -C <isola-portal> diff --name-only 8743ddc..23c669f          # expect only packages/backend/deploy/*
+```
+
+Use `git archive`, **never** `tar` of the working tree: on a Windows checkout
+`core.autocrlf` smudges shell scripts to CRLF, and a carriage-returned shebang does
+not execute in a Linux container. That mistake produced a false test failure during
+5M-R.
 
 ### 3. Drift check — is the live service still what the baseline describes?
 
@@ -205,31 +217,78 @@ not return one.
 **Rollback:** remove any secret created in error and create it again. Secrets are
 immutable — a wrong value is replaced by creating a `_v2` and swapping, never by editing.
 
-### 8. Ship, verify integrity, and build
+### 8. Ship, verify integrity, and build — FROM THE MONOREPO ROOT
 
 ```bash
 scp /tmp/rel.tar epicadmin@66.118.37.110:/tmp/rel.tar
 ssh epicadmin@66.118.37.110
-D=/opt/isola-portal-build/23c669f
-sudo mkdir -p $D && sudo tar -xf /tmp/rel.tar -C $D --strip-components=2
-sha256sum /tmp/rel.tar                                  # MUST equal step 2
+D=/opt/isola-portal-build/mono-23c669f
+sudo mkdir -p $D && sudo tar -xf /tmp/rel.tar -C $D && sudo rm -f /tmp/rel.tar
+sha256sum /tmp/rel.tar                                       # MUST equal step 2
 printf 'a\r\nb\r\n' > /tmp/ctl
-tr -cd '\r' < /tmp/ctl | wc -c                          # control: MUST print 2
-tr -cd '\r' < $D/scripts/runtime/run_migrations.sh | wc -c   # MUST print 0
+tr -cd '\r' < /tmp/ctl | wc -c                                # control: MUST print 2
+tr -cd '\r' < $D/packages/backend/scripts/runtime/run_migrations.sh | wc -c   # MUST print 0
 rm -f /tmp/ctl
-cd $D && sudo docker build -t isola-portal-api:23c669f -f Dockerfile .
-sudo docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep 23c669f
 ```
 
-**Expect:** sha identical to step 2; the control reads `2`; the script reads `0`; the build
-exits 0; an image id is printed. **If the control does not read 2 the check is blind** —
-fix the check before believing it about the file.
+**Build with `Dockerfile.render`, from the repository root:**
 
-**Record the image id in the Port evidence entity.** There is no registry on this host, so
-the tag is the only provenance, and a tag can be moved.
+```bash
+cd $D
+sudo docker build -f packages/backend/Dockerfile.render -t isola-portal-api:23c669f . > /tmp/build.log 2>&1
+echo "BUILD_EXIT=$?"
+```
+
+**CAPTURE THE BUILD'S OWN EXIT CODE. DO NOT PIPE IT.**
+
+`docker build ... | tail -25` reports the exit status of `tail`, which is always 0.
+Measured 2026-08-20: a build that had already failed was reported as "exit code 0"
+and the failure was found only by reading the log. Redirect to a file and echo `$?`
+as above. If you must pipe, set `set -o pipefail` first AND prove the originating
+status — an unproven pipeline is not a measurement.
+
+Then confirm the artefact actually exists, which a build log cannot tell you:
+
+```bash
+sudo docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep '^isola-portal-api:23c669f '
+```
+
+**WHY NOT `packages/backend/Dockerfile`.** That file exists and looks like the
+production build. It is not. The live image's own layer history shows
+`COPY packages/backend/ /app/` and copies from `packages/webapp-libs/...`, which only
+resolve with the repository root as context — and an `email_builder` stage that runs
+`pnpm nx run webapp-emails:build` and contributes `index.umd.js`. Only
+`packages/backend/Dockerfile.render` matches that history. The name is misleading:
+despite "render", this is what produces the deployed EasyPanel image.
+
+**Record the image id in the Port evidence entity.** There is no registry on this
+host, so the tag is the only provenance and a tag can be moved.
+
+**KNOWN BLOCKER AS OF 2026-08-20 — THIS STEP DOES NOT YET SUCCEED.**
+With the correct Dockerfile and context, 38 stages complete (including the pnpm
+install and the webapp-emails build) and the build then fails in `build_static.sh`:
+
+> `AttributeError: module 'common.tasks' has no attribute 'LambdaTask'.`
+
+Root cause, located 2026-08-20: `packages/backend/common/tasks.py:42` evaluates
+`settings.WORKERS_EVENT_BUS_NAME` as a DEFAULT ARGUMENT, so it runs at
+class-definition time. Importing the module therefore depends on Django settings
+resolving at import. When that fails during `django.setup()`'s admin autodiscover the
+module is left partially initialised, `LambdaTask` is never bound, and the caller's
+`getattr` reports it missing while Python suggests the identical name.
+
+PROVEN NOT TO BE A REGRESSION FROM THIS RELEASE: the parent commit fails identically,
+and **zero backend files differ between the deployed commit `7f58a926` and the branch
+base `cfcbe4f`** — the backend tree building here is the one already in production.
+Refuted along the way: build context (fixed, still fails), `TASK_BACKEND=celery` (no
+effect), and a homoglyph in the handler path (bytes are clean ASCII).
+
+EasyPanel evidently builds this successfully, so the remaining difference is in ITS
+build invocation — most likely the environment it injects at build time. Resolving
+that, or fixing the import-time settings access, is a prerequisite for this step and
+is NOT part of Packet 5M-E.
 
 **Rollback:** nothing to roll back; no production object has changed.
-
 ---
 
 ## D. Render and validate (steps 9–11) — no production change
