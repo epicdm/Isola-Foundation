@@ -51,13 +51,28 @@ document, in any command argument, or in any transcript.
 | `PAPERCLIP_BOARD_TOKEN_FILE` | `isola_portal_paperclip_board_token_v1` | `/run/secrets/portal_paperclip_board_token` |
 | `ISOLA_GATEWAY_ADMIN_TOKEN_FILE` | `isola_portal_gateway_admin_token_v1` | `/run/secrets/portal_gateway_admin_token` |
 
-> **Discrepancy, recorded rather than papered over.** The packet commissioning this
-> runbook asked for **eight** portal secret mappings. Measurement of the live service
-> finds **six** credential-bearing variables, listed above. The number eight matches the
-> renderer's **exclusion set** — those six plus `DEPLOY_TIMESTAMP` and `GIT_SHA`, which
-> are EasyPanel build metadata and not credentials. Two secrets are not being created to
-> satisfy a count. **If the owner believes two further credentials exist, name them before
-> step 7 and this table is extended.**
+> **Six live credentials, eight loader-supported names — reconciled 2026-08-20.**
+> The packet commissioning this runbook expected **eight** portal secret mappings.
+> Measured against the live service, there are **six** credential-bearing variables,
+> and the six rows above are the complete set.
+>
+> The number eight is real, but it counts something else: `config/settings.py` has
+> **eight `secret_env()` call sites**. Two of them — `STRIPE_LIVE_SECRET_KEY` and
+> `STRIPE_TEST_SECRET_KEY` — are **absent from the live service** and fall back to
+> `sk_<CHANGE_ME>` placeholder defaults, i.e. Stripe is not configured on this
+> service. The loader supports them so that they need no code change if Stripe is
+> ever enabled; supporting a name is not the same as holding a credential.
+>
+> An earlier note here attributed the eight to the renderer's exclusion set (six
+> credentials plus `DEPLOY_TIMESTAMP` and `GIT_SHA`). That arithmetic also reaches
+> eight, which is exactly why it was believable and exactly why it was worth
+> checking: **two different derivations landing on the same number made the wrong
+> one look confirmed.** The loader count is the one the packet meant.
+>
+> **No credential is being invented to satisfy a count.** If Stripe is to be
+> configured, that is a separate decision with its own keys, and this table is
+> extended before step 7 — it is not something to discover mid-window.
+
 
 ---
 
@@ -501,7 +516,18 @@ curl -s -o /dev/null -w 'new=%{http_code}\n' -H "Authorization: Bearer <v2>" \
 the old value fails, not that the gateway still works. Without the control, a gateway that
 refuses *everything* passes this step.
 
-3. **Zero-reference cleanup.** Before removing the superseded secret, enumerate every store
+3. **STOP. Do not destroy v1 yet.** Promotion is reversible only while v1 still
+   exists. If anything surfaces in the next hours — a consumer nobody enumerated, a
+   cached client, a scheduled job that authenticates once a day — recovery means
+   putting v1 back, and **a deleted secret cannot be put back, only re-minted as a
+   different value in every store that held it.** Leave v1 in place through a soak of
+   at least one business hour, and preferably until the next working day.
+
+   Rollback during the soak is free and complete: set `GATEWAY_ADMIN_TOKEN` back to
+   v1 (or re-add it as `GATEWAY_ADMIN_TOKEN_NEXT`) and redeploy the gateway. Nothing
+   has to be reconstructed, because nothing has been destroyed.
+
+4. **Zero-reference cleanup — only after that soak.** Before removing the superseded secret, enumerate every store
    that holds a copy:
 
 ```bash
@@ -523,9 +549,11 @@ sudo docker secret ls --format '{{.Name}}' | grep -c gateway_admin_token_v1   # 
 A credential removed from one store while an identical copy lives in another is not a
 rotation; it is a moved problem. **The enumeration is part of the fix, not a follow-up.**
 
-**Rollback after step 22:** none for the credential itself — v1 is gone. This is the point
-of no return, which is why step 20's overlap proof and step 21's acceptance must both have
-passed first.
+**Rollback after step 22:** free until item 4 runs, and unavailable afterwards.
+Promotion alone changes nothing irreversibly — v1 still exists and can be restored in
+one redeploy. **Removing v1 is the point of no return**, which is why it now sits
+behind its own soak gate, and why step 20's overlap proof and step 21's acceptance
+must both have passed before you reach it.
 
 ### 23. Revoke the temporary EasyPanel token
 
