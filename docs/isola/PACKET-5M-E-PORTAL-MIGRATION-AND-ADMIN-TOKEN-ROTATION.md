@@ -184,7 +184,7 @@ IS the EasyPanel recovery record referenced in step 18.
 ### 2. Verify the release, and ship the WHOLE monorepo as build context
 
 ```bash
-git -C <isola-portal> rev-parse HEAD          # expect 23c669f...
+git -C <isola-portal> rev-parse HEAD          # expect 115291e...
 git -C <isola-portal> status --porcelain      # expect EMPTY
 git -C <isola-portal> -c core.autocrlf=false archive --format=tar HEAD > /tmp/rel.tar
 sha256sum /tmp/rel.tar
@@ -206,8 +206,8 @@ See step 8 for why.
 Still verify the release tree and the absence of unrelated change:
 
 ```bash
-git -C <isola-portal> diff --name-only cfcbe4f..23c669f          # expect only the release files
-git -C <isola-portal> diff --name-only 8743ddc..23c669f          # expect only packages/backend/deploy/*
+git -C <isola-portal> diff --name-only cfcbe4f..115291e          # expect only the release files
+git -C <isola-portal> diff --name-only 8743ddc..115291e          # expect only packages/backend/deploy/*
 ```
 
 Use `git archive`, **never** `tar` of the working tree: on a Windows checkout
@@ -316,7 +316,7 @@ immutable — a wrong value is replaced by creating a `_v2` and swapping, never 
 ```bash
 scp /tmp/rel.tar epicadmin@66.118.37.110:/tmp/rel.tar
 ssh epicadmin@66.118.37.110
-D=/opt/isola-portal-build/mono-23c669f
+D=/opt/isola-portal-build/rel-115291e
 sudo mkdir -p $D && sudo tar -xf /tmp/rel.tar -C $D && sudo rm -f /tmp/rel.tar
 sha256sum /tmp/rel.tar                                       # MUST equal step 2
 printf 'a\r\nb\r\n' > /tmp/ctl
@@ -332,7 +332,7 @@ rm -f /tmp/ctl
 
 ```bash
 cd $D
-sudo docker build -f packages/backend/Dockerfile.render -t isola-portal-api:23c669f . > /tmp/build.log 2>&1
+sudo docker build -f packages/backend/Dockerfile.render -t isola-portal-api:115291e . > /tmp/build.log 2>&1
 echo "BUILD_EXIT=$?"
 ```
 
@@ -347,7 +347,7 @@ status — an unproven pipeline is not a measurement.
 Then confirm the artefact actually exists, which a build log cannot tell you:
 
 ```bash
-sudo docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep '^isola-portal-api:23c669f '
+sudo docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep '^isola-portal-api:115291e '
 ```
 
 **WHY NOT `packages/backend/Dockerfile`.** That file exists and looks like the
@@ -403,7 +403,7 @@ build, and the runbook says so rather than letting the two be conflated.
 
 ```bash
 cd $D/deploy && chmod +x render-portal-stack.sh
-sudo bash render-portal-stack.sh 23c669f > /opt/isola/isola-portal-api-stack.yml
+sudo bash render-portal-stack.sh 115291e > /opt/isola/isola-portal-api-stack.yml
 ```
 
 **Expect:** exit 0, and a `carried keys:` line on stderr naming 29 keys.
@@ -494,7 +494,7 @@ sudo docker service scale isola_isola-portal-api=0     # stop the other owner fi
 sudo docker run --network easypanel-isola \
   -e DATABASE_URL_FILE=/run/secrets/portal_database_url \
   --mount type=bind,source=/dev/null,target=/dev/null \
-  isola-portal-api:23c669f python manage.py isola_migrate
+  isola-portal-api:115291e python manage.py isola_migrate
 sudo docker service scale isola_isola-portal-api=1
 ```
 
@@ -733,6 +733,119 @@ Then **revoke the token in the panel** so the file's absence is not the only con
 prove the revocation by making one authenticated call that now fails. A deleted file is
 containment; revocation is remediation, and a value that existed on disk must be assumed
 compromised.
+
+---
+
+## H2. THE ROTATION SEQUENCE, as it must actually be run (Packet 5M-EG-S, 2026-08-21)
+
+Section H above is superseded by this one. H was written against a gateway image
+that **does not exist on host03** and assumed one administrator-token value; both
+assumptions were wrong, and the corrected facts change the order of operations.
+
+### H2.0 — the measured token topology
+
+There are **two distinct administrator-token values** held across **three** Docker
+secret objects. Proven 2026-08-21 by salted digests computed inside each container,
+with same-value, one-byte-different and different-secret controls:
+
+| Store | Held by | Value |
+|---|---|---|
+| `isola_gw_admin_token_v1` | `isolagw_gateway` (public) | **A** |
+| `isola_portal_gateway_admin_token_v1` | `isolaportal_api` | **A** — the same value, a second copy |
+| `isola_gwint_admin_token_v1` | `isolagwint_gateway` (internal) | **B** — a different credential |
+
+So rotating "the portal's administrator token" means rotating **value A**, which
+lives in **two** secret objects that must move together. The internal gateway is
+**not** a receiver of the portal's token and is **out of scope for this rotation** —
+it carries the same one-slot gap on its own credential and gets its candidate now so
+it is ready when value B is rotated under a separate packet.
+
+### H2.1 — the candidates
+
+| Service | Deployed today | Candidate | Image ID |
+|---|---|---|---|
+| `isolagw_gateway` | `isola-gateway:overlay-5317cec` (`be2e7394478f`) | **`isola-gateway:grace-pub-eebf659`** | `aeb76dbc10ee` |
+| `isolagwint_gateway` | `isola-gateway:audit-3ea85dc` (`20ddd40b4701`) | **`isola-gateway:grace-int-d913de2`** | `d44d75c72c1b` |
+
+Both are commit-derived, `BUILD_EXIT=0`, tied to pushed commits, and referenced by
+**zero** services. Rollback is the deployed image above, which is retained.
+
+### H2.2 — the sequence
+
+Every numbered step is a production mutation. Steps 4–9 are the irreversible window
+and must run in one sitting with a person present.
+
+1. **Window.** Obtain a quiet window or a packet-specific waiver. The public gateway
+   is the customer path; a failed boot here is customer-visible.
+2. **Baseline and drift.** Re-inspect both gateways and the portal, and re-run the
+   token-topology digest comparison. If value A is no longer shared by exactly those
+   two stores, STOP — the plan below is wrong for the estate you have.
+3. **Mint v2 directly into a Docker secret.** Generate and pipe in one operation so
+   the value never lands in a file, a variable or shell history:
+
+   ```
+   openssl rand -hex 32 | tr -d '
+' | sudo docker secret create isola_gw_admin_token_v2 -
+   ```
+
+   Create the portal's copy from the **same** value in the same pipeline, or the two
+   sides will disagree and the proof in step 6 will fail closed.
+4. **Deploy the grace gateway with CURRENT=v1 and NEXT=v2.** Add
+   `GATEWAY_ADMIN_TOKEN_NEXT_FILE` pointing at the mounted v2 secret and switch the
+   image to `isola-gateway:grace-pub-eebf659`. **Both changes in one deploy** — the
+   old image ignores `_NEXT` entirely, so deploying the secret first proves nothing
+   and deploying the image first leaves no overlap.
+5. **Prove the gateway came back**, not merely that the deploy returned: replicas
+   1/1, task not restarting, and a request that succeeds.
+6. **Prove the overlap, all three lines in the same run.**
+
+   ```
+   v1 -> 200
+   v2 -> 200
+   bogus -> 401
+   ```
+
+   Two 200s without the 401 cannot distinguish "both accepted" from "this endpoint
+   accepts anything". If v2 returns 401, the two secrets hold different values —
+   go back to step 3; do **not** promote.
+7. **Point the portal at v2** by changing its secret source to the v2 object and
+   redeploying. Both values are accepted at this moment, so this cannot fail closed.
+8. **Prove the portal's own read works on v2** — `GET /v1/bindings` through the portal,
+   not a raw curl, because the portal is the consumer whose failure would be silent.
+9. **Promote: CURRENT=v2, remove NEXT, redeploy.** Then prove **v1 → 401 and v2 → 200
+   in the same run.** The second line is not optional: a 401 alone proves the old value
+   fails, not that the gateway still works, and a gateway refusing everything would
+   pass a one-line check.
+10. **Regression:** portal, public gateway, runtime, and the binding read.
+11. **Soak** at least one business hour, preferably to the next working day.
+
+### H2.3 — what must NOT happen during that execution
+
+**No `_v1` secret is removed.** Promotion is reversible only while v1 exists: set
+`GATEWAY_ADMIN_TOKEN` back to v1, or re-add it as `_NEXT`, and redeploy. Nothing has
+to be reconstructed because nothing has been destroyed. A Swarm secret cannot be read
+back, so a deleted v1 is not recoverable — only re-mintable as a **different** value
+in **every** store that held it, which for value A means two stores plus any consumer
+nobody enumerated.
+
+### H2.4 — the separate cleanup packet, after the soak
+
+1. Prove **zero** references to every v1 object, enumerating **all** stores.
+2. Remove the v1 secrets under an exact-command authorization generated from the
+   measured target (see section I.2).
+3. Remove or sanitize the retained EasyPanel portal definition — see the credential
+   note below.
+4. Prove all six old plaintext copies are absent, with a positive control showing the
+   scan can still find a planted one.
+5. Preserve a credential-independent rollback path throughout.
+
+> **THE PLAINTEXT COPIES ARE NOT GONE YET, and no report should say they are.**
+> The migrated stack is secret-backed, but `isola_isola-portal-api` is scaled 0/0 with
+> its **definition retained**, and that definition still carries all **39** environment
+> keys including the six credential values in plaintext. That retention is deliberate —
+> it is the rollback record — and it means the cleanup above is a real outstanding
+> obligation, not a formality. Until it runs: the active path is secret-backed, the
+> retained definition holds plaintext copies, and `GATEWAY_ADMIN_TOKEN` v1 is live.
 
 ---
 
