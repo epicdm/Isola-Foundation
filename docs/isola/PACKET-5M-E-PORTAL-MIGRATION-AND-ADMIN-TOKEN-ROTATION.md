@@ -27,8 +27,8 @@ any real customer contact, and the retirement in step 18.
 
 | Thing | Value |
 |---|---|
-| Portal release commit | `5c5bed3` — branch `foundation/portal-secret-files`, parent `23c669f` |
-| Portal image (BUILT, verified) | `isola-portal-api:5c5bed3`, id `fb60ec4d76c8` |
+| Portal release commit | `32c8b80` — branch `feat/secret-file-support-2026-08-20`, parent `5c5bed3` (superseded 2026-08-21 by Packet 5M-ER3R; this doc's branch name above this line was `foundation/portal-secret-files`, which no longer matches the actual branch — left as found, not reconciled this pass) |
+| Portal image (BUILT, verified) | `isola-portal-api:32c8b80`, id `21034f2ef0da` (supersedes `5c5bed3` / `fb60ec4d76c8`: adds the `.gitattributes` LF fix, the release-preflight script, and black-formatting on `config/healthz.py` / `config/secret_files.py`; PR https://github.com/epicdm/isola-portal/pull/68, CI run 32444300921 green) |
 | Gateway release commit | `b05abf1` — branch `feat/credential-rotation-grace-2026-08-20` |
 | Gateway image (built, verified) | `isola-gateway:admingrace-b05abf1`, id `e1ea6bc0d41d` |
 | Live service being replaced | `isola_isola-portal-api` |
@@ -276,7 +276,10 @@ despite "render", this is what produces the deployed EasyPanel image.
 host, so the tag is the only provenance and a tag can be moved.
 
 **RESOLVED 2026-08-21. This step now succeeds — `BUILD_EXIT=0`, image
-`isola-portal-api:5c5bed3` id `fb60ec4d76c8`.**
+`isola-portal-api:5c5bed3` id `fb60ec4d76c8`.** Superseded the same day by Packet
+5M-ER3R's final release commit `32c8b80`, image `isola-portal-api:32c8b80` id
+`21034f2ef0da` — see the Fixed Inputs table above. The `5c5bed3` build stays recorded
+here as the first proof that this step's mechanics work; it is not the candidate to use.
 
 It failed for two packets, and neither cause was a code defect in the migration delta.
 
