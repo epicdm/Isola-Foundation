@@ -890,26 +890,51 @@ try {
 // It cannot be bundled here (it is per-machine and not version-controlled), so this
 // chains its own suite when present and says so plainly when it is absent. An absent
 // hook is reported, never silently treated as a pass: "no result" is not "passed".
+// 2026-08-21 (Packet 5M-ER4S) — DISCOVER THE SUITES, DO NOT NAME ONE.
+//
+// This block used to run exactly one hardcoded file, `enforce-safety.test.js`.
+// By 2026-08-21 there were SIX suites beside it — doc-vs-exec, gate-control,
+// network-destroy, temp-5mra, resource-destroy — and this chained one of them.
+// A lane following CLAUDE.md's documented procedure ("run selftest.js to verify")
+// was verifying 39 of 188 user-home checks and being told "all checks passed".
+//
+// That is the SAME defect as the one described in the comment directly above:
+// running part of the enforcement and believing you had run all of it. It was
+// written here as a lesson and then re-committed one level down. So the list is
+// now DERIVED from the directory rather than remembered, and the count of suites
+// found is printed — a number nobody can mistake for coverage they did not get.
 const os = require('os');
-const homeHookTest = path.join(os.homedir(), '.claude', 'hooks', 'enforce-safety.test.js');
+const fsm = require('fs');
+const homeHookDir = path.join(os.homedir(), '.claude', 'hooks');
 let homeHookFailed = 0;
 try {
-  if (require('fs').existsSync(homeHookTest)) {
-    console.log('\n--- user-home hook: ' + homeHookTest);
-    const r = spawnSync(process.execPath, [homeHookTest], { encoding: 'utf8' });
-    const out = (r.stdout || '') + (r.stderr || '');
-    const summary = out.split('\n').filter((l) => /passed,|FAILURE/.test(l)).pop() || '(no summary line)';
-    const bad = /[1-9]\d* failed/.test(summary) || r.status !== 0;
-    if (bad) homeHookFailed = 1;
-    console.log((bad ? '  FAIL  ' : '  PASS  ') + 'enforce-safety.test.js — ' + summary.trim());
+  const suites = fsm.existsSync(homeHookDir)
+    ? fsm.readdirSync(homeHookDir)
+        .filter((f) => /^enforce-safety.*\.test\.js$/.test(f))
+        .sort()
+    : [];
+  if (suites.length) {
+    console.log('\n--- user-home hook suites in ' + homeHookDir + ' (' + suites.length + ' found)');
+    for (const f of suites) {
+      const r = spawnSync(process.execPath, [path.join(homeHookDir, f)], { encoding: 'utf8' });
+      const out = (r.stdout || '') + (r.stderr || '');
+      const summary = out.split('\n').filter((l) => /passed,|FAILURE/.test(l)).pop() || '(no summary line)';
+      const bad = /[1-9]\d* failed/.test(summary) || r.status !== 0;
+      if (bad) homeHookFailed = 1;
+      console.log((bad ? '  FAIL  ' : '  PASS  ') + f.padEnd(44) + summary.trim());
+    }
+  } else if (fsm.existsSync(path.join(homeHookDir, 'enforce-safety.js'))) {
+    homeHookFailed = 1;
+    console.log('\n--- user-home hook: INSTALLED BUT HAS NO SUITE (' + homeHookDir + ')');
+    console.log('  FAIL  enforce-safety.js is enforcing here with nothing verifying it.');
   } else {
-    console.log('\n--- user-home hook: NOT INSTALLED on this machine (' + homeHookTest + ')');
+    console.log('\n--- user-home hook: NOT INSTALLED on this machine (' + homeHookDir + ')');
     console.log('  NOT RUN  enforce-safety.js is unverified here. This is a per-machine hook;');
     console.log('           its absence means this machine does not have that enforcement.');
   }
 } catch (e) {
   homeHookFailed = 1;
-  console.log('  FAIL  could not run the user-home hook suite: ' + (e && e.message));
+  console.log('  FAIL  could not run the user-home hook suites: ' + (e && e.message));
 }
 failed += homeHookFailed;
 

@@ -168,6 +168,40 @@ const DESTRUCTIVE_RULES = [
     why: 'Destructive docker network operation. Removing a network disconnects every container attached to it. Remove a named network only under explicit authorization.',
   },
 
+  // 2026-08-21 (Packet 5M-ER4S) — DESTRUCTIVE RESOURCE REMOVAL.
+  //
+  // Same shape as the network gap directly above, found the same way and one day
+  // later: `container-destroy` matches the container/compose forms, `network-destroy`
+  // matches networks, and NOTHING matched secrets, configs or volumes on either
+  // guard surface. Measured across 23 destructive cases before this rule existed,
+  // 19 were ALLOWED by both surfaces — including sudo, env-prefixed, bash -c,
+  // sh -c, ssh-wrapped, multi-target, by-id, substituted, globbed and xargs forms.
+  //
+  // A Swarm secret cannot be read back once created, so removing the wrong name is
+  // unrecoverable from this estate — only the issuer that minted the value can
+  // replace it. A volume removal is the data. This matters immediately: Packet 5M-E
+  // converts the portal's six plaintext credentials into Docker secrets and then
+  // rotates the live gateway admin token.
+  //
+  // Execution-only by construction: DESTRUCTIVE_RULES are applied against
+  // scanTarget on the Bash path only, so a runbook or a Port record may quote the
+  // vocabulary. That is the same reasoning already recorded for the rules above.
+  //
+  // Not a production-name blacklist — the verb is the predicate. ls, inspect and
+  // create are untouched. This rule is deliberately duplicated on the user-home
+  // surface (`docker-resource-destroy`) so neither surface is load-bearing alone;
+  // the user-home hook is per-machine and not reviewed in a PR, so a lane without
+  // it must still be protected by the copy that travels with this repository.
+  {
+    id: 'resource-destroy',
+    re: new RegExp(
+      '\\b' + CLI.container + '\\s+(secret|config|volume)\\s+(' +
+        [VERB.remove, tok('rem', 'ove')].join('|') + ')\\b',
+      'i'
+    ),
+    why: 'Destructive removal of a Docker secret, config or volume. A Swarm secret cannot be read back, so removing the wrong one is unrecoverable without the issuer; a volume is the data. Remove a named resource only under an explicit exact-target authorization.',
+  },
+
   {
     id: 'process-manager-destroy',
     re: new RegExp('\\b' + CLI.proc + '\\s+(' + VERB.purge + '|' + VERB.terminate + ')\\b', 'i'),
