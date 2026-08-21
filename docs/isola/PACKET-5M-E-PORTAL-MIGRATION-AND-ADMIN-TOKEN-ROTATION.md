@@ -700,6 +700,106 @@ compromised.
 
 ---
 
+## I. Destructive-cleanup boundary (Packet 5M-ER4S, 2026-08-21)
+
+Steps 18 and 23–24 remove things that cannot be recreated from this estate. Read
+this section before running any of them.
+
+### I.1 — `.test.env` is a TEST-TIME mount and nothing else
+
+The candidate image deliberately does not contain `packages/backend/.test.env`;
+that removal is the point of Packet 5M-ER4H. To run the suite against the image
+you mount it read-only for the duration of the run.
+
+**It must never be mounted into the production service.** Not as a bind mount, not
+as a Swarm config, not as a `file` mount, not "temporarily to debug". The whole
+reason the file was removed is that a runtime artifact must not carry a test
+environment file, and re-mounting it in production reinstates exactly the defect
+this release exists to close — while making the stack render disagree with the
+running service, which is how the original problem stayed invisible.
+
+The rendered stack must therefore contain **zero** occurrences of `.test.env`.
+Assert it, do not assume it:
+
+    docker stack config -c isola-portal-api-stack.yml | grep -c "test.env"   # MUST be 0
+
+### I.2 — Temporary exact-command authorization, for destructive cleanup only
+
+Both guard surfaces now refuse removal of a Docker **secret**, **config** or
+**volume** (`resource-destroy` in the project hook, `docker-resource-destroy` in
+the user-home hook), in addition to container/stack/service teardown, network
+removal and every prune. That refusal is correct and must not be weakened.
+
+When a step here genuinely requires one of those removals, generate a temporary
+authorization **from the measured target**, not in advance:
+
+1. **Measure first.** Record the exact resource name and its reference count. An
+   authorization written before measurement is an authorization for a guess.
+2. **Authorize the exact command string**, anchored so it cannot be extended.
+   The terminator must be a quote or end-of-string — never `;`, `&` or `|`,
+   which would permit `<authorized> && rm -rf /`. That precise hole was found
+   and closed in an earlier packet's authorization regex.
+3. **One target, one command, one use.** Never a name pattern, never a prefix.
+4. **Write the removal command down before running it**, together with the exact
+   step that restores service if the removal turns out to be wrong.
+5. **Remove the authorization immediately afterwards** and prove both guards
+   refuse the formerly authorized command again.
+6. **Re-ask if the measured operation is bigger than the one authorized.**
+   Refusing is compliance. An authorization covers the operation as described.
+
+### I.3 — Guard-restoration proof (run after every cleanup step)
+
+A guard suite passing is not proof that a specific exemption is gone: nothing in
+the suites asserts "an authorization for X must not also exempt Y". That gap has
+already bitten once — an authorization was wired into the wrong rule and 73/73
+still passed. So fire the commands themselves:
+
+    node .claude/hooks/selftest.js                        # 73 project checks + every user-home suite
+    node ~/.claude/hooks/enforce-safety.resource-destroy.test.js   # 44 checks, both surfaces
+
+Then confirm, through the live hook chain rather than a simulated payload, that
+the formerly authorized command is refused again **and** that a read-only probe of
+the same resource class is still allowed. One without the other proves nothing:
+a hook that refuses everything looks identical to a hook that is working.
+
+### I.4 — Rollback must not depend on recreating a removed credential
+
+A Swarm secret is write-only once created. Nothing on this host can read one
+back, so a rollback that says "recreate the old secret" is a rollback that
+depends on a value nobody has. Therefore:
+
+* **Do not remove any `_v1` secret during cutover.** The rollback path is
+  "point the service back at the retained `_v1` secret", which only works while
+  that secret still exists.
+* Removal of the superseded secret happens **only after the soak gate**, and only
+  once its reference count is measured at zero.
+* Until that point the rollback is a service update, not a credential operation.
+
+### I.5 — Historical `.test.env` credential closeout (RESOLVED, no action)
+
+The sanitized value in the release tree is an inert sentinel. An earlier commit,
+`b1f7145` *"pinned snapshot of apptension/saas-boilerplate 5.0.0"*, carries the
+original. It was measured on 2026-08-21 and it is **dead upstream boilerplate,
+not an EPIC credential**:
+
+* all **31** values in that historical blob are **byte-identical** to the public
+  `apptension/saas-boilerplate` `master` file fetched live from GitHub — 31
+  identical, 0 differing, 0 keys unique to this repository, with a mutated-copy
+  control confirming the comparison is not trivially true;
+* a read-only probe of `GET https://api.stripe.com/v1/account` returned
+  **HTTP 401 "Invalid API Key provided"**, and the instrument was proven able to
+  discriminate because a no-Authorization control against the same endpoint
+  returned a **different** message ("You did not provide an API key"). A bare 401
+  was not treated as sufficient.
+
+**Classification: REJECTED.** No rotation is required and no issuer contact is
+owed. Git history is not rewritten. The value remains reachable from ~94 refs
+including `origin/HEAD`, which is acceptable precisely because it is public
+upstream content that was never secret.
+
+---
+
+
 ## Stop conditions
 
 Stop and ask the owner if any of these occur:
