@@ -1,7 +1,31 @@
 # Packet 5M-E — portal-api migration and GATEWAY_ADMIN_TOKEN rotation
 
-**Status: NOT EXECUTED.** This document is the procedure. Packets 5M-R and 5M-RR were
-repository, build and Port work only. Nothing here has been run.
+**Status: EXECUTED 2026-08-21 — steps 1–18 PASS, steps 19–22 BLOCKED.**
+
+The portal migration is done. `isolaportal_api` runs `isola-portal-api:115291e`
+(`0a7a43c27cf7`) and serves `isola-portal.saas00.epic.dm`; all six credentials
+resolve from Docker secret files; `isola_isola-portal-api` is scaled **0/0** with
+its definition and 39-key environment retained as the recovery record.
+
+**Steps 19–22 (the rotation) were NOT attempted.** The gateway that serves the
+portal runs `isola-gateway:overlay-5317cec`, which has a single admin-token slot
+(`config.js:131 adminToken: str(env, "GATEWAY_ADMIN_TOKEN")`) and no
+`GATEWAY_ADMIN_TOKEN_NEXT`, no `bootErrors`, and no grace vocabulary of any kind.
+The image section H was measured against — `admingrace-b05abf1` / `e1ea6bc0d41d`
+— is not on this host. Step 20's overlap proof cannot be attempted, so the
+rotation stops before it starts rather than swapping a single-slot token and
+breaking every v1 holder with no rollback window.
+
+The capability exists in source at `b05abf1` on
+`feat/credential-rotation-grace-2026-08-20` and is at HEAD in
+`services/isola-gateway/src/config.ts`. Notably `isolart_runtime` already runs
+`isola-runtime:grace-b05abf1` — the grace build reached the runtime and never the
+gateway. Remediation is build-and-deploy, on **both** `isolagw_gateway` and
+`isolagwint_gateway`, and needs its own authorization: the execution
+authorization named the portal release and image, not the gateway.
+
+See `ev-5m-e-portal-migration-executed-2026-08-21` and
+`def-gateway-deployed-image-lacks-rotation-grace-2026-08-21`.
 
 **Why this exists.** `isola_isola-portal-api` holds six credentials as plaintext
 environment variables, one of which is the live gateway administrator token. An EasyPanel
@@ -125,6 +149,18 @@ document, in any command argument, or in any transcript.
 
 
 ---
+
+> **ARTIFACT WARNING, added during the authorized execution of 2026-08-21.** The
+> command examples in sections A–D below still name `23c669f`, `5c5bed3` and
+> `32c8b80`. Those are historical and **must not be copy-pasted**. The authoritative
+> artifacts are the Fixed-inputs table at the top of this document:
+> release `115291e2bb20b209e064cbf2db30f9092f9c7568`, image
+> `isola-portal-api:115291e`, id `0a7a43c27cf7`.
+>
+> This is not a cosmetic point. Earlier in this packet sequence a `sed` that failed
+> to match left one stale SHA in a build script, and the build rebuilt the WRONG
+> commit and overwrote an immutable tag. A stale example in a runbook is the same
+> failure with a human in the loop instead of a regex.
 
 ## A. Pre-flight (steps 1–5) — no production change
 
