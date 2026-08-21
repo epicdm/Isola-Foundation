@@ -27,21 +27,14 @@ any real customer contact, and the retirement in step 18.
 
 | Thing | Value |
 |---|---|
-| Portal release commit | **`513e552`** (`513e552895c04e2d3a6b3426d70d9b954a5e5c9b`) — branch `feat/secret-file-support-2026-08-20`. Source tree `f831f2fbe1bc7ad35f52c285ea4c832aeba94530`, backend tree `1dcbc5a92f03013bf8a0adeedaf459e323be7dc6`. Supersedes `32c8b80`, `90fdbb1`, `5c5bed3`. |
-| Portal image (BUILT, ACCEPTED) | **`isola-portal-api:513e552`**, id **`f80f560ec14f`** (`sha256:f80f560ec14f4fc246f01f4adb08338fdb1bb11cc2eb82f3ce4199bfed6d0638`). Built from the exact commit above, `BUILD_EXIT=0` captured directly. Supersedes `21034f2ef0da` (`32c8b80`) and `fb60ec4d76c8` (`5c5bed3`), both retained as evidence, neither deleted. |
-| Artifact release gate | Workflow **`release gate (artifact-tied)`**, run **32487232712**, job **96786402024**. `requested_sha == head_sha == 513e552…` — it checks out the RELEASE COMMIT, not GitHub's `refs/pull/N/merge`, and refuses if they disagree or if HEAD is a synthetic merge commit. |
-| Release-gating test command | `pytest apps/users/tests/ apps/isola_provisioning/tests/ config/tests/ common/tests/ --create-db -p no:cacheprovider -q --tb=short -rf` — **identical in CI and in candidate-image acceptance.** |
-| Node-set parity | **327 nodes**, normalized SHA-256 **`005d2ae68ffe759a0e2839c6cbc79a8d049d207bf46c01d631547e918f4a46ce`**, identical in CI and in the image. `ONLY_IN_CI=0`, `ONLY_IN_IMAGE=0`, with a planted-control proving the comparison detects one removed node. Per directory: users 128 · provisioning 124 · config 29 · common 46 (secret-loader 17, task/import 11, containment 12). Suite result in the image: **327 passed, 0 failed, 0 errors**. |
+| Portal release commit | **`115291e`** (`115291e2bb20b209e064cbf2db30f9092f9c7568`) — branch `feat/secret-file-support-2026-08-20`. Source tree `79351a446d6e517e6cf3ac3b1237321652319ac8`, backend tree `bba5cbd17d4d2bc272d13fd70b93452b5205d5e7`. Supersedes `afaba01`, `513e552`, `32c8b80`, `90fdbb1`, `5c5bed3`. |
+| Portal image (BUILT) | **`isola-portal-api:115291e`**, id **`0a7a43c27cf7`**. Built from the exact commit above, `BUILD_EXIT=0` captured directly (not through a pipe). Prior tags verified byte-unchanged by the build script's own immutability control: `afaba01`=`f77e6516f66e`, `513e552`=`f80f560ec14f`, `rollback-7f58a926579e`=`6000d3efa7dd`. Nothing was deleted. |
+| Artifact release gate | Workflow **`release gate (artifact-tied)`**, run **32508930356**, job **96855302664**, conclusion `success`. Identity record read from the run's own log: `requested_sha == head_sha == 115291e2bb20b209e064cbf2db30f9092f9c7568`, `source_tree=79351a446d6e517e6cf3ac3b1237321652319ac8`, `backend_tree=bba5cbd17d4d2bc272d13fd70b93452b5205d5e7` — all three identical to the tree the image was built from. It checks out the RELEASE COMMIT, not GitHub's `refs/pull/N/merge`, and refuses if they disagree or if HEAD is a synthetic merge commit. |
+| Node set | **338 nodes**, SHA-256 **`d090a0fa9e0b3c03928e5000cc2338dbf50c8c2fb068552c939a57aebf181c34`** — byte-identical to the set recorded for `afaba01`, which is the evidence that ER4H changed **build and packaging only** and touched no test. |
+| Release-gating test command | `pytest apps/users/tests/ apps/isola_provisioning/tests/ config/tests/ common/tests/ --create-db -p no:cacheprovider -q --tb=short -rf` — **identical in CI and in candidate-image acceptance.** In the image it must now be run with `.test.env` mounted read-only (see the note below the table). Measured on `115291e`: **338 passed, 0 failed, 0 errors**, `PYTEST_EXIT=0`, 486s. |
+| ~~Node-set parity (superseded)~~ | ~~**327 nodes**, normalized SHA-256 `005d2ae68ffe759a0e2839c6cbc79a8d049d207bf46c01d631547e918f4a46ce`, identical in CI and in the image. Suite result in the image: 327 passed, 0 failed, 0 errors.~~ **Superseded by the `115291e` row above (338 nodes, `d090a0fa…`).** The 327 figure belonged to release `513e552`; the set grew to 338 at `afaba01` when Packet 5M-ER4L added the migration-owner lock tests, and is unchanged at `115291e`. Both figures were correct for their own commit — this row is struck rather than deleted so the two numbers are never mistaken for a discrepancy. Note that the in-image half of that parity claim was only obtainable because the credential file shipped inside the artifact; see the operating-fact note above. |
 | Credentials | **Six LIVE**, each mapped to an external Docker secret (table below). The loader SUPPORTS eight `secret_env()` names — the six plus `STRIPE_LIVE_SECRET_KEY` and `STRIPE_TEST_SECRET_KEY`, which are ABSENT from the live service and fall back to placeholder defaults. Supporting a name is not holding a credential. |
 | Rendered stack contract (verified) | 29 carried non-secret keys + 3 template keys + 6 `*_FILE` pointers = 38 rendered env keys; 6 secret `source:`→`target:` mappings; 6 external declarations; 0 plaintext occurrences of any credential key; `PORTAL_RUN_MIGRATIONS: "false"`; 0 active Traefik labels (route disabled by default); commented cutover `priority: 1000`; image pinned to the final candidate; 0 writable volumes. `docker stack config` exit 0; sabotage removal of a required secret declaration → non-zero; canonical render revalidated exit 0. |
-
-> **NOTE, 2026-08-21 (Packet 5M-ER4).** The `32c8b80` row this replaces cited "CI run
-> 32444300921 green". That run was green, but it tested **`refs/pull/68/merge`** —
-> GitHub's synthetic merge of the branch into trunk — not the release commit. It
-> collected 513 nodes because trunk carries 261 test nodes the release does not.
-> Nothing was wrong with the candidate (the release's 252 nodes were a strict subset
-> and all passed), but a PR gate certifies a tree that is not the artifact. That is why
-> the artifact-tied gate above now exists and is the row that matters for 5M-E.
 | Gateway release commit | `b05abf1` — branch `feat/credential-rotation-grace-2026-08-20` |
 | Gateway image (built, verified) | `isola-gateway:admingrace-b05abf1`, id `e1ea6bc0d41d` |
 | Live service being replaced | `isola_isola-portal-api` |
@@ -49,6 +42,50 @@ any real customer contact, and the retirement in step 18.
 | Public hostname | `isola-portal.saas00.epic.dm` |
 | Host | `epicadmin@66.118.37.110` (host03) |
 | Traefik dynamic config | `/etc/easypanel/traefik/config/main.yaml` |
+
+> **CHANGE OF OPERATING FACT, 2026-08-21 (Packet 5M-ER4H) — read this before running
+> any in-image test step in this runbook.**
+>
+> Up to and including `afaba01`, the runtime image shipped `packages/backend/.test.env`
+> at `/app/.test.env`. That is the defect 5M-ER4H removed, and the removal is proven
+> twice: the file is absent from the merged filesystem, **and** a scan of every layer
+> tar — 95,738 entries, with a positive control that located `app/manage.py` — finds no
+> dotenv file in any layer. The merged-filesystem check alone would not have been
+> enough: a file copied in one layer and deleted in a later one is invisible to `find`
+> and still recoverable from `docker save`.
+>
+> **The consequence is operational and is not optional.** `setup.cfg` declares
+> `env_files = .test.env` under pytest-dotenv with `env_override_existing_values = 1`,
+> so that file supplies the suite's configuration *and overrides anything passed with
+> `-e`*. Measured on `115291e`, one pair of runs against the same image:
+>
+> | Run | Result |
+> |---|---|
+> | `.test.env` mounted read-only at test time | **338 passed, 0 failed, 0 errors**, `PYTEST_EXIT=0`, 486s |
+> | no mount (the contrasting control) | `ImproperlyConfigured: Set the DJANGO_SECRET_KEY environment variable`, exit 1 |
+>
+> So the earlier "327/327 in the image" figure was obtainable **only because the
+> credential file shipped inside the artifact**. Node-set parity must now be
+> established by mounting the file for the duration of the run, never by baking it in:
+>
+> ```
+> docker run --rm --network <net> \
+>   -v <build-tree>/packages/backend/.test.env:/app/.test.env:ro \
+>   --entrypoint sh isola-portal-api:115291e -c 'cd /app && pytest …'
+> ```
+>
+> The fixture must also answer to the hostnames and role that file names — host `db`,
+> host `redis`, role/database `backend` — which is why the CI job aliases them. A step
+> that omits the mount will fail in a way that **looks like a regression in the
+> candidate** and is not one.
+>
+> **NOTE, 2026-08-21 (Packet 5M-ER4).** The `32c8b80` row this replaces cited "CI run
+> 32444300921 green". That run was green, but it tested **`refs/pull/68/merge`** —
+> GitHub's synthetic merge of the branch into trunk — not the release commit. It
+> collected 513 nodes because trunk carries 261 test nodes the release does not.
+> Nothing was wrong with the candidate (the release's 252 nodes were a strict subset
+> and all passed), but a PR gate certifies a tree that is not the artifact. That is why
+> the artifact-tied gate above now exists and is the row that matters for 5M-E.
 
 ### Secret mappings, by name only
 
@@ -689,3 +726,56 @@ On completion, one dispatch containing:
 - **owner-conveyance count** — how many decisions were escalated and what each returned;
 - a Port write recording the outcome, the evidence, and any defect found;
 - the footer: `PORT: read <what> · wrote <entities>`.
+
+---
+
+## Appendix — Lane coordination: disposition of PR #70 (Packet 5M-ER4H, 2026-08-21)
+
+**PR #70** — `fix/portal-build-hardening-2026-08-21` @ `052f63b97d034ebd7f9dc7196872fb5f9151ae7b`,
+*"fix(portal): stop sourcing .test.env in the image build, pin the build, and prove both"* —
+was opened by another lane against the same problem this packet fixes. It is **OPEN and
+NOT merged.** Its diagnosis was correct and it found the defect first.
+
+### What was adopted, and as what
+
+Four of its five files were adopted **as Lane A commits on
+`feat/secret-file-support-2026-08-20`**, not by merging the PR:
+
+| File | Why it was required |
+|---|---|
+| root `.dockerignore` | `Dockerfile.render` builds from the **repository root**, so the root `.dockerignore` is the only one Docker consults. `packages/backend/.dockerignore` is never read for that build. The root file excluded nothing env-related, which is precisely how the file reached `/app/.test.env`. |
+| `scripts/runtime/build_static.sh` | Removes `export $(egrep -v '^#' ./.test.env \| xargs)`. Behaviour-neutral: the Dockerfile's `static_files` stage already sets the same six variables, so the read was redundant. Verified empirically — the build's `collectstatic` copied 207 files and post-processed 591 with no env file present. |
+| `.gitattributes` | Broader LF classes, superseding the single-path pin. |
+| `Dockerfile.render` | Digest-pinned base images; pinned `pnpm`, `pip`, `setuptools`, `wheel`, `uv`. |
+
+The fifth file, `.github/workflows/portal-build-hardening.yml`, was **not adopted**, per
+the packet's instruction not to take it wholesale.
+
+### What PR #70 has that this branch does NOT — recorded as gaps, not as "superseded"
+
+An earlier pass of this comparison reported the workflow *"not present at `origin/pr70`"*.
+**That was wrong** — a bad-ref artifact reported as a finding. The file is present at the
+PR head and `gh workflow list` shows `portal-build-hardening` as an active workflow. The
+corrected comparison finds genuinely unique controls, and honesty requires listing them
+as outstanding rather than claiming `release-gate.yml` covers them:
+
+| PR #70 control | Covered here? |
+|---|---|
+| **A planted secret in the excluded file cannot enter the context** — plants a marker in `.test.env`, builds, asserts the marker is absent from `/app`, **and builds a deliberately unsafe control image proving the marker WOULD have entered without the exclusion** | **NO.** This is the strongest control in either lane: it proves the exclusion is load-bearing, not merely present. ER4H proves the *file* is absent from every layer, which is a different and weaker claim. **Recommended for adoption.** |
+| **No migration was applied during the image build**, with a control proving the detector can see an applied migration | **NO.** Nothing in `release-gate.yml` or `release-preflight.sh` checks this. |
+| **No `SecretsUsedInArgOrEnv` build warning** | **NO.** |
+| **No credential-shaped material in image, bytecode or bundles**, with a planted control | **PARTIAL.** ER4H scans layer *filenames* and the runtime *environment*; it does not scan file *content* or compiled bytecode. |
+| Line endings pinned, asserted via `git check-attr` with a negative control on a nonexistent path | **PARTIAL.** ER4H sweeps for CR bytes across 482 files but does not assert the `.gitattributes` rule is in effect. |
+| Database major version asserted before the suite runs | **NO.** |
+| Build does not read an env file | **YES** — `release-preflight.sh` source mode, with a positive control. |
+| `/app/.test.env` absent from the built image | **YES, and stronger** — ER4H also scans every layer tar (95,738 entries) with a positive control. |
+
+### Recommended disposition
+
+**Close PR #70 as "adopted selectively", not as rejected**, crediting the lane with
+finding the defect — and open a follow-on item for the four uncovered controls above,
+with the planted-secret/unsafe-control pair first. Its diagnosis was right; only its
+justification over-reached, in claiming every value in `.test.env` is a public upstream
+placeholder. That is not supported for the high-entropy keys: `STRIPE_TEST_SECRET_KEY`
+carried a genuine `sk_test_` provider format at 107 characters and 5.53 bits/char. Its
+*conclusion* — get the file out of the image — was nonetheless correct.
