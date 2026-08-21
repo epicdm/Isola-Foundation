@@ -27,8 +27,8 @@ any real customer contact, and the retirement in step 18.
 
 | Thing | Value |
 |---|---|
-| Portal release commit | `23c669f` — branch `foundation/portal-secret-files`, parent `cfcbe4f` |
-| Portal image to build | `isola-portal-api:23c669f` |
+| Portal release commit | `5c5bed3` — branch `foundation/portal-secret-files`, parent `23c669f` |
+| Portal image (BUILT, verified) | `isola-portal-api:5c5bed3`, id `fb60ec4d76c8` |
 | Gateway release commit | `b05abf1` — branch `feat/credential-rotation-grace-2026-08-20` |
 | Gateway image (built, verified) | `isola-gateway:admingrace-b05abf1`, id `e1ea6bc0d41d` |
 | Live service being replaced | `isola_isola-portal-api` |
@@ -100,11 +100,19 @@ IS the EasyPanel recovery record referenced in step 18.
 ```bash
 git -C <isola-portal> rev-parse HEAD          # expect 23c669f...
 git -C <isola-portal> status --porcelain      # expect EMPTY
-git -C <isola-portal> archive --format=tar HEAD > /tmp/rel.tar   # WHOLE REPO, not a subtree
+git -C <isola-portal> -c core.autocrlf=false archive --format=tar HEAD > /tmp/rel.tar
 sha256sum /tmp/rel.tar
 ```
 
-Record the sha. **The context is the monorepo root, not `packages/backend`.** An
+Record the sha. Two things about that command are load-bearing.
+
+**`-c core.autocrlf=false` IS NOT OPTIONAL.** `git archive` HONOURS `core.autocrlf`,
+so on a Windows checkout it ships CRLF even though the committed blobs are LF.
+Measured 2026-08-21: the committed `packages/backend/.test.env` had 0 CR bytes, the
+working tree had 42, and plain `git archive` produced 42. That single difference cost
+two packets — see step 8.
+
+**The context is the monorepo root, not `packages/backend`.** An
 earlier version of this step archived `packages/backend` alone; that produced a
 context in which the production Dockerfile cannot even resolve its `COPY` paths.
 See step 8 for why.
@@ -227,7 +235,10 @@ sudo mkdir -p $D && sudo tar -xf /tmp/rel.tar -C $D && sudo rm -f /tmp/rel.tar
 sha256sum /tmp/rel.tar                                       # MUST equal step 2
 printf 'a\r\nb\r\n' > /tmp/ctl
 tr -cd '\r' < /tmp/ctl | wc -c                                # control: MUST print 2
-tr -cd '\r' < $D/packages/backend/scripts/runtime/run_migrations.sh | wc -c   # MUST print 0
+# AUDIT EVERY CONSUMED TEXT FILE, NOT JUST THE SHELL SCRIPTS:
+find $D/packages/backend -type f \( -name '*.sh' -o -name '*.py' -o -name '.test.env' \) \
+  -exec sh -c 'n=$(tr -cd "\r" < "$1" | wc -c); [ "$n" != 0 ] && echo "CR=$n $1"' _ {} \;
+# MUST print nothing. Checking only *.sh is what let a CRLF .test.env through.
 rm -f /tmp/ctl
 ```
 
@@ -264,30 +275,36 @@ despite "render", this is what produces the deployed EasyPanel image.
 **Record the image id in the Port evidence entity.** There is no registry on this
 host, so the tag is the only provenance and a tag can be moved.
 
-**KNOWN BLOCKER AS OF 2026-08-20 — THIS STEP DOES NOT YET SUCCEED.**
-With the correct Dockerfile and context, 38 stages complete (including the pnpm
-install and the webapp-emails build) and the build then fails in `build_static.sh`:
+**RESOLVED 2026-08-21. This step now succeeds — `BUILD_EXIT=0`, image
+`isola-portal-api:5c5bed3` id `fb60ec4d76c8`.**
 
-> `AttributeError: module 'common.tasks' has no attribute 'LambdaTask'.`
+It failed for two packets, and neither cause was a code defect in the migration delta.
 
-Root cause, located 2026-08-20: `packages/backend/common/tasks.py:42` evaluates
-`settings.WORKERS_EVENT_BUS_NAME` as a DEFAULT ARGUMENT, so it runs at
-class-definition time. Importing the module therefore depends on Django settings
-resolving at import. When that fails during `django.setup()`'s admin autodiscover the
-module is left partially initialised, `LambdaTask` is never bound, and the caller's
-`getattr` reports it missing while Python suggests the identical name.
+1. WRONG CONTEXT AND DOCKERFILE — corrected above.
+2. A CRLF `.test.env`, shipped by `git archive` honouring `core.autocrlf`.
+   `build_static.sh` sources it with `export $(egrep -v '^#' ./.test.env | xargs)`, so
+   EVERY value gained a trailing carriage return. `LAMBDA_TASKS_BASE_HANDLER` became
+   `common.tasks.LambdaTask\r`, and `apps/users/tasks.py` called
+   `getattr(module, "LambdaTask\r")` — which fails even though the module genuinely
+   has `LambdaTask`. That is why Python suggested a name that looked identical: the
+   difference is invisible.
 
-PROVEN NOT TO BE A REGRESSION FROM THIS RELEASE: the parent commit fails identically,
-and **zero backend files differ between the deployed commit `7f58a926` and the branch
-base `cfcbe4f`** — the backend tree building here is the one already in production.
-Refuted along the way: build context (fixed, still fails), `TASK_BACKEND=celery` (no
-effect), and a homoglyph in the handler path (bytes are clean ASCII).
+   DIAGNOSTIC TELL, worth remembering: an `AttributeError` whose "did you mean"
+   suggestion equals the missing name means a non-printing character, not a naming
+   mistake. Check `repr()` before theorising about imports. Three structural
+   hypotheses — circular import, module shadowing, settings lifecycle — were each
+   disproved by measurement before this surfaced.
 
-EasyPanel evidently builds this successfully, so the remaining difference is in ITS
-build invocation — most likely the environment it injects at build time. Resolving
-that, or fixing the import-time settings access, is a prerequisite for this step and
-is NOT part of Packet 5M-E.
+SINGLE-VARIABLE CONTROL, recorded so the fix is attributable: the same commit in the
+same image, with only `.test.env` line endings differing, gives `collectstatic exit=0`
+(LF) and `exit=1` with the exact error (CRLF).
 
+A separate, genuine latent defect was also repaired in `5c5bed3`: `common/tasks.py`
+evaluated `settings.WORKERS_EVENT_BUS_NAME` in a DEFAULT ARGUMENT, making the module
+importable only when settings resolved at import. It is fixed with a private sentinel
+(not `None`, because the setting is itself `env(default=None)` and an explicit `None`
+must stay distinguishable from omission). That repair was NOT what unblocked the
+build, and the runbook says so rather than letting the two be conflated.
 **Rollback:** nothing to roll back; no production object has changed.
 ---
 
