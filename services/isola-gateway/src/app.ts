@@ -906,7 +906,17 @@ export function createGateway(deps: GatewayDeps): Gateway {
     const match =
       typeof rawHeader === "string" ? /^Bearer[ ]+(.+)$/i.exec(rawHeader.trim()) : null;
     const token = match === null ? null : (match[1] ?? "").trim();
-    if (token === null || token.length === 0 || !constantTimeEquals(token, config.adminToken)) {
+    // ROTATION GRACE. Both configured values are compared, always, with no
+    // early exit, so the number of comparisons does not reveal which matched.
+    // A NEXT value grants exactly what the current one does and nothing more.
+    const matchesCurrent =
+      token !== null && token.length > 0 && constantTimeEquals(token, config.adminToken);
+    const matchesNext =
+      token !== null &&
+      token.length > 0 &&
+      config.adminTokenNext !== null &&
+      constantTimeEquals(token, config.adminTokenNext);
+    if (!matchesCurrent && !matchesNext) {
       logger.warn({
         event: "bindings",
         correlationId,

@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 
 import { createGateway } from "./app.js";
-import { bootWarnings, configuredBindings, loadConfig } from "./config.js";
+import { bootErrors, bootWarnings, configuredBindings, loadConfig } from "./config.js";
 import { createLedger } from "./ledger.js";
 import { createPostgresOwnershipGate, migrateOwnershipStore } from "./ownership-store.js";
 import { createLogger } from "./log.js";
@@ -20,6 +20,22 @@ import { SERVICE_VERSION } from "./version.js";
 
 const config = loadConfig(process.env);
 const logger = createLogger();
+
+// FATAL configuration. Checked before anything else binds a port: a service that
+// starts with a half-configured credential overlap looks healthy right up until
+// the old credential is withdrawn.
+const fatal = bootErrors(config);
+if (fatal.length > 0) {
+  for (const detail of fatal) {
+    logger.error({ event: "boot", outcome: "invalid_config", detail });
+  }
+  logger.error({
+    event: "boot",
+    outcome: "boot_refused",
+    detail: "fatal configuration errors; refusing to start",
+  });
+  process.exit(1);
+}
 
 // Binding validation is a BOOT GATE. A non-PUBLIC exposure, a duplicate
 // (account, inbox) pair or a missing secret must never reach a running process.
