@@ -86,38 +86,63 @@ export function resolveHeaderValue(
     );
   }
 
-  // OWN DATA PROPERTIES ONLY. An inherited property must never satisfy a
-  // reference: with a polluted `Object.prototype`, or an `env` built by
-  // `Object.create({RUNTIME_SECRET: ...})`, a lookup would otherwise succeed
-  // for a key the MEDIATED environment does not contain — quietly putting an
-  // attacker-chosen value on the wire while every "is it present" check said
-  // yes. Found by adversarial review, 2026-08-24.
-  if (!Object.prototype.hasOwnProperty.call(env, refName)) {
-    throw new Error(
-      `HTTP adapter header "${headerName}" references env "${refName}", which is not present ` +
-        `in the resolved mediated environment`,
-    );
-  }
-
-  // A getter on `env` can throw, and its message could carry the very value
-  // this function exists to keep out of error text. Read defensively and
-  // replace any thrown message with our own. Same review.
-  let value: unknown;
+  // OWN *DATA* PROPERTIES ONLY — not merely own properties.
+  //
+  // `hasOwnProperty` alone is not enough: it is satisfied by an own ACCESSOR,
+  // and a getter can return anything at all, including `process.env`. That
+  // would defeat the single most important property of this function while
+  // every ownership check reported success. So the descriptor is inspected and
+  // a `value` is required; a getter is refused outright rather than invoked.
+  //
+  // Inheritance is refused for the same reason: with a polluted
+  // `Object.prototype`, or an env built by `Object.create({RUNTIME_SECRET:…})`,
+  // a lookup would succeed for a key the MEDIATED environment does not contain
+  // — quietly putting an attacker-chosen value on the wire.
+  //
+  // Both found by adversarial review, 2026-08-24.
+  let descriptor: PropertyDescriptor | undefined;
   try {
-    value = env[refName];
+    descriptor = Object.getOwnPropertyDescriptor(env, refName);
   } catch {
+    // A Proxy trap can throw. Its message is not ours to trust or repeat.
     throw new Error(
       `HTTP adapter header "${headerName}" could not read env "${refName}" from the resolved ` +
         `mediated environment`,
     );
   }
 
+  // `"value" in descriptor` is the data-property test. An accessor descriptor
+  // has get/set and no `value`, and is refused without ever being called.
+  if (descriptor === undefined || !("value" in descriptor)) {
+    throw new Error(
+      `HTTP adapter header "${headerName}" references env "${refName}", which is not present ` +
+        `as a plain value in the resolved mediated environment`,
+    );
+  }
+
+  const value: unknown = descriptor.value;
+
   // FAIL CLOSED. A missing mediated secret must never degrade to an
   // unauthenticated request that then fails confusingly upstream.
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(
       `HTTP adapter header "${headerName}" references env "${refName}", which is not present ` +
-        `in the resolved mediated environment`,
+        `as a plain value in the resolved mediated environment`,
+    );
+  }
+
+  // HEADER INJECTION, AND THE LEAK IT CAUSES.
+  //
+  // A resolved value containing CR, LF or NUL is not merely malformed: passing
+  // it to `fetch` makes Node throw `Headers.append: "<THE WHOLE VALUE>" is an
+  // invalid header value` — putting the secret straight into an error message
+  // and from there into logs and run records. Validate here and throw our OWN
+  // error, which names the header and the env key and never the value.
+  // Adversarial review, 2026-08-24.
+  if (/[\r\n\0]/.test(value)) {
+    throw new Error(
+      `HTTP adapter header "${headerName}" resolved from env "${refName}" contains a control ` +
+        `character (CR, LF or NUL) and was refused`,
     );
   }
   return value;
@@ -135,11 +160,17 @@ export function resolveHeaderValue(
 export function resolveHeaders(
   rawHeaders: Record<string, unknown>,
   env: Record<string, unknown>,
-): Record<string, string> {
-  const out = Object.create(null) as Record<string, string>;
-  // Own enumerable entries only, for the same reason as the env lookup above.
+): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  // Own enumerable keys only, for the same reason as the env lookup above.
   for (const name of Object.keys(rawHeaders)) {
-    out[name] = resolveHeaderValue(name, rawHeaders[name], env);
+    // A header NAME is caller-supplied too, and an invalid one produces the
+    // same value-bearing throw from `fetch` that the value check above exists
+    // to prevent. RFC 7230 token characters only.
+    if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name)) {
+      throw new Error(`HTTP adapter header name ${JSON.stringify(name)} is not a valid HTTP token`);
+    }
+    out.push([name, resolveHeaderValue(name, rawHeaders[name], env)]);
   }
   return out;
 }
@@ -166,10 +197,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   try {
     const res = await fetch(url, {
       method,
-      headers: {
-        "content-type": "application/json",
-        ...headers,
-      },
+      // ENTRIES, NOT AN OBJECT LITERAL. Spreading into `{...}` reintroduces
+      // object-key semantics: a header legitimately named `__proto__` is lost
+      // on the way to `fetch` even though `resolveHeaders` preserved it. An
+      // array of pairs has no such semantics and every name survives verbatim.
+      //
+      // The earlier fix stopped at `resolveHeaders` and a test asserted only
+      // that function's output, so the bug remained on the real request path
+      // while the test passed — test the PATH, not the pieces (CLAUDE.md §2.20).
+      headers: [["content-type", "application/json"], ...headers],
       body: JSON.stringify(body),
       ...(timer ? { signal: controller.signal } : {}),
     });
