@@ -180,6 +180,7 @@ export async function execute(ctx) {
   // Resolved BEFORE the request is constructed: a bad reference must not reach
   // the network at all.
   const headers = resolveHeaders(rawHeaders, mediatedEnv);
+  const hasContentType = headers.some(([name]) => name.toLowerCase() === "content-type");
   const payloadTemplate = parseObject(config.payloadTemplate);
   const body = { ...payloadTemplate, agentId: agent.id, runId, context };
 
@@ -197,7 +198,16 @@ export async function execute(ctx) {
       // The earlier fix stopped at `resolveHeaders` and a test asserted only
       // that function's output, so the bug remained on the real request path
       // while the test passed — test the PATH, not the pieces (CLAUDE.md §2.20).
-      headers: [["content-type", "application/json"], ...headers],
+      //
+      // The default content-type is only prepended when the caller did not set
+      // one. With pairs, an unconditional prepend would no longer be OVERRIDDEN
+      // by a caller's value — `fetch` COMBINES duplicates, yielding
+      // "application/json, text/plain". That is a behaviour change for any
+      // existing agent that sets its own, so it is removed rather than
+      // documented. Comparison is case-insensitive because header names are.
+      headers: hasContentType
+        ? headers
+        : [["content-type", "application/json"], ...headers],
       body: JSON.stringify(body),
       ...(timer ? { signal: controller.signal } : {}),
     });
