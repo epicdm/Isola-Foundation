@@ -44,6 +44,7 @@ import { idempotencyKey } from "./idempotency.js";
 import { handleManualHandbackWebhook } from "./handback.js";
 import type { Ledger, ReserveResult, SqlClient, SqlExecutor } from "./ledger.js";
 import type { ConversationRef, OwnershipGate } from "./ownership.js";
+import { recordHumanReply } from "./ownership-store.js";
 import { constantTimeEquals } from "./signature.js";
 import { checkSender } from "./allowlist.js";
 import { classifyTurn, recordTurn } from "./turns.js";
@@ -70,6 +71,7 @@ import {
 import { SERVICE_VERSION } from "./version.js";
 import {
   evaluateSuppression,
+  isHumanAgentReply,
   isManualHandbackSignal,
   parseRouting,
   parseWebhookPayload,
@@ -104,6 +106,11 @@ export type Outcome =
    * `handleManualHandbackWebhook`.
    */
   | "manual_handback_signal"
+  /**
+   * A human agent wrote in the conversation. The ownership ledger was advanced
+   * to HUMAN_OWNED; nothing was sent and no model was invoked.
+   */
+  | "human_reply"
   /**
    * The event carried no routable account/inbox. Chatwoot sends these
    * routinely and they need no action. 422, not 401: answering 401 made a
@@ -265,6 +272,18 @@ export type DeliveryDecision =
       kind: "manual_handback_signal";
       binding: Binding;
       conversationId: number;
+    }
+  /**
+   * A human agent replied or noted in the conversation. Recorded as ownership,
+   * never answered. `messageId` is Chatwoot's own message id and becomes the
+   * operation id, so one physical human message produces exactly one
+   * transition however many times Chatwoot redelivers it.
+   */
+  | {
+      kind: "human_reply";
+      binding: Binding;
+      conversationId: number;
+      messageId: number;
     };
 
 export interface DecideArgs {
@@ -410,6 +429,28 @@ export function decideDelivery(args: DecideArgs): DecideResult {
       kind: "manual_handback_signal",
       binding: resolution.binding,
       conversationId: payload.conversationDisplayId,
+    });
+  }
+
+  // A HUMAN AGENT WROTE IN THE CONVERSATION. Same reasoning as the branch above
+  // and the same reason it has to sit HERE: `evaluateSuppression` classifies an
+  // outgoing message as `message_type_not_incoming` and drops it, so the one
+  // event that proves a person took the conversation was never recorded and the
+  // ledger could not advance past HUMAN_REQUESTED
+  // (`def-gateway-ownership-ledger-human-side-transitions-unwired-2026-08-24`).
+  //
+  // This is NOT a reply path — nothing is sent, no model is invoked. It records
+  // ownership and stops.
+  if (
+    isHumanAgentReply(payload) &&
+    payload.conversationDisplayId !== null &&
+    payload.messageId !== null
+  ) {
+    return at({
+      kind: "human_reply",
+      binding: resolution.binding,
+      conversationId: payload.conversationDisplayId,
+      messageId: payload.messageId,
     });
   }
 
@@ -785,6 +826,83 @@ export function createGateway(deps: GatewayDeps): Gateway {
           { suppressionReason: decision.reason },
         );
         return;
+
+      case "human_reply": {
+        // ACK first. Recording ownership is not worth risking Chatwoot's 5s
+        // deadline, and a human reply needs no response from us at all.
+        finish(200, "human_reply", {
+          accountId: decision.binding.chatwootAccountId,
+          inboxId: decision.binding.chatwootInboxId,
+          conversationId: decision.conversationId,
+          tenantId: decision.binding.tenantId,
+        });
+
+        // FAIL CLOSED ON MISSING WIRING, LOUDLY — same reasoning as the
+        // handback branch below. Silence here would recreate the very defect
+        // being fixed: a transition that exists, is correct, and is never
+        // called, with nothing in the logs to say so.
+        if (deps.ownershipExec === undefined) {
+          logger.error({
+            event: "ownership",
+            correlationId,
+            alert: true,
+            alertCode: "ownership_exec_not_configured",
+            accountId: decision.binding.chatwootAccountId,
+            conversationId: decision.conversationId,
+            tenantId: decision.binding.tenantId,
+            outcome: "human_reply_not_recorded",
+            detail:
+              "a signed human-agent reply arrived but GatewayDeps.ownershipExec is not " +
+              "configured; the takeover was acknowledged but the ledger was not advanced",
+          });
+          return;
+        }
+
+        const conversation: ConversationRef = {
+          tenantId: decision.binding.tenantId,
+          chatwootAccountId: decision.binding.chatwootAccountId,
+          chatwootConversationId: decision.conversationId,
+          chatwootInboxId: decision.binding.chatwootInboxId,
+        };
+
+        track(
+          recordHumanReply(deps.ownershipExec, {
+            conversation,
+            // Chatwoot's own message id: one physical human message, one
+            // transition, however many times Chatwoot redelivers it.
+            operationId: `chatwoot:message:${decision.messageId}`,
+            reason: "human_agent_replied_in_chatwoot",
+            actorRef: "chatwoot:dashboard_user",
+          })
+            .then((outcome) => {
+              logger.info({
+                event: "ownership",
+                correlationId,
+                accountId: decision.binding.chatwootAccountId,
+                conversationId: decision.conversationId,
+                tenantId: decision.binding.tenantId,
+                outcome: "human_reply_recorded",
+                transition: outcome.status,
+                ownershipState: outcome.state ?? null,
+                ownershipEpisode: outcome.episode ?? null,
+              });
+            })
+            .catch((err: unknown) => {
+              logger.error({
+                event: "ownership",
+                correlationId,
+                alert: true,
+                alertCode: "human_reply_record_failed",
+                accountId: decision.binding.chatwootAccountId,
+                conversationId: decision.conversationId,
+                tenantId: decision.binding.tenantId,
+                outcome: "human_reply_not_recorded",
+                detail: err instanceof Error ? err.message : "unknown error",
+              });
+            }),
+        );
+        return;
+      }
 
       case "manual_handback_signal": {
         // ACK now, exactly like an accepted reply delivery — nothing below

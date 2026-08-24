@@ -490,6 +490,44 @@ export function isManualHandbackSignal(payload: WebhookPayload): boolean {
   return payload.event === STATUS_CHANGED_EVENT && payload.conversationStatus === "pending";
 }
 
+/**
+ * True when a HUMAN AGENT has written into the conversation from the Chatwoot
+ * dashboard — the takeover signal the ownership ledger never received.
+ *
+ * WHY THIS EXISTS. `confirmHumanOwnership` and `recordHumanReply` were written,
+ * reviewed and correct, and had ZERO call sites in the deployed build
+ * (`def-gateway-ownership-ledger-human-side-transitions-unwired-2026-08-24`).
+ * Escalation could move a conversation to HUMAN_REQUESTED and nothing could
+ * ever advance it to HUMAN_OWNED, because the one event that proves a person
+ * actually took the conversation — that person writing in it — was being
+ * dropped by `evaluateSuppression` as `message_type_not_incoming` and never
+ * looked at again. Same failure shape as the handback edge: the transition
+ * existed, the caller did not.
+ *
+ * WHO COUNTS. Chatwoot's `sender.type` is `contact` for the customer, `user`
+ * for a human dashboard agent, and `agent_bot` for us. Only `user` is a person
+ * taking over. `agent_bot` is this gateway's own reply coming back around and
+ * must never be read as a human takeover — that would silence the AI in
+ * response to its own message.
+ *
+ * PRIVATE NOTES COUNT, DELIBERATELY. A private note is not customer-visible, so
+ * it is tempting to ignore it. But a human writing an internal note is a human
+ * working the conversation, and the cost of the two mistakes is asymmetric:
+ * treating it as takeover silences the AI while a person is present (safe, and
+ * reversible by explicit handback), whereas ignoring it lets the AI talk over
+ * somebody who is mid-investigation (the exact failure this ledger exists to
+ * prevent). Fail closed — CLAUDE.md §2.12.
+ */
+export function isHumanAgentReply(payload: WebhookPayload): boolean {
+  return (
+    payload.event === REPLYABLE_EVENT &&
+    payload.messageType === "outgoing" &&
+    payload.senderType === "user" &&
+    payload.conversationDisplayId !== null &&
+    payload.messageId !== null
+  );
+}
+
 /** Text the model could actually work with. Whitespace is not text. */
 export function hasUsableText(payload: WebhookPayload): boolean {
   return payload.content !== null && payload.content.trim().length > 0;
