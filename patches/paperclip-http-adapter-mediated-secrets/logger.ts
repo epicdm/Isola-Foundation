@@ -74,8 +74,8 @@ export const httpLogger = pinoHttp({
           // See redactSecretValuesForLogs — added after a canary proved a
           // failed POST /companies/{id}/secrets logged the value in clear.
           reqBody: redactSecretValuesForLogs(ctx.reqBody),
-          reqParams: ctx.reqParams,
-          reqQuery: ctx.reqQuery,
+          reqParams: redactSecretValuesForLogs(ctx.reqParams),
+          reqQuery: redactSecretValuesForLogs(ctx.reqQuery),
         };
       }
       const props: Record<string, unknown> = {};
@@ -84,10 +84,10 @@ export const httpLogger = pinoHttp({
         props.reqBody = redactSecretValuesForLogs(body);
       }
       if (params && typeof params === "object" && Object.keys(params).length > 0) {
-        props.reqParams = params;
+        props.reqParams = redactSecretValuesForLogs(params);
       }
       if (query && typeof query === "object" && Object.keys(query).length > 0) {
-        props.reqQuery = query;
+        props.reqQuery = redactSecretValuesForLogs(query);
       }
       if ((req as any).route?.path) {
         props.routePath = (req as any).route.path;
