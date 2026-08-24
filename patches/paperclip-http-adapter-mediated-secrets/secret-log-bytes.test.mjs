@@ -76,11 +76,30 @@ function makeLogger() {
       },
     },
     customLogLevel(_req, res, err) {
+      // The `err` ARGUMENT cannot be replaced, only emptied — mirrors production.
+      if (err && isSecretBearingPath(_req.originalUrl ?? _req.url)) {
+        try {
+          err.message = SAFE_SECRET_ROUTE_MESSAGE;
+          err.stack = `${err.name ?? "Error"}: ${SAFE_SECRET_ROUTE_MESSAGE}`;
+          for (const k of Object.keys(err)) { if (k !== "name") delete err[k]; }
+          // `cause` is NON-ENUMERABLE — mirrors production.
+          try { delete err.cause; } catch {}
+          if ("cause" in err) {
+            try { Object.defineProperty(err, "cause", { value: undefined, enumerable: false, configurable: true }); } catch {}
+          }
+        } catch {}
+      }
       if (err || res.statusCode >= 500) return "error";
       if (res.statusCode >= 400) return "warn";
       return "info";
     },
-    customSuccessMessage(req, res) { return `${req.method} ${req.url} ${res.statusCode}`; },
+    customSuccessMessage(req, res) {
+      // req.url carries the QUERY STRING — mirrors production.
+      if (isSecretBearingPath(req.originalUrl ?? req.url)) {
+        return `${req.method} ${req.route?.path ?? "[secrets route]"} ${res.statusCode}`;
+      }
+      return `${req.method} ${req.url} ${res.statusCode}`;
+    },
     customErrorMessage(req, res, err) {
       if (isSecretBearingPath(req.originalUrl ?? req.url)) {
         return `${req.method} ${req.route?.path ?? "[secrets route]"} ${res.statusCode} — ${SAFE_SECRET_ROUTE_MESSAGE}`;
@@ -124,7 +143,7 @@ function makeLogger() {
 }
 
 /** Drive one request through the real middleware and return the emitted bytes. */
-function emit({ url, status, attachErrorContext, attachErr, hostile }) {
+function emit({ url, status, attachErrorContext, attachErr, hostile, errArgument }) {
   const { httpLogger, lines } = makeLogger();
   const req = {
     method: "POST",
@@ -173,8 +192,12 @@ function emit({ url, status, attachErrorContext, attachErr, hostile }) {
     };
   }
 
-  httpLogger(req, res);
-  if (listeners.finish) listeners.finish();
+  // pino-http's third parameter is `next`, not an error. The `err` ARGUMENT
+  // reaches it through the response's own 'error' event, which is exactly the
+  // path customProps cannot influence — so it must be driven that way here.
+  httpLogger(req, res, () => {});
+  if (errArgument && listeners.error) listeners.error(errArgument);
+  else if (listeners.finish) listeners.finish();
   else if (listeners.close) listeners.close();
   return lines.join("");
 }
@@ -217,6 +240,45 @@ console.log("== secrets route, 201 success ==");
   ok("201: a log line WAS emitted", bytes.length > 0);
   const leaked = ALL.filter((c) => bytes.includes(c));
   ok("201: no canary in the emitted bytes" + (leaked.length ? " -> LEAKED " + leaked.join(", ") : ""), leaked.length === 0);
+}
+
+console.log("== REVIEW dc614d2 (1): the QUERY STRING must not reach top-level msg ==");
+{
+  const url = SECRETS_URL + "?value=" + C.body + "&token=" + C.query;
+  for (const st of [201, 400, 409]) {
+    const bytes = emit({ url, status: st });
+    ok(`msg leak, status ${st}: a log line WAS emitted`, bytes.length > 0);
+    const leaked = ALL.filter((c) => bytes.includes(c));
+    ok(`msg leak, status ${st}: query string absent from the emitted bytes` +
+       (leaked.length ? " -> LEAKED " + leaked.join(", ") : ""), leaked.length === 0);
+  }
+}
+
+console.log("== REVIEW dc614d2 (2,3): case / percent-encoded / double-slash variants ==");
+for (const [label, url] of [
+  ["UPPERCASE", "/api/companies/acme/SECRETS"],
+  ["percent-encoded", "/api/companies/acme/%73ecrets"],
+  ["double-encoded", "/api/companies/acme/%2573ecrets"],
+  ["repeated slashes", "//api//companies//acme//secrets"],
+]) {
+  const bytes = emit({ url, status: 400 });
+  ok(`${label}: a log line WAS emitted`, bytes.length > 0);
+  const leaked = ALL.filter((c) => bytes.includes(c));
+  ok(`${label}: treated as a secrets route, no canary` +
+     (leaked.length ? " -> LEAKED " + leaked.join(", ") : ""), leaked.length === 0);
+}
+
+console.log("== REVIEW dc614d2 (4): the err ARGUMENT (res.on('error')) path ==");
+{
+  const cause = new Error("cause " + C.causeMsg);
+  const argErr = new Error("stream failure " + C.errMsg, { cause });
+  argErr.stack = "Error: stream failure " + C.errMsg + " at " + C.errStack;
+  argErr.secretProp = C.errProp;
+  const bytes = emit({ url: SECRETS_URL, status: 500, errArgument: argErr });
+  ok("err-argument: a log line WAS emitted", bytes.length > 0);
+  const leaked = ALL.filter((c) => bytes.includes(c));
+  ok("err-argument: no canary in the emitted bytes" +
+     (leaked.length ? " -> LEAKED " + leaked.join(", ") : ""), leaked.length === 0);
 }
 
 console.log("== UNRELATED route still logs its detail (no global suppression) ==");

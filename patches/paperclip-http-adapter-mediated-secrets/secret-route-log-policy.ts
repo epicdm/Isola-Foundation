@@ -38,22 +38,53 @@
  * which happen before routing completes.
  */
 const SECRET_BEARING_PATHS: RegExp[] = [
-  /^\/api\/companies\/[^/]+\/secrets(?:\/|$|\?)/,
-  /^\/api\/secrets(?:\/|$|\?)/,
-  /^\/api\/companies\/[^/]+\/secret-provider-configs(?:\/|$|\?)/,
-  /^\/api\/secret-provider-configs(?:\/|$|\?)/,
-  /^\/api\/companies\/[^/]+\/secrets\/remote-import(?:\/|$|\?)/,
-  /^\/api\/agents\/[^/]+\/keys(?:\/|$|\?)/,
+  /^\/api\/companies\/[^/]+\/secrets(?:\/|$)/i,
+  /^\/api\/secrets(?:\/|$)/i,
+  /^\/api\/companies\/[^/]+\/secret-provider-configs(?:\/|$)/i,
+  /^\/api\/secret-provider-configs(?:\/|$)/i,
+  /^\/api\/agents\/[^/]+\/keys(?:\/|$)/i,
 ];
 
 /** The message emitted in place of any real error text on these routes. */
 export const SAFE_SECRET_ROUTE_MESSAGE =
   "secrets-route request failed; detail withheld because this route may carry a credential";
 
+/**
+ * Normalise a url path before matching.
+ *
+ * Three ways a secrets request could MISS this policy and fall through to the
+ * ordinary logging path, all found by review:
+ *   - CASE. Express routing is case-insensitive by default, so
+ *     `/api/companies/x/SECRETS` reaches the secrets handler while a
+ *     case-sensitive matcher says it is an ordinary route.
+ *   - PERCENT-ENCODING. `/api/companies/x/%73ecrets` is the same resource to
+ *     the router and a different string to a naive matcher.
+ *   - REPEATED SLASHES. `//api//companies//x//secrets` likewise.
+ *
+ * A miss here is not a cosmetic difference: it means the request body reaches
+ * the ordinary `customProps` branch and is logged in full. So normalisation is
+ * deliberately generous, and matching is the safe direction to over-apply.
+ */
+function normalisePathForMatch(url: string): string {
+  const raw = url.split("?")[0] ?? url;
+  let decoded = raw;
+  // Decode repeatedly: a doubly-encoded path (%2573) decodes to %73 and then
+  // to `s`. Bounded, because decoding is attacker-influenced.
+  for (let i = 0; i < 3; i += 1) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    } catch {
+      break; // malformed escape: match on what we have rather than throwing
+    }
+  }
+  return decoded.replace(/\/{2,}/g, "/").toLowerCase();
+}
+
 export function isSecretBearingPath(url: string | undefined): boolean {
   if (typeof url !== "string" || url.length === 0) return false;
-  const path = url.split("?")[0] ?? url;
-  return SECRET_BEARING_PATHS.some((re) => re.test(path));
+  return SECRET_BEARING_PATHS.some((re) => re.test(normalisePathForMatch(url)));
 }
 
 /** A stable, non-revealing classification. Derived from the error TYPE only. */

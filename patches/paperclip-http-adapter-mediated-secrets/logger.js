@@ -75,6 +75,27 @@ export const httpLogger = pinoHttp({
         },
     },
     customLogLevel(_req, res, err) {
+        if (err && isSecretBearingPath(_req.originalUrl ?? _req.url)) {
+            try {
+                err.message = SAFE_SECRET_ROUTE_MESSAGE;
+                err.stack = `${err.name ?? "Error"}: ${SAFE_SECRET_ROUTE_MESSAGE}`;
+                for (const k of Object.keys(err)) {
+                    if (k !== "name")
+                        delete err[k];
+                }
+                try {
+                    delete err.cause;
+                }
+                catch { }
+                if ("cause" in err) {
+                    try {
+                        Object.defineProperty(err, "cause", { value: undefined, enumerable: false, configurable: true });
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
         if (shouldSilenceHttpSuccessLog(_req.method, _req.url, res.statusCode)) {
             return "silent";
         }
@@ -85,6 +106,9 @@ export const httpLogger = pinoHttp({
         return "info";
     },
     customSuccessMessage(req, res) {
+        if (isSecretBearingPath(req.originalUrl ?? req.url)) {
+            return `${req.method} ${req.route?.path ?? "[secrets route]"} ${res.statusCode}`;
+        }
         return `${req.method} ${req.url} ${res.statusCode}`;
     },
     customErrorMessage(req, res, err) {

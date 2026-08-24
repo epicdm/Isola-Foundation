@@ -86,6 +86,46 @@ export const httpLogger = pinoHttp({
     },
   },
   customLogLevel(_req, res, err) {
+    // THE `err` ARGUMENT CANNOT BE REPLACED, ONLY EMPTIED.
+    // pino-http selects `err || res.err` AFTER customProps runs, so swapping
+    // `res.err` there does not cover an error delivered via `res.on("error")`.
+    // This hook does receive that object and runs before serialisation, so on
+    // a secrets route its message, stack and own properties are overwritten in
+    // place. Mutating it is safe: it is about to be logged and discarded, and
+    // it is neither the request nor the response.
+    if (err && isSecretBearingPath((_req as any).originalUrl ?? _req.url)) {
+      try {
+        (err as any).message = SAFE_SECRET_ROUTE_MESSAGE;
+        (err as any).stack = `${(err as any).name ?? "Error"}: ${SAFE_SECRET_ROUTE_MESSAGE}`;
+        for (const k of Object.keys(err as any)) {
+          if (k !== "name") delete (err as any)[k];
+        }
+        // `cause` from `new Error(msg, { cause })` is NON-ENUMERABLE, so the
+        // loop above never sees it — while pino's err serialiser FOLLOWS it.
+        // A canary planted in `cause.message` reached the emitted bytes until
+        // this was added. Clear it explicitly, with defineProperty as the
+        // fallback when the property is not configurable.
+        try {
+          delete (err as any).cause;
+        } catch {
+          /* fall through to defineProperty below */
+        }
+        if ("cause" in (err as any)) {
+          try {
+            Object.defineProperty(err, "cause", {
+              value: undefined,
+              enumerable: false,
+              configurable: true,
+            });
+          } catch {
+            /* the res.err swap in customProps still applies */
+          }
+        }
+      } catch {
+        // A frozen error cannot be emptied; the res.err swap in customProps and
+        // the route-aware req serializer still apply.
+      }
+    }
     if (shouldSilenceHttpSuccessLog(_req.method, _req.url, res.statusCode)) {
       return "silent";
     }
@@ -94,6 +134,14 @@ export const httpLogger = pinoHttp({
     return "info";
   },
   customSuccessMessage(req, res) {
+    // `req.url` CARRIES THE QUERY STRING. On a secrets route that alone puts
+    // `?value=<secret>` into the top-level `msg`, which no redact path
+    // protects. pino-http uses this success path for any response WITHOUT an
+    // error object — including a 400 or 409 — so this is not only the 2xx
+    // case. Found by review of dc614d2.
+    if (isSecretBearingPath((req as any).originalUrl ?? req.url)) {
+      return `${req.method} ${(req as any).route?.path ?? "[secrets route]"} ${res.statusCode}`;
+    }
     return `${req.method} ${req.url} ${res.statusCode}`;
   },
   customErrorMessage(req, res, err) {
