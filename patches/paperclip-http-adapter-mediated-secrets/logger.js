@@ -5,7 +5,13 @@ import { pinoHttp } from "pino-http";
 import { readConfigFile } from "../config-file.js";
 import { resolveDefaultLogsDir, resolveHomeAwarePath } from "../home-paths.js";
 import { shouldSilenceHttpSuccessLog } from "./http-log-policy.js";
-import { redactSecretValuesForLogs } from "../log-redaction.js";
+import {
+  isSecretBearingPath,
+  safeSecretRouteLogProps,
+  safeSecretRouteError,
+  classifyError,
+  SAFE_SECRET_ROUTE_MESSAGE,
+} from "./secret-route-log-policy.js";
 function resolveServerLogDir() {
     const envOverride = process.env.PAPERCLIP_LOG_DIR?.trim();
     if (envOverride)
@@ -25,7 +31,25 @@ const sharedOpts = {
 };
 export const logger = pino({
     level: "debug",
-    redact: ["req.headers.authorization"],
+    redact: [
+      // Defence in depth ONLY. Native path redaction cannot reach err.message,
+      // err.stack, a cause chain or the top-level msg, so it is not what
+      // protects the secrets routes — see secret-route-log-policy.ts. These
+      // are fixed paths, never built from user input.
+      "req.headers.authorization",
+      "req.headers.cookie",
+      "req.body.value",
+      "req.body.secret",
+      "req.body.password",
+      "req.body.token",
+      "req.body.apiKey",
+      "req.query.token",
+      "req.query.value",
+      "reqBody.value",
+      "reqBody.secret",
+      "reqBody.password",
+      "reqBody.token",
+    ],
 }, pino.transport({
     targets: [
         {
@@ -42,6 +66,14 @@ export const logger = pino({
 }));
 export const httpLogger = pinoHttp({
     logger,
+    serializers: {
+        req(req) {
+            if (isSecretBearingPath(req.originalUrl ?? req.url)) {
+                return { id: req.id, method: req.method, url: req.route?.path ?? "[secrets route]" };
+            }
+            return pinoHttp.stdSerializers.req(req);
+        },
+    },
     customLogLevel(_req, res, err) {
         if (shouldSilenceHttpSuccessLog(_req.method, _req.url, res.statusCode)) {
             return "silent";
@@ -56,31 +88,50 @@ export const httpLogger = pinoHttp({
         return `${req.method} ${req.url} ${res.statusCode}`;
     },
     customErrorMessage(req, res, err) {
+        if (isSecretBearingPath(req.originalUrl ?? req.url)) {
+            return `${req.method} ${req.route?.path ?? "[secrets route]"} ${res.statusCode} — ${SAFE_SECRET_ROUTE_MESSAGE}`;
+        }
         const ctx = res.__errorContext;
         const errMsg = ctx?.error?.message || err?.message || res.err?.message || "unknown error";
         return `${req.method} ${req.url} ${res.statusCode} — ${errMsg}`;
     },
     customProps(req, res) {
+        if (isSecretBearingPath(req.originalUrl ?? req.url)) {
+            if (res.statusCode >= 400 && res.err) {
+                res.err = safeSecretRouteError(res.statusCode, res.err);
+            }
+            if (res.statusCode < 400)
+                return { secretsRoute: true };
+            return safeSecretRouteLogProps({
+                routePath: req.route?.path,
+                method: req.method,
+                companyId: req.params?.companyId,
+                secretId: req.params?.id,
+                statusCode: res.statusCode,
+                requestId: req.id,
+                errorCode: classifyError(res.__errorContext?.error ?? res.err, res.statusCode),
+            });
+        }
         if (res.statusCode >= 400) {
             const ctx = res.__errorContext;
             if (ctx) {
                 return {
                     errorContext: ctx.error,
-                    reqBody: redactSecretValuesForLogs(ctx.reqBody),
-                    reqParams: redactSecretValuesForLogs(ctx.reqParams),
-                    reqQuery: redactSecretValuesForLogs(ctx.reqQuery),
+                    reqBody: ctx.reqBody,
+                    reqParams: ctx.reqParams,
+                    reqQuery: ctx.reqQuery,
                 };
             }
             const props = {};
             const { body, params, query } = req;
             if (body && typeof body === "object" && Object.keys(body).length > 0) {
-                props.reqBody = redactSecretValuesForLogs(body);
+                props.reqBody = body;
             }
             if (params && typeof params === "object" && Object.keys(params).length > 0) {
-                props.reqParams = redactSecretValuesForLogs(params);
+                props.reqParams = params;
             }
             if (query && typeof query === "object" && Object.keys(query).length > 0) {
-                props.reqQuery = redactSecretValuesForLogs(query);
+                props.reqQuery = query;
             }
             if (req.route?.path) {
                 props.routePath = req.route.path;
