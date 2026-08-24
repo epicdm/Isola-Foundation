@@ -112,12 +112,21 @@ export function isSecretBearingPath(url: string | undefined): boolean {
  */
 export function isSecretBearingRequest(req: unknown): boolean {
   if (typeof req !== "object" || req === null) return false;
-  const r = req as { originalUrl?: unknown; url?: unknown; baseUrl?: unknown };
-  const candidates: Array<unknown> = [r.originalUrl, r.url];
-  if (typeof r.baseUrl === "string" && typeof r.url === "string") {
-    candidates.push(r.baseUrl + r.url);
+  // FAIL CLOSED, and never throw. This runs inside the logger, so an exception
+  // here is not a classification error — it is a request with no log line at
+  // all. A getter or Proxy on the request can throw from a plain property
+  // read, so on any failure the request is treated AS IF secrets-bearing:
+  // losing some log detail is the cheap mistake, logging a credential is not.
+  try {
+    const r = req as { originalUrl?: unknown; url?: unknown; baseUrl?: unknown };
+    const candidates: Array<unknown> = [r.originalUrl, r.url];
+    if (typeof r.baseUrl === "string" && typeof r.url === "string") {
+      candidates.push(r.baseUrl + r.url);
+    }
+    return candidates.some((c) => isSecretBearingPath(typeof c === "string" ? c : undefined));
+  } catch {
+    return true;
   }
-  return candidates.some((c) => isSecretBearingPath(typeof c === "string" ? c : undefined));
 }
 
 /** A stable, non-revealing classification. Derived from the error TYPE only. */

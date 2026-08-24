@@ -112,12 +112,17 @@ export function isSecretBearingPath(url) {
  */
 export function isSecretBearingRequest(req) {
   if (typeof req !== "object" || req === null) return false;
-  const r = req;
-  const candidates = [r.originalUrl, r.url];
-  if (typeof r.baseUrl === "string" && typeof r.url === "string") {
-    candidates.push(r.baseUrl + r.url);
+  // FAIL CLOSED, and never throw — this runs inside the logger.
+  try {
+    const r = req;
+    const candidates = [r.originalUrl, r.url];
+    if (typeof r.baseUrl === "string" && typeof r.url === "string") {
+      candidates.push(r.baseUrl + r.url);
+    }
+    return candidates.some((c) => isSecretBearingPath(typeof c === "string" ? c : undefined));
+  } catch {
+    return true;
   }
-  return candidates.some((c) => isSecretBearingPath(typeof c === "string" ? c : undefined));
 }
 
 /** A stable, non-revealing classification. Derived from the error TYPE only. */
