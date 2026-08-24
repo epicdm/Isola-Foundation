@@ -68,19 +68,37 @@ describe("parseWebhookPayload", () => {
 });
 
 describe("parseRouting", () => {
+  // `ambiguous` was added when the parser learned Chatwoot's flat `inbox_id`
+  // shape. It is asserted here rather than loosened away with objectContaining:
+  // for these bodies the correct answer really is "not ambiguous", and saying so
+  // is what stops a future change from quietly reporting every body as
+  // contradictory while these tests still pass.
   it("extracts the account and inbox ids without trusting anything else", () => {
     expect(parseRouting(Buffer.from(JSON.stringify(messageCreatedPayload())))).toEqual({
       accountId: 1,
       inboxId: 7,
+      ambiguous: false,
     });
   });
 
   it("returns nulls for anything it cannot read", () => {
-    expect(parseRouting(Buffer.from("garbage"))).toEqual({ accountId: null, inboxId: null });
-    expect(parseRouting(Buffer.from("{}"))).toEqual({ accountId: null, inboxId: null });
+    expect(parseRouting(Buffer.from("garbage"))).toEqual({
+      accountId: null,
+      inboxId: null,
+      ambiguous: false,
+    });
+    expect(parseRouting(Buffer.from("{}"))).toEqual({
+      accountId: null,
+      inboxId: null,
+      ambiguous: false,
+    });
+    // A malformed account id and a readable inbox id: the unreadable half is
+    // null, the readable half survives, and nothing about that is ambiguous —
+    // ambiguity means two PRESENT values disagreeing, not one absent value.
     expect(parseRouting(Buffer.from('{"account":{"id":"x"},"inbox":{"id":7}}'))).toEqual({
       accountId: null,
       inboxId: 7,
+      ambiguous: false,
     });
   });
 });

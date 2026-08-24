@@ -141,7 +141,19 @@ export type Outcome =
   | "ok";
 
 /** Server-side only. The HTTP response never says which half failed. */
-export type RejectionReason = SignatureFailureReason | "no_binding_secret" | "unparseable_body";
+export type RejectionReason =
+  | SignatureFailureReason
+  | "no_binding_secret"
+  | "unparseable_body"
+  /**
+   * A routing identifier arrived in BOTH the flat and nested forms and the two
+   * disagreed. Distinct from `unparseable_body` on purpose: "no identifier" is
+   * a routine, harmless Chatwoot event, whereas "two identifiers that contradict
+   * each other" is a body nobody should be sending and is worth seeing in a log
+   * as its own thing. Collapsing them would hide the second inside the noise of
+   * the first.
+   */
+  | "ambiguous_identifiers";
 
 export type Handler = (req: IncomingMessage, res: ServerResponse) => void;
 
@@ -309,6 +321,14 @@ export function decideDelivery(args: DecideArgs): DecideResult {
   const routing = parseRouting(args.raw);
   const at = (decision: DeliveryDecision): DecideResult => ({ decision, routing });
 
+  // Ambiguity is checked BEFORE the missing-identifier case. Both forms present
+  // and disagreeing is a different fault from neither being present, and it is
+  // refused before any secret is selected — verifying a signature against one
+  // tenant's key while the body names another is precisely the confusion this
+  // refusal exists to prevent.
+  if (routing.ambiguous) {
+    return at({ kind: "reject", reason: "ambiguous_identifiers" });
+  }
   if (routing.accountId === null || routing.inboxId === null) {
     return at({ kind: "reject", reason: "unparseable_body" });
   }
@@ -718,6 +738,17 @@ export function createGateway(deps: GatewayDeps): Gateway {
         if (decision.reason === "unparseable_body") {
           finish(422, "unroutable_event", { rejectionReason: decision.reason }, {
             error: "event carries no routable account/inbox and was not processed",
+          });
+          return;
+        }
+        // Same 422 family and the same reasoning about leaking nothing: decided
+        // before any secret is consulted, and the caller already knows what it
+        // sent. It keeps its OWN rejectionReason so a contradictory body is
+        // never filed under the routine no-identifier case.
+        if (decision.reason === "ambiguous_identifiers") {
+          finish(422, "unroutable_event", { rejectionReason: decision.reason }, {
+            error:
+              "event carries contradictory account/inbox identifiers and was refused as ambiguous",
           });
           return;
         }

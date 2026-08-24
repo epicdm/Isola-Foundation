@@ -82,6 +82,90 @@ function child(record: Record<string, unknown>, key: string): Record<string, unk
   return isRecord(value) ? value : null;
 }
 
+// ---------------------------------------------------------------------------
+// TWO PAYLOAD SHAPES, ONE PARSER
+// ---------------------------------------------------------------------------
+//
+// Chatwoot does not send one envelope. It sends the webhook_data of whichever
+// MODEL the event is about, and those models nest differently. Read from the
+// running 4.x source rather than inferred:
+//
+//   Message#webhook_data           -> { account: {...}, inbox: {...},
+//                                       conversation: { id, status, meta, ... },
+//                                       id: <MESSAGE pk>, ... }
+//
+//   Conversations::EventDataPresenter#webhook_data
+//     (what `conversation_status_changed` sends, via
+//      `conversation.webhook_data.merge(event:, changed_attributes:)`)
+//                                  -> { account: {...},
+//                                       id: <CONVERSATION display_id>,
+//                                       inbox_id: <FLAT>, status: <FLAT>,
+//                                       meta: { assignee, ... }, ... }
+//
+// The conversation shape has NO `inbox` node and NO `conversation` node. The
+// parser used to read `inbox.id` only, so every conversation event resolved to
+// `inboxId: null`, which `decideDelivery` refuses as `unparseable_body` BEFORE
+// a secret is ever selected. That is the measured 422 `unroutable_event` in
+// `docs/isola/REPRO-EXPLICIT-HANDBACK-UNREACHABLE-2026-08-24.md`, and it is why
+// the explicit-handback signal never arrived.
+//
+// THE TRAP, stated because getting it wrong is worse than not fixing it at all:
+// only compare the two forms where they MEAN THE SAME THING.
+//
+//     inbox_id  <-> inbox.id            same thing -> disagreement is ambiguous
+//     account_id <-> account.id         same thing -> disagreement is ambiguous
+//     status    <-> conversation.status same thing -> disagreement is ambiguous
+//     id        <-> conversation.id     DIFFERENT THINGS
+//
+// Top-level `id` is the MESSAGE pk in a message event and the CONVERSATION
+// display_id in a conversation event. They legitimately differ on every single
+// message payload Chatwoot has ever sent. Comparing them and calling the
+// difference "ambiguous" would refuse all normal traffic — a fix that breaks
+// the working path to repair the broken one.
+
+interface DualFormInt {
+  value: number | null;
+  /** Both forms were present and disagreed. The caller must refuse. */
+  ambiguous: boolean;
+}
+
+/**
+ * Read an identifier Chatwoot sends flat in one payload shape and nested in
+ * another, refusing rather than guessing when the two disagree.
+ *
+ * Absent-in-both is `null`, not ambiguous: a missing identifier is the
+ * caller's existing "cannot route" case and is already handled.
+ */
+function readDualFormInt(
+  root: Record<string, unknown>,
+  flatKey: string,
+  nestedParent: string,
+  nestedKey = "id",
+): DualFormInt {
+  const flat = readInt(root[flatKey]);
+  const parent = child(root, nestedParent);
+  const nested = parent === null ? null : readInt(parent[nestedKey]);
+  if (flat !== null && nested !== null && flat !== nested) {
+    return { value: null, ambiguous: true };
+  }
+  return { value: flat ?? nested, ambiguous: false };
+}
+
+/**
+ * True when this body is a CONVERSATION-shaped payload rather than a
+ * message-shaped one.
+ *
+ * The discriminator is the absence of a `conversation` node together with a
+ * string `status` at the top level. Every message payload carries a
+ * `conversation` node, so this cannot misfire on one — which matters, because
+ * the single thing it controls is whether top-level `id` is read as a
+ * conversation id or as a message id. Get that backwards and the gateway
+ * records a conversation id as a message id, or vice versa.
+ */
+function isConversationShaped(root: Record<string, unknown>): boolean {
+  return child(root, "conversation") === null && typeof root["status"] === "string";
+}
+
 /**
  * Chatwoot has shipped `message_type` both as a string and as the underlying
  * enum ordinal. Accept both rather than mis-classifying an outgoing message as
@@ -196,29 +280,57 @@ export function readAttachmentTypes(value: unknown): string[] {
   );
 }
 
+export interface Routing {
+  accountId: number | null;
+  inboxId: number | null;
+  /**
+   * A routing identifier was present in BOTH forms and the two disagreed.
+   *
+   * This is a refusal, not a fallback, and it is deliberately decided here —
+   * before a secret is chosen. Picking either value would mean verifying the
+   * signature against one tenant's key while the body claims another's, which
+   * is the one mistake this whole function exists to avoid.
+   */
+  ambiguous: boolean;
+}
+
 /**
  * Extract only the routing identifiers, without validating anything else.
  *
  * This runs on an UNVERIFIED body, purely to select which AgentBot secret to
  * check the signature against. Nothing here is trusted for any other purpose.
+ *
+ * Accepts both payload shapes — see the note above `readDualFormInt`. Reading
+ * `inbox.id` alone is what made every `conversation_status_changed` delivery
+ * unroutable.
  */
-export function parseRouting(raw: Buffer): { accountId: number | null; inboxId: number | null } {
+export function parseRouting(raw: Buffer): Routing {
+  const none: Routing = { accountId: null, inboxId: null, ambiguous: false };
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw.toString("utf8"));
   } catch {
-    return { accountId: null, inboxId: null };
+    return none;
   }
-  if (!isRecord(parsed)) return { accountId: null, inboxId: null };
-  const account = child(parsed, "account");
-  const inbox = child(parsed, "inbox");
-  return {
-    accountId: account === null ? null : readInt(account["id"]),
-    inboxId: inbox === null ? null : readInt(inbox["id"]),
-  };
+  if (!isRecord(parsed)) return none;
+
+  const account = readDualFormInt(parsed, "account_id", "account");
+  const inbox = readDualFormInt(parsed, "inbox_id", "inbox");
+  if (account.ambiguous || inbox.ambiguous) {
+    return { accountId: null, inboxId: null, ambiguous: true };
+  }
+  return { accountId: account.value, inboxId: inbox.value, ambiguous: false };
 }
 
-/** Full parse of a verified body. Returns null when the body is not a JSON object. */
+/**
+ * Full parse of a verified body.
+ *
+ * Returns null when the body is not a JSON object, AND when a dual-form
+ * identifier is ambiguous — both are refusals, and `decideDelivery` maps null
+ * to `bad_request`. Refusing an ambiguous body is the point: a payload that
+ * claims two different inboxes has no single correct interpretation, and
+ * picking one would route a customer's conversation by a guess.
+ */
 export function parseWebhookPayload(raw: Buffer): WebhookPayload | null {
   let parsed: unknown;
   try {
@@ -228,19 +340,42 @@ export function parseWebhookPayload(raw: Buffer): WebhookPayload | null {
   }
   if (!isRecord(parsed)) return null;
 
-  const account = child(parsed, "account");
-  const inbox = child(parsed, "inbox");
-  const conversation = child(parsed, "conversation");
-  const meta = conversation === null ? null : child(conversation, "meta");
-  const sender = child(parsed, "sender");
-  const attributes =
-    conversation === null ? null : child(conversation, "custom_attributes");
+  const account = readDualFormInt(parsed, "account_id", "account");
+  const inbox = readDualFormInt(parsed, "inbox_id", "inbox");
+  if (account.ambiguous || inbox.ambiguous) return null;
 
+  const conversation = child(parsed, "conversation");
+  const conversationShaped = isConversationShaped(parsed);
+
+  // `meta`, `custom_attributes` and `status` hang off the conversation node in
+  // a message payload and off the ROOT in a conversation payload. Same fields,
+  // same meaning, two homes.
+  const metaHost = conversation ?? (conversationShaped ? parsed : null);
+  const meta = metaHost === null ? null : child(metaHost, "meta");
+  const attributes = metaHost === null ? null : child(metaHost, "custom_attributes");
+
+  // Status: genuinely the same field in both shapes, so a disagreement is
+  // ambiguous and refused.
+  const nestedStatus = conversation === null ? null : readString(conversation["status"]);
+  const flatStatus = readString(parsed["status"]);
+  if (nestedStatus !== null && flatStatus !== null && nestedStatus !== flatStatus) {
+    return null;
+  }
+
+  // Top-level `id`: the MESSAGE pk in a message payload, the CONVERSATION
+  // display_id in a conversation payload. Never compared across shapes — see
+  // the trap note above `readDualFormInt`.
+  const rootId = readInt(parsed["id"]);
+
+  const sender = child(parsed, "sender");
   const privateRaw = parsed["private"];
 
   return {
     event: readString(parsed["event"]),
-    messageId: readInt(parsed["id"]),
+    // A conversation event carries no message, so it must not report one.
+    // Reading `id` here unconditionally would file a conversation display_id
+    // as a message id and corrupt idempotency keyed on it.
+    messageId: conversationShaped ? null : rootId,
     content: readString(parsed["content"]),
     messageType: readMessageType(parsed["message_type"]),
     attachmentTypes: readAttachmentTypes(parsed["attachments"]),
@@ -255,10 +390,11 @@ export function parseWebhookPayload(raw: Buffer): WebhookPayload | null {
       sender === null
         ? null
         : (readString(sender["phone_number"]) ?? readString(sender["identifier"])),
-    accountId: account === null ? null : readInt(account["id"]),
-    inboxId: inbox === null ? null : readInt(inbox["id"]),
-    conversationDisplayId: conversation === null ? null : readInt(conversation["id"]),
-    conversationStatus: conversation === null ? null : readString(conversation["status"]),
+    accountId: account.value,
+    inboxId: inbox.value,
+    conversationDisplayId:
+      conversation !== null ? readInt(conversation["id"]) : (conversationShaped ? rootId : null),
+    conversationStatus: nestedStatus ?? (conversationShaped ? flatStatus : null),
     assignee: meta === null ? null : (meta["assignee"] ?? null),
     customAttributes: attributes ?? {},
   };

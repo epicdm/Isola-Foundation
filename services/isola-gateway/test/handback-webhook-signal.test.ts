@@ -24,6 +24,7 @@ import { describe, expect, it, vi } from "vitest";
 import { isManualHandbackSignal, STATUS_CHANGED_EVENT } from "../src/webhook.js";
 import { handleManualHandbackWebhook } from "../src/handback.js";
 import type { ConversationRef } from "../src/ownership.js";
+import type { SqlExecutor } from "../src/ledger.js";
 
 import {
   ACCOUNT_ID,
@@ -185,7 +186,13 @@ function fakeOwnershipExec(state: string, episode = 1) {
       return { ok: false, status: "conflict" };
     }),
   };
-  return { exec, attempts };
+  // `SqlExecutor.transaction` is generic (`transaction<T>(fn): Promise<T>`) and
+  // `vi.fn()` erases that generic, so the double can never structurally satisfy
+  // the interface no matter how its body is written. The cast is applied ONCE
+  // here rather than at every call site: what is being faked is "a transaction
+  // was attempted", and `attempts` — not the return value — is what every
+  // assertion reads.
+  return { exec: exec as unknown as SqlExecutor, attempts };
 }
 
 describe("POST /v1/chatwoot/agent-bot — a signed status-changed(pending) delivery", () => {
