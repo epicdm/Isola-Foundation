@@ -81,7 +81,32 @@ export function resolveHeaderValue(headerName, raw, env) {
     );
   }
 
-  const value = env[refName];
+  // OWN DATA PROPERTIES ONLY. An inherited property must never satisfy a
+  // reference: with a polluted `Object.prototype`, or an `env` built by
+  // `Object.create({RUNTIME_SECRET: ...})`, a lookup would otherwise succeed
+  // for a key the MEDIATED environment does not contain — quietly putting an
+  // attacker-chosen value on the wire while every "is it present" check said
+  // yes. Found by adversarial review, 2026-08-24.
+  if (!Object.prototype.hasOwnProperty.call(env, refName)) {
+    throw new Error(
+      `HTTP adapter header "${headerName}" references env "${refName}", which is not present ` +
+        `in the resolved mediated environment`,
+    );
+  }
+
+  // A getter on `env` can throw, and its message could carry the very value
+  // this function exists to keep out of error text. Read defensively and
+  // replace any thrown message with our own. Same review.
+  let value;
+  try {
+    value = env[refName];
+  } catch {
+    throw new Error(
+      `HTTP adapter header "${headerName}" could not read env "${refName}" from the resolved ` +
+        `mediated environment`,
+    );
+  }
+
   // FAIL CLOSED. A missing mediated secret must never degrade to an
   // unauthenticated request that then fails confusingly upstream.
   if (typeof value !== "string" || value.length === 0) {
@@ -96,11 +121,17 @@ export function resolveHeaderValue(headerName, raw, env) {
 /**
  * Resolve every header. Pure, and separated from `execute` so the refusal
  * behaviour can be tested without a network stack.
+ *
+ * The accumulator has a NULL PROTOTYPE. With a plain `{}`, a legitimate literal
+ * header named `__proto__` would hit the legacy prototype setter instead of
+ * becoming an own property, and would be silently dropped from the request —
+ * a literal header that stopped working. Also found by adversarial review.
  */
 export function resolveHeaders(rawHeaders, env) {
-  const out = {};
-  for (const [name, raw] of Object.entries(rawHeaders)) {
-    out[name] = resolveHeaderValue(name, raw, env);
+  const out = Object.create(null);
+  // Own enumerable entries only, for the same reason as the env lookup above.
+  for (const name of Object.keys(rawHeaders)) {
+    out[name] = resolveHeaderValue(name, rawHeaders[name], env);
   }
   return out;
 }

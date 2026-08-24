@@ -81,6 +81,57 @@ resolveHeaders(cfg.headers, cfg.env);
 ok("config.headers still holds only the REFERENCE", JSON.stringify(cfg.headers) === JSON.stringify({ Authorization: { $env: "K" } }));
 ok("serialised config does not contain the value", !JSON.stringify(cfg.headers).includes(CANARY));
 
+console.log("== ADVERSARIAL REVIEW REGRESSIONS (codex, 2026-08-24) ==");
+
+// 1. Inherited properties must NOT satisfy a reference.
+Object.prototype.POLLUTED_SECRET = "Bearer attacker-controlled";
+throws("prototype-polluted key is refused",
+  () => resolveHeaderValue("Authorization", { $env: "POLLUTED_SECRET" }, {}),
+  "not present", "attacker-controlled");
+throws("Object.create(proto) inherited key is refused",
+  () => resolveHeaderValue("Authorization", { $env: "RUNTIME_SECRET" }, Object.create({ RUNTIME_SECRET: CANARY })),
+  "not present", CANARY);
+delete Object.prototype.POLLUTED_SECRET;
+
+// and the polluted key must not reach the wire either
+{
+  Object.prototype.POLLUTED_SECRET2 = "Bearer attacker-controlled-2";
+  let called = false;
+  const rf = globalThis.fetch;
+  globalThis.fetch = async () => { called = true; return { ok: true, status: 200 }; };
+  let threw = false;
+  try {
+    await execute({ runId: "r", agent: { id: "a" }, context: {},
+      config: { url: "http://upstream.invalid/x", headers: { Authorization: { $env: "POLLUTED_SECRET2" } }, env: {} } });
+  } catch { threw = true; }
+  globalThis.fetch = rf;
+  delete Object.prototype.POLLUTED_SECRET2;
+  ok("polluted prototype makes NO outbound request", threw === true && called === false);
+}
+
+// 2. A throwing accessor must not leak its message.
+{
+  const env = {};
+  Object.defineProperty(env, "K", { enumerable: true, get() { throw new Error(CANARY); } });
+  throws("throwing getter is sanitised", () => resolveHeaderValue("Authorization", { $env: "K" }, env),
+    "could not read", CANARY);
+}
+
+// 3. A literal header named __proto__ must survive.
+{
+  // NOTE: an object LITERAL `{"__proto__": x}` sets the prototype and creates no
+  // own property, so it cannot express this case. Real headers arrive from
+  // JSON.parse of a jsonb column, which DOES create an own property -- so the
+  // fixture must be built the same way or the test is vacuous.
+  const raw = JSON.parse('{"__proto__":"keepme","X-Ok":"yes"}');
+  ok("fixture control: the input really has __proto__ as an OWN property",
+    Object.prototype.hasOwnProperty.call(raw, "__proto__"));
+  const out = resolveHeaders(raw, {});
+  ok("__proto__ literal header is preserved as an own property",
+    Object.prototype.hasOwnProperty.call(out, "__proto__") && out["__proto__"] === "keepme");
+  ok("other headers unaffected by the null-prototype accumulator", out["X-Ok"] === "yes");
+}
+
 console.log("");
 console.log("  CONTROL: the canary is findable in a string that contains it: " +
   (("x " + CANARY).includes(CANARY) ? "PASS" : "FAIL - all absence checks void"));
