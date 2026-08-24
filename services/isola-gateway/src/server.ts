@@ -128,7 +128,17 @@ const ledger = createLedger({
 // executor, so `pg` stays imported by exactly one module.
 const ownership = createPostgresOwnershipGate(ledger);
 
-const gateway = createGateway({ config, logger, ledger, ownership, turnStore: ledger });
+// `ledger` also satisfies `SqlExecutor` (createLedger's real return type is
+// `Ledger & SqlExecutor`); `ownershipExec` names that same object under its
+// own narrow purpose, exactly as `turnStore` already does one line over.
+const gateway = createGateway({
+  config,
+  logger,
+  ledger,
+  ownership,
+  turnStore: ledger,
+  ownershipExec: ledger,
+});
 const server = createServer(gateway.handler);
 
 let handbackSweeper: { start(): void; stop(): void; sweep(): Promise<number> } | null = null;
@@ -182,7 +192,11 @@ async function boot(): Promise<void> {
   // HANDBACK — the IDLE trigger. Without this a conversation a human took over
   // stays HUMAN_OWNED forever and the AI never answers that customer again.
   // The manual trigger ("Mark as pending" in Chatwoot) is handled on the
-  // webhook path; this is the one that needs a clock.
+  // webhook path (`handleManualHandbackWebhook`, wired in `app.ts` via
+  // `ownershipExec` above); this is the one that needs a clock. This
+  // sweeper's OWN `recordReadable` fallback below is a second, weaker manual
+  // detection path retained for redundancy — see its comment for why it
+  // cannot be relied on alone once a team has been assigned.
   handbackSweeper = createHandbackSweeper({
     exec: ledger,
     chatwoot: gateway.chatwoot,

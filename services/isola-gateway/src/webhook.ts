@@ -319,6 +319,41 @@ export type SuppressionVerdict =
 
 export const REPLYABLE_EVENT = "message_created";
 
+/**
+ * Chatwoot's own status-change event.
+ *
+ * A SEPARATE AXIS from message delivery. `evaluateSuppression` below decides
+ * whether the MODEL may answer a `message_created` delivery; this constant
+ * marks the event that carries the opposite signal — a human explicitly
+ * returning the conversation, which the model must never see as a prompt.
+ */
+export const STATUS_CHANGED_EVENT = "conversation_status_changed";
+
+/**
+ * True when this delivery is Chatwoot's own report that a human just pressed
+ * "Mark as pending" — the exact gesture `evaluateSuppression`'s
+ * `status_not_pending` guard already keys on, delivered as an EVENT instead of
+ * needing a re-fetch through `conversations#show`.
+ *
+ * THAT RE-FETCH IS WHY THIS FUNCTION EXISTS. `conversations#show` returns 500
+ * for an AgentBot token once a team has been assigned — and escalation is what
+ * assigns the team, so the read the sweeper depended on breaks precisely when
+ * a real escalation needs it (see `def-explicit-handback-unreachable-after-
+ * team-assignment-2026-08-24`, and `handback.ts`'s own sweeper comment, which
+ * already treats that fetch's failure as non-fatal rather than trusting it).
+ * The webhook already tells us the status directly and it is signature-
+ * verified by the same HMAC check every delivery goes through — so nothing
+ * downstream needs a re-fetch to trust it.
+ *
+ * Deliberately narrow: only `pending` matters here. Every other status change
+ * (open, resolved, snoozed) is not the handback gesture and is left alone —
+ * `evaluateSuppression`'s ordinary predicate already governs what happens on
+ * the next real message.
+ */
+export function isManualHandbackSignal(payload: WebhookPayload): boolean {
+  return payload.event === STATUS_CHANGED_EVENT && payload.conversationStatus === "pending";
+}
+
 /** Text the model could actually work with. Whitespace is not text. */
 export function hasUsableText(payload: WebhookPayload): boolean {
   return payload.content !== null && payload.content.trim().length > 0;

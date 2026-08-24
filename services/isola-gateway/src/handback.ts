@@ -44,6 +44,7 @@ import {
   abortHandback,
   beginHandback,
   completeHandback,
+  readConversationOwnership,
   settleResumed,
 } from "./ownership-store.js";
 import type { ConversationRef } from "./ownership.js";
@@ -199,6 +200,103 @@ export async function performHandback(
 
   deps.logger.info({ ...base, outcome: "handed_back", settled });
   return { ok: true, settled };
+}
+
+// ---------------------------------------------------------------------------
+// THE MANUAL TRIGGER, ON THE WEBHOOK PATH
+// ---------------------------------------------------------------------------
+//
+// server.ts's own boot comment has said, since before this function existed,
+// that "the manual trigger ('Mark as pending' in Chatwoot) is handled on the
+// webhook path; this is the one that needs a clock" — describing exactly this
+// function, which did not exist yet. The sweeper's `recordReadable` fallback
+// was the only manual detection there ever was, and it depends on re-reading
+// the conversation via `conversations#show`, which 500s for an AgentBot token
+// once a team is assigned — precisely the case escalation creates. So the
+// comment was aspirational, not a description of working code: for every
+// escalation with a team configured (the normal, intended path),
+// `recordReadable` was false on every sweep and the manual trigger could never
+// fire. See `def-explicit-handback-unreachable-after-team-assignment-2026-08-24`.
+//
+// THE FIX IS THE EVENT, NOT THE FETCH. Chatwoot's own `conversation_status_changed`
+// webhook reports the status directly, so nothing here needs to ask
+// `conversations#show` anything. It reaches this function only after the SAME
+// signature verification every other delivery goes through — no new trust
+// boundary, no admin token, no manual database change. It is, deliberately,
+// Chatwoot's real "mark as pending" action and nothing else: the ratified
+// instruction is that explicit handback must work through the conversation
+// lifecycle a human agent already uses, not a parallel mechanism.
+
+export interface ManualHandbackWebhookArgs {
+  conversation: ConversationRef;
+  target: ChatwootTarget;
+  correlationId?: string | null;
+}
+
+export type ManualHandbackWebhookOutcome =
+  | { outcome: "handed_back"; episode: number; settled: boolean }
+  /** The AI already owned this conversation; the signal was a true no-op. */
+  | { outcome: "no_handback_needed"; state: string }
+  | { outcome: "handback_failed"; stage: string; detail: string };
+
+/**
+ * Act on a signed `conversation_status_changed` -> `pending` webhook.
+ *
+ * Reads the CURRENT episode before deciding whether to call `performHandback`
+ * at all — under NO lock, because the decision made here is only "is there
+ * anything eligible to hand back", never the transition itself. The actual
+ * safety property is `performHandback`'s own `expectedEpisode` check, taken
+ * under `applyOwnershipTransition`'s row lock; a stale read here can only
+ * cause a call that gets correctly refused, never one that succeeds
+ * incorrectly.
+ *
+ * IDEMPOTENT ACROSS RETRIES FOR FREE. `performHandback`'s operation id is
+ * deterministic — `handback:{tenant}:{account}:{conversation}:{episode}:{reason}`
+ * — so a redelivered webhook (Chatwoot's own retry, or two concurrent
+ * deliveries) computes the SAME id and `applyOwnershipTransition`'s unique
+ * claim resolves the race; the loser reports `duplicate`, which
+ * `performHandback` reports as `ok: true`. No separate delivery ledger
+ * reservation is needed for this path, unlike the reply path — the ownership
+ * store's own claim already is the exactly-once guarantee.
+ */
+export async function handleManualHandbackWebhook(
+  deps: HandbackDeps,
+  args: ManualHandbackWebhookArgs,
+): Promise<ManualHandbackWebhookOutcome> {
+  const view = await readConversationOwnership(deps.exec, args.conversation);
+
+  const eligible = (HANDBACK_ELIGIBLE_STATES as readonly string[]).includes(view.state);
+  if (!eligible) {
+    deps.logger.info({
+      event: "handback",
+      outcome: "webhook_no_handback_needed",
+      accountId: args.conversation.chatwootAccountId,
+      conversationId: args.conversation.chatwootConversationId,
+      ownershipState: view.state,
+      detail:
+        "a status-changed webhook reported pending, but the AI already owns this " +
+        "conversation; nothing to hand back",
+    });
+    return { outcome: "no_handback_needed", state: view.state };
+  }
+
+  const result = await performHandback(deps, {
+    conversation: args.conversation,
+    episode: view.episode,
+    target: args.target,
+    reason: "manual_mark_pending",
+    // Distinct actorRef from the sweeper's own manual path
+    // ("chatwoot:mark_as_pending"), so the audit trail can tell which
+    // detection mechanism actually fired — useful while both exist, and a
+    // clean signal if the sweeper's fallback is ever retired outright.
+    actorRef: "chatwoot:mark_as_pending:webhook",
+    correlationId: args.correlationId ?? null,
+  });
+
+  if (!result.ok) {
+    return { outcome: "handback_failed", stage: result.stage, detail: result.detail };
+  }
+  return { outcome: "handed_back", episode: view.episode, settled: result.settled };
 }
 
 /** A conversation the sweeper may act on, read from the ownership store. */
