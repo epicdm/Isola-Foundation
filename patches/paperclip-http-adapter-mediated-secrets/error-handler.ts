@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { ZodError } from "zod";
 import { HttpError } from "../errors.js";
-import { isSecretBearingPath, safeSecretRouteError } from "./secret-route-log-policy.js";
+import { isSecretBearingRequest, safeSecretRouteError } from "./secret-route-log-policy.js";
 import { trackErrorHandlerCrash } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 
@@ -24,7 +24,7 @@ function attachErrorContext(
   // The route is known here, which is why sanitising happens at this point
   // rather than downstream where it is not. attachErrorContext is only reached
   // on 5xx paths, so the status is 500 by construction.
-  if (isSecretBearingPath((req as any).originalUrl ?? req.url)) {
+  if (isSecretBearingRequest(req)) {
     (res as any).__errorContext = {
       error: { message: "", name: payload?.name },
       method: req.method,

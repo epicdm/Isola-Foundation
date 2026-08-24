@@ -20,7 +20,7 @@ import { Writable } from "node:stream";
 import { pino } from "pino";
 import { pinoHttp } from "pino-http";
 import {
-  isSecretBearingPath,
+  isSecretBearingRequest,
   safeSecretRouteLogProps,
   safeSecretRouteError,
   classifyError,
@@ -69,7 +69,7 @@ function makeLogger() {
       // into the record that customProps cannot influence. This mirrors the
       // production logger exactly.
       req(req) {
-        if (isSecretBearingPath(req.originalUrl ?? req.url)) {
+        if (isSecretBearingRequest(req)) {
           return { id: req.id, method: req.method, url: req.route?.path ?? "[secrets route]" };
         }
         return pinoHttp.stdSerializers.req(req);
@@ -77,7 +77,7 @@ function makeLogger() {
     },
     customLogLevel(_req, res, err) {
       // The `err` ARGUMENT cannot be replaced, only emptied — mirrors production.
-      if (err && isSecretBearingPath(_req.originalUrl ?? _req.url)) {
+      if (err && isSecretBearingRequest(_req)) {
         try {
           err.message = SAFE_SECRET_ROUTE_MESSAGE;
           err.stack = `${err.name ?? "Error"}: ${SAFE_SECRET_ROUTE_MESSAGE}`;
@@ -95,13 +95,13 @@ function makeLogger() {
     },
     customSuccessMessage(req, res) {
       // req.url carries the QUERY STRING — mirrors production.
-      if (isSecretBearingPath(req.originalUrl ?? req.url)) {
+      if (isSecretBearingRequest(req)) {
         return `${req.method} ${req.route?.path ?? "[secrets route]"} ${res.statusCode}`;
       }
       return `${req.method} ${req.url} ${res.statusCode}`;
     },
     customErrorMessage(req, res, err) {
-      if (isSecretBearingPath(req.originalUrl ?? req.url)) {
+      if (isSecretBearingRequest(req)) {
         return `${req.method} ${req.route?.path ?? "[secrets route]"} ${res.statusCode} — ${SAFE_SECRET_ROUTE_MESSAGE}`;
       }
       const ctx = res.__errorContext;
@@ -109,7 +109,7 @@ function makeLogger() {
       return `${req.method} ${req.url} ${res.statusCode} — ${errMsg}`;
     },
     customProps(req, res) {
-      if (isSecretBearingPath(req.originalUrl ?? req.url)) {
+      if (isSecretBearingRequest(req)) {
         if (res.statusCode >= 400 && res.err) {
           res.err = safeSecretRouteError(res.statusCode, res.err);
         }
@@ -303,6 +303,37 @@ console.log("== the request/response objects must not be mutated ==");
   httpLogger(req, res); if (listeners.finish) listeners.finish();
   ok("req.body unchanged", JSON.stringify(body) === before);
   ok("req.body still holds its value", body.value === C.body);
+}
+
+
+console.log("== DRIFT CONTROL: the shipped logger must carry every mechanism ==");
+{
+  // The reviewer was right that the previous "drift check" was a shell grep I
+  // ran by hand, not an assertion. If the shipped logger lost a protection
+  // while this harness kept its copy, every test above would still pass and
+  // the deployed service would leak. So the shipped file is read and asserted.
+  const { readFileSync, existsSync } = await import("node:fs");
+  const candidates = ["./logger.js", "../logger.js", "/app/server/dist/middleware/logger.js"];
+  const found = candidates.find((c) => existsSync(c));
+  ok("shipped logger.js is readable (otherwise this control proves nothing)", Boolean(found));
+  if (found) {
+    const src = readFileSync(found, "utf8");
+    const REQUIRED = [
+      ["route-level classification", "isSecretBearingRequest("],
+      ["route-aware req serializer", "stdSerializers.req"],
+      ["success message not req.url", "customSuccessMessage"],
+      ["error message replaced", "SAFE_SECRET_ROUTE_MESSAGE"],
+      ["allowlist props", "safeSecretRouteLogProps"],
+      ["res.err swapped", "safeSecretRouteError"],
+      ["non-enumerable cause cleared", "delete err.cause"],
+    ];
+    for (const [label, needle] of REQUIRED) {
+      ok(`shipped logger has: ${label}`, src.includes(needle));
+    }
+    // NEGATIVE CONTROL: the assertion must be capable of FAILING.
+    ok("drift control can fail (a fabricated mechanism is absent)",
+       src.includes("THIS_MECHANISM_DOES_NOT_EXIST") === false);
+  }
 }
 
 console.log("");

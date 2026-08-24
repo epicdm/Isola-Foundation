@@ -6,7 +6,7 @@ import { readConfigFile } from "../config-file.js";
 import { resolveDefaultLogsDir, resolveHomeAwarePath } from "../home-paths.js";
 import { shouldSilenceHttpSuccessLog } from "./http-log-policy.js";
 import {
-  isSecretBearingPath,
+  isSecretBearingRequest,
   safeSecretRouteLogProps,
   safeSecretRouteError,
   classifyError,
@@ -68,14 +68,14 @@ export const httpLogger = pinoHttp({
     logger,
     serializers: {
         req(req) {
-            if (isSecretBearingPath(req.originalUrl ?? req.url)) {
+            if (isSecretBearingRequest(req)) {
                 return { id: req.id, method: req.method, url: req.route?.path ?? "[secrets route]" };
             }
             return pinoHttp.stdSerializers.req(req);
         },
     },
     customLogLevel(_req, res, err) {
-        if (err && isSecretBearingPath(_req.originalUrl ?? _req.url)) {
+        if (err && isSecretBearingRequest(_req)) {
             try {
                 err.message = SAFE_SECRET_ROUTE_MESSAGE;
                 err.stack = `${err.name ?? "Error"}: ${SAFE_SECRET_ROUTE_MESSAGE}`;
@@ -106,13 +106,13 @@ export const httpLogger = pinoHttp({
         return "info";
     },
     customSuccessMessage(req, res) {
-        if (isSecretBearingPath(req.originalUrl ?? req.url)) {
+        if (isSecretBearingRequest(req)) {
             return `${req.method} ${req.route?.path ?? "[secrets route]"} ${res.statusCode}`;
         }
         return `${req.method} ${req.url} ${res.statusCode}`;
     },
     customErrorMessage(req, res, err) {
-        if (isSecretBearingPath(req.originalUrl ?? req.url)) {
+        if (isSecretBearingRequest(req)) {
             return `${req.method} ${req.route?.path ?? "[secrets route]"} ${res.statusCode} — ${SAFE_SECRET_ROUTE_MESSAGE}`;
         }
         const ctx = res.__errorContext;
@@ -120,7 +120,7 @@ export const httpLogger = pinoHttp({
         return `${req.method} ${req.url} ${res.statusCode} — ${errMsg}`;
     },
     customProps(req, res) {
-        if (isSecretBearingPath(req.originalUrl ?? req.url)) {
+        if (isSecretBearingRequest(req)) {
             if (res.statusCode >= 400 && res.err) {
                 res.err = safeSecretRouteError(res.statusCode, res.err);
             }

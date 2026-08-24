@@ -1,10 +1,10 @@
 import { ZodError } from "zod";
 import { HttpError } from "../errors.js";
-import { isSecretBearingPath, safeSecretRouteError } from "./secret-route-log-policy.js";
+import { isSecretBearingRequest, safeSecretRouteError } from "./secret-route-log-policy.js";
 import { trackErrorHandlerCrash } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 function attachErrorContext(req, res, payload, rawError) {
-    if (isSecretBearingPath(req.originalUrl ?? req.url)) {
+    if (isSecretBearingRequest(req)) {
         res.__errorContext = {
             error: { message: "", name: payload?.name },
             method: req.method,

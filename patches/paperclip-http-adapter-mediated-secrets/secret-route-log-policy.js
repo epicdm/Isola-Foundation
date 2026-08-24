@@ -37,12 +37,20 @@
  * populated — which is the case for a 404 or a body-parser failure, both of
  * which happen before routing completes.
  */
+/**
+ * Matched as a path SEGMENT, deliberately NOT anchored at `^/api`.
+ *
+ * Anchoring was a blocking defect: an absolute-form request target
+ * (`http://host/api/.../secrets`) and a mounted-router prefix
+ * (`/paperclip/api/.../secrets`) both reach the secrets handler while an
+ * anchored matcher calls them ordinary routes — and an ordinary route logs the
+ * whole body. The trailing `(?:\/|$)` keeps `/secretsanity` from matching, so
+ * loosening the left side does not loosen the right.
+ */
 const SECRET_BEARING_PATHS = [
-  /^\/api\/companies\/[^/]+\/secrets(?:\/|$)/i,
-  /^\/api\/secrets(?:\/|$)/i,
-  /^\/api\/companies\/[^/]+\/secret-provider-configs(?:\/|$)/i,
-  /^\/api\/secret-provider-configs(?:\/|$)/i,
-  /^\/api\/agents\/[^/]+\/keys(?:\/|$)/i,
+  /\/secrets(?:\/|$)/i,
+  /\/secret-provider-configs(?:\/|$)/i,
+  /\/agents\/[^/]+\/keys(?:\/|$)/i,
 ];
 
 /** The message emitted in place of any real error text on these routes. */
@@ -66,7 +74,12 @@ export const SAFE_SECRET_ROUTE_MESSAGE =
  * deliberately generous, and matching is the safe direction to over-apply.
  */
 function normalisePathForMatch(url) {
-  const raw = url.split("?")[0] ?? url;
+  let raw = url.split("?")[0] ?? url;
+  // ABSOLUTE-FORM REQUEST TARGET. RFC 7230 permits `POST http://host/path`,
+  // and Node exposes it verbatim on req.url. Strip the origin so the path is
+  // compared, not the scheme and authority.
+  const origin = /^[a-z][a-z0-9+.-]*:\/\/[^/]*/i.exec(raw);
+  if (origin) raw = raw.slice(origin[0].length) || "/";
   let decoded = raw;
   // Decode repeatedly: a doubly-encoded path (%2573) decodes to %73 and then
   // to `s`. Bounded, because decoding is attacker-influenced.
@@ -85,6 +98,26 @@ function normalisePathForMatch(url) {
 export function isSecretBearingPath(url) {
   if (typeof url !== "string" || url.length === 0) return false;
   return SECRET_BEARING_PATHS.some((re) => re.test(normalisePathForMatch(url)));
+}
+
+/**
+ * Classify a REQUEST, not a single string.
+ *
+ * `originalUrl ?? url` was a blocking defect on a mounted router: Express
+ * routes the STRIPPED `req.url` while `originalUrl` keeps the mount prefix, and
+ * `??` never falls back once `originalUrl` exists. Both forms are tested, plus
+ * `baseUrl + url`, and ANY match classifies the request as secrets-bearing.
+ * Over-classifying costs a little log detail; under-classifying logs a
+ * credential.
+ */
+export function isSecretBearingRequest(req) {
+  if (typeof req !== "object" || req === null) return false;
+  const r = req;
+  const candidates = [r.originalUrl, r.url];
+  if (typeof r.baseUrl === "string" && typeof r.url === "string") {
+    candidates.push(r.baseUrl + r.url);
+  }
+  return candidates.some((c) => isSecretBearingPath(typeof c === "string" ? c : undefined));
 }
 
 /** A stable, non-revealing classification. Derived from the error TYPE only. */

@@ -6,7 +6,7 @@ import { readConfigFile } from "../config-file.js";
 import { resolveDefaultLogsDir, resolveHomeAwarePath } from "../home-paths.js";
 import { shouldSilenceHttpSuccessLog } from "./http-log-policy.js";
 import {
-  isSecretBearingPath,
+  isSecretBearingRequest,
   safeSecretRouteLogProps,
   safeSecretRouteError,
   classifyError,
@@ -79,7 +79,7 @@ export const httpLogger = pinoHttp({
     // even on a 201. On a secrets route the request is described by its ROUTE
     // TEMPLATE and nothing else.
     req(req: any) {
-      if (isSecretBearingPath(req.originalUrl ?? req.url)) {
+      if (isSecretBearingRequest(req)) {
         return { id: req.id, method: req.method, url: req.route?.path ?? "[secrets route]" };
       }
       return (pinoHttp as any).stdSerializers.req(req);
@@ -93,7 +93,7 @@ export const httpLogger = pinoHttp({
     // a secrets route its message, stack and own properties are overwritten in
     // place. Mutating it is safe: it is about to be logged and discarded, and
     // it is neither the request nor the response.
-    if (err && isSecretBearingPath((_req as any).originalUrl ?? _req.url)) {
+    if (err && isSecretBearingRequest(_req)) {
       try {
         (err as any).message = SAFE_SECRET_ROUTE_MESSAGE;
         (err as any).stack = `${(err as any).name ?? "Error"}: ${SAFE_SECRET_ROUTE_MESSAGE}`;
@@ -139,7 +139,7 @@ export const httpLogger = pinoHttp({
     // protects. pino-http uses this success path for any response WITHOUT an
     // error object — including a 400 or 409 — so this is not only the 2xx
     // case. Found by review of dc614d2.
-    if (isSecretBearingPath((req as any).originalUrl ?? req.url)) {
+    if (isSecretBearingRequest(req)) {
       return `${req.method} ${(req as any).route?.path ?? "[secrets route]"} ${res.statusCode}`;
     }
     return `${req.method} ${req.url} ${res.statusCode}`;
@@ -148,7 +148,7 @@ export const httpLogger = pinoHttp({
     // The raw error message is NEVER used as the log message on a secrets
     // route: it is the one field most likely to quote the submitted value
     // back ("duplicate secret <value>").
-    if (isSecretBearingPath((req as any).originalUrl ?? req.url)) {
+    if (isSecretBearingRequest(req)) {
       return `${req.method} ${(req as any).route?.path ?? "[secrets route]"} ${res.statusCode} — ${SAFE_SECRET_ROUTE_MESSAGE}`;
     }
     const ctx = (res as any).__errorContext;
@@ -159,7 +159,7 @@ export const httpLogger = pinoHttp({
     // SECRETS ROUTES: construct the record from a fixed allowlist and return.
     // Nothing from the body, query, params or error is enumerated, so no
     // nesting, proxy, getter, toJSON or cause chain can smuggle a value out.
-    if (isSecretBearingPath((req as any).originalUrl ?? req.url)) {
+    if (isSecretBearingRequest(req)) {
       const anyReq = req as any;
       const anyRes = res as any;
       if (res.statusCode >= 400 && anyRes.err) {
