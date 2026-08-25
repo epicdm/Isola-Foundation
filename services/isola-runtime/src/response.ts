@@ -31,8 +31,15 @@
 /**
  * Bumped whenever the shape of an inline body changes in a way a client could
  * observe. Carried on every inline response so the gateway can assert on it.
+ *
+ * v2 (2026-08-25) — adds `action` and `actionReason` to the SUCCESS body, for
+ * structured AI-initiated escalation. Additive and backward compatible: a
+ * client that ignores both fields sees a v1 body. `action` is `null` for every
+ * template that has not opted into structured output, which is how the gateway
+ * tells "this run had no opinion" from "this run asked for a human" without
+ * reading the reply text.
  */
-export const RESPONSE_CONTRACT_VERSION = 1;
+export const RESPONSE_CONTRACT_VERSION = 2;
 
 export const RESPONSE_MODES = ["none", "inline"] as const;
 export type ResponseMode = (typeof RESPONSE_MODES)[number];
@@ -125,6 +132,17 @@ export interface InlineSuccessArgs {
   issueStatus: string | null;
   replay: boolean;
   usage: InlineUsage;
+  /**
+   * What the agent asked for, from the closed set in `src/action.ts`.
+   *
+   * `null` means this template does not emit structured actions, which is NOT
+   * the same as `"reply"` — the caller must be able to distinguish "the agent
+   * said nothing about escalation" from "the agent said do not escalate", or a
+   * legacy template would silently lose its fallback path.
+   */
+  action?: string | null;
+  /** Bounded reason code for an escalation. Never prose, never an identifier. */
+  actionReason?: string | null;
 }
 
 export interface InlineFailureArgs {
@@ -174,6 +192,9 @@ export function inlineSuccessBody(args: InlineSuccessArgs): Record<string, unkno
     transitioned: args.transitioned,
     issueStatus: args.issueStatus,
     replay: args.replay,
+    // Always present, so a caller never has to tell "absent" from "null".
+    action: args.action ?? null,
+    actionReason: args.actionReason ?? null,
     ...usageFields(args.usage),
   };
 }
@@ -196,6 +217,14 @@ export function inlineFailureBody(args: InlineFailureArgs): Record<string, unkno
     completionState: args.completionState,
     runId: args.runId,
     answerText: null,
+    // HARDCODED, exactly like `answerText`, and for the same reason: there is
+    // no parameter through which a failure could carry an action. A run that
+    // produced no answer must not be able to ask the gateway to hand a customer
+    // to a person — the failure path escalates on its own terms, and letting a
+    // model-supplied action ride along on it would be a second, unvalidated way
+    // to move the ledger.
+    action: null,
+    actionReason: null,
     failureCategory: args.failureCategory,
     error: args.failureCategory,
     recorded: args.recorded,

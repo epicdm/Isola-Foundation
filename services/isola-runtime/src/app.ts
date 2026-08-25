@@ -26,6 +26,11 @@ import {
   transitionIssue,
   transitionNotAttempted,
 } from "./callbacks.js";
+import {
+  DEFAULT_ESCALATION_REASON,
+  STRUCTURED_OUTPUT_INSTRUCTION,
+  parseAgentAction,
+} from "./action.js";
 import { buildUserMessage, renderContext } from "./context.js";
 import {
   ConversationIssues,
@@ -653,6 +658,11 @@ export function createRuntime(deps: AppDeps): Runtime {
             issueStatus: prior.transitionStatus,
             replay: true,
             usage,
+            // THE ORIGINAL DECISION, replayed. Not re-derived, and not dropped:
+            // a redelivery that returned no action would silently downgrade the
+            // first delivery's escalation to an ordinary reply.
+            action: prior.action ?? null,
+            actionReason: prior.actionReason ?? null,
           }),
         );
         return;
@@ -1064,6 +1074,17 @@ export function createRuntime(deps: AppDeps): Runtime {
       }
 
       // ---- budget preflight and reservation --------------------------------
+      // STRUCTURED OUTPUT, when this template opted in.
+      //
+      // The instruction is appended HERE rather than written into the charter,
+      // so an operator editing the persona in Paperclip cannot remove the wire
+      // contract. The prompt is documentation; `parseAgentAction` below is the
+      // enforcement, and the provider's own json_object mode is the third leg.
+      const structured = template.structuredOutput === true;
+      const systemPrompt = structured
+        ? `${resolvedPrompt.prompt}\n\n${STRUCTURED_OUTPUT_INSTRUCTION}`
+        : resolvedPrompt.prompt;
+
       const pre = await metering.preflight({
         companyId,
         agentId,
@@ -1071,7 +1092,8 @@ export function createRuntime(deps: AppDeps): Runtime {
         runId,
         paperclipRunId,
         model,
-        promptChars: resolvedPrompt.prompt.length + userMessage.length,
+        // Costed against the prompt ACTUALLY sent, instruction included.
+        promptChars: systemPrompt.length + userMessage.length,
       });
 
       if (pre.kind === "exhausted") {
@@ -1190,6 +1212,13 @@ export function createRuntime(deps: AppDeps): Runtime {
        * the inline contract reports them apart.
        */
       let invalidOutput = false;
+      /**
+       * What the agent asked for. Null for a template that does not emit
+       * structured actions — deliberately distinct from `"reply"`, so the
+       * gateway can tell "no opinion" from "do not escalate".
+       */
+      let agentAction: string | null = null;
+      let agentActionReason: string | null = null;
       // Wall time of the brain round-trip, including any agent loop and tool
       // calls the runtime cannot see from here. Measured around the call rather
       // than inferred from a downstream accounting table: `first_seen` there may
@@ -1203,15 +1232,61 @@ export function createRuntime(deps: AppDeps): Runtime {
           model,
           timeoutMs,
           messages: [
-            { role: "system", content: resolvedPrompt.prompt },
+            { role: "system", content: systemPrompt },
             { role: "user", content: userMessage },
           ],
+          ...(structured ? { responseFormat: "json_object" as const } : {}),
         });
         brainMs = now() - tBrainStart;
         status = "succeeded";
-        content = result.content;
         httpStatus = 200;
         outcome = "ok";
+
+        if (structured) {
+          // THE SCHEMA IS ENFORCED HERE, NOT REQUESTED IN PROSE.
+          const parsedAction = parseAgentAction(result.content);
+          if (parsedAction.kind === "invalid") {
+            // FAIL CLOSED. The provider returned something this service cannot
+            // read as an agent turn, so there is no reply to deliver and none
+            // is invented. Reported as `invalid_output`, which the gateway
+            // already treats as a failure: it posts no customer message and
+            // escalates to a human. A visible failure, not a silent one.
+            status = "provider_error";
+            invalidOutput = true;
+            content = null;
+            failureCategory = `structured_output_invalid (${parsedAction.detail})`;
+            httpStatus = 502;
+            outcome = "provider_error";
+          } else {
+            // The customer-facing reply, kept SEPARATE from the action. This is
+            // what is persisted and what is returned as `answerText`; the raw
+            // json envelope is never sent to a customer and never recorded.
+            content = parsedAction.reply;
+            agentAction = parsedAction.action;
+            agentActionReason =
+              parsedAction.action === "request_human"
+                ? (parsedAction.reason ?? DEFAULT_ESCALATION_REASON)
+                : null;
+            if (parsedAction.actionDefaulted || parsedAction.reasonRejected) {
+              // A template that is not honouring the contract must be visible
+              // rather than looking like a stream of ordinary replies.
+              logger.warn({
+                event: "agent_action",
+                correlationId,
+                runId,
+                agentId,
+                templateId: template.id,
+                outcome: "agent_action_degraded",
+                actionDefaulted: parsedAction.actionDefaulted,
+                reasonRejected: parsedAction.reasonRejected,
+                detail:
+                  "the model's structured turn was incomplete; the safe default was used and no escalation was inferred from the reply text",
+              });
+            }
+          }
+        } else {
+          content = result.content;
+        }
         if (result.usage !== null) {
           // `promptTokens` includes the cached subset; billing splits them.
           const cached = result.usage.cachedPromptTokens ?? 0;
@@ -1452,6 +1527,11 @@ export function createRuntime(deps: AppDeps): Runtime {
         answerText: completionState === "completed" ? persistedAnswer : null,
         completionState,
         usage: usageRecord,
+        // Retained ONLY for a completed run, exactly like the answer: a replay
+        // must reproduce the original decision, and a run that did not complete
+        // has no decision to reproduce.
+        action: completionState === "completed" ? agentAction : null,
+        actionReason: completionState === "completed" ? agentActionReason : null,
       });
       finalized = true;
 
@@ -1490,6 +1570,11 @@ export function createRuntime(deps: AppDeps): Runtime {
         // one. These two fields are what make that visible without reading the text.
         brain: template.modelBaseUrl ?? "default",
         charterSource: resolvedPrompt.source,
+        // WHAT THE AGENT ASKED FOR. A code, never the reply text — this is the
+        // field that makes an escalation auditable without reading the answer.
+        structuredOutput: structured,
+        agentAction,
+        agentActionReason,
         // WHERE THE TIME WENT. `durationMs` is the total; these three name the
         // legs, so "why was that slow" is a log read and not an investigation.
         // They do not have to sum to durationMs — the remainder is this service's
@@ -1535,6 +1620,8 @@ export function createRuntime(deps: AppDeps): Runtime {
               issueStatus: transition.status,
               replay: false,
               usage: usageRecord,
+              action: agentAction,
+              actionReason: agentActionReason,
             }),
           );
         } else {

@@ -82,6 +82,9 @@ describe("what the gateway sends", () => {
     const result = await runtime.invoke(REQUEST);
     expect(result).toEqual({
       text: null,
+      // Contract v2: a failure can never carry an action.
+      action: null,
+      actionReason: null,
       outcome: "unauthorized",
       correlationId: "run-1",
       completionState: null,
@@ -124,6 +127,11 @@ describe("what the gateway reads back", () => {
     );
     expect(await runtime.invoke(REQUEST)).toEqual({
       text: null,
+      // A 200 with no action field at all — a pre-v2 runtime. Null, never
+      // "reply": the pipeline must be able to tell "said nothing" from "said
+      // do not escalate".
+      action: null,
+      actionReason: null,
       outcome: "ok",
       correlationId: "runtime-corr",
       completionState: null,

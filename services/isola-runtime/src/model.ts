@@ -21,6 +21,18 @@ export interface ModelRequest {
   model: string;
   messages: ChatMessage[];
   timeoutMs: number;
+  /**
+   * Ask the provider to constrain its output to a JSON object.
+   *
+   * Absent means the request is byte-for-byte what it has always been — the
+   * field is only ever set for a template that opted into structured output, so
+   * no existing template's request shape changes.
+   *
+   * This is not a tool and grants no capability: the provider restricts the
+   * FORM of the text it returns, nothing is executed and nothing is called.
+   * OpenAI-compatible, and supported by DeepSeek as `{"type":"json_object"}`.
+   */
+  responseFormat?: "json_object";
 }
 
 /**
@@ -151,6 +163,11 @@ export function createOpenAiCompatibleClient(
             model: request.model,
             messages: request.messages,
             stream: false,
+            // Omitted entirely when not requested, so a template that never
+            // opted in sends the exact body it sent before this field existed.
+            ...(request.responseFormat === undefined
+              ? {}
+              : { response_format: { type: request.responseFormat } }),
           }),
           signal: controller.signal,
         });

@@ -86,9 +86,54 @@ export class StubModelClient implements ModelClient {
     return this.impl(request);
   }
 
+  /**
+   * "The model produced this reply text."
+   *
+   * CONTRACT-AWARE ON PURPOSE. When the request asked for `json_object` — i.e.
+   * the template opted into structured output — a real provider would return
+   * the agent-action envelope, not bare prose. So the stub emits the envelope
+   * with the ordinary `"reply"` action, which is what "the model answered
+   * normally" MEANS under that contract.
+   *
+   * This keeps every pre-existing fixture expressing the same intent it always
+   * did, rather than each one having to know whether its template is
+   * structured. A test that wants to drive the raw wire — malformed json, an
+   * unknown action, a fenced block — uses `returningRaw`, which never wraps.
+   */
   static returning(content: string): StubModelClient {
+    return new StubModelClient(async (req) => ({
+      content:
+        req.responseFormat === "json_object"
+          ? JSON.stringify({ action: "reply", reply: content })
+          : content,
+      model: "stub-model",
+      finishReason: "stop",
+      usage: null,
+    }));
+  }
+
+  /** Exactly these bytes, whatever the request asked for. */
+  static returningRaw(content: string): StubModelClient {
     return new StubModelClient(async () => ({
       content,
+      model: "stub-model",
+      finishReason: "stop",
+      usage: null,
+    }));
+  }
+
+  /** A structured turn with an explicit action, for escalation tests. */
+  static returningAction(
+    action: string,
+    reply: string,
+    reason?: string,
+  ): StubModelClient {
+    return new StubModelClient(async () => ({
+      content: JSON.stringify({
+        action,
+        reply,
+        ...(reason === undefined ? {} : { reason }),
+      }),
       model: "stub-model",
       finishReason: "stop",
       usage: null,

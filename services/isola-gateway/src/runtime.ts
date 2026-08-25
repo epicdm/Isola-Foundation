@@ -132,11 +132,35 @@ export function outcomeForCompletionState(state: RuntimeCompletionState): string
   }
 }
 
+/**
+ * The structured action an agent turn may carry, contract v2.
+ *
+ * `null` means the runtime said NOTHING about escalation — an older build, or a
+ * template that does not emit actions. That is deliberately distinct from
+ * `"reply"`, which is a positive statement that no human is needed. The
+ * pipeline needs the difference: on `null` it may fall back to the legacy
+ * phrase heuristic, and on `"reply"` it must not.
+ */
+export const AGENT_ACTIONS = ["reply", "request_human"] as const;
+export type AgentAction = (typeof AGENT_ACTIONS)[number];
+
+export function isAgentAction(value: unknown): value is AgentAction {
+  return typeof value === "string" && (AGENT_ACTIONS as readonly string[]).includes(value);
+}
+
 export interface AgentRuntimeResult {
   /** The assistant text, or null when the runtime did not return one. */
   text: string | null;
   outcome: string;
   correlationId: string;
+  /**
+   * What the agent asked for, or null when it said nothing. Only ever read from
+   * a SUCCESS body: the runtime hardcodes `action: null` on every failure, so a
+   * failed run structurally cannot ask for a handover.
+   */
+  action: AgentAction | null;
+  /** Bounded reason code for an escalation. Never prose, never an identifier. */
+  actionReason: string | null;
   /**
    * The runtime's structured end state when it supplied one, else null. The
    * pipeline PREFERS this over `outcome` for classification.
@@ -217,6 +241,34 @@ function readContractVersion(payload: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+/**
+ * Read the agent's action, and REFUSE anything that is not one of the two known
+ * verbs.
+ *
+ * An unrecognised value becomes `null`, not a guess. `null` routes to the
+ * legacy phrase heuristic, which is the pre-existing behaviour — so an
+ * unexpected token degrades to what this gateway did yesterday rather than
+ * silencing a customer's AI on a word nobody defined.
+ *
+ * The reason code is likewise refused unless it looks like a code. It is
+ * persisted to the ownership audit trail, and that table must never receive
+ * prose or a customer's words: `ownership.ts` throws on a non-code, so a bad
+ * value here would fail the whole escalation rather than being written.
+ */
+const REASON_CODE_SHAPE = /^[a-z0-9][a-z0-9_.:-]{0,63}$/;
+
+export function readAgentAction(payload: unknown): AgentAction | null {
+  if (!isRecord(payload)) return null;
+  const value = payload["action"];
+  return isAgentAction(value) ? value : null;
+}
+
+export function readActionReason(payload: unknown): string | null {
+  if (!isRecord(payload)) return null;
+  const value = payload["actionReason"];
+  return typeof value === "string" && REASON_CODE_SHAPE.test(value) ? value : null;
+}
+
 export interface HttpAgentRuntimeOptions {
   baseUrl: string;
   invokePath: string;
@@ -243,6 +295,8 @@ export class HttpAgentRuntime implements AgentRuntime {
       // Fail closed rather than sending an unauthenticated invocation.
       return {
         text: null,
+        action: null,
+        actionReason: null,
         outcome: "unauthorized",
         correlationId: request.runId,
         completionState: null,
@@ -282,6 +336,8 @@ export class HttpAgentRuntime implements AgentRuntime {
       if (err instanceof EgressBlockedError) {
         return {
           text: null,
+          action: null,
+          actionReason: null,
           outcome: "runtime_unreachable",
           correlationId: request.runId,
           completionState: null,
@@ -290,6 +346,8 @@ export class HttpAgentRuntime implements AgentRuntime {
       }
       return {
         text: null,
+        action: null,
+        actionReason: null,
         outcome: timedOut ? "model_timeout" : "runtime_unreachable",
         correlationId: request.runId,
         completionState: null,
@@ -321,7 +379,15 @@ export class HttpAgentRuntime implements AgentRuntime {
         completionState !== null && completionState !== "completed"
           ? outcomeForCompletionState(completionState)
           : statusOutcome;
-      return { text: null, outcome, correlationId, completionState, contractVersion };
+      return {
+        text: null,
+        action: null,
+        actionReason: null,
+        outcome,
+        correlationId,
+        completionState,
+        contractVersion,
+      };
     }
 
     // A 200 that says `ok: false` is a failure regardless of its status code.
@@ -334,7 +400,15 @@ export class HttpAgentRuntime implements AgentRuntime {
         completionState !== null && completionState !== "completed"
           ? outcomeForCompletionState(completionState)
           : bodyOutcome;
-      return { text: null, outcome, correlationId, completionState, contractVersion };
+      return {
+        text: null,
+        action: null,
+        actionReason: null,
+        outcome,
+        correlationId,
+        completionState,
+        contractVersion,
+      };
     }
 
     // A 200 with `ok: true` but a non-`completed` state is still a failure —
@@ -342,6 +416,8 @@ export class HttpAgentRuntime implements AgentRuntime {
     if (completionState !== null && completionState !== "completed") {
       return {
         text: null,
+        action: null,
+        actionReason: null,
         outcome: outcomeForCompletionState(completionState),
         correlationId,
         completionState,
@@ -349,8 +425,13 @@ export class HttpAgentRuntime implements AgentRuntime {
       };
     }
 
+    // THE ONLY PATH THAT MAY CARRY AN ACTION. Every return above pins it to
+    // null, so a run this client classified as a failure cannot ask the
+    // pipeline to hand a customer to a person.
     return {
       text: readInlineText(payload),
+      action: readAgentAction(payload),
+      actionReason: readActionReason(payload),
       outcome: "ok",
       correlationId,
       completionState,

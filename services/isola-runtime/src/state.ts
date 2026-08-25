@@ -109,6 +109,18 @@ export interface RunResultRecord {
   /** The truthful end state, as `src/response.ts` defines it. */
   completionState: string | null;
   usage: RunUsageRecord | null;
+  /**
+   * The structured action this run produced, retained for the same reason as
+   * `answerText`: a replayed duplicate must reproduce the ORIGINAL decision.
+   *
+   * Without this, a redelivered webhook would replay the stored answer with no
+   * action, and an escalation the first delivery requested would silently
+   * downgrade to an ordinary reply on the retry — the customer would have been
+   * told a colleague is coming while the second delivery told the gateway
+   * nothing was needed. Null for a run that emitted no action.
+   */
+  action?: string | null;
+  actionReason?: string | null;
 }
 
 export interface IdempotencyRecord {

@@ -56,6 +56,21 @@ export interface TemplateEntry {
   readonly maxContextBytes: number;
   readonly toolPolicy: ToolPolicy;
   readonly systemPrompt: string;
+  /**
+   * OPT-IN STRUCTURED OUTPUT. Absent means today's behaviour exactly: a plain
+   * prose completion, no `response_format` on the request, nothing parsed.
+   *
+   * When true the runtime appends `STRUCTURED_OUTPUT_INSTRUCTION`, asks the
+   * provider for `json_object`, and requires the reply to satisfy the agent
+   * action schema — see `src/action.ts`. It is per-template because the
+   * internal operations coordinator answers with a markdown table, and forcing
+   * json on it would break a working template to fix a different one.
+   *
+   * This is NOT a tool grant. `toolPolicy` is unchanged and still all-false;
+   * a response format constrains the shape of returned text and executes
+   * nothing.
+   */
+  readonly structuredOutput?: boolean;
 }
 
 /** Registry metadata safe to return over the API. Never includes the prompt. */
@@ -171,6 +186,9 @@ const TEMPLATE_LIST: readonly TemplateEntry[] = Object.freeze([
     maxContextBytes: DEFAULT_MAX_CONTEXT_BYTES,
     toolPolicy: NO_TOOLS,
     systemPrompt: FRONT_DESK_PROMPT,
+    // The customer-facing template, and the only one that can need a human.
+    // Its escalation used to be inferred from wording; it is now a field.
+    structuredOutput: true,
   } satisfies TemplateEntry),
   /**
    * THE INTERNAL MANAGER. The first template to declare its own brain.

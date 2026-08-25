@@ -862,9 +862,16 @@ export class StubAgentRuntime implements AgentRuntime {
     return this.impl(request);
   }
 
+  /**
+   * A pre-v2 runtime: it returns text and says NOTHING about escalation.
+   * `action: null` is what keeps every pre-existing test exercising the legacy
+   * phrase-heuristic path, which is exactly what they were written against.
+   */
   static answering(text: string): StubAgentRuntime {
     return new StubAgentRuntime(async () => ({
       text,
+      action: null,
+      actionReason: null,
       outcome: "ok",
       correlationId: "runtime-correlation-id",
       completionState: "completed",
@@ -872,10 +879,29 @@ export class StubAgentRuntime implements AgentRuntime {
     }));
   }
 
+  /** A v2 runtime returning an explicit structured action. */
+  static answeringWithAction(
+    text: string,
+    action: "reply" | "request_human",
+    actionReason: string | null = null,
+  ): StubAgentRuntime {
+    return new StubAgentRuntime(async () => ({
+      text,
+      action,
+      actionReason,
+      outcome: "ok",
+      correlationId: "runtime-correlation-id",
+      completionState: "completed",
+      contractVersion: 2,
+    }));
+  }
+
   /** The open-contract case: success with no text. */
   static withoutText(): StubAgentRuntime {
     return new StubAgentRuntime(async () => ({
       text: null,
+      action: null,
+      actionReason: null,
       outcome: "ok",
       correlationId: "runtime-correlation-id",
       completionState: "completed",
@@ -886,6 +912,8 @@ export class StubAgentRuntime implements AgentRuntime {
   static failing(outcome: string): StubAgentRuntime {
     return new StubAgentRuntime(async () => ({
       text: null,
+      action: null,
+      actionReason: null,
       outcome,
       correlationId: "runtime-correlation-id",
       completionState: null,
@@ -903,6 +931,8 @@ export class StubAgentRuntime implements AgentRuntime {
   ): StubAgentRuntime {
     return new StubAgentRuntime(async () => ({
       text: null,
+      action: null,
+      actionReason: null,
       outcome,
       correlationId: "runtime-correlation-id",
       completionState,
@@ -919,6 +949,8 @@ export class StubAgentRuntime implements AgentRuntime {
             () =>
               resolve({
                 text,
+                action: null,
+                actionReason: null,
                 outcome: "ok",
                 correlationId: "runtime-correlation-id",
                 completionState: "completed",

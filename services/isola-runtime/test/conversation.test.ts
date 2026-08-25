@@ -110,10 +110,18 @@ const CONVERSATION_CONTEXT = {
 
 const CONV_KEY = "chatwoot:1:9012";
 
+// Contract-aware for the same reason as `StubModelClient.returning`: the
+// front-desk template opted into structured output, so "the model answered
+// with this text" is the agent-action envelope carrying it, not bare prose.
+// The assertions below are unchanged — only what a real provider would have
+// put on the wire is.
 function modelReturning(content: string): StubModelClient {
   return new StubModelClient(
-    async (): Promise<ModelResponse> => ({
-      content,
+    async (req): Promise<ModelResponse> => ({
+      content:
+        req.responseFormat === "json_object"
+          ? JSON.stringify({ action: "reply", reply: content })
+          : content,
       model: "deepseek-chat",
       finishReason: "stop",
       usage: { promptTokens: 900, completionTokens: 120, cachedPromptTokens: 100 },

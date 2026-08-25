@@ -98,6 +98,25 @@ export interface GatewayConfig {
    */
   failpoint: FailpointName | null | "unrecognised";
 
+  /**
+   * THE LEGACY PHRASE HEURISTIC — the fallback, and the rollback.
+   *
+   * `true` (the default, and every existing deployment) keeps today's behaviour
+   * exactly: when a runtime returns no structured action, the agent's reply is
+   * matched against `ESCALATION_PHRASES` and a match escalates.
+   *
+   * `false` means only a structured `action: "request_human"` can escalate.
+   *
+   * Note what this flag CANNOT do: it cannot cause both mechanisms to run. The
+   * precedence rule in `pipeline.ts` consults the heuristic only when the
+   * runtime supplied no action at all, so a structured turn is never
+   * second-guessed by wording — with the flag on or off. The flag exists so a
+   * staging deployment can prove the heuristic is inert rather than merely
+   * unreachable, and so production can keep it until the same proof is run
+   * there.
+   */
+  escalationPhraseHeuristic: boolean;
+
   applyLabels: boolean;
   applyCustomAttributes: boolean;
   answeredLabel: string | null;
@@ -303,6 +322,8 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
 
     failpoint: readFailpoint(env),
 
+    // Defaults TRUE so no existing deployment changes behaviour on upgrade.
+    escalationPhraseHeuristic: bool(env, "GATEWAY_ESCALATION_PHRASE_HEURISTIC", true),
     applyLabels: bool(env, "GATEWAY_APPLY_LABELS", true),
     applyCustomAttributes: bool(env, "GATEWAY_APPLY_CUSTOM_ATTRIBUTES", true),
     answeredLabel: label(env, "GATEWAY_LABEL_ANSWERED", DEFAULT_ANSWERED_LABEL),

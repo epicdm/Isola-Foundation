@@ -687,7 +687,50 @@ export async function processDelivery(
     // The reply is already with the customer — escalating AFTER the send is
     // deliberate: the promise has been made, so the worst outcome is a promise
     // nobody hears. Escalating before the send would risk the reverse.
-    const promise = detectHumanPromise(answer);
+    // ---- WHO DECIDES THE ESCALATION ---------------------------------------
+    //
+    // STRUCTURED METADATA WINS, ALWAYS AND EXCLUSIVELY.
+    //
+    // When the runtime returned an action, that action IS the decision and the
+    // reply text is never inspected. This is what closes the defect: the same
+    // intent phrased two ways — "a colleague will…" and "I'll bring in a
+    // colleague" — used to produce an escalation and a silence respectively,
+    // because the wording was the signal. Now the field is the signal and the
+    // wording is free.
+    //
+    // The heuristic is consulted ONLY when the runtime said nothing at all
+    // (`action === null`): an older runtime, or a template that does not emit
+    // actions. That is the rollback path, and it is also why the two mechanisms
+    // can never both fire — they are the two arms of one branch, not two
+    // checks in sequence.
+    //
+    // `action === "reply"` is a POSITIVE statement that no human is needed, so
+    // it suppresses the heuristic too. Falling through to phrase matching there
+    // would let wording override the agent's own explicit decision, which is
+    // the defect in the other direction.
+    const structuredAction = result.action;
+    const usingStructuredAction = structuredAction !== null;
+    const heuristicEnabled = deps.config.escalationPhraseHeuristic;
+
+    const promise =
+      usingStructuredAction || !heuristicEnabled
+        ? { promised: false, matched: [] as string[], deferred: undefined }
+        : detectHumanPromise(answer);
+
+    const escalateForHuman = usingStructuredAction
+      ? structuredAction === "request_human"
+      : promise.promised;
+
+    // The reason written to the ownership audit trail. A structured escalation
+    // carries the agent's own bounded code; the heuristic path keeps the code
+    // it has always used. Neither is ever free text — `ownership.ts` throws on
+    // a non-code, and the runtime client has already refused anything that does
+    // not match the code shape.
+    const escalationReason =
+      usingStructuredAction && structuredAction === "request_human"
+        ? (result.actionReason ?? "explicit_human_request")
+        : "agent_requested_human";
+
     // A DEFERRAL IS NOT A NON-EVENT. The reply named a human but the AI is still
     // asking the customer something, so handing over now would suppress the
     // answer it just asked for. Logged, because a deferral nobody can see is the
@@ -706,13 +749,22 @@ export async function processDelivery(
           "conversation so the answer is not suppressed",
       });
     }
-    if (promise.promised) {
+    if (escalateForHuman) {
       deps.logger.info({
         ...base,
         event: "promise",
         outcome: "human_promised",
+        // WHICH MECHANISM DECIDED. Without this the two paths are
+        // indistinguishable in the log, and "is the structured contract
+        // actually working in staging?" becomes an investigation instead of a
+        // log read.
+        escalationSource: usingStructuredAction ? "structured_action" : "phrase_heuristic",
+        agentAction: structuredAction,
+        escalationReason,
         matchedPhrases: promise.matched,
-        detail: "the reply promised a human; escalating so someone is actually told",
+        detail: usingStructuredAction
+          ? "the agent asked for a human in its structured action; escalating"
+          : "the reply promised a human; escalating so someone is actually told",
       });
       const visible = await escalate(
         deps,
@@ -720,7 +772,7 @@ export async function processDelivery(
         target,
         writeDeps,
         writes,
-        "agent_requested_human",
+        escalationReason,
       );
       await annotate(deps, job, target, writeDeps, writes, "escalated");
       deps.logger.info({
@@ -733,6 +785,9 @@ export async function processDelivery(
         messagePostedNow: sent.kind === "sent",
         chatwootMessageId: sent.kind === "skipped" ? null : sent.messageId,
         escalationVisible: visible,
+        escalationSource: usingStructuredAction ? "structured_action" : "phrase_heuristic",
+        agentAction: structuredAction,
+        escalationReason,
         matchedPhrases: promise.matched,
         durationMs: deps.now() - job.startedAtMs,
       });

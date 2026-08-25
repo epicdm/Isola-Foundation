@@ -96,6 +96,8 @@ describe("runtime_no_text — the contract violation", () => {
   it("treats whitespace-only text as no text at all", async () => {
     const runtime = new StubAgentRuntime(async () => ({
       text: "   \n ",
+      action: null,
+      actionReason: null,
       outcome: "ok",
       correlationId: "c",
       completionState: "completed",
