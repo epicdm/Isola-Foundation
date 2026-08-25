@@ -159,6 +159,12 @@ export interface AgentRuntimeResult {
    * failed run structurally cannot ask for a handover.
    */
   action: AgentAction | null;
+  /**
+   * True when the body carried an `action` this build does not implement.
+   * Distinct from `action: null`, which means the runtime said nothing at all —
+   * the first must fail closed, the second falls back to the legacy heuristic.
+   */
+  actionUnrecognised: boolean;
   /** Bounded reason code for an escalation. Never prose, never an identifier. */
   actionReason: string | null;
   /**
@@ -242,31 +248,69 @@ function readContractVersion(payload: unknown): number | null {
 }
 
 /**
- * Read the agent's action, and REFUSE anything that is not one of the two known
- * verbs.
+ * Reading the action needs THREE outcomes, not two.
  *
- * An unrecognised value becomes `null`, not a guess. `null` routes to the
- * legacy phrase heuristic, which is the pre-existing behaviour — so an
- * unexpected token degrades to what this gateway did yesterday rather than
- * silencing a customer's AI on a word nobody defined.
+ * Collapsing "the runtime said nothing" and "the runtime said something I do
+ * not understand" into a single `null` loses the distinction that decides what
+ * is safe to do:
  *
- * The reason code is likewise refused unless it looks like a code. It is
- * persisted to the ownership audit trail, and that table must never receive
- * prose or a customer's words: `ownership.ts` throws on a non-code, so a bad
- * value here would fail the whole escalation rather than being written.
+ *   absent      a pre-v2 runtime -> fall back to the legacy heuristic, which is
+ *               exactly what this gateway did before the contract existed.
+ *   known       authoritative.
+ *   unrecognised the runtime asked for something this build cannot perform. It
+ *               is NOT safe to send the reply and quietly do nothing: the reply
+ *               may well describe the very thing that was requested ("I've
+ *               arranged a callback"), so the customer would be told an action
+ *               happened that did not. This fails closed instead.
+ *
+ * The runtime validates its own output and never emits an unknown verb today,
+ * so this is defence against a future contract version meeting an old gateway —
+ * which is precisely when a silent downgrade would be hardest to notice.
  */
-const REASON_CODE_SHAPE = /^[a-z0-9][a-z0-9_.:-]{0,63}$/;
+export type AgentActionRead =
+  | { kind: "absent" }
+  | { kind: "known"; action: AgentAction }
+  | { kind: "unrecognised" };
 
-export function readAgentAction(payload: unknown): AgentAction | null {
-  if (!isRecord(payload)) return null;
+export function readAgentAction(payload: unknown): AgentActionRead {
+  if (!isRecord(payload)) return { kind: "absent" };
   const value = payload["action"];
-  return isAgentAction(value) ? value : null;
+  if (value === undefined || value === null) return { kind: "absent" };
+  return isAgentAction(value) ? { kind: "known", action: value } : { kind: "unrecognised" };
+}
+
+/**
+ * The reason is validated against the CLOSED SET, not merely against a code
+ * shape.
+ *
+ * A shape check alone accepts `card_4111111111111111`, which is code-shaped,
+ * would pass `ownership.ts`'s pattern, and would be written verbatim to the
+ * audit table. The runtime already enforces the closed list — but this value
+ * crosses a service boundary before being persisted, and the component that
+ * PERSISTS it is the one that has to guarantee what goes in. Anything else
+ * becomes null and the escalation uses the default code.
+ *
+ * Adversarial review, 2026-08-25.
+ */
+export const AGENT_ESCALATION_REASON_CODES: readonly string[] = Object.freeze([
+  "explicit_human_request",
+  "low_confidence",
+  "policy_boundary",
+  "approval_required",
+  "tool_failure",
+  "complaint_sensitive",
+  "unsupported_request",
+]);
+
+export function isAgentEscalationReason(value: unknown): value is string {
+  return typeof value === "string" && AGENT_ESCALATION_REASON_CODES.includes(value);
 }
 
 export function readActionReason(payload: unknown): string | null {
   if (!isRecord(payload)) return null;
-  const value = payload["actionReason"];
-  return typeof value === "string" && REASON_CODE_SHAPE.test(value) ? value : null;
+  return isAgentEscalationReason(payload["actionReason"])
+    ? (payload["actionReason"] as string)
+    : null;
 }
 
 export interface HttpAgentRuntimeOptions {
@@ -296,6 +340,7 @@ export class HttpAgentRuntime implements AgentRuntime {
       return {
         text: null,
         action: null,
+        actionUnrecognised: false,
         actionReason: null,
         outcome: "unauthorized",
         correlationId: request.runId,
@@ -337,6 +382,7 @@ export class HttpAgentRuntime implements AgentRuntime {
         return {
           text: null,
           action: null,
+          actionUnrecognised: false,
           actionReason: null,
           outcome: "runtime_unreachable",
           correlationId: request.runId,
@@ -347,6 +393,7 @@ export class HttpAgentRuntime implements AgentRuntime {
       return {
         text: null,
         action: null,
+        actionUnrecognised: false,
         actionReason: null,
         outcome: timedOut ? "model_timeout" : "runtime_unreachable",
         correlationId: request.runId,
@@ -382,6 +429,7 @@ export class HttpAgentRuntime implements AgentRuntime {
       return {
         text: null,
         action: null,
+        actionUnrecognised: false,
         actionReason: null,
         outcome,
         correlationId,
@@ -403,6 +451,7 @@ export class HttpAgentRuntime implements AgentRuntime {
       return {
         text: null,
         action: null,
+        actionUnrecognised: false,
         actionReason: null,
         outcome,
         correlationId,
@@ -417,6 +466,7 @@ export class HttpAgentRuntime implements AgentRuntime {
       return {
         text: null,
         action: null,
+        actionUnrecognised: false,
         actionReason: null,
         outcome: outcomeForCompletionState(completionState),
         correlationId,
@@ -428,9 +478,11 @@ export class HttpAgentRuntime implements AgentRuntime {
     // THE ONLY PATH THAT MAY CARRY AN ACTION. Every return above pins it to
     // null, so a run this client classified as a failure cannot ask the
     // pipeline to hand a customer to a person.
+    const actionRead = readAgentAction(payload);
     return {
       text: readInlineText(payload),
-      action: readAgentAction(payload),
+      action: actionRead.kind === "known" ? actionRead.action : null,
+      actionUnrecognised: actionRead.kind === "unrecognised",
       actionReason: readActionReason(payload),
       outcome: "ok",
       correlationId,

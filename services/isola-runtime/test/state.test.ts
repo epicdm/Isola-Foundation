@@ -334,3 +334,95 @@ describe("the mounted volume, and what happens when it is not usable", () => {
     expect(store.kind).toBe("file");
   });
 });
+
+describe("the structured action survives a restart", () => {
+  /**
+   * REGRESSION, adversarial review 2026-08-25.
+   *
+   * `resultOf()` rebuilt the record field by field and did not copy `action` or
+   * `actionReason`. The store still held the ANSWER, so a replay after a
+   * restart looked perfectly healthy while reporting `action: null` — and the
+   * gateway would then fall back to phrase matching for a run that had already
+   * decided a human was needed. The escalation would silently disappear on a
+   * redelivery that crossed a restart, which is exactly when nobody is looking.
+   */
+  it("rehydrates action and actionReason from disk", async () => {
+    const dir = tempDir();
+    const first = new FileStateStore({ dir });
+    await first.transact((draft) => {
+      draft.idempotency["k"] = {
+        key: "k",
+        state: "complete",
+        companyId: "c",
+        agentId: "a",
+        runId: "r",
+        issueId: "i",
+        createdAtMs: 1,
+        completedAtMs: 2,
+        result: {
+          httpStatus: 200,
+          outcome: "ok",
+          recorded: true,
+          recorderError: null,
+          transitioned: false,
+          transitionStatus: null,
+          costEventKey: null,
+          costKind: null,
+          accruedMicrocents: 0,
+          answerText: "I'm bringing in a colleague.",
+          completionState: "completed",
+          usage: null,
+          action: "request_human",
+          actionReason: "complaint_sensitive",
+        },
+      };
+    });
+
+    // A brand new store over the same directory — the restart.
+    const second = new FileStateStore({ dir });
+    const snapshot = await second.read();
+    const result = snapshot.idempotency["k"]?.result;
+
+    expect(result?.answerText).toBe("I'm bringing in a colleague.");
+    // THE POINT. Without the fix these two are undefined and the decision is lost.
+    expect(result?.action).toBe("request_human");
+    expect(result?.actionReason).toBe("complaint_sensitive");
+  });
+
+  it("a run that carried no action rehydrates as null, not undefined-shaped garbage", async () => {
+    const dir = tempDir();
+    const first = new FileStateStore({ dir });
+    await first.transact((draft) => {
+      draft.idempotency["k"] = {
+        key: "k",
+        state: "complete",
+        companyId: "c",
+        agentId: "a",
+        runId: "r",
+        issueId: "i",
+        createdAtMs: 1,
+        completedAtMs: 2,
+        result: {
+          httpStatus: 200,
+          outcome: "ok",
+          recorded: true,
+          recorderError: null,
+          transitioned: false,
+          transitionStatus: null,
+          costEventKey: null,
+          costKind: null,
+          accruedMicrocents: 0,
+          answerText: "Plain answer.",
+          completionState: "completed",
+          usage: null,
+          action: null,
+          actionReason: null,
+        },
+      };
+    });
+    const second = new FileStateStore({ dir });
+    const result = (await second.read()).idempotency["k"]?.result;
+    expect(result?.action).toBeNull();
+    expect(result?.actionReason).toBeNull();
+  });
+});

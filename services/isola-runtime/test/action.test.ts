@@ -189,15 +189,33 @@ describe("malformed or unknown input fails closed", () => {
   });
 });
 
-describe("a missing action defaults to reply, and is flagged", () => {
-  // The SAFE direction. A missing action must never manufacture an escalation;
-  // the worst case is the pre-existing behaviour of not escalating.
-  it("defaults to reply", () => {
+describe("a missing action reports NOTHING, and is flagged", () => {
+  // REVISED after adversarial review, 2026-08-25. The first draft defaulted a
+  // missing action to "reply". That looked safe — it cannot manufacture an
+  // escalation — and was the more dangerous option: a non-null action tells the
+  // gateway to stop reading the reply text, so a model that omitted the field
+  // while saying "I'll bring in a colleague" would have had its answer
+  // delivered AND the legacy safety net switched off. A customer promised a
+  // person nobody was told about is the exact defect this module exists to
+  // remove.
+  it("reports null, not reply", () => {
     const out = parseAgentAction(envelope({ reply: "We're open until six." }));
     expect(out.kind).toBe("ok");
     if (out.kind !== "ok") return;
-    expect(out.action).toBe("reply");
+    expect(out.action).toBeNull();
     expect(out.actionDefaulted).toBe(true);
+  });
+
+  it("null is distinguishable from an explicit reply", () => {
+    const silent = parseAgentAction(envelope({ reply: "Hi." }));
+    const explicit = parseAgentAction(envelope({ action: "reply", reply: "Hi." }));
+    expect(silent.kind).toBe("ok");
+    expect(explicit.kind).toBe("ok");
+    if (silent.kind !== "ok" || explicit.kind !== "ok") return;
+    // The whole point: "said nothing" must not look like "said do not escalate".
+    expect(silent.action).not.toBe(explicit.action);
+    expect(silent.action).toBeNull();
+    expect(explicit.action).toBe("reply");
   });
 
   it("an explicit action is NOT flagged as defaulted", () => {
@@ -213,7 +231,9 @@ describe("a missing action defaults to reply, and is flagged", () => {
     );
     expect(out.kind).toBe("ok");
     if (out.kind !== "ok") return;
-    expect(out.action).toBe("reply");
+    // Null, so the caller falls back to whatever it did before — it does NOT
+    // silently assert that no human is needed.
+    expect(out.action).toBeNull();
   });
 });
 
@@ -284,8 +304,8 @@ describe("prototype safety", () => {
       const out = parseAgentAction(raw);
       expect(out.kind).toBe("ok");
       if (out.kind !== "ok") return;
-      // Must fall back to the safe default, NOT the inherited escalation.
-      expect(out.action).toBe("reply");
+      // Must report nothing, NOT the inherited escalation.
+      expect(out.action).toBeNull();
       expect(out.actionDefaulted).toBe(true);
     } finally {
       delete (Object.prototype as unknown as Record<string, unknown>)["action"];

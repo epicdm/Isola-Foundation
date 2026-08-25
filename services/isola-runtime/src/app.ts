@@ -1262,6 +1262,8 @@ export function createRuntime(deps: AppDeps): Runtime {
             // what is persisted and what is returned as `answerText`; the raw
             // json envelope is never sent to a customer and never recorded.
             content = parsedAction.reply;
+            // Null when the model emitted no action. Passed through as null so
+            // the caller's own fallback still runs — never coerced to "reply".
             agentAction = parsedAction.action;
             agentActionReason =
               parsedAction.action === "request_human"

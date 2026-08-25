@@ -97,6 +97,7 @@ describe("runtime_no_text — the contract violation", () => {
     const runtime = new StubAgentRuntime(async () => ({
       text: "   \n ",
       action: null,
+      actionUnrecognised: false,
       actionReason: null,
       outcome: "ok",
       correlationId: "c",

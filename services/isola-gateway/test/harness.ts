@@ -871,6 +871,7 @@ export class StubAgentRuntime implements AgentRuntime {
     return new StubAgentRuntime(async () => ({
       text,
       action: null,
+      actionUnrecognised: false,
       actionReason: null,
       outcome: "ok",
       correlationId: "runtime-correlation-id",
@@ -888,6 +889,7 @@ export class StubAgentRuntime implements AgentRuntime {
     return new StubAgentRuntime(async () => ({
       text,
       action,
+      actionUnrecognised: false,
       actionReason,
       outcome: "ok",
       correlationId: "runtime-correlation-id",
@@ -901,6 +903,7 @@ export class StubAgentRuntime implements AgentRuntime {
     return new StubAgentRuntime(async () => ({
       text: null,
       action: null,
+      actionUnrecognised: false,
       actionReason: null,
       outcome: "ok",
       correlationId: "runtime-correlation-id",
@@ -913,6 +916,7 @@ export class StubAgentRuntime implements AgentRuntime {
     return new StubAgentRuntime(async () => ({
       text: null,
       action: null,
+      actionUnrecognised: false,
       actionReason: null,
       outcome,
       correlationId: "runtime-correlation-id",
@@ -932,6 +936,7 @@ export class StubAgentRuntime implements AgentRuntime {
     return new StubAgentRuntime(async () => ({
       text: null,
       action: null,
+      actionUnrecognised: false,
       actionReason: null,
       outcome,
       correlationId: "runtime-correlation-id",
@@ -950,6 +955,7 @@ export class StubAgentRuntime implements AgentRuntime {
               resolve({
                 text,
                 action: null,
+                actionUnrecognised: false,
                 actionReason: null,
                 outcome: "ok",
                 correlationId: "runtime-correlation-id",

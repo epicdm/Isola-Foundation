@@ -37,7 +37,7 @@ import { DELIVERY_ACTION, deliveryRef, type LedgerIdentity } from "./deliveryref
 import type { Failpoint } from "./failpoint.js";
 import type { Ledger, SqlClient } from "./ledger.js";
 import type { Logger } from "./log.js";
-import type { AgentRuntime } from "./runtime.js";
+import { isAgentEscalationReason, type AgentRuntime } from "./runtime.js";
 import {
   isReasonCode,
   suppressesAutomatedReply,
@@ -104,6 +104,11 @@ const WRITE = {
 export const FAILURE_EXPLANATIONS: Readonly<Record<string, string>> = Object.freeze({
   runtime_no_text:
     "the AI runtime reported success but returned no answer text, which violates the inline response contract",
+  // The runtime asked for an action this build does not implement. The answer
+  // was withheld rather than sent, because it may describe the very action that
+  // was requested and would tell the customer something happened that did not.
+  runtime_action_unrecognised:
+    "the AI runtime requested an action this gateway does not implement; the answer was withheld rather than sent without performing it",
   budget_exhausted: "the AI employee's monthly budget is fully committed; the model was not called",
   provider_error: "the model provider returned an error",
   model_timeout: "the model provider did not answer inside the deadline",
@@ -609,12 +614,23 @@ export async function processDelivery(
   // `persistence_failed` arrives here as itself and not as `provider_error`.
   //
   // The contract violation. `outcome: ok` with no text is NOT an empty answer.
+  //
+  // AN ACTION THIS BUILD CANNOT PERFORM IS A FAILURE, NOT A REPLY.
+  //
+  // The runtime asked for something this gateway does not implement. Sending
+  // the answer and quietly doing nothing is the dangerous option, because the
+  // answer may describe the very thing that was requested — "I've arranged a
+  // callback for you" — and the customer would be told an action happened that
+  // did not. Fail closed: no customer message, and a human is shown the
+  // conversation. Same treatment as no usable text, for the same reason.
   const failureOutcome =
     result.outcome !== "ok"
       ? result.outcome
-      : result.text === null || result.text.trim().length === 0
-        ? "runtime_no_text"
-        : null;
+      : result.actionUnrecognised
+        ? "runtime_action_unrecognised"
+        : result.text === null || result.text.trim().length === 0
+          ? "runtime_no_text"
+          : null;
 
   if (failureOutcome === null) {
     const answer = result.text as string;
@@ -726,9 +742,20 @@ export async function processDelivery(
     // it has always used. Neither is ever free text — `ownership.ts` throws on
     // a non-code, and the runtime client has already refused anything that does
     // not match the code shape.
+    //
+    // VALIDATED HERE, not merely at the HTTP boundary. This is the component
+    // that hands the value to the ownership ledger, and the ledger persists it
+    // to an audit table — so this is where the guarantee has to be made. The
+    // HTTP client checks the same set, but any other `AgentRuntime`
+    // implementation bypasses it, and a code-shaped string like
+    // `card_4111111111111111` would satisfy `ownership.ts`'s pattern and be
+    // written verbatim. Anything outside the ratified seven degrades to the
+    // default code rather than travelling. Adversarial review, 2026-08-25.
     const escalationReason =
       usingStructuredAction && structuredAction === "request_human"
-        ? (result.actionReason ?? "explicit_human_request")
+        ? isAgentEscalationReason(result.actionReason)
+          ? result.actionReason
+          : "explicit_human_request"
         : "agent_requested_human";
 
     // A DEFERRAL IS NOT A NON-EVENT. The reply named a human but the AI is still

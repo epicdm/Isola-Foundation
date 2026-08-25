@@ -320,6 +320,13 @@ function resultOf(value: unknown): RunResultRecord | null {
     answerText: optString(value["answerText"]),
     completionState: optString(value["completionState"]),
     usage,
+    // REHYDRATED, not dropped. Omitting these here made the durable store lose
+    // the run's decision across a restart: the record still held the answer, so
+    // a replay looked healthy while reporting `action: null` — and the gateway
+    // would then fall back to phrase matching for a run that had already
+    // decided. Found by adversarial review, 2026-08-25.
+    action: optString(value["action"]),
+    actionReason: optString(value["actionReason"]),
   };
 }
 

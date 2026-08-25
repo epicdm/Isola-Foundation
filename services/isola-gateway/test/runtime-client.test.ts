@@ -84,6 +84,7 @@ describe("what the gateway sends", () => {
       text: null,
       // Contract v2: a failure can never carry an action.
       action: null,
+      actionUnrecognised: false,
       actionReason: null,
       outcome: "unauthorized",
       correlationId: "run-1",
@@ -131,6 +132,7 @@ describe("what the gateway reads back", () => {
       // "reply": the pipeline must be able to tell "said nothing" from "said
       // do not escalate".
       action: null,
+      actionUnrecognised: false,
       actionReason: null,
       outcome: "ok",
       correlationId: "runtime-corr",

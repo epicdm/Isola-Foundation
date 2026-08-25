@@ -94,16 +94,31 @@ export const DEFAULT_ESCALATION_REASON: EscalationReasonCode = "explicit_human_r
 export type AgentActionParse =
   | {
       kind: "ok";
-      action: AgentAction;
+      /**
+       * What the agent asked for, or NULL when it emitted no `action` at all.
+       *
+       * `null` is not "reply". It means the model said NOTHING about
+       * escalation, and the caller must be able to tell that apart so it can
+       * fall back to whatever it did before this contract existed.
+       *
+       * An earlier draft defaulted a missing action to `"reply"` on the
+       * reasoning that it "cannot manufacture an escalation". Adversarial
+       * review killed it, correctly: a model that omits the field while
+       * replying *"I'll bring in a colleague"* would have had its answer
+       * delivered AND the legacy safety net suppressed, because a non-null
+       * action tells the gateway to stop reading the text. That is a customer
+       * promised a person nobody was told about — the exact defect this whole
+       * module exists to remove, reintroduced by the fix for it.
+       */
+      action: AgentAction | null;
       /** The customer-facing text, kept SEPARATE from the action. */
       reply: string;
       /** Null for an ordinary reply, and for an escalation that named no reason. */
       reason: EscalationReasonCode | null;
       /**
-       * True when the model emitted no `action` at all and the safe default was
-       * used. Surfaced so a template that is silently not honouring the contract
-       * is visible in the logs rather than looking like a stream of ordinary
-       * replies.
+       * True when the model emitted no `action` at all. Surfaced so a template
+       * that is silently not honouring the contract is visible in the logs
+       * rather than looking like a stream of ordinary replies.
        */
       actionDefaulted: boolean;
       /**
@@ -139,10 +154,12 @@ function unfence(raw: string): string {
  *
  * Two failure shapes are treated very differently, on purpose:
  *
- *  - **No `action` field at all** -> defaults to `"reply"`, flagged. This is the
- *    SAFE direction: the worst case is a turn that does not escalate, which is
- *    exactly today's behaviour, and it cannot manufacture an escalation nobody
- *    asked for. It also keeps a template that has not opted in from breaking.
+ *  - **No `action` field at all** -> `action: null`, flagged. The model said
+ *    nothing, so this reports nothing rather than inventing a decision. The
+ *    caller then behaves exactly as it did before the contract existed — for
+ *    the gateway that means the legacy phrase heuristic still runs, so the
+ *    pre-existing safety net is preserved rather than silently switched off by
+ *    a model that skipped a field.
  *
  *  - **An `action` that is present but unknown** -> `invalid`. The model tried
  *    to say something and this service does not know what. Coercing it to
@@ -191,10 +208,12 @@ export function parseAgentAction(rawContent: string | null): AgentActionParse {
   }
 
   const actionRaw = readOwn("action");
-  let action: AgentAction;
+  let action: AgentAction | null;
   let actionDefaulted = false;
   if (actionRaw === undefined || actionRaw === null) {
-    action = "reply";
+    // NOT "reply". See the note on the `action` field above — reporting a
+    // decision the model never made would suppress the caller's fallback.
+    action = null;
     actionDefaulted = true;
   } else if (isAgentAction(actionRaw)) {
     action = actionRaw;

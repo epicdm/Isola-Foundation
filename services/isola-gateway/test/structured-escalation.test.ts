@@ -168,23 +168,86 @@ describe("the model cannot select another team", () => {
     expect(assigned[0]?.teamId).not.toBe(7);
   });
 
-  it("the runtime client refuses an action that is not one of the two verbs", async () => {
-    // A runtime returning something unknown must not silence a customer's AI
-    // on a word nobody defined. It degrades to the legacy path.
+  it("an action this build cannot perform FAILS CLOSED — no reply, human shown", async () => {
+    // Adversarial review, 2026-08-25. The first draft degraded an unrecognised
+    // action to the legacy path and SENT the reply. That is unsafe: the reply
+    // may describe the very action that was requested ("I've arranged your
+    // callback"), so the customer would be told something happened that did
+    // not. A future runtime meeting an old gateway is exactly when that would
+    // be hardest to notice.
     const { chatwoot } = await deliver({
       runtime: new StubAgentRuntime(async () => ({
-        text: "Nothing unusual here.",
-        // Deliberately outside the union; the client's reader must null it.
-        action: "transfer_to_team_99" as unknown as null,
+        text: "I've arranged a callback for you.",
+        action: null,
+        actionUnrecognised: true,
         actionReason: null,
         outcome: "ok",
         correlationId: "c",
         completionState: "completed",
-        contractVersion: 2,
+        contractVersion: 99,
       })),
     });
+    // The answer is WITHHELD.
+    expect(chatwoot.customerMessages).toHaveLength(0);
+    // And a human is shown the conversation.
+    expect(assignments(chatwoot)).toHaveLength(1);
+  });
+
+  it("CONTROL — the same runtime with a KNOWN action does send the reply", async () => {
+    const { chatwoot } = await deliver({
+      runtime: StubAgentRuntime.answeringWithAction("I've noted that.", "reply"),
+    });
     expect(chatwoot.customerMessages).toHaveLength(1);
-    expect(assignments(chatwoot)).toHaveLength(0);
+  });
+});
+
+describe("the runtime client's own validation", () => {
+  it("classifies an unknown action as unrecognised, NOT as absent", async () => {
+    // The distinction decides what is safe: absent -> legacy fallback,
+    // unrecognised -> fail closed. Collapsing them loses that.
+    const { readAgentAction, readActionReason } = await import("../src/runtime.js");
+    expect(readAgentAction({ action: "transfer_to_team_99" })).toEqual({
+      kind: "unrecognised",
+    });
+    expect(readAgentAction({})).toEqual({ kind: "absent" });
+    expect(readAgentAction({ action: null })).toEqual({ kind: "absent" });
+    expect(readAgentAction({ action: "request_human" })).toEqual({
+      kind: "known",
+      action: "request_human",
+    });
+  });
+
+  it("refuses a reason outside the seven ratified codes, even if code-shaped", async () => {
+    // `card_4111111111111111` passes the ownership code PATTERN and would be
+    // written verbatim to the audit table. Shape is not membership.
+    const { readActionReason } = await import("../src/runtime.js");
+    expect(readActionReason({ actionReason: "card_4111111111111111" })).toBeNull();
+    expect(readActionReason({ actionReason: "Customer asked for a human" })).toBeNull();
+    // CONTROL — a ratified code is accepted, so the refusals mean something.
+    expect(readActionReason({ actionReason: "complaint_sensitive" })).toBe(
+      "complaint_sensitive",
+    );
+  });
+
+  it("an unbounded reason degrades to the default code, never to free text", async () => {
+    const logger = new CapturingLogger();
+    await deliver({
+      runtime: new StubAgentRuntime(async () => ({
+        text: "Bringing in a colleague.",
+        action: "request_human" as const,
+        actionUnrecognised: false,
+        // What a compromised or buggy runtime might send.
+        actionReason: "card_4111111111111111",
+        outcome: "ok",
+        correlationId: "c",
+        completionState: "completed" as const,
+        contractVersion: 2,
+      })),
+      logger,
+    });
+    const line = logger.withOutcome("human_promised")[0];
+    expect(line?.["escalationReason"]).toBe("explicit_human_request");
+    expect(String(line?.["escalationReason"])).not.toContain("4111");
   });
 });
 
