@@ -61,6 +61,10 @@ const PROTECTED_PREFIXES = [
   '/plan',
   '/onboard',
   '/admin',
+  // Session-gated only (getSession() + resolveWorkspaceAuthz() in the page itself do the
+  // real, role-based authorization) — this is an earlier bounce to login, defense in depth,
+  // not a substitute for the route's own membership check.
+  '/isola-workspace',
 ];
 
 function isProtectedPath(pathname: string): boolean {
@@ -111,5 +115,6 @@ export const config = {
     '/plan/:path*',
     '/onboard/:path*',
     '/admin/:path*',
+    '/isola-workspace/:path*',
   ],
 };

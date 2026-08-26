@@ -1,0 +1,322 @@
+{
+  "$meta": {
+    "purpose": "Fixture data for the approved Isola Workspace design. Start here — build the UI against these fixtures behind typed adapters, then swap the adapters for real integrations.",
+    "warning": "Contains no real credentials, tokens, phone numbers or customer data. All values are invented. Do not replace with production data in the repository."
+  },
+
+  "tenants": [
+    {
+      "id": "epic",
+      "name": "EPIC Communications",
+      "note": "Internet, phone and managed services",
+      "country": "Dominica",
+      "timezone": "America/Dominica (UTC-4, AST)",
+      "currency": { "code": "XCD", "display": "EC$" },
+      "entitlements": ["core", "ai-team", "telephony", "billing"],
+      "accent": "#6F3DF4",
+      "administrator": { "name": "Angela Marcelle", "initials": "AM", "email": "angela@epic.example", "verified": true },
+      "openingHours": "Mon–Fri 08:00–17:00 · Sat 09:00–13:00 · closed Sunday",
+      "onboarding": { "proved": 4, "of": 7, "progress": "57%" }
+    },
+    {
+      "id": "marche",
+      "name": "Marché Créole",
+      "note": "Grocery and delivery, messaging only",
+      "country": "Dominica",
+      "timezone": "America/Dominica (UTC-4, AST)",
+      "currency": { "code": "XCD", "display": "EC$" },
+      "entitlements": ["core", "ai-team"],
+      "accent": "#6F3DF4",
+      "administrator": { "name": "Claudette Régis", "initials": "CR", "email": "claudette@marchecreole.example", "verified": true },
+      "openingHours": null,
+      "openingHoursBlocker": "Not confirmed yet — the AI front desk cannot start until Claudette confirms when the shop is open.",
+      "onboarding": { "proved": 1, "of": 7, "progress": "14%" }
+    }
+  ],
+
+  "conversation": {
+    "accountId": 5,
+    "inboxId": 46,
+    "conversationId": 131,
+    "channel": "WhatsApp",
+    "status": "open",
+    "assignee": "Eric Giraud",
+    "labels": ["Sales", "WhatsApp"],
+    "correlation": "epic-cz-revenue-loop1-2026-08-06-conv131",
+    "lastSync": "2026-08-06T09:14:00-04:00",
+    "note": "These identifiers appear ONLY inside the Technical details disclosure.",
+    "messages": [
+      { "from": "customer", "at": "09:04", "text": "Good morning. We looked at the proposal for the internet and phone package." },
+      { "from": "operator", "at": "09:07", "author": "Eric Giraud", "delivery": "delivered", "text": "Morning! Happy to walk you through it. Anything in particular you want to go over?" },
+      { "from": "customer", "at": "09:12", "text": "Thanks — can you send the updated price for the phone lines with the front desk service included? We want to decide this week." }
+    ]
+  },
+
+  "customer": {
+    "name": "Joss Boutique",
+    "initials": "JB",
+    "status": "Active customer",
+    "industry": "Retail",
+    "location": "Roseau, Dominica",
+    "since": "2024-03",
+    "owner": "Eric Giraud",
+    "phone": "+1 767 555 0148",
+    "currentNeed": "An updated price for two phone lines with the AI front desk included.",
+    "nextAction": {
+      "title": "Send the updated package price and hold it until Friday",
+      "context": "Asked at 09:12 · nothing sent yet · due Friday 7 August",
+      "dueDate": "2026-08-07"
+    },
+    "alerts": [
+      { "severity": "warn", "text": "Reply due tomorrow. They are deciding this week." }
+    ],
+    "opportunity": {
+      "id": 1642,
+      "name": "Connectivity and AI Front Desk Package",
+      "value": "EC$4,850",
+      "valueNote": "first year",
+      "stage": "Proposal sent",
+      "likelihood": "60%",
+      "expectedClose": "2026-08-14",
+      "lines": [
+        { "label": "Business internet 100/50", "price": "EC$185/mo" },
+        { "label": "Hosted phone, 2 lines", "price": "EC$120/mo" },
+        { "label": "AI Front Desk", "price": "EC$80/mo" }
+      ],
+      "source": "Sales records"
+    },
+    "services": [
+      { "name": "Business internet 100/50", "detail": "Roseau branch · installed Mar 2024", "status": "Active" },
+      { "name": "Hosted phone · 2 lines", "detail": "Details unavailable right now", "status": "Active", "requiresEntitlement": "telephony" },
+      { "name": "WhatsApp business number", "detail": "+1 767 555 0148", "status": "Active" },
+      { "name": "AI Front Desk", "detail": "Trial ends 20 Aug 2026", "status": "Trial" }
+    ],
+    "recentContact": [
+      { "title": "WhatsApp · customer asked for updated pricing", "meta": "Today 09:12", "emphasis": "current" },
+      { "title": "Proposal sent by Eric Giraud", "meta": "4 Aug 2026 · email" },
+      { "title": "Site visit for phone line survey", "meta": "29 Jul 2026" },
+      { "title": "Support call about slow internet — resolved", "meta": "18 Jul 2026" }
+    ],
+    "governedActivity": [
+      {
+        "title": "Quote document attached to the customer record",
+        "state": "done",
+        "readback": "Confirmed by the sales system at 08:41 — document “Quote QT-1642-B” is on the record.",
+        "by": "Eric Giraud"
+      },
+      {
+        "title": "Customer marked as “deciding this week”",
+        "state": "done",
+        "readback": "Confirmed at 09:14",
+        "by": "Atlas, approved by Eric Giraud"
+      }
+    ],
+    "billing": {
+      "requiresEntitlement": "billing",
+      "requiresPermission": "billing.read",
+      "balance": "EC$0.00",
+      "monthlyPlan": "EC$305.00",
+      "lastPayment": "28 Jul · EC$305.00",
+      "history": "17 months, always on time"
+    },
+    "phone": {
+      "requiresEntitlement": "telephony",
+      "extensions": [
+        { "name": "Front counter · extension 101", "detail": "Rings 20 seconds, then voicemail", "status": "Working" },
+        { "name": "Stockroom · extension 102", "detail": "Rings 20 seconds, then front counter", "status": "Working" }
+      ],
+      "lastCall": "Yesterday 16:42 · 4 min · answered by Marie Joseph",
+      "degraded": true,
+      "degradedSince": "08:58"
+    }
+  },
+
+  "work": [
+    {
+      "id": "wk-approval-1",
+      "kind": "approval",
+      "title": "Add a follow-up reminder on the sales record",
+      "summary": "Reminder for Eric Giraud, due 7 Aug 2026, on the Joss Boutique opportunity.",
+      "requestedBy": { "name": "Atlas", "kind": "ai", "role": "AI assistant" },
+      "consequence": "A reminder titled “Follow up on package pricing” will be added to the Joss Boutique sales record, assigned to Eric Giraud, due 7 Aug 2026. Nothing is sent to the customer.",
+      "state": "awaitingApproval",
+      "onApproveReadback": "Reminder “Follow up on package pricing” now exists on the Joss Boutique record, assigned to Eric Giraud, due 7 Aug 2026. Read back at 09:31 AST."
+    },
+    {
+      "id": "wk-todo-1",
+      "kind": "action",
+      "title": "Send the updated package price",
+      "subtitle": "Joss Boutique · due tomorrow",
+      "state": "proposed",
+      "assignee": { "name": "Eric Giraud", "initials": "EG", "kind": "human" },
+      "priority": "high"
+    },
+    {
+      "id": "wk-overdue-1",
+      "kind": "action",
+      "title": "Confirm the extension list",
+      "subtitle": "Bellevue Hardware · was due 4 Aug",
+      "state": "overdue",
+      "badge": "2 days late",
+      "assignee": { "name": "Marie Joseph", "initials": "MJ", "kind": "human" },
+      "requiresEntitlement": "telephony"
+    },
+    {
+      "id": "wk-blocked-1",
+      "kind": "action",
+      "title": "Apply an EC$250 goodwill credit",
+      "subtitle": "Joss Boutique · prepared by Ledger",
+      "state": "blocked",
+      "explanation": "Credits above EC$100 need a manager. Nothing has been changed and the customer has not been told anything.",
+      "recovery": "Send to a manager",
+      "requiresEntitlement": "billing"
+    },
+    {
+      "id": "wk-failed-1",
+      "kind": "action",
+      "title": "Change call routing to the evening menu",
+      "subtitle": "Rosalie Café · requested Tuesday",
+      "state": "failed",
+      "explanation": "The phone system did not accept the change, so nothing was changed. The café is still on the daytime menu. Tell them before end of day if it cannot be fixed.",
+      "customerImpact": "The café is still on the daytime menu.",
+      "recovery": "Try again",
+      "onRetryReadback": "Confirmed by the phone system. Evening menu is now active from 17:00. Read back at 09:33 AST.",
+      "requiresEntitlement": "telephony"
+    },
+    {
+      "id": "wk-unconfirmed-1",
+      "kind": "action",
+      "title": "Price list message to 12 customers",
+      "subtitle": "Sent to WhatsApp at 08:20",
+      "state": "unconfirmed",
+      "explanation": "WhatsApp has accepted the request but has not confirmed delivery. Do not tell customers it was sent yet.",
+      "recovery": null
+    },
+    {
+      "id": "wk-done-1",
+      "kind": "action",
+      "title": "Call notes saved to the customer record",
+      "subtitle": "Joss Boutique · today 08:41",
+      "state": "done",
+      "readback": "Confirmed on the record as note #318."
+    }
+  ],
+
+  "aiTeam": [
+    { "name": "Atlas", "initials": "At", "role": "Assistant · reads and suggests only", "availability": "Available", "kind": "advisor",
+      "knowledge": ["Price list v4", "Service terms", "Coverage map"],
+      "today": "23 summaries, 7 actions prepared" },
+    { "name": "Nova", "initials": "No", "role": "Front desk · WhatsApp, after hours", "availability": "On duty", "kind": "frontline",
+      "allowed": ["Answer common questions", "Take a message", "Book a callback"],
+      "alwaysHandsOver": "Prices and quotes · complaints · anything about a bill · when the customer asks for a person",
+      "today": "11 conversations handled, 6 handed over" },
+    { "name": "Ledger", "initials": "Le", "role": "Billing · every action needs approval", "availability": "Approval only", "kind": "preparer",
+      "requiresEntitlement": "billing" },
+    { "name": "Echo", "initials": "Ec", "role": "Follow-ups · paused, phone service down", "availability": "Paused", "kind": "scheduler",
+      "pausedReason": "Phone service degraded since 08:58", "today": "2 attempts failed, paused since 08:58",
+      "requiresEntitlement": "telephony" }
+  ],
+
+  "atlasSuggestion": {
+    "text": "Hi! Updated pricing for the two phone lines with AI Front Desk included is EC$385 per month, all taxes in. That is EC$40 less than the earlier quote. Happy to hold this price until Friday.",
+    "provenance": ["Based on: price list v4", "Opportunity record"],
+    "confidence": "high",
+    "notSentToCustomer": true,
+    "actions": ["Put in the reply box", "Ask for approval", "Create a follow-up", "Discard"]
+  },
+
+  "today": {
+    "date": "Thursday 6 August 2026",
+    "time": "09:34 Atlantic time",
+    "decisionMetrics": [
+      { "value": "2", "family": "err", "text": "customers waiting on a promise we broke" },
+      { "value": "3", "family": "warn", "text": "approvals waiting, oldest 40 min" },
+      { "value": "EC$14,050", "family": "neutral", "text": "of sales waiting on us to reply" }
+    ],
+    "activityLine": "24 conversations today · 11 answered by the AI team · 14 actions confirmed",
+    "needsAttention": [
+      { "severity": "err", "title": "Rosalie Café is still on the wrong call menu", "body": "The routing change failed on Tuesday and nobody has told the customer. Calls after 17:00 are ringing the empty counter phone.", "meta": "Owner Marie Joseph · failed 2 days ago", "action": "Fix it", "primary": true, "requiresEntitlement": "telephony" },
+      { "severity": "err", "title": "A delivery customer has waited since yesterday", "body": "They asked to change a delivery address at 17:40 and nobody has replied. The delivery is scheduled for this afternoon.", "meta": "Unassigned · 16 hours", "action": "Open it", "primary": true, "whenMissingEntitlement": "telephony" },
+      { "severity": "warn", "title": "Joss Boutique is waiting on a price and deciding this week", "body": "EC$4,850 opportunity. Asked at 09:12, follow-up due tomorrow, no reply sent yet.", "meta": "Owner Eric Giraud", "action": "Open conversation" },
+      { "severity": "warn", "title": "3 approvals have been waiting more than 30 minutes", "body": "Two reminders on sales records and one billing credit. Nothing has been sent to customers while they wait.", "action": "Review" },
+      { "severity": "warn", "title": "2 conversations have had no answer for over an hour", "body": "Marigot Nursery (1h 20m) and an unknown WhatsApp number (1h 05m). Both are unassigned.", "action": "Assign" },
+      { "severity": "block", "title": "Phone service is answering slowly", "body": "Since 08:58. Phone changes are paused; calls themselves are working. Echo, the follow-up assistant, is paused until it clears.", "action": "Details", "requiresEntitlement": "telephony" }
+    ],
+    "approvalsWaiting": [
+      { "title": "Follow-up reminder · Joss Boutique", "meta": "Atlas · 40 min" },
+      { "title": "EC$250 goodwill credit · Joss Boutique", "meta": "Ledger · 32 min · needs a manager", "requiresEntitlement": "billing" },
+      { "title": "Reminder to call back · Marigot Nursery", "meta": "Atlas · 12 min" }
+    ],
+    "staffWorkload": [
+      { "name": "Eric Giraud", "initials": "EG", "detail": "6 conversations · 4 follow-ups", "state": "Busy" },
+      { "name": "Marie Joseph", "initials": "MJ", "detail": "9 conversations · 5 follow-ups, 2 late", "state": "Overloaded", "family": "warn" },
+      { "name": "Denise Paul", "initials": "DP", "detail": "3 conversations · 1 follow-up", "state": "Has room", "family": "ok" }
+    ],
+    "salesNeedingPush": [
+      { "customer": "Joss Boutique", "name": "Connectivity and AI Front Desk", "meta": "Proposal sent · closes 14 Aug · Eric Giraud", "value": "EC$4,850", "state": "Waiting on us", "family": "warn" },
+      { "customer": "Bellevue Hardware", "name": "Phone system expansion", "meta": "Quote requested · closes 21 Aug · Marie Joseph", "value": "EC$9,200", "state": "Date passed", "family": "err" },
+      { "customer": "Marigot Nursery", "name": "Business internet upgrade", "meta": "Site survey booked · closes 28 Aug · Eric Giraud", "value": "EC$3,100", "state": "On track", "family": "neutral" }
+    ],
+    "serviceProblems": [
+      { "title": "Phone service is slow", "detail": "Changes paused · calls unaffected · since 08:58", "family": "warn", "requiresEntitlement": "telephony" },
+      { "title": "Everything else is working", "detail": "Messaging, sales records and billing all responding", "family": "ok" }
+    ]
+  },
+
+  "onboarding": {
+    "stages": ["Business", "Workspace", "Channels", "AI Team", "Business systems", "Acceptance", "Go live"],
+    "stageStates": ["notStarted", "setup", "proved", "accepted", "blocked", "failed"],
+    "epic": [
+      { "stage": "Business", "state": "accepted", "note": "Signed off by Angela" },
+      { "stage": "Workspace", "state": "proved", "note": "2 of 3 staff signed in" },
+      { "stage": "Channels", "state": "setup", "note": "Email set up but never tested" },
+      { "stage": "AI Team", "state": "proved", "note": "Nova and Atlas answering" },
+      { "stage": "Business systems", "state": "setup", "note": "Phone connected, not proved" },
+      { "stage": "Acceptance", "state": "failed", "note": "1 check failed", "afterRetry": { "state": "proved", "note": "All 11 checks passed" } },
+      { "stage": "Go live", "state": "notStarted", "note": "Waiting on checks", "afterRetry": { "state": "setup", "note": "Ready to switch on" } }
+    ],
+    "marche": [
+      { "stage": "Business", "state": "proved", "note": "Claudette confirmed the details" },
+      { "stage": "Workspace", "state": "setup", "note": "1 of 4 staff signed in" },
+      { "stage": "Channels", "state": "setup", "note": "WhatsApp only so far" },
+      { "stage": "AI Team", "state": "blocked", "note": "Waiting on opening hours" },
+      { "stage": "Business systems", "state": "notStarted", "note": "Not started" },
+      { "stage": "Acceptance", "state": "notStarted", "note": "No checks run yet" },
+      { "stage": "Go live", "state": "notStarted", "note": "Not started" }
+    ],
+    "acceptanceChecks": [
+      { "name": "The administrator can sign in", "evidence": "Angela signed in on 5 Aug at 14:02" },
+      { "name": "Staff can sign in and see only their inboxes", "evidence": "Eric and Marie both confirmed" },
+      { "name": "A real message from outside arrives", "evidence": "WhatsApp test from an external number" },
+      { "name": "The AI front desk answers it", "evidence": "Nova replied in 4 seconds" },
+      { "name": "A person can take over mid-conversation", "evidence": "Marie took over, Nova stopped" },
+      { "name": "A person can reply and the customer receives it", "evidence": "Delivery confirmed by WhatsApp" },
+      { "name": "The AI can be handed the conversation back", "evidence": "Handed back at 14:19, Nova resumed" },
+      { "name": "The customer panel shows the right customer", "evidence": "Matched by phone number, history correct" },
+      { "name": "An approved action reaches the real system", "evidence": "Test reminder created on a sales record", "epicFailure": "Call menu change was not confirmed by the phone system" },
+      { "name": "The system confirms the change back to us", "evidence": "Read back from the sales record" },
+      { "name": "One business cannot see another business", "evidence": "Second test tenant saw nothing of EPIC" }
+    ],
+    "rule": "Creating an account or an integration never counts as a pass. Each check records evidence of a real message, login or change."
+  },
+
+  "staff": {
+    "epic": [
+      { "name": "Eric Giraud", "initials": "EG", "role": "Sales · all inboxes · sees customer money details", "state": "Signed in" },
+      { "name": "Marie Joseph", "initials": "MJ", "role": "Support · WhatsApp and email · no money details", "state": "Signed in" },
+      { "name": "Denise Paul", "initials": "DP", "role": "Support · WhatsApp only", "state": "Invited, not signed in" }
+    ],
+    "marche": [
+      { "name": "Claudette Régis", "initials": "CR", "role": "Owner · all inboxes", "state": "Signed in" },
+      { "name": "Jules Toussaint", "initials": "JT", "role": "Counter · WhatsApp", "state": "Invited" },
+      { "name": "Nadia Baptiste", "initials": "NB", "role": "Deliveries · WhatsApp", "state": "Invited" },
+      { "name": "Simon Prosper", "initials": "SP", "role": "Counter · WhatsApp", "state": "Invited" }
+    ]
+  },
+
+  "otherConversations": [
+    { "customer": "Bellevue Hardware", "initials": "BH", "at": "08:47", "preview": "We still have two extensions not ringing." },
+    { "customer": "Rosalie Café", "initials": "RC", "at": "Yest.", "preview": "Call routing change was requested Tuesday." },
+    { "customer": "Marigot Nursery", "initials": "MN", "at": "Yest.", "preview": "Front desk agent handled after hours." }
+  ]
+}
