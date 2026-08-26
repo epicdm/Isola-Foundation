@@ -1,4 +1,4 @@
-import { findCustomerByPhone, json2Call, type OdooConfig } from '@/engines/odoo';
+import { json2Call, type OdooConfig, type OdooCustomer } from '@/engines/odoo';
 import type {
   Customer360Document,
   Customer360Loop,
@@ -21,6 +21,34 @@ function displayName(value: unknown): string | null {
   return null;
 }
 
+const CUSTOMER_FIELDS = ['id', 'name', 'email', 'phone', 'phone_sanitized', 'street', 'city', 'is_company'];
+
+/** Unlike the legacy helper, this lookup does not turn transport failure into no-match. */
+async function findCustomerStrict(config: OdooConfig, phone: string): Promise<OdooCustomer | null> {
+  const digits = phone.replace(/[^\d]/g, '');
+  if (digits.length < 7) return null;
+  const candidates = [...new Set([
+    digits.length === 10 ? `+1${digits}` : `+${digits}`,
+    `+${digits}`,
+  ])];
+
+  for (const candidate of candidates) {
+    const rows = await json2Call(config, 'res.partner', 'search_read', {
+      domain: [['phone_sanitized', '=', candidate]],
+      fields: CUSTOMER_FIELDS,
+      limit: 1,
+    }, 12000) as OdooCustomer[];
+    if (rows.length) return rows[0];
+  }
+
+  const rows = await json2Call(config, 'res.partner', 'search_read', {
+    domain: [['phone_sanitized', 'ilike', digits.slice(-10)]],
+    fields: CUSTOMER_FIELDS,
+    limit: 1,
+  }, 12000) as OdooCustomer[];
+  return rows[0] ?? null;
+}
+
 /**
  * One partner-scoped Odoo projection for the embedded Chatwoot workspace.
  * It creates nothing and every read is pinned to the resolved partner id.
@@ -30,7 +58,7 @@ export async function readCustomer360(
   phone: string,
   conversation: Customer360Snapshot['conversation'],
 ): Promise<Customer360Snapshot | null> {
-  const partner = await findCustomerByPhone(config, phone);
+  const partner = await findCustomerStrict(config, phone);
   if (!partner) return null;
   const partnerId = partner.id;
 
