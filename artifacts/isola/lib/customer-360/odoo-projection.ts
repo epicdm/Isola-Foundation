@@ -1,5 +1,6 @@
 import { json2Call, type OdooConfig, type OdooCustomer } from '@/engines/odoo';
 import type {
+  Customer360Balance,
   Customer360Document,
   Customer360Loop,
   Customer360Snapshot,
@@ -13,6 +14,11 @@ function number(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+/** Odoo returns a many2one as [id, "NAME"]; the currency NAME is the code. */
+function currencyCode(value: unknown): string | null {
+  return displayName(value);
+}
+
 function displayName(value: unknown): string | null {
   if (Array.isArray(value)) return text(value[1]);
   if (value && typeof value === 'object') {
@@ -22,6 +28,12 @@ function displayName(value: unknown): string | null {
 }
 
 const CUSTOMER_FIELDS = ['id', 'name', 'email', 'phone', 'phone_sanitized', 'street', 'city', 'is_company'];
+
+/**
+ * Sentinel for a read this projection is willing to lose but not willing to
+ * misreport. Distinct from `[]`, which means Odoo answered and had nothing.
+ */
+const TOLERATED_FAILURE = Symbol('tolerated-odoo-read-failure');
 
 /** Unlike the legacy helper, this lookup does not turn transport failure into no-match. */
 async function findCustomerStrict(config: OdooConfig, phone: string): Promise<OdooCustomer | null> {
@@ -62,16 +74,16 @@ export async function readCustomer360(
   if (!partner) return null;
   const partnerId = partner.id;
 
-  const [sales, invoices, opportunities, tasks] = await Promise.all([
+  const [sales, invoices, opportunitiesRaw, tasksRaw] = await Promise.all([
     json2Call(config, 'sale.order', 'search_read', {
       domain: [['partner_id', '=', partnerId]],
-      fields: ['id', 'name', 'state', 'amount_total', 'date_order'],
+      fields: ['id', 'name', 'state', 'amount_total', 'currency_id', 'date_order'],
       order: 'date_order desc',
       limit: 12,
     }, 12000) as Promise<Record<string, unknown>[]>,
     json2Call(config, 'account.move', 'search_read', {
       domain: [['partner_id', '=', partnerId], ['move_type', '=', 'out_invoice']],
-      fields: ['id', 'name', 'state', 'payment_state', 'amount_total', 'amount_residual', 'invoice_date'],
+      fields: ['id', 'name', 'state', 'payment_state', 'amount_total', 'amount_residual', 'currency_id', 'invoice_date'],
       order: 'invoice_date desc',
       limit: 12,
     }, 12000) as Promise<Record<string, unknown>[]>,
@@ -80,14 +92,21 @@ export async function readCustomer360(
       fields: ['id', 'name', 'stage_id', 'expected_revenue', 'date_deadline'],
       order: 'write_date desc',
       limit: 8,
-    }, 12000).catch(() => []) as Promise<Record<string, unknown>[]>,
+    }, 12000).catch(() => TOLERATED_FAILURE) as Promise<Record<string, unknown>[] | typeof TOLERATED_FAILURE>,
     json2Call(config, 'project.task', 'search_read', {
       domain: [['partner_id', '=', partnerId], ['active', '=', true]],
       fields: ['id', 'name', 'stage_id', 'date_deadline'],
       order: 'date_deadline asc',
       limit: 8,
-    }, 12000).catch(() => []) as Promise<Record<string, unknown>[]>,
+    }, 12000).catch(() => TOLERATED_FAILURE) as Promise<Record<string, unknown>[] | typeof TOLERATED_FAILURE>,
   ]);
+
+  // A tolerated failure is reported, never rendered as an empty result. The
+  // same distinction the customer lookup already makes between "no match" and
+  // "could not ask".
+  const openLoopsAvailable = opportunitiesRaw !== TOLERATED_FAILURE && tasksRaw !== TOLERATED_FAILURE;
+  const opportunities = opportunitiesRaw === TOLERATED_FAILURE ? [] : opportunitiesRaw;
+  const tasks = tasksRaw === TOLERATED_FAILURE ? [] : tasksRaw;
 
   const documents: Customer360Document[] = [
     ...sales.map((row) => ({
@@ -96,6 +115,7 @@ export async function readCustomer360(
       kind: row.state === 'draft' || row.state === 'sent' ? 'quotation' as const : 'order' as const,
       state: text(row.state),
       total: number(row.amount_total),
+      currency: currencyCode(row.currency_id),
       date: text(row.date_order),
     })),
     ...invoices.map((row) => ({
@@ -106,6 +126,7 @@ export async function readCustomer360(
       paymentState: text(row.payment_state),
       total: number(row.amount_total),
       residual: number(row.amount_residual),
+      currency: currencyCode(row.currency_id),
       date: text(row.invoice_date),
     })),
   ];
@@ -128,9 +149,23 @@ export async function readCustomer360(
     })),
   ];
 
-  const balanceDue = invoices
-    .filter((row) => row.state === 'posted')
-    .reduce((sum, row) => sum + (number(row.amount_residual) ?? 0), 0);
+  // GROUPED, NOT SUMMED. `def-receivables-headline-figure-is-mostly-draft-
+  // invoices-2026-08-13` measured EPIC's own unpaid set as 265 XCD invoices
+  // plus 2 USD ones, and states plainly that adding amount_residual across
+  // them without conversion "produces a meaningless total". This runtime has
+  // no FX rate and must not invent one, so each currency is reported on its
+  // own line and the operator reads them separately.
+  const byCurrency = new Map<string, number>();
+  for (const row of invoices) {
+    if (row.state !== 'posted') continue;
+    const residual = number(row.amount_residual) ?? 0;
+    if (residual === 0) continue;
+    const code = currencyCode(row.currency_id) ?? 'UNKNOWN';
+    byCurrency.set(code, (byCurrency.get(code) ?? 0) + residual);
+  }
+  const balances: Customer360Balance[] = [...byCurrency.entries()]
+    .map(([currency, amount]) => ({ currency, amount }))
+    .sort((a, b) => b.amount - a.amount);
 
   return {
     verifiedAt: new Date().toISOString(),
@@ -143,8 +178,9 @@ export async function readCustomer360(
       phone: partner.phone,
       city: partner.city,
     },
-    balanceDue: invoices.length ? balanceDue : null,
+    balances,
     documents,
     openLoops,
+    openLoopsAvailable,
   };
 }

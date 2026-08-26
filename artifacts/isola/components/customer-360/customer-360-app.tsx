@@ -15,7 +15,31 @@ type Phase =
   | { kind: 'ready'; snapshot: Customer360Snapshot }
   | { kind: 'message'; title: string; body: string; retry?: ChatwootContextHint };
 
-const money = new Intl.NumberFormat('en-DM', { style: 'currency', currency: 'XCD' });
+/**
+ * Format an amount in ITS OWN currency.
+ *
+ * The previous single formatter hardcoded XCD and was applied to every figure,
+ * so a USD invoice rendered as EC$. A wrong number wearing a confident currency
+ * symbol is the failure mode this workspace exists to prevent: an operator can
+ * read it straight to a customer. When Odoo did not give us a currency we show
+ * the bare amount and say so, rather than guessing one.
+ */
+function formatMoney(amount: number | null | undefined, currency: string | null | undefined): string {
+  if (amount == null) return '—';
+  if (!currency) return `${amount.toLocaleString('en-DM')} (currency unknown)`;
+  try {
+    return new Intl.NumberFormat('en-DM', { style: 'currency', currency }).format(amount);
+  } catch {
+    // An unrecognised ISO code must not throw the whole panel away.
+    return `${amount.toLocaleString('en-DM')} ${currency}`;
+  }
+}
+
+/** Balances are never combined; each currency is its own line. */
+function formatBalances(balances: Customer360Snapshot['balances']): string {
+  if (!balances.length) return 'No posted balance';
+  return balances.map((b) => formatMoney(b.amount, b.currency)).join(' + ');
+}
 
 function loadSnapshot(hint: ChatwootContextHint, setPhase: (phase: Phase) => void) {
   setPhase({ kind: 'loading', hint });
@@ -69,7 +93,7 @@ export function Customer360App() {
   return <main className={styles.shell}>
     <header className={styles.customerBand}>
       <div><span className={styles.eyebrow}>Verified Odoo customer</span><h1>{snapshot.customer.name}</h1><p>{snapshot.customer.phone ?? 'No phone'} · {snapshot.customer.email ?? 'No email'}</p></div>
-      <div className={styles.pulse}><span>Balance due</span><strong>{snapshot.balanceDue == null ? '—' : money.format(snapshot.balanceDue)}</strong><small>Checked {new Date(snapshot.verifiedAt).toLocaleTimeString()}</small></div>
+      <div className={styles.pulse}><span>Balance due</span><strong>{formatBalances(snapshot.balances)}</strong><small>{snapshot.balances.length > 1 ? 'Separate currencies — not combined' : `Checked ${new Date(snapshot.verifiedAt).toLocaleTimeString()}`}</small></div>
     </header>
 
     <section className={styles.request}>
@@ -82,17 +106,17 @@ export function Customer360App() {
     </nav>
 
     {tab === 'overview' && <section className={styles.grid}>
-      <article className={styles.card}><span className={styles.eyebrow}>Commercial</span><strong>{quotations.length} quotations</strong><p>{invoices.length} invoices · {snapshot.openLoops.filter((x) => x.kind === 'opportunity').length} opportunities</p><button onClick={() => setTab('sales')}>Review sales</button></article>
-      <article className={styles.card}><span className={styles.eyebrow}>Open loops</span><strong>{snapshot.openLoops.length} items need follow-up</strong><p>{snapshot.openLoops[0]?.title ?? 'No open Odoo work found.'}</p><button onClick={() => setTab('support')}>Review loops</button></article>
-      <article className={styles.card}><span className={styles.eyebrow}>Account</span><strong>{snapshot.balanceDue ? money.format(snapshot.balanceDue) : 'No posted balance'}</strong><p>Odoo remains the authoritative record.</p><button onClick={() => setTab('billing')}>Review billing</button></article>
+      <article className={styles.card}><span className={styles.eyebrow}>Commercial</span><strong>{quotations.length} quotations</strong><p>{invoices.length} invoices · {snapshot.openLoopsAvailable ? `${snapshot.openLoops.filter((x) => x.kind === 'opportunity').length} opportunities` : 'opportunities unavailable'}</p><button onClick={() => setTab('sales')}>Review sales</button></article>
+      <article className={styles.card}><span className={styles.eyebrow}>Open loops</span><strong>{snapshot.openLoopsAvailable ? `${snapshot.openLoops.length} items need follow-up` : 'Open work unavailable'}</strong><p>{snapshot.openLoopsAvailable ? (snapshot.openLoops[0]?.title ?? 'No open Odoo work found.') : 'Odoo did not answer for opportunities or tasks. This is not a statement that none exist.'}</p><button onClick={() => setTab('support')}>Review loops</button></article>
+      <article className={styles.card}><span className={styles.eyebrow}>Account</span><strong>{formatBalances(snapshot.balances)}</strong><p>Odoo remains the authoritative record.</p><button onClick={() => setTab('billing')}>Review billing</button></article>
     </section>}
 
     {tab === 'sales' && <DocumentList title="Sales documents" empty="No quotations or orders found." items={snapshot.documents.filter((x) => x.kind !== 'invoice')} />}
     {tab === 'billing' && <DocumentList title="Invoices" empty="No customer invoices found." items={invoices} />}
-    {tab === 'support' && <section className={styles.list}><div className={styles.sectionHead}><div><span className={styles.eyebrow}>Close the loop</span><h2>Open customer work</h2></div><p>Review before creating a duplicate.</p></div>{snapshot.openLoops.length ? snapshot.openLoops.map((loop) => <article className={styles.row} key={`${loop.kind}-${loop.id}`}><div><strong>{loop.title}</strong><p>{loop.kind} · {loop.state ?? 'State unavailable'}</p></div><div><span>{loop.due ?? 'No due date'}</span><button disabled title="Exact Odoo deep link lands in the next slice">Open in Odoo</button></div></article>) : <p className={styles.empty}>No open Odoo work found.</p>}</section>}
+    {tab === 'support' && <section className={styles.list}><div className={styles.sectionHead}><div><span className={styles.eyebrow}>Close the loop</span><h2>Open customer work</h2></div><p>Review before creating a duplicate.</p></div>{!snapshot.openLoopsAvailable ? <p className={styles.empty}>Odoo did not answer for opportunities or tasks. Review the customer directly in Odoo before assuming there is no open work.</p> : snapshot.openLoops.length ? snapshot.openLoops.map((loop) => <article className={styles.row} key={`${loop.kind}-${loop.id}`}><div><strong>{loop.title}</strong><p>{loop.kind} · {loop.state ?? 'State unavailable'}</p></div><div><span>{loop.due ?? 'No due date'}</span><button disabled title="Exact Odoo deep link lands in the next slice">Open in Odoo</button></div></article>) : <p className={styles.empty}>No open Odoo work found.</p>}</section>}
   </main>;
 }
 
 function DocumentList({ title, empty, items }: { title: string; empty: string; items: Customer360Snapshot['documents'] }) {
-  return <section className={styles.list}><div className={styles.sectionHead}><div><span className={styles.eyebrow}>Odoo records</span><h2>{title}</h2></div><p>Review the source record before sending anything.</p></div>{items.length ? items.map((item) => <article className={styles.row} key={`${item.kind}-${item.id}`}><div><strong>{item.reference}</strong><p>{item.kind} · {item.paymentState ?? item.state ?? 'State unavailable'}</p></div><div><span>{item.total == null ? '—' : money.format(item.total)}</span><button disabled title="Send/review action lands in the next slice">Review</button></div></article>) : <p className={styles.empty}>{empty}</p>}</section>;
+  return <section className={styles.list}><div className={styles.sectionHead}><div><span className={styles.eyebrow}>Odoo records</span><h2>{title}</h2></div><p>Review the source record before sending anything.</p></div>{items.length ? items.map((item) => <article className={styles.row} key={`${item.kind}-${item.id}`}><div><strong>{item.reference}</strong><p>{item.kind} · {item.paymentState ?? item.state ?? 'State unavailable'}</p></div><div><span>{formatMoney(item.total, item.currency)}</span><button disabled title="Send/review action lands in the next slice">Review</button></div></article>) : <p className={styles.empty}>{empty}</p>}</section>;
 }

@@ -8,7 +8,22 @@ export interface Customer360Document {
   paymentState?: string | null;
   total: number | null;
   residual?: number | null;
+  /**
+   * The document's OWN currency, read from Odoo. Never assumed.
+   *
+   * EPIC's ledger genuinely holds more than one: the unpaid set measured
+   * 2026-08-13 was 265 XCD invoices alongside 2 USD ones. Rendering an amount
+   * under a currency it was not denominated in produces a confident wrong
+   * number, which is the one thing an operator must never read to a customer.
+   */
+  currency: string | null;
   date: string | null;
+}
+
+/** Outstanding residual for ONE currency. Never combined across currencies. */
+export interface Customer360Balance {
+  currency: string;
+  amount: number;
 }
 
 export interface Customer360Loop {
@@ -34,9 +49,27 @@ export interface Customer360Snapshot {
     phone: string | null;
     city: string | null;
   };
-  balanceDue: number | null;
+  /**
+   * Outstanding residual PER CURRENCY, on posted invoices only.
+   *
+   * An array rather than a single number because a scalar cannot express a
+   * partner who owes in two currencies, and the previous scalar was summed
+   * across them and then rendered as XCD. Empty means nothing outstanding;
+   * more than one entry means the operator must read them separately.
+   */
+  balances: Customer360Balance[];
   documents: Customer360Document[];
   openLoops: Customer360Loop[];
+  /**
+   * False when Odoo refused or could not answer the opportunity/task reads.
+   *
+   * Those two reads are tolerated rather than fatal, because `crm.lead` and
+   * `project.task` field availability varies by Odoo edition and module set.
+   * But a tolerated failure must not render as "no open work" — that is an
+   * outage reported to the operator as a fact about the customer. The UI says
+   * "unavailable" when this is false.
+   */
+  openLoopsAvailable: boolean;
 }
 
 export type Customer360Response =
