@@ -1,10 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const findCustomerByPhone = vi.fn();
 const json2Call = vi.fn();
 
 vi.mock('@/engines/odoo', () => ({
-  findCustomerByPhone: (...args: unknown[]) => findCustomerByPhone(...args),
   json2Call: (...args: unknown[]) => json2Call(...args),
 }));
 
@@ -14,13 +12,12 @@ const config = { url: 'https://odoo.invalid', apiKey: 'not-used', db: 'test' };
 
 describe('Odoo Customer 360 projection', () => {
   beforeEach(() => {
-    findCustomerByPhone.mockReset();
     json2Call.mockReset();
   });
 
   it('pins every business read to the one matched partner', async () => {
-    findCustomerByPhone.mockResolvedValue({ id: 42, name: 'EPIC Customer', email: 'owner@example.test', phone: '+17670000000', city: 'Roseau' });
     json2Call.mockImplementation(async (_config: unknown, model: string) => {
+      if (model === 'res.partner') return [{ id: 42, name: 'EPIC Customer', email: 'owner@example.test', phone: '+17670000000', city: 'Roseau' }];
       if (model === 'sale.order') return [{ id: 8, name: 'S0008', state: 'sent', amount_total: 125, date_order: '2026-08-26' }];
       if (model === 'account.move') return [{ id: 9, name: 'INV/9', state: 'posted', payment_state: 'partial', amount_total: 125, amount_residual: 50, invoice_date: '2026-08-26' }];
       if (model === 'crm.lead') return [{ id: 10, name: 'Upgrade', stage_id: [2, 'Qualified'], expected_revenue: 400, date_deadline: '2026-08-30' }];
@@ -34,15 +31,21 @@ describe('Odoo Customer 360 projection', () => {
     expect(result?.documents.map((item) => item.kind)).toEqual(['quotation', 'invoice']);
     expect(result?.openLoops.map((item) => item.kind)).toEqual(['opportunity', 'task']);
 
-    for (const call of json2Call.mock.calls) {
+    for (const call of json2Call.mock.calls.filter((call) => call[1] !== 'res.partner')) {
       const params = call[3] as { domain: unknown[][] };
       expect(params.domain).toContainEqual(['partner_id', '=', 42]);
     }
   });
 
   it('does not issue business reads when no customer matches', async () => {
-    findCustomerByPhone.mockResolvedValue(null);
+    json2Call.mockResolvedValue([]);
     await expect(readCustomer360(config, '+17670000000', { displayId: 61, currentRequest: null })).resolves.toBeNull();
-    expect(json2Call).not.toHaveBeenCalled();
+    expect(json2Call).toHaveBeenCalled();
+    expect(json2Call.mock.calls.every((call) => call[1] === 'res.partner')).toBe(true);
+  });
+
+  it('does not misreport an Odoo outage as customer-not-found', async () => {
+    json2Call.mockRejectedValue(new Error('Odoo unavailable'));
+    await expect(readCustomer360(config, '+17670000000', { displayId: 61, currentRequest: null })).rejects.toThrow('Odoo unavailable');
   });
 });
