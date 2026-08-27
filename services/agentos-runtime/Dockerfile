@@ -32,8 +32,21 @@ COPY src ./src
 
 # ---------- runtime ----------
 FROM python:3.13-slim AS runtime
+# PYTHONPATH=/app/src is LOAD-BEARING, not tidiness. The package lives at
+# /app/src/agentos_runtime and is never `pip install`ed into site-packages —
+# only its dependencies are (via --prefix=/install above). Without this the
+# container builds cleanly and then dies on boot with
+# `ModuleNotFoundError: No module named 'agentos_runtime'`.
+#
+# It was missing until 2026-08-27 and the test suite did not catch it:
+# pyproject.toml sets `pythonpath = ["src"]` under [tool.pytest.ini_options],
+# so PYTEST put the package on the path and 47/47 passed against a path the
+# real runtime never has. The green suite proved the code, not the deliverable.
+# Measured on host03: image built, service created, task exited 1 in a restart
+# loop. Do not remove this line without making `docker run` part of the proof.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src \
     PATH="/usr/local/bin:$PATH" \
     AGENTOS_HOST=0.0.0.0 \
     AGENTOS_PORT=8700
