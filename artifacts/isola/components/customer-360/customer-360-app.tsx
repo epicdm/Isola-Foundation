@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   CHATWOOT_FETCH_INFO_REQUEST,
   parseChatwootContext,
@@ -70,6 +70,7 @@ export function ReplyReview({
   const action = snapshot.recommendedAction;
   const [draft, setDraft] = useState(action?.suggestedReply ?? '');
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   if (!action) return null;
 
   return (
@@ -85,6 +86,7 @@ export function ReplyReview({
 
         <label className={styles.replyLabel} htmlFor="c360-reply-draft">Proposed reply — edit freely</label>
         <textarea
+          ref={textareaRef}
           id="c360-reply-draft"
           className={styles.replyBox}
           value={draft}
@@ -110,11 +112,19 @@ export function ReplyReview({
                 await navigator.clipboard.writeText(draft);
                 setCopyState('copied');
               } catch {
+                // Measured: Chatwoot's Dashboard App iframe carries no
+                // allow="clipboard-write", so the Clipboard API is denied by
+                // the browser's default Permissions Policy for cross-origin
+                // iframes. Selecting the text turns the honest fallback
+                // message into a one-keystroke (Ctrl/Cmd+C) action instead
+                // of requiring the operator to click into the box and
+                // select-all themselves.
+                textareaRef.current?.select();
                 setCopyState('failed');
               }
             }}
           >
-            {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed — select and copy manually' : 'Copy suggested reply'}
+            {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Selected — press Ctrl/Cmd+C to copy' : 'Copy suggested reply'}
           </button>
         </div>
         <p className={styles.copyHint}>
