@@ -50,7 +50,7 @@ function jsonResponse(status: number, body: unknown): Response {
 }
 
 describe("createAgentOsExecutionProvider", () => {
-  it("sends EXACTLY the six-field envelope — correlationId, tenantId, templateId, exposure, systemPrompt, context", async () => {
+  it("sends EXACTLY the seven-field envelope — correlationId, tenantId, templateId, exposure, systemPrompt, context, deadlineMs", async () => {
     let sentUrl = "";
     let sentBody: Record<string, unknown> = {};
     let sentAuth = "";
@@ -74,8 +74,23 @@ describe("createAgentOsExecutionProvider", () => {
 
     expect(sentUrl).toBe(`${BASE_URL}/v1/agent-run`);
     expect(sentAuth).toBe(`Bearer ${FAKE_SHARED_SECRET}`);
+    // This exact-shape assertion is the guard that fires whenever the wire
+    // contract widens, and it FIRED on 2026-08-27 for
+    // def-agentos-sidecar-ignores-caller-deadline-2026-08-27: `deadlineMs` is
+    // a deliberate, reviewed widening (see the field doc on
+    // AgentOsRunEnvelope), not an accident, so the list is updated rather than
+    // relaxed. It stays an exhaustive equality — never a subset check — so the
+    // next field to appear has to be argued for too.
     expect(Object.keys(sentBody).sort()).toEqual(
-      ["context", "correlationId", "exposure", "systemPrompt", "templateId", "tenantId"].sort(),
+      [
+        "context",
+        "correlationId",
+        "deadlineMs",
+        "exposure",
+        "systemPrompt",
+        "templateId",
+        "tenantId",
+      ].sort(),
     );
     // FIX 4: the SERVER-AUTHORITATIVE instruction is carried, and carried
     // SEPARATELY from the caller-supplied context.

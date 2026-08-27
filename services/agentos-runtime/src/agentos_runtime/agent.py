@@ -112,6 +112,22 @@ def make_run_operations_coordinator(settings: Settings) -> AgentRunner:
             # validated in settings.py and then never applied, so a stalled
             # provider call had no deadline inside this process at all — the
             # Node-side deadline would fire while this coroutine kept running.
+            #
+            # KEPT, and deliberately not merged into the route's deadline.
+            # main.py now wraps this whole call in the EARLIER of this ceiling
+            # and the caller's remaining budget (see deadline.py), so on the
+            # HTTP path the outer bound fires first or at the same instant and
+            # this one is the floor beneath it. It stays because it is this
+            # function's own guarantee: any caller of
+            # `run_operations_coordinator` — including one added later that
+            # does not go through /v1/agent-run — is bounded without having to
+            # remember to bound it. Removing it would move the protection into
+            # the caller, which is where it was missing in the first place.
+            # `CancelledError` is a BaseException, so neither the `except
+            # asyncio.TimeoutError` below nor the broad `except Exception`
+            # swallows an outer cancellation: it propagates, and the run really
+            # stops rather than being converted into a structured "failure"
+            # while the work continues.
             try:
                 run_output = await asyncio.wait_for(
                     agent.arun(context_text), timeout=settings.request_timeout_s

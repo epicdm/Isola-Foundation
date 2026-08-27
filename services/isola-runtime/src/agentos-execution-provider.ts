@@ -43,6 +43,33 @@ export interface AgentOsRunEnvelope {
    */
   readonly systemPrompt: string;
   readonly context: string;
+  /**
+   * THE DEADLINE THIS CALL IS ALREADY OPERATING UNDER, in REMAINING
+   * MILLISECONDS, as an integer.
+   *
+   * Added 2026-08-27 to close
+   * def-agentos-sidecar-ignores-caller-deadline-2026-08-27. The sidecar
+   * enforced only its OWN configured `AGENTOS_REQUEST_TIMEOUT_S` because the
+   * envelope gave Node's deadline nowhere to travel. Aborting the fetch here
+   * does not stop the work behind it: when this deadline was the tighter one,
+   * Node gave up and the sidecar kept executing — and kept spending provider
+   * tokens — for a caller that was already gone.
+   *
+   * SERVER-DERIVED, NEVER CALLER-SUPPLIED. It is exactly the `deadlineMs`
+   * computed below from `request.timeoutMs` (itself
+   * `Math.min(template.timeoutMs, RUNTIME_MODEL_TIMEOUT_MS)`, computed in
+   * app.ts) and the operator's `AGENTOS_TIMEOUT_MS`. `ExecutionRequest` has no
+   * field a caller could put a deadline in, and that absence is the
+   * enforcement: a caller able to name its own deadline could widen the
+   * effective policy ceiling of a process it has no right to configure.
+   *
+   * A DURATION, NOT AN ABSOLUTE TIMESTAMP. The two containers have no
+   * guaranteed clock sync, so an epoch value interpreted against the sidecar's
+   * clock misbehaves silently under skew in both directions — arriving already
+   * expired, or arriving with hours of budget. A duration means the same thing
+   * on both sides of the hop with no shared reference at all.
+   */
+  readonly deadlineMs: number;
 }
 
 export interface AgentOsExecutionProviderOptions {
@@ -113,6 +140,24 @@ export function createAgentOsExecutionProvider(
         };
       }
 
+      /**
+       * THE TIGHTER OF THE TWO DEADLINES WINS.
+       *
+       * `request.timeoutMs` is the per-run deadline (the tighter of the
+       * template's and RUNTIME_MODEL_TIMEOUT_MS, computed in app.ts);
+       * `options.timeoutMs` is the operator's AGENTOS_TIMEOUT_MS ceiling for
+       * this hop specifically. Until now only the first was ever read, so
+       * AGENTOS_TIMEOUT_MS was configuration with no effect — a setting that
+       * looks applied and is not (CLAUDE.md Law 24's corollary).
+       *
+       * Computed HERE, above the envelope, because the same number is now
+       * both enforced locally (the abort timer below) and transmitted to the
+       * sidecar (`deadlineMs`). One expression, read twice: if the two could
+       * be computed separately they could drift, and the sidecar would be
+       * told one budget while this side abandoned the call at another.
+       */
+      const deadlineMs = Math.min(request.timeoutMs, options.timeoutMs);
+
       const envelope: AgentOsRunEnvelope = {
         correlationId: request.correlationId,
         tenantId: request.tenantId,
@@ -127,19 +172,11 @@ export function createAgentOsExecutionProvider(
         // must never be able to become the instruction source.
         systemPrompt: request.systemPrompt,
         context: buildUserMessage(request.renderedContext),
+        // The SAME number the abort timer below is armed with — see the field
+        // doc on AgentOsRunEnvelope for why it is a remaining duration and why
+        // it can never come from the caller.
+        deadlineMs,
       };
-
-      /**
-       * THE TIGHTER OF THE TWO DEADLINES WINS.
-       *
-       * `request.timeoutMs` is the per-run deadline (the tighter of the
-       * template's and RUNTIME_MODEL_TIMEOUT_MS, computed in app.ts);
-       * `options.timeoutMs` is the operator's AGENTOS_TIMEOUT_MS ceiling for
-       * this hop specifically. Until now only the first was ever read, so
-       * AGENTOS_TIMEOUT_MS was configuration with no effect — a setting that
-       * looks applied and is not (CLAUDE.md Law 24's corollary).
-       */
-      const deadlineMs = Math.min(request.timeoutMs, options.timeoutMs);
 
       const controller = new AbortController();
       let timedOut = false;
