@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { decideExposure } from "../src/app.js";
+import { AGENTOS_ALLOWED_TENANT } from "../src/agentos-allowlist.js";
 import { findTemplate, normaliseRequestedExposure } from "../src/registry.js";
 import {
   CapturingLogger,
@@ -122,7 +123,10 @@ describe("POST /v1/invoke — exposure enforcement over HTTP", () => {
     ...(exposure === undefined ? {} : { exposure }),
     agentId: "agent-1",
     runId: "run-1",
-    context: { hello: "world" },
+    // `tenantId` clears the AgentOS allowlist gate for
+    // epic-staff-operations-coordinator@v1 — a no-op for every other
+    // template, which `evaluateAgentOsEligibility` short-circuits on id.
+    context: { hello: "world", tenantId: AGENTOS_ALLOWED_TENANT },
   });
 
   it("INTERNAL credential + INTERNAL template + INTERNAL exposure => 200", async () => {

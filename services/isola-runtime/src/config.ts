@@ -112,6 +112,25 @@ export interface RuntimeConfig {
   outboxFlushLimit: number;
   /** Background sweep interval. 0 disables the timer. */
   outboxSweepMs: number;
+
+  // ---- AgentOS sidecar (dec-agentos-private-python-service-behind-node-isola-runtime-2026-08-22) ----
+  /**
+   * Internal-network-only base URL for the private Python AgentOS sidecar.
+   * `null` means "not configured", which is a BOOT FAILURE (see bootErrors)
+   * because `epic-staff-operations-coordinator@v1` is unconditionally
+   * registered in registry.ts and its allowlisted path has nowhere else to
+   * go — there is deliberately no fallback to the direct-model path for a
+   * request this service has already decided is AgentOS-eligible.
+   */
+  agentOsBaseUrl: string | null;
+  /**
+   * File-backed shared secret authenticating THIS service to the sidecar,
+   * loaded once at startup via the same `_FILE` convention entrypoint.sh
+   * already uses for MODEL_API_KEY and friends (AGENTOS_SHARED_SECRET_FILE).
+   * `null` means "not configured": also a boot failure, for the same reason.
+   */
+  agentOsSharedSecret: string | null;
+  agentOsTimeoutMs: number;
 }
 
 export const DEFAULT_MODEL_BASE_URL = "https://api.deepseek.com";
@@ -135,6 +154,8 @@ export const DEFAULT_ESTIMATED_OUTPUT_TOKENS = 1000;
 export const DEFAULT_RESERVATION_TTL_MS = 5 * 60 * 1000;
 export const DEFAULT_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 export const DEFAULT_OUTBOX_SWEEP_MS = 60_000;
+/** The tighter of this and the template deadline wins, same convention as RUNTIME_MODEL_TIMEOUT_MS. */
+export const DEFAULT_AGENTOS_TIMEOUT_MS = 60_000;
 
 export type EnvRecord = Record<string, string | undefined>;
 
@@ -229,6 +250,8 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
   const paperclipBaseUrl = paperclipBaseUrlRaw
     ? stripTrailingSlash(paperclipBaseUrlRaw)
     : null;
+  const agentOsBaseUrlRaw = str(env, "AGENTOS_BASE_URL");
+  const agentOsBaseUrl = agentOsBaseUrlRaw ? stripTrailingSlash(agentOsBaseUrlRaw) : null;
 
   const explicitAllowlist = parseAllowlist(env["EGRESS_ALLOWLIST"]);
   // A template that declares its own brain must be reachable, or the call fails
@@ -244,6 +267,7 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
   const derivedAllowlist = [
     hostOf(modelBaseUrl),
     hostOf(paperclipBaseUrl),
+    hostOf(agentOsBaseUrl),
     ...templateHosts,
   ].filter((h): h is string => h !== null);
   // EXPLICIT STAYS AUTHORITATIVE. An operator who sets EGRESS_ALLOWLIST means
@@ -361,6 +385,10 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
     outboxRetentionMs: int(env, "RUNTIME_OUTBOX_RETENTION_MS", 24 * 60 * 60 * 1000),
     outboxFlushLimit: int(env, "RUNTIME_OUTBOX_FLUSH_LIMIT", 10),
     outboxSweepMs: intAllowZero(env, "RUNTIME_OUTBOX_SWEEP_MS", DEFAULT_OUTBOX_SWEEP_MS),
+
+    agentOsBaseUrl,
+    agentOsSharedSecret: str(env, "AGENTOS_SHARED_SECRET"),
+    agentOsTimeoutMs: int(env, "AGENTOS_TIMEOUT_MS", DEFAULT_AGENTOS_TIMEOUT_MS),
   };
 }
 
@@ -423,6 +451,28 @@ export function bootErrors(config: RuntimeConfig): string[] {
         `RUNTIME_SECRET_${cls}_NEXT collides with a ${other} credential. One token would satisfy both exposure classes and the boundary would not exist.`,
       );
     }
+  }
+
+  // ── AGENTOS SIDECAR VALIDATION ────────────────────────────────────────────
+  //
+  // epic-staff-operations-coordinator@v1 is unconditionally registered in
+  // registry.ts, and agentos-allowlist.ts routes it to the AgentOS provider
+  // with NO fallback to the direct-model path by design (see app.ts's
+  // routing gate) — falling back would defeat the tenant enforcement this
+  // path exists to add. So unlike MODEL_API_KEY (a bootWarning below,
+  // because the direct-model path degrades gracefully to a 502 per request),
+  // a missing AgentOS credential here is a boot refusal: the alternative is
+  // a process that starts, looks healthy, and 503s the one template it was
+  // built to serve on every single call.
+  if (config.agentOsBaseUrl === null) {
+    errors.push(
+      "AGENTOS_BASE_URL is unset. epic-staff-operations-coordinator@v1 routes through the AgentOS execution provider for its allowlisted tenant/exposure and has no fallback to the direct-model path — set the sidecar's internal-network base URL or the process will 503 every eligible request forever.",
+    );
+  }
+  if (config.agentOsSharedSecret === null) {
+    errors.push(
+      "AGENTOS_SHARED_SECRET (via AGENTOS_SHARED_SECRET_FILE, same convention as MODEL_API_KEY_FILE in entrypoint.sh) is unset. The AgentOS sidecar call cannot be authenticated without it.",
+    );
   }
 
   return errors;

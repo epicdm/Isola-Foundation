@@ -39,14 +39,16 @@ import {
   createInstructionsProvider,
   type InstructionsProvider,
 } from "./instructions.js";
-import {
-  ModelInvalidOutputError,
-  ModelProviderError,
-  ModelTimeoutError,
-} from "./errors.js";
+import { ModelProviderError } from "./errors.js";
 import { createLogger, type Logger } from "./log.js";
 import { buildIdempotencyKey, MeteringService, type MeteringOptions } from "./metering.js";
 import { createOpenAiCompatibleClient, type ModelClient } from "./model.js";
+import { evaluateAgentOsEligibility } from "./agentos-allowlist.js";
+import { createAgentOsExecutionProvider } from "./agentos-execution-provider.js";
+import {
+  createDirectModelExecutionProvider,
+  type ExecutionProvider,
+} from "./execution-provider.js";
 import type { TokenUsage } from "./money.js";
 import { createPaperclipApi, type PaperclipApi, type PaperclipCall } from "./paperclip.js";
 import {
@@ -110,13 +112,27 @@ export type Outcome =
   /** 503: measured spend has not reached the ledger. Fail closed, do not run. */
   | "cost_delivery_unconfirmed"
   /** A duplicate of a run that is still in flight. Nothing was done twice. */
-  | "duplicate_run_suppressed";
+  | "duplicate_run_suppressed"
+  /**
+   * 403: the request matched the AgentOS-gated template id but not its
+   * tenant/exposure allowlist. Refused outright — never routed to the
+   * direct-model path instead, which would silently defeat the enforcement.
+   */
+  | "agentos_routing_refused"
+  /** 503: the request is AgentOS-eligible but AGENTOS_BASE_URL/AGENTOS_SHARED_SECRET are unset. */
+  | "agentos_not_configured";
 
 export interface AppDeps {
   config: RuntimeConfig;
   logger?: Logger;
   /** Injected in tests; defaults to the real allowlisted OpenAI-compatible client. */
   modelClient?: ModelClient;
+  /**
+   * Injected in tests; defaults to a real AgentOS HTTP client when
+   * config.agentOsBaseUrl/agentOsSharedSecret are set, else `null` (which
+   * fails closed with `agentos_not_configured` for any eligible request).
+   */
+  agentOsProvider?: ExecutionProvider | null;
   /** Injected in tests; defaults to Paperclip-or-Null based on config. */
   recorder?: RunRecorder;
   /** Injected in tests; defaults to the real Paperclip REST client, or null. */
@@ -403,6 +419,28 @@ export function createRuntime(deps: AppDeps): Runtime {
     overrideClients.set(base, made);
     return made;
   };
+
+  /**
+   * THE PRIVATE AGENTOS SIDECAR CLIENT — one instance for the whole process,
+   * exactly like `modelClient` above. `null` when unconfigured; the request
+   * path below fails closed with `agentos_not_configured` rather than ever
+   * substituting the direct-model path for a request already decided to be
+   * AgentOS-eligible (see agentos-allowlist.ts). In production `bootErrors`
+   * (config.ts) refuses to start the process at all in that state — this
+   * null-check is defence in depth for anything that constructs the app
+   * without going through server.ts's boot gate (as every test here does).
+   */
+  const agentOsProvider: ExecutionProvider | null =
+    deps.agentOsProvider !== undefined
+      ? deps.agentOsProvider
+      : config.agentOsBaseUrl !== null && config.agentOsSharedSecret !== null
+        ? createAgentOsExecutionProvider({
+            baseUrl: config.agentOsBaseUrl,
+            sharedSecret: config.agentOsSharedSecret,
+            safeFetch,
+            timeoutMs: config.agentOsTimeoutMs,
+          })
+        : null;
 
   const recorder =
     deps.recorder ??
@@ -842,6 +880,71 @@ export function createRuntime(deps: AppDeps): Runtime {
 
     // ---- authorised: do the work synchronously ----------------------------
     const exposure = decision.exposure;
+
+    // ---- AgentOS routing gate ----------------------------------------------
+    // This is the FIRST tenant enforcement anywhere in this service.
+    // `extractTenantId` has always been a best-effort, descriptive extraction
+    // (conversation.ts) — nothing gated on it until this template existed.
+    // For every template OTHER than epic-staff-operations-coordinator@v1 this
+    // is a complete no-op: `evaluateAgentOsEligibility` returns
+    // `not_applicable` immediately and execution falls through to the
+    // unchanged direct-model path below, exactly as it always has.
+    const tenantId = extractTenantId(body.context);
+    const agentOsEligibility = evaluateAgentOsEligibility({
+      templateId: template.id,
+      tenantId,
+      exposure,
+    });
+
+    if (agentOsEligibility.kind === "refused") {
+      // Matched the gated template id but failed tenant or exposure: refuse
+      // outright. NEVER fall through to the direct-model path here — that
+      // would silently defeat the only tenant boundary this service has.
+      finish(
+        403,
+        "agentos_routing_refused",
+        { error: agentOsEligibility.reason },
+        {
+          agentId,
+          runId,
+          templateId: template.id,
+          templateExposure: template.exposure,
+          credentialExposure,
+          tenantId,
+          reason: agentOsEligibility.reason,
+        },
+        { completionState: "rejected", failureCategory: agentOsEligibility.reason },
+      );
+      return;
+    }
+
+    let executionProvider: ExecutionProvider;
+    if (agentOsEligibility.kind === "eligible") {
+      if (agentOsProvider === null) {
+        finish(
+          503,
+          "agentos_not_configured",
+          {
+            error:
+              "AgentOS execution provider is not configured (AGENTOS_BASE_URL / AGENTOS_SHARED_SECRET unset)",
+          },
+          {
+            agentId,
+            runId,
+            templateId: template.id,
+            templateExposure: template.exposure,
+            credentialExposure,
+            tenantId,
+          },
+          { completionState: "rejected", failureCategory: "agentos_not_configured" },
+        );
+        return;
+      }
+      executionProvider = agentOsProvider;
+    } else {
+      executionProvider = createDirectModelExecutionProvider(clientForTemplate(template));
+    }
+
     const rendered = renderContext(body.context, template.maxContextBytes);
     const model = config.modelNameOverride ?? template.model;
     resolvedModel = model;
@@ -1199,53 +1302,73 @@ export function createRuntime(deps: AppDeps): Runtime {
       const tBrainStart = now();
 
       try {
-        const result = await clientForTemplate(template).complete({
+        // Provider-shaped, not client-shaped: `executionProvider` is either
+        // the DirectModelExecutionProvider wrapping `clientForTemplate` (every
+        // template except the one below) or the AgentOsExecutionProvider
+        // (only epic-staff-operations-coordinator@v1, only tenant 8D3dp3z,
+        // only exposure INTERNAL — see the routing gate above). Neither path
+        // is visible from here; this block only ever sees an ExecutionResult.
+        const result = await executionProvider.execute({
+          template,
+          tenantId,
+          exposure,
           model,
+          systemPrompt: resolvedPrompt.prompt,
+          renderedContext: rendered,
+          correlationId,
           timeoutMs,
-          messages: [
-            { role: "system", content: resolvedPrompt.prompt },
-            { role: "user", content: userMessage },
-          ],
         });
         brainMs = now() - tBrainStart;
-        status = "succeeded";
-        content = result.content;
-        httpStatus = 200;
-        outcome = "ok";
-        if (result.usage !== null) {
-          // `promptTokens` includes the cached subset; billing splits them.
-          const cached = result.usage.cachedPromptTokens ?? 0;
-          const prompt = result.usage.promptTokens ?? 0;
-          usage = {
-            inputTokens: Math.max(0, prompt - cached),
-            cachedInputTokens: cached,
-            outputTokens: result.usage.completionTokens ?? 0,
-          };
+        if (result.status === "completed") {
+          status = "succeeded";
+          content = result.content;
+          httpStatus = 200;
+          outcome = "ok";
+          if (result.usage !== null) {
+            // `promptTokens` includes the cached subset; billing splits them.
+            const cached = result.usage.cachedPromptTokens ?? 0;
+            const prompt = result.usage.promptTokens ?? 0;
+            usage = {
+              inputTokens: Math.max(0, prompt - cached),
+              cachedInputTokens: cached,
+              outputTokens: result.usage.completionTokens ?? 0,
+            };
+          }
+        } else {
+          // NEVER fabricate an answer here. The write-back says the run
+          // failed. This mirrors, field for field, what the inline
+          // ModelClient try/catch used to do — see execution-provider.ts's
+          // DirectModelExecutionProvider, which reproduces it verbatim — so a
+          // direct-model failure is byte-for-byte identical to before this
+          // seam existed. An AgentOS failure (timeout, non-200, malformed or
+          // non-"completed" body) lands on the exact same three statuses,
+          // distinguished only by a `failureCategory` string prefixed
+          // `agentos_...` for operator traceability. There is no retry here
+          // and no fallback to a different provider.
+          failureCategory = result.reason;
+          httpStatus = result.httpStatus;
+          invalidOutput = result.invalidOutput;
+          if (result.category === "timeout") {
+            status = "timed_out";
+            outcome = "model_timeout";
+          } else if (result.category === "provider_error") {
+            status = "provider_error";
+            outcome = "provider_error";
+          } else {
+            status = "internal_error";
+            outcome = "internal_error";
+          }
         }
       } catch (err) {
-        // Recorded on the FAILURE path too. A timeout's brainMs is the most
-        // useful number there is when asking whether the ceiling is wrong or the
-        // upstream is; omitting it would leave exactly the case we most need.
+        // Defence in depth: no ExecutionProvider implementation above should
+        // ever throw (each maps its own failures to ExecutionResult), but a
+        // future one that does must still fail closed here rather than crash
+        // the request unhandled.
         brainMs = now() - tBrainStart;
-        // NEVER fabricate an answer here. The write-back says the run failed.
-        if (err instanceof ModelTimeoutError) {
-          status = "timed_out";
-          failureCategory = `model_timeout_after_${timeoutMs}ms`;
-          httpStatus = 504;
-          outcome = "model_timeout";
-        } else if (err instanceof ModelProviderError) {
-          status = "provider_error";
-          failureCategory = err.message;
-          httpStatus = 502;
-          outcome = "provider_error";
-          // Subclass of the above: same status, same outcome, same category.
-          invalidOutput = err instanceof ModelInvalidOutputError;
-        } else {
-          status = "internal_error";
-          failureCategory = `internal_error (${err instanceof Error ? err.name : "unknown"})`;
-          httpStatus = 500;
-          outcome = "internal_error";
-        }
+        status = "internal_error";
+        failureCategory = `internal_error (${err instanceof Error ? err.name : "unknown"})`;
+        httpStatus = 500;
+        outcome = "internal_error";
       }
 
       // ---- settle the reservation and meter the real cost ------------------
@@ -1277,7 +1400,7 @@ export function createRuntime(deps: AppDeps): Runtime {
           ref: conversationRef,
           companyId,
           call,
-          tenantId: extractTenantId(body.context),
+          tenantId,
           correlationId,
           runId: paperclipRunId,
           agentId,

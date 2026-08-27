@@ -6,8 +6,10 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { createApp, createRuntime, type AppDeps, type Runtime } from "../src/app.js";
+import { AGENTOS_ALLOWED_TENANT } from "../src/agentos-allowlist.js";
 import { loadConfig, type EnvRecord, type RuntimeConfig } from "../src/config.js";
 import { PaperclipApiError } from "../src/errors.js";
+import { createDirectModelExecutionProvider } from "../src/execution-provider.js";
 import { createLogger, type Logger } from "../src/log.js";
 import type { ModelClient, ModelRequest, ModelResponse } from "../src/model.js";
 import type {
@@ -53,6 +55,15 @@ export const BASE_ENV: EnvRecord = {
   // A harness that supplied a permissive default would have hidden exactly the
   // behaviour these tests now depend on.
   RUNTIME_BUDGET_FALLBACK_CENTS: "5000",
+  // REQUIRED IN PRODUCTION (see config.ts's bootErrors), so required here for
+  // the same reason as RUNTIME_BUDGET_FALLBACK_CENTS above: without these two,
+  // epic-staff-operations-coordinator@v1 has no fallback and every eligible
+  // request would 503 forever. `startServer` in this file separately wires a
+  // per-test `agentOsProvider` default from whatever `modelClient` a test
+  // supplies, so these two only need to be NON-EMPTY for bootErrors to read
+  // clean — no test depends on this exact URL or secret being dialled.
+  AGENTOS_BASE_URL: "https://agentos-sidecar.internal.example.test",
+  AGENTOS_SHARED_SECRET: placeholder("agentos"),
 };
 
 export function envConfig(overrides: EnvRecord = {}): RuntimeConfig {
@@ -308,9 +319,24 @@ export interface TestServer {
 export async function startServer(deps: AppDeps): Promise<TestServer> {
   // No test is ever allowed to reach a real Paperclip host.
   const stub = deps.paperclipApi === undefined ? new StubPaperclipApi() : null;
-  const runtime = createRuntime(
-    stub === null ? deps : { ...deps, paperclipApi: stub },
-  );
+  const withPaperclip = stub === null ? deps : { ...deps, paperclipApi: stub };
+  // Most existing tests were written before the AgentOS execution provider
+  // existed and inject only `modelClient` — they are testing budget, metering,
+  // exposure resolution, the callback loop, and so on, NOT the AgentOS HTTP
+  // boundary itself. Rather than force every one of those tests to also stub
+  // out a sidecar, a test that supplies a `modelClient` but no explicit
+  // `agentOsProvider` gets one built from that SAME stub client, so an
+  // AgentOS-eligible run (epic-staff-operations-coordinator@v1, tenant
+  // AGENTOS_ALLOWED_TENANT, exposure INTERNAL — see OVERDUE_FIXTURE below)
+  // observes byte-for-byte the same stub behaviour it always has. A test that
+  // wants to exercise the real sidecar boundary (timeouts, malformed bodies,
+  // auth failures, ...) passes its own `agentOsProvider` explicitly, which
+  // this never overrides.
+  const withAgentOs: AppDeps =
+    withPaperclip.agentOsProvider !== undefined || withPaperclip.modelClient === undefined
+      ? withPaperclip
+      : { ...withPaperclip, agentOsProvider: createDirectModelExecutionProvider(withPaperclip.modelClient) };
+  const runtime = createRuntime(withAgentOs);
   const server: Server = createServer(runtime.handler);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as AddressInfo;
@@ -381,8 +407,16 @@ export function get(base: string, path: string, bearer?: string): Promise<HttpRe
   return request(`${base}${path}`, { method: "GET", headers });
 }
 
+/**
+ * Carries `tenantId: AGENTOS_ALLOWED_TENANT` so every pre-existing test that
+ * uses this fixture with `INTERNAL_TEMPLATE` (epic-staff-operations-
+ * coordinator@v1) continues to clear the AgentOS allowlist gate exactly as it
+ * did before that gate existed. See `startServer`'s `agentOsProvider` default
+ * above for the other half of that guarantee.
+ */
 export const OVERDUE_FIXTURE = {
   issueId: "ISSUE-4821",
+  tenantId: AGENTOS_ALLOWED_TENANT,
   fixture: "overdue-invoices",
   invoices: [
     { account: "ACC-1001", customer: "Northwind Freight", balance: "USD 4,120.00", dueDate: "2026-06-01" },

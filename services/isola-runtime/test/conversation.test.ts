@@ -46,6 +46,7 @@ import {
   extractTenantId,
   titleMatchesKey,
 } from "../src/conversation.js";
+import { AGENTOS_ALLOWED_TENANT } from "../src/agentos-allowlist.js";
 import { PaperclipApiError, RecorderError } from "../src/errors.js";
 import type { ModelResponse } from "../src/model.js";
 import { renderOutcomeBody, type RunOutcome, type RunRecorder } from "../src/recorder.js";
@@ -677,7 +678,7 @@ describe("RUNTIME_CONVERSATION_ISSUES=false", () => {
         exposure: "INTERNAL",
         agentId: AGENT,
         runId: "run-1",
-        context: { issueId: "ISSUE-4821" },
+        context: { issueId: "ISSUE-4821", tenantId: AGENTOS_ALLOWED_TENANT },
         responseMode: "inline",
       },
     });
@@ -697,7 +698,9 @@ describe("the INTERNAL issue-driven path is untouched", () => {
         exposure: "INTERNAL",
         agentId: AGENT,
         runId: "run-1",
-        context,
+        // `tenantId` clears the AgentOS allowlist gate for this template; every
+        // caller here passes an object literal, so the merge is safe.
+        context: { tenantId: AGENTOS_ALLOWED_TENANT, ...(context as Record<string, unknown>) },
         responseMode: "inline",
       },
     });
