@@ -75,6 +75,7 @@ import {
 import {
   RESPONSE_CONTRACT_VERSION,
   RESPONSE_MODES,
+  type PersistenceState,
   completionStateForOutcome,
   inlineFailureBody,
   inlineHttpStatus,
@@ -684,9 +685,14 @@ export function createRuntime(deps: AppDeps): Runtime {
             runId: ctx.runId,
             // The stored string, returned as stored. Never re-rendered.
             answerText,
-            // A completed run is one Paperclip accepted, so there is no
-            // recorder error to carry.
-            recorderError: null,
+            // A stored `completed` means persistence did not FAIL, so a
+            // `recorded:false` record can only be the skipped-unconfigured
+            // case. Records written before this contract always had
+            // `recorded:true` on a completed run, so they map to "recorded"
+            // and replay exactly as they did before.
+            persistence: prior.recorded ? "recorded" : "skipped_unconfigured",
+            // Replayed as stored — the original run's reason, not invented here.
+            recorderError: prior.recorderError,
             transitioned: prior.transitioned,
             issueStatus: prior.transitionStatus,
             replay: true,
@@ -1455,12 +1461,25 @@ export function createRuntime(deps: AppDeps): Runtime {
       // HTTP status. It is logged and surfaced as `recorded:false`.
       let recorded = false;
       let recorderError: string | null = null;
+      /**
+       * WHETHER THE ANSWER WAS WRITTEN DOWN — orthogonal to `completionState`.
+       *
+       * Defaults to `failed`, the fail-closed value: every branch below sets it
+       * explicitly, and a future branch that forgets to inherits the safe one.
+       * `recorded` and `recorderError` keep their exact previous meanings so
+       * nothing downstream that reads them changes behaviour.
+       */
+      let persistence: PersistenceState = "failed";
       /** Wall time of the Paperclip write-back. 0 when no record was attempted. */
       let recordMs = 0;
       if (conversationFailure !== null) {
         // There is no issue to write to. The recorder is not called: it would
         // fail on the missing {issueId} anyway, and reporting the real reason is
         // more useful than reporting the symptom.
+        // A run that NEEDED an issue and could not get one. A write was
+        // required and did not happen, so this stays a genuine failure — it is
+        // not the "no recorder configured" deployment property.
+        persistence = "failed";
         recorded = false;
         recorderError = conversationFailure;
         logger.error({
@@ -1479,8 +1498,19 @@ export function createRuntime(deps: AppDeps): Runtime {
           await recorder.record(runOutcome);
           recordMs = now() - tRecordStart;
           recorded = recorder.kind !== "null";
-          if (recorder.kind === "null") recorderError = "no recorder configured";
+          if (recorder.kind === "null") {
+            // NO WRITE WAS ATTEMPTED. `NullRunRecorder.record()` is a no-op, so
+            // reaching here with a null recorder means nothing was tried and
+            // nothing went wrong — a deployment property, not a fault.
+            recorderError = "no recorder configured";
+            persistence = "skipped_unconfigured";
+          } else {
+            persistence = "recorded";
+          }
         } catch (err) {
+          // A CONFIGURED recorder attempted a write and it did not succeed.
+          // This is the real persistence failure, and it stays fail-closed.
+          persistence = "failed";
           recorded = false;
           recorderError = err instanceof Error ? err.message : "unknown recorder failure";
           logger.error({
@@ -1535,17 +1565,30 @@ export function createRuntime(deps: AppDeps): Runtime {
       const persistedAnswer = runOutcome.content;
 
       /**
-       * The truthful end state.
+       * The truthful end state — MODE-INDEPENDENT, deliberately.
        *
-       * `completed` requires BOTH that the model answered and that Paperclip
-       * accepted the write-back. A recorder failure is `persistence_failed`:
-       * the answer exists but was not persisted, so it is not handed out — the
-       * caller would otherwise reply to a customer with text that no record
-       * anywhere contains.
+       * `completed` requires that the model answered, that persistence did not
+       * FAIL, and that the answer is non-empty.
+       *
+       * The change from `!recorded` to `persistence === "failed"` is the whole
+       * fix (dec-ai1b-inline-agent-answer-may-return-without-recorder-2026-08-27):
+       * `!recorded` was true both when a configured recorder failed AND when no
+       * recorder was configured at all, so a deployment property was reported
+       * as a runtime fault. A CONFIGURED recorder that fails is still
+       * `persistence_failed` and still withholds the answer — unchanged.
+       *
+       * This stays mode-independent on purpose: `metering.finalize` stores it,
+       * and a later replay in EITHER mode must reproduce what that mode would
+       * have returned. Making it depend on `responseMode` would break that.
+       * The MODE decides what to DO with this state, further down.
+       *
+       * Note the ORDER is unchanged: persistence is judged before the answer's
+       * emptiness, so an empty answer with skipped persistence is still
+       * `invalid_output` and never a success.
        */
       const completionState: CompletionState =
         outcome === "ok"
-          ? !recorded
+          ? persistence === "failed"
             ? "persistence_failed"
             : persistedAnswer === null || persistedAnswer.trim().length === 0
               ? "invalid_output"
@@ -1663,7 +1706,13 @@ export function createRuntime(deps: AppDeps): Runtime {
               runId,
               // Same reference the recorder received. Not a copy of a copy.
               answerText: persistedAnswer as string,
-              recorderError: null,
+              // `completionState === "completed"` guarantees persistence is not
+              // "failed", so this ternary is exhaustive rather than a cast.
+              // The body derives `recorded` from it and cannot overstate it.
+              persistence: persistence === "recorded" ? "recorded" : "skipped_unconfigured",
+              // Carries "no recorder configured" on the skipped path, so the
+              // response states plainly why nothing was written.
+              recorderError,
               transitioned: transition.transitioned,
               issueStatus: transition.status,
               replay: false,

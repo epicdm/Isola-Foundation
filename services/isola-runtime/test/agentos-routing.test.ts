@@ -12,6 +12,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { ExecutionProvider, ExecutionRequest, ExecutionResult } from "../src/execution-provider.js";
+import { NullRunRecorder } from "../src/recorder.js";
 import {
   CapturingLogger,
   INTERNAL_SECRET,
@@ -319,6 +320,92 @@ describe("AgentOS routing over HTTP", () => {
     expect(res.correlationHeader).toBe(sentCorrelationId);
     const line = logger.withOutcome("ok").find((l) => l["correlationId"] === sentCorrelationId);
     expect(line).toBeDefined();
+  });
+});
+
+/**
+ * The scenario the ratified decision is actually about
+ * (`dec-ai1b-inline-agent-answer-may-return-without-recorder-2026-08-27`):
+ * a REAL AgentOS execution provider completing with answer text while no
+ * recorder is configured. The inline tests in `inline.test.ts` cover the
+ * response contract, but they run through the harness's direct-model
+ * substitution — these drive a genuine `agentOsProvider` so the AgentOS path
+ * itself is proven, not inferred.
+ */
+describe("AgentOS answer + unconfigured recorder (the ratified case)", () => {
+  const AGENTOS_ANSWER = "| Account | Balance |\n| ACC-1001 | USD 4,120.00 |";
+
+  it("returns the AgentOS answer inline as a non-persisted success", async () => {
+    const agentOs: ExecutionProvider = {
+      execute: async () => ({
+        status: "completed",
+        content: AGENTOS_ANSWER,
+        model: "deepseek-chat",
+        usage: null,
+      }),
+    };
+    server = await startServer({
+      config: envConfig(),
+      modelClient: StubModelClient.returning("direct model must not answer here"),
+      agentOsProvider: agentOs,
+      recorder: new NullRunRecorder(),
+    });
+
+    const res = await invoke(server.url, {
+      bearer: INTERNAL_SECRET,
+      body: {
+        templateId: INTERNAL_TEMPLATE,
+        exposure: "INTERNAL",
+        agentId: "agent-7",
+        runId: "run-agentos-no-recorder",
+        context: OVERDUE_FIXTURE,
+        responseMode: "inline",
+      },
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.json["completionState"]).toBe("completed");
+    expect(res.json["answerText"]).toBe(AGENTOS_ANSWER);
+    // Honest about the fact nothing was written down.
+    expect(res.json["recorded"]).toBe(false);
+    expect(res.json["persistence"]).toBe("skipped_unconfigured");
+  });
+
+  it("a FAILED AgentOS run with no recorder is still not a success", async () => {
+    // Positive control for the test above: skipping persistence must not turn
+    // a provider failure into an answer.
+    const agentOs: ExecutionProvider = {
+      execute: async () => ({
+        status: "failed",
+        category: "provider_error",
+        reason: "agentos_non_terminal_status (error)",
+        httpStatus: 502,
+        invalidOutput: true,
+      }),
+    };
+    server = await startServer({
+      config: envConfig(),
+      modelClient: StubModelClient.returning("unused"),
+      agentOsProvider: agentOs,
+      recorder: new NullRunRecorder(),
+    });
+
+    const res = await invoke(server.url, {
+      bearer: INTERNAL_SECRET,
+      body: {
+        templateId: INTERNAL_TEMPLATE,
+        exposure: "INTERNAL",
+        agentId: "agent-7",
+        runId: "run-agentos-failed",
+        context: OVERDUE_FIXTURE,
+        responseMode: "inline",
+      },
+    });
+
+    expect(res.status).toBe(502);
+    expect(res.json["ok"]).toBe(false);
+    expect(res.json["answerText"]).toBeNull();
+    expect(res.json["completionState"]).not.toBe("completed");
   });
 });
 

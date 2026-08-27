@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { extractIssueId, parseInvokeBody } from "../src/app.js";
 import { ModelProviderError, ModelTimeoutError, RecorderError } from "../src/errors.js";
 import { findTemplate } from "../src/registry.js";
-import { renderOutcomeBody } from "../src/recorder.js";
+import { NullRunRecorder, renderOutcomeBody, type RunRecorder } from "../src/recorder.js";
 import {
   CapturingLogger,
   INTERNAL_SECRET,
@@ -25,12 +25,18 @@ afterEach(async () => {
 
 async function boot(opts: {
   model?: StubModelClient;
-  recorder?: RecordingRecorder;
+  /**
+   * Widened from `RecordingRecorder` so a test can inject a `NullRunRecorder`
+   * (the unconfigured-persistence case). Same shape and same cast as
+   * `inline.test.ts`'s own boot helper — callers that read `.outcomes` are the
+   * ones that pass a RecordingRecorder or take the default.
+   */
+  recorder?: RunRecorder;
   env?: Record<string, string | undefined>;
 } = {}) {
   const logger = new CapturingLogger();
   const model = opts.model ?? StubModelClient.returning("stub answer");
-  const recorder = opts.recorder ?? new RecordingRecorder();
+  const recorder = (opts.recorder ?? new RecordingRecorder()) as RecordingRecorder;
   server = await startServer({
     config: envConfig(opts.env ?? {}),
     logger: logger.logger,
@@ -260,6 +266,53 @@ describe("recorder failure does not mask a successful run", () => {
     expect(res.status).toBe(200);
     expect(res.json["recorded"]).toBe(true);
     expect(recorder.outcomes[0]!.issueId).toBe("ISSUE-4821");
+  });
+
+  /**
+   * NON-INLINE IS UNCHANGED by
+   * `dec-ai1b-inline-agent-answer-may-return-without-recorder-2026-08-27`.
+   *
+   * Measured baseline before the change (not assumed): a non-inline run with a
+   * NullRunRecorder returned HTTP 200, `ok:true`, `outcome:"ok"`,
+   * `recorded:false`, `recorderError:"no recorder configured"`. The non-inline
+   * response is built from `httpStatus`/`outcome` and never reads
+   * `completionState`, so moving `completionState` cannot move it. These pin
+   * that, so a future change to the persistence dimension cannot quietly
+   * alter the durable-mode contract.
+   */
+  it("non-inline + null recorder is byte-identical to its pre-change response", async () => {
+    await boot({ recorder: new NullRunRecorder() });
+
+    const res = await invoke(server!.url, { bearer: INTERNAL_SECRET, body: goodBody() });
+
+    expect(res.status).toBe(200);
+    expect(res.json["ok"]).toBe(true);
+    expect(res.json["outcome"]).toBe("ok");
+    expect(res.json["recorded"]).toBe(false);
+    expect(res.json["recorderError"]).toBe("no recorder configured");
+    // The inline-only contract fields must not leak into a non-inline body.
+    expect(res.json["answerText"]).toBeUndefined();
+    expect(res.json["completionState"]).toBeUndefined();
+    expect(res.json["persistence"]).toBeUndefined();
+    expect(res.json["contractVersion"]).toBeUndefined();
+  });
+
+  it("non-inline + null recorder REPLAYS byte-identically too", async () => {
+    const { model } = await boot({ recorder: new NullRunRecorder() });
+
+    await invoke(server!.url, { bearer: INTERNAL_SECRET, body: goodBody() });
+    const replay = await invoke(server!.url, { bearer: INTERNAL_SECRET, body: goodBody() });
+
+    expect(model.calls).toHaveLength(1);
+    expect(replay.status).toBe(200);
+    expect(replay.json["ok"]).toBe(true);
+    expect(replay.json["outcome"]).toBe("ok");
+    expect(replay.json["replay"]).toBe(true);
+    expect(replay.json["recorded"]).toBe(false);
+    expect(replay.json["recorderError"]).toBe("no recorder configured");
+    // A non-inline replay never carries an answer, even though the run's
+    // answer is now retained in the idempotency record for inline replays.
+    expect(replay.json["answerText"]).toBeUndefined();
   });
 
   it("still fails the HTTP status when the MODEL failed, even if recording worked", async () => {
