@@ -44,7 +44,11 @@ function setSessionCookie(res: Response, sid: string) {
   res.cookie(SESSION_COOKIE, sid, {
     httpOnly: true,
     secure: true,
-    sameSite: 'lax',
+    // 'none' is required so the browser sends this cookie on the cross-site
+    // subresource request Chatwoot's Dashboard App iframe makes to this origin;
+    // 'lax' is never sent in that context. CSRF exposure from this widening is
+    // tracked as deferred hardening, not fixed here (functionality-first).
+    sameSite: 'none',
     path: '/',
     maxAge: SESSION_TTL,
   });
@@ -54,7 +58,7 @@ function setOidcCookie(res: Response, name: string, value: string) {
   res.cookie(name, value, {
     httpOnly: true,
     secure: true,
-    sameSite: 'lax',
+    sameSite: 'none',
     path: '/',
     maxAge: OIDC_COOKIE_TTL,
   });
