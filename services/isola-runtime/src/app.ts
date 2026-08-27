@@ -889,11 +889,15 @@ export function createRuntime(deps: AppDeps): Runtime {
     // is a complete no-op: `evaluateAgentOsEligibility` returns
     // `not_applicable` immediately and execution falls through to the
     // unchanged direct-model path below, exactly as it always has.
+    // DESCRIPTIVE ONLY — this is what the CALLER said its tenant is. It is
+    // still used for the conversation-issue description exactly as before, and
+    // it is NOT what decides AgentOS routing: `config.agentOsTenantId` is.
     const tenantId = extractTenantId(body.context);
     const agentOsEligibility = evaluateAgentOsEligibility({
       templateId: template.id,
-      tenantId,
+      requestTenantId: tenantId,
       exposure,
+      configuredTenantId: config.agentOsTenantId,
     });
 
     if (agentOsEligibility.kind === "refused") {
@@ -919,14 +923,17 @@ export function createRuntime(deps: AppDeps): Runtime {
     }
 
     let executionProvider: ExecutionProvider;
-    if (agentOsEligibility.kind === "eligible") {
-      if (agentOsProvider === null) {
+    // The tenant the run EXECUTES as. For an AgentOS run this is the
+    // server-configured value the allowlist resolved — never the caller's.
+    let executionTenantId: string | null = tenantId;
+    if (agentOsEligibility.kind === "eligible" || agentOsEligibility.kind === "not_configured") {
+      if (agentOsEligibility.kind === "not_configured" || agentOsProvider === null) {
         finish(
           503,
           "agentos_not_configured",
           {
             error:
-              "AgentOS execution provider is not configured (AGENTOS_BASE_URL / AGENTOS_SHARED_SECRET unset)",
+              "AgentOS execution provider is not configured (AGENTOS_BASE_URL / AGENTOS_SHARED_SECRET / AGENTOS_TENANT_ID unset)",
           },
           {
             agentId,
@@ -941,6 +948,7 @@ export function createRuntime(deps: AppDeps): Runtime {
         return;
       }
       executionProvider = agentOsProvider;
+      executionTenantId = agentOsEligibility.tenantId;
     } else {
       executionProvider = createDirectModelExecutionProvider(clientForTemplate(template));
     }
@@ -1310,7 +1318,9 @@ export function createRuntime(deps: AppDeps): Runtime {
         // is visible from here; this block only ever sees an ExecutionResult.
         const result = await executionProvider.execute({
           template,
-          tenantId,
+          // SERVER-decided for the AgentOS path; the caller's descriptive value
+          // for every other template (unchanged — the direct provider ignores it).
+          tenantId: executionTenantId,
           exposure,
           model,
           systemPrompt: resolvedPrompt.prompt,

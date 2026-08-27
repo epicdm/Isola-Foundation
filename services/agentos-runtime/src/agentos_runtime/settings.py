@@ -77,6 +77,11 @@ class Settings:
     # Backs AgentOS's own `authorization_config` (its control-plane routes,
     # separate from our custom /v1/agent-run route's shared-secret check).
     jwt_verification_key: str
+    # THE TENANT THIS SIDECAR SERVES — operator configuration, the authority.
+    # Mirrors the Node side's AGENTOS_TENANT_ID: the envelope's `tenantId` must
+    # MATCH this, and may never select a different one. Required, so the
+    # sidecar can never fall back to comparing against a compiled-in constant.
+    tenant_id: str
     # Model access. `None` is an ACCEPTED state at boot (see module docstring)
     # — every /v1/agent-run request fails closed with a clear error instead.
     model_api_key: str | None
@@ -123,6 +128,16 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
             "with nothing behind it."
         )
 
+    tenant_id = _read_file_env(e, "AGENTOS_TENANT_ID")
+    if tenant_id is None:
+        raise ConfigError(
+            "AGENTOS_TENANT_ID is unset. It is the tenant this sidecar serves, and it must "
+            "be chosen by the operator: without it the only remaining way to pick a tenant "
+            "would be the request envelope, which is exactly the client-side selection this "
+            "setting exists to remove. Expected value: the AGENTOS_ALLOWED_TENANT constant "
+            "in allowlist.py."
+        )
+
     # Defensive self-check on the hardcoded allowlist constants (see
     # allowlist.py's own docstring on why these are literals, not env-derived).
     # This can only fail if a future edit accidentally empties one of them —
@@ -158,6 +173,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     return Settings(
         shared_secret=shared_secret,
         jwt_verification_key=jwt_verification_key,
+        tenant_id=tenant_id,
         model_api_key=model_api_key,
         model_base_url=(e.get("AGENTOS_MODEL_BASE_URL") or DEFAULT_MODEL_BASE_URL).rstrip("/"),
         model_id=e.get("AGENTOS_MODEL_ID") or DEFAULT_MODEL_ID,

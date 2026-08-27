@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import time
 
-from fastapi import Depends, FastAPI, HTTPException, status as http_status
+from fastapi import Depends, FastAPI, HTTPException, Request, status as http_status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from agentos_runtime.agent import build_agent, make_run_operations_coordinator
 from agentos_runtime.allowlist import evaluate_eligibility
@@ -60,6 +62,42 @@ run_operations_coordinator = make_run_operations_coordinator(settings)
 # built-in `/health` instead of a route this file owns.
 
 
+@base_app.exception_handler(RequestValidationError)
+async def _validation_error_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    """FastAPI's DEFAULT 422 body echoes the rejected input back to the caller.
+
+    That is a redaction hole on this route specifically: the envelope carries
+    `context` (the whole run context) and `extra="forbid"` means a request
+    carrying a credential-shaped extra field is rejected BY NAME AND VALUE —
+    so the default handler would write both into an HTTP response and, via
+    any upstream access log, potentially into a log line too. Enumerate the
+    SHAPES, not just the copies (CLAUDE.md Law 26's corollary): a secret can
+    sit in a field value just as easily as in a query string.
+
+    This handler emits FIELD NAMES ONLY. `exc.errors()` entries also carry
+    `input` (the submitted value) and `msg`/`ctx` (which can quote it); none
+    of those are read here — only `loc`.
+    """
+    fields = sorted(
+        {
+            ".".join(str(part) for part in error.get("loc", ()) if part != "body")
+            for error in exc.errors()
+        }
+        - {""}
+    )
+    return JSONResponse(
+        # Literal 422 rather than the starlette constant: `HTTP_422_UNPROCESSABLE_ENTITY`
+        # is deprecated in the pinned starlette in favour of
+        # `HTTP_422_UNPROCESSABLE_CONTENT`, and naming either one couples this
+        # handler to a rename that does not change the status code.
+        status_code=422,
+        content={
+            "detail": "request body failed validation",
+            "fields": fields,
+        },
+    )
+
+
 @base_app.post("/v1/agent-run", response_model=AgentRunResponse)
 async def agent_run(
     envelope: AgentRunEnvelope,
@@ -73,6 +111,7 @@ async def agent_run(
         tenant_id=envelope.tenantId,
         template_id=envelope.templateId,
         exposure=envelope.exposure,
+        configured_tenant_id=settings.tenant_id,
     )
     if not eligibility.eligible:
         duration_ms = (time.monotonic() - started) * 1000

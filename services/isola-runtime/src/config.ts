@@ -130,6 +130,20 @@ export interface RuntimeConfig {
    * `null` means "not configured": also a boot failure, for the same reason.
    */
   agentOsSharedSecret: string | null;
+  /**
+   * THE TENANT THIS PATH RUNS AS — operator configuration, never the request.
+   *
+   * The AI-1A packet requires SERVER-SIDE selection of the tenant. An earlier
+   * revision compared the caller-supplied `context.tenantId` against a
+   * compiled-in constant and treated a match as authoritative, which is
+   * CLIENT-side selection validated against a constant: any holder of a valid
+   * INTERNAL credential could name the allowlisted tenant regardless of their
+   * real one. This value is the authority; a request may only echo it.
+   *
+   * Expected to be set to `AGENTOS_ALLOWED_TENANT` (agentos-allowlist.ts).
+   * `null` means "not configured", which is a BOOT FAILURE — see bootErrors.
+   */
+  agentOsTenantId: string | null;
   agentOsTimeoutMs: number;
 }
 
@@ -388,6 +402,11 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
 
     agentOsBaseUrl,
     agentOsSharedSecret: str(env, "AGENTOS_SHARED_SECRET"),
+    // NO DEFAULT, deliberately — same reasoning as RUNTIME_BUDGET_FALLBACK_CENTS
+    // above. Defaulting this to the expected constant would quietly restore the
+    // very behaviour this setting exists to remove: a tenant decided by
+    // something other than the operator.
+    agentOsTenantId: str(env, "AGENTOS_TENANT_ID"),
     agentOsTimeoutMs: int(env, "AGENTOS_TIMEOUT_MS", DEFAULT_AGENTOS_TIMEOUT_MS),
   };
 }
@@ -472,6 +491,11 @@ export function bootErrors(config: RuntimeConfig): string[] {
   if (config.agentOsSharedSecret === null) {
     errors.push(
       "AGENTOS_SHARED_SECRET (via AGENTOS_SHARED_SECRET_FILE, same convention as MODEL_API_KEY_FILE in entrypoint.sh) is unset. The AgentOS sidecar call cannot be authenticated without it.",
+    );
+  }
+  if (config.agentOsTenantId === null) {
+    errors.push(
+      "AGENTOS_TENANT_ID is unset. It is the tenant the AgentOS path runs as, and it must be chosen by the operator: without it the only remaining way to pick a tenant would be the request body, which is exactly the client-side selection this setting exists to remove. Set it explicitly (expected value: the AGENTOS_ALLOWED_TENANT constant in agentos-allowlist.ts).",
     );
   }
 

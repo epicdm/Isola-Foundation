@@ -22,6 +22,7 @@ def _fake_settings(secret: str) -> Settings:
     return Settings(
         shared_secret=secret,
         jwt_verification_key="k" * 32,
+        tenant_id="8D3dp3z",
         model_api_key=None,
         model_base_url="https://api.deepseek.com",
         model_id="deepseek-chat",

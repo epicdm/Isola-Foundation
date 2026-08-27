@@ -31,6 +31,7 @@ def _env(tmp_path, **overrides) -> dict[str, str]:
     env = {
         "AGENTOS_SHARED_SECRET_FILE": str(shared),
         "AGENTOS_JWT_VERIFICATION_KEY_FILE": str(jwt),
+        "AGENTOS_TENANT_ID": "8D3dp3z",
     }
     env.update(overrides)
     return env
@@ -50,6 +51,21 @@ def test_missing_shared_secret_refuses_to_load(tmp_path):
     del env["AGENTOS_SHARED_SECRET_FILE"]
     with pytest.raises(ConfigError, match="AGENTOS_SHARED_SECRET"):
         load_settings(env)
+
+
+def test_missing_tenant_id_refuses_to_load(tmp_path):
+    # The server-side tenant authority is mandatory: without it the only
+    # remaining way to pick a tenant is the request envelope, which is the
+    # client-side selection this setting exists to remove.
+    env = _env(tmp_path)
+    del env["AGENTOS_TENANT_ID"]
+    with pytest.raises(ConfigError, match="AGENTOS_TENANT_ID"):
+        load_settings(env)
+
+
+def test_tenant_id_is_read_from_config_not_a_constant(tmp_path):
+    settings = load_settings(_env(tmp_path, AGENTOS_TENANT_ID="some-other-tenant"))
+    assert settings.tenant_id == "some-other-tenant"
 
 
 def test_missing_jwt_key_refuses_to_load(tmp_path):

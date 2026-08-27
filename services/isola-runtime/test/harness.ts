@@ -64,6 +64,10 @@ export const BASE_ENV: EnvRecord = {
   // clean — no test depends on this exact URL or secret being dialled.
   AGENTOS_BASE_URL: "https://agentos-sidecar.internal.example.test",
   AGENTOS_SHARED_SECRET: placeholder("agentos"),
+  // The SERVER-SIDE tenant authority. Set to the expected constant, which is
+  // what a real deployment sets it to — the request body can no longer choose
+  // a tenant, so the fixtures' `tenantId` is only ever an echo of this.
+  AGENTOS_TENANT_ID: AGENTOS_ALLOWED_TENANT,
 };
 
 export function envConfig(overrides: EnvRecord = {}): RuntimeConfig {

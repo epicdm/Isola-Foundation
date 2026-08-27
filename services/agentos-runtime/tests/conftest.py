@@ -14,6 +14,8 @@ import sys
 
 import pytest
 
+from agentos_runtime.allowlist import AGENTOS_ALLOWED_TENANT
+
 
 def write_secret(tmp_path, name: str, value: str):
     path = tmp_path / name
@@ -31,6 +33,9 @@ def base_env(tmp_path, monkeypatch):
 
     monkeypatch.setenv("AGENTOS_SHARED_SECRET_FILE", shared_secret_path)
     monkeypatch.setenv("AGENTOS_JWT_VERIFICATION_KEY_FILE", jwt_key_path)
+    # The SERVER-SIDE tenant authority (see settings.py / allowlist.py). Set to
+    # the expected constant, which is what a real deployment sets it to.
+    monkeypatch.setenv("AGENTOS_TENANT_ID", AGENTOS_ALLOWED_TENANT)
     monkeypatch.delenv("AGENTOS_MODEL_API_KEY", raising=False)
     monkeypatch.delenv("AGENTOS_MODEL_API_KEY_FILE", raising=False)
     monkeypatch.setenv("AGENTOS_HOST", "127.0.0.1")
@@ -38,6 +43,7 @@ def base_env(tmp_path, monkeypatch):
     return {
         "shared_secret": "test-shared-secret-value",
         "jwt_key": "a" * 32,
+        "tenant_id": AGENTOS_ALLOWED_TENANT,
     }
 
 

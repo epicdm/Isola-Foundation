@@ -106,6 +106,106 @@ describe("AgentOS routing over HTTP", () => {
     expect(agentOs.calls).toHaveLength(0);
   });
 
+  it("REGRESSION: a forged context.tenantId cannot select a tenant the SERVER is not configured for", async () => {
+    // The Codex finding, end to end. The operator has configured this runtime
+    // for a different tenant; the caller holds a valid INTERNAL credential and
+    // forges the historically-allowlisted tenant string in the request body.
+    // Before the fix this matched a compiled-in constant and routed to AgentOS.
+    const model = StubModelClient.returning("should never be called");
+    const agentOs = new RecordingAgentOsProvider({
+      status: "completed",
+      content: "should never be reached",
+      model: null,
+      usage: null,
+    });
+    server = await startServer({
+      config: envConfig({ AGENTOS_TENANT_ID: "a-different-configured-tenant" }),
+      modelClient: model,
+      agentOsProvider: agentOs,
+    });
+
+    const res = await invoke(server.url, {
+      bearer: INTERNAL_SECRET,
+      body: {
+        templateId: INTERNAL_TEMPLATE,
+        exposure: "INTERNAL",
+        agentId: "agent-7",
+        runId: "run-forged-tenant",
+        context: OVERDUE_FIXTURE, // carries tenantId: 8D3dp3z
+      },
+    });
+
+    expect(res.status).toBe(403);
+    expect(res.json["outcome"]).toBe("agentos_routing_refused");
+    expect(String(res.json["error"])).toContain("agentos_tenant_refused");
+    // Neither provider ran: no fall-through to the direct model either.
+    expect(agentOs.calls).toHaveLength(0);
+    expect(model.calls).toHaveLength(0);
+  });
+
+  it("sends the SERVER-configured tenant to the sidecar, not whatever the body said", async () => {
+    // Positive twin of the regression above: when the body carries no tenant
+    // at all, the run still executes — as the configured tenant.
+    const agentOs = new RecordingAgentOsProvider({
+      status: "completed",
+      content: "ok",
+      model: null,
+      usage: null,
+    });
+    server = await startServer({
+      config: envConfig(),
+      modelClient: StubModelClient.returning("unused"),
+      agentOsProvider: agentOs,
+    });
+
+    const { tenantId: _dropped, ...fixtureWithoutTenant } = OVERDUE_FIXTURE;
+    const res = await invoke(server.url, {
+      bearer: INTERNAL_SECRET,
+      body: {
+        templateId: INTERNAL_TEMPLATE,
+        exposure: "INTERNAL",
+        agentId: "agent-7",
+        runId: "run-server-tenant",
+        context: fixtureWithoutTenant,
+      },
+    });
+
+    expect(res.status).toBe(200);
+    expect(agentOs.calls).toHaveLength(1);
+    expect(agentOs.calls[0]!.tenantId).toBe("8D3dp3z");
+  });
+
+  it("503s agentos_not_configured when AGENTOS_TENANT_ID is unset — never falls back to a constant", async () => {
+    const model = StubModelClient.returning("should never be called");
+    const agentOs = new RecordingAgentOsProvider({
+      status: "completed",
+      content: "x",
+      model: null,
+      usage: null,
+    });
+    server = await startServer({
+      config: envConfig({ AGENTOS_TENANT_ID: undefined }),
+      modelClient: model,
+      agentOsProvider: agentOs,
+    });
+
+    const res = await invoke(server.url, {
+      bearer: INTERNAL_SECRET,
+      body: {
+        templateId: INTERNAL_TEMPLATE,
+        exposure: "INTERNAL",
+        agentId: "agent-7",
+        runId: "run-no-tenant-config",
+        context: OVERDUE_FIXTURE,
+      },
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.json["outcome"]).toBe("agentos_not_configured");
+    expect(agentOs.calls).toHaveLength(0);
+    expect(model.calls).toHaveLength(0);
+  });
+
   it("refuses the wrong exposure for the gated template with 403", async () => {
     const model = StubModelClient.returning("should never be called");
     const agentOs = new RecordingAgentOsProvider({ status: "completed", content: "x", model: null, usage: null });

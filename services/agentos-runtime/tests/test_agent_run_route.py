@@ -99,6 +99,41 @@ def test_wrong_tenant_is_refused_before_agno_logic(client, app_module, monkeypat
     assert called["count"] == 0
 
 
+def test_regression_forged_tenant_is_refused_when_sidecar_is_configured_for_another(
+    base_env, monkeypatch, tmp_path
+):
+    """The Codex finding, end to end on the Python side.
+
+    The sidecar is configured for a DIFFERENT tenant; the envelope forges the
+    historically-allowlisted value. It must be refused before any Agno logic.
+    """
+    from conftest import fresh_import
+
+    monkeypatch.setenv("AGENTOS_TENANT_ID", "a-different-configured-tenant")
+    module = fresh_import("agentos_runtime.main")
+
+    called = {"count": 0}
+
+    async def fake_run(context_text: str) -> AgentRunOutcome:
+        called["count"] += 1
+        return AgentRunOutcome(completed=True, content="should never run")
+
+    monkeypatch.setattr(module, "run_operations_coordinator", fake_run)
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(module.app) as c:
+        res = c.post(
+            "/v1/agent-run",
+            json=VALID_BODY,  # tenantId "8D3dp3z"
+            headers=_auth_headers(base_env["shared_secret"]),
+        )
+
+    assert res.status_code == 403
+    assert "tenant_refused" in res.json()["detail"]
+    assert called["count"] == 0
+
+
 def test_wrong_template_is_refused(client, base_env):
     body = {**VALID_BODY, "templateId": "some-other-template@v1"}
     res = client.post("/v1/agent-run", json=body, headers=_auth_headers(base_env["shared_secret"]))
@@ -175,15 +210,64 @@ def test_healthz_is_unauthenticated_and_reveals_nothing(client):
 
 
 def test_malformed_envelope_missing_required_field_is_rejected(client, base_env):
+    # Carries a secret-shaped run context so the 422 body can be checked for
+    # it: FastAPI's DEFAULT validation handler echoes the rejected input,
+    # which on THIS route would mean writing the whole run context into an
+    # HTTP response. main.py installs a field-names-only handler instead.
+    planted_context_secret = "-".join(["not", "a", "real", "credential", "ctx"]) + "-" + "0" * 16
     body = {k: v for k, v in VALID_BODY.items() if k != "tenantId"}
+    body["context"] = f"run context carrying {planted_context_secret}"
+
     res = client.post("/v1/agent-run", json=body, headers=_auth_headers(base_env["shared_secret"]))
+
     assert res.status_code == 422
+    # The ASSERTION THAT MATTERS: the submitted value never comes back.
+    assert planted_context_secret not in res.text
+    # Positive control — the response is not simply empty, and it does name
+    # the offending FIELD, so this is redaction rather than a broken handler.
+    payload = res.json()
+    assert payload["detail"] == "request body failed validation"
+    assert "tenantId" in payload["fields"]
 
 
 def test_envelope_rejects_unexpected_extra_fields(client, base_env):
     # The envelope type is the enforcement: an extra field (e.g. something
     # that looks like a credential) is refused outright, never silently
-    # accepted and ignored.
-    body = {**VALID_BODY, "odooApiKey": "should-never-be-a-field"}
+    # accepted and ignored — AND its value is never echoed back.
+    planted_secret = "-".join(["not", "a", "real", "credential", "extra"]) + "-" + "0" * 16
+    body = {**VALID_BODY, "odooApiKey": planted_secret}
+
     res = client.post("/v1/agent-run", json=body, headers=_auth_headers(base_env["shared_secret"]))
+
     assert res.status_code == 422
+    # Previously this test asserted ONLY the status code, so it passed
+    # vacuously on the very thing it was written to check.
+    assert planted_secret not in res.text
+    payload = res.json()
+    assert payload["detail"] == "request body failed validation"
+    # The field NAME is reported (that is useful and non-sensitive); the value
+    # is not. This is also the positive control for the assertion above.
+    assert "odooApiKey" in payload["fields"]
+
+
+def test_validation_error_body_never_carries_submitted_values(client, base_env):
+    """Broader shape check: several bad fields at once, none of their VALUES
+    may appear anywhere in the response.
+    """
+    planted = {
+        "ctx": "-".join(["not", "a", "real", "credential", "a"]) + "-" + "0" * 16,
+        "extra": "-".join(["not", "a", "real", "credential", "b"]) + "-" + "0" * 16,
+    }
+    body = {
+        **VALID_BODY,
+        "context": planted["ctx"],
+        "exposure": "NOT_A_VALID_EXPOSURE",
+        "surpriseField": planted["extra"],
+    }
+
+    res = client.post("/v1/agent-run", json=body, headers=_auth_headers(base_env["shared_secret"]))
+
+    assert res.status_code == 422
+    for value in planted.values():
+        assert value not in res.text
+    assert "NOT_A_VALID_EXPOSURE" not in res.text
