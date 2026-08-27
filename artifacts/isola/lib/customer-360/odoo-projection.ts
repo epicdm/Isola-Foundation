@@ -1,8 +1,10 @@
 import { json2Call, type OdooConfig, type OdooCustomer } from '@/engines/odoo';
+import { odooDeepLink } from '@/lib/context/customer-sources';
 import type {
   Customer360Balance,
   Customer360Document,
   Customer360Loop,
+  Customer360RecommendedAction,
   Customer360Snapshot,
 } from './contracts';
 
@@ -12,6 +14,38 @@ function text(value: unknown): string | null {
 
 function number(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Refuses to build a deep link against an origin this projection does not
+ * trust, even though `odooDeepLink` already refuses a missing baseUrl.
+ *
+ * `epic_sandbox` is a real, deployed, NON-authoritative Odoo instance
+ * (CLAUDE.md's authority map: "the authority is epic-communications-inc.odoo.com
+ * and nothing else"). A tenant's OdooBinding is data, not code — a
+ * misconfigured row could point there, and a deep link is exactly the kind
+ * of confident, clickable artifact that must never be built against it.
+ * This does not hardcode a single tenant's host, because other tenants may
+ * have their own legitimate self-hosted or SaaS Odoo instances; it refuses
+ * only what is generically unsafe: a non-https origin, or a hostname naming
+ * itself a sandbox.
+ */
+function isAllowedOdooOrigin(baseUrl: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'https:') return false;
+  if (/sandbox/i.test(parsed.hostname)) return false;
+  return true;
+}
+
+/** Server-authoritative deep link, or null when it cannot be honestly built. */
+function safeOdooLink(baseUrl: string | undefined, model: string, recordId: number): string | null {
+  if (!baseUrl || !isAllowedOdooOrigin(baseUrl)) return null;
+  return odooDeepLink(baseUrl, model, recordId);
 }
 
 /** Odoo returns a many2one as [id, "NAME"]; the currency NAME is the code. */
@@ -117,6 +151,7 @@ export async function readCustomer360(
       total: number(row.amount_total),
       currency: currencyCode(row.currency_id),
       date: text(row.date_order),
+      odooLink: safeOdooLink(config.url, 'sale.order', Number(row.id)),
     })),
     ...invoices.map((row) => ({
       id: Number(row.id),
@@ -128,6 +163,7 @@ export async function readCustomer360(
       residual: number(row.amount_residual),
       currency: currencyCode(row.currency_id),
       date: text(row.invoice_date),
+      odooLink: safeOdooLink(config.url, 'account.move', Number(row.id)),
     })),
   ];
 
@@ -182,5 +218,45 @@ export async function readCustomer360(
     documents,
     openLoops,
     openLoopsAvailable,
+    recommendedAction: recommendedAction(documents, partner.name),
+  };
+}
+
+/** en-DM: same locale the panel already renders amounts in. */
+function formatMoney(amount: number, currency: string | null): string {
+  if (!currency) return `${amount.toLocaleString('en-DM')} (currency unknown)`;
+  try {
+    return new Intl.NumberFormat('en-DM', { style: 'currency', currency }).format(amount);
+  } catch {
+    return `${amount.toLocaleString('en-DM')} ${currency}`;
+  }
+}
+
+/**
+ * S3: ONE recommendation, and only for the case this slice actually proves —
+ * a draft quotation. Every other document shape gets no recommendation
+ * rather than a wrong one; withholding is the honest default (dispatch:
+ * "recommendation changes or is withheld" for non-draft quotes).
+ */
+function recommendedAction(
+  documents: Customer360Document[],
+  customerName: string,
+): Customer360RecommendedAction | null {
+  const draftQuotation = documents
+    .filter((d) => d.kind === 'quotation' && d.state === 'draft')
+    .sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''))[0];
+  if (!draftQuotation) return null;
+
+  const firstName = customerName.trim().split(/\s+/)[0] || customerName;
+  const amount = draftQuotation.total != null
+    ? formatMoney(draftQuotation.total, draftQuotation.currency)
+    : 'an amount Odoo has not confirmed';
+
+  return {
+    kind: 'review-draft-quotation',
+    headline: `Review quotation ${draftQuotation.reference} and ask the customer whether they would like to proceed or request changes.`,
+    document: draftQuotation,
+    reasoning: `${draftQuotation.reference} is a draft quotation for ${customerName} — it has not been sent, approved or accepted. Confirming intent before any further action avoids acting on a stale or unreviewed document.`,
+    suggestedReply: `Hi ${firstName}, I've reviewed quotation ${draftQuotation.reference} for ${amount}. Would you like to proceed, or is there anything you'd like adjusted?`,
   };
 }

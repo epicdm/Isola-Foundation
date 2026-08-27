@@ -18,6 +18,13 @@ export interface Customer360Document {
    */
   currency: string | null;
   date: string | null;
+  /**
+   * The exact record in the authoritative Odoo instance, built server-side
+   * from the tenant's resolved OdooConfig.url — never from anything the
+   * browser supplies. Null when a link cannot be honestly constructed (no
+   * resolved instance URL, or the record id is not a real positive integer).
+   */
+  odooLink: string | null;
 }
 
 /** Outstanding residual for ONE currency. Never combined across currencies. */
@@ -70,6 +77,30 @@ export interface Customer360Snapshot {
    * "unavailable" when this is false.
    */
   openLoopsAvailable: boolean;
+  /**
+   * S3: one evidence-backed recommendation, generated only from verified
+   * data already in this snapshot. Null whenever no document clearly
+   * warrants one (no draft quotation) — recommending nothing is the honest
+   * answer, not a missing feature.
+   */
+  recommendedAction: Customer360RecommendedAction | null;
+}
+
+export interface Customer360RecommendedAction {
+  kind: 'review-draft-quotation';
+  /** Compact one-line recommendation, e.g. "Review quotation S00670 and ask
+   *  the customer whether they would like to proceed or request changes." */
+  headline: string;
+  /** The quotation this recommendation is about — always present, always verified. */
+  document: Customer360Document;
+  /** Plain-language reasoning shown beside the recommendation, not just the verdict. */
+  reasoning: string;
+  /**
+   * A reply an operator can review, edit and send themselves. Generated only
+   * from verified customer/document/amount/currency fields already in this
+   * snapshot — never claims the document was sent, attached or accepted.
+   */
+  suggestedReply: string;
 }
 
 export type Customer360Response =

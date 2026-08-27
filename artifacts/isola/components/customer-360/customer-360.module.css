@@ -16,4 +16,25 @@
 .list { padding: 16px; }.sectionHead { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 10px; }.sectionHead p { max-width: 260px; text-align: right; }
 .row { display: flex; justify-content: space-between; gap: 14px; align-items: center; padding: 13px 4px; border-top: 1px solid #e7edf4; }.row > div:last-child { display: flex; gap: 10px; align-items: center; }.row button { background: #edf3fa; }.row button:disabled { cursor: not-allowed; opacity: .55; }
 .loading, .notice { max-width: 620px; margin: 80px auto; padding: 24px; }.empty { color: #657188; padding: 18px 0; }
-@media (max-width: 700px) { .shell { padding: 10px; }.customerBand, .request, .grid { grid-template-columns: 1fr; }.customerBand { display: grid; }.sectionHead, .row { align-items: flex-start; flex-direction: column; }.sectionHead p { text-align: left; }.row > div:last-child { width: 100%; justify-content: space-between; } }
+.rowLink { border-radius: 8px; background: #edf3fa; color: #1769bd; padding: 9px 12px; font-weight: 700; text-decoration: none; }
+
+/* S3: recommended action + review/copy surface */
+.recommendation { border: 1px solid #dbe3ed; border-radius: 14px; background: #fff; box-shadow: 0 1px 2px rgba(15,23,42,.05); padding: 16px 18px; margin-top: 12px; }
+.recommendation h2 { margin: 3px 0; font-size: 17px; }
+.reasoning { color: #52637a; margin: 8px 0 0; }
+.reviewFacts { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 10px; margin: 12px 0; }
+.reviewFacts div { background: #f6f9fc; border-radius: 8px; padding: 8px 10px; }
+.reviewFacts dt { font-size: 11px; color: #52637a; text-transform: uppercase; letter-spacing: .05em; }
+.reviewFacts dd { margin: 2px 0 0; font-weight: 700; }
+.reviewActions { display: flex; gap: 10px; margin-top: 12px; }
+.primaryBtn { border: 0; border-radius: 8px; background: #175aa7; color: #fff; padding: 10px 16px; font-weight: 700; cursor: pointer; }
+.secondaryBtn { border: 1px solid #c7d3e2; border-radius: 8px; background: #fff; color: #175aa7; padding: 9px 15px; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; }
+.secondaryBtn:disabled { cursor: not-allowed; opacity: .55; }
+.overlay { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 50; }
+.reviewCard { background: #fff; border-radius: 14px; max-width: 560px; width: 100%; padding: 22px; box-shadow: 0 10px 40px rgba(15,23,42,.25); }
+.reviewCard h2 { margin: 0 0 12px; font-size: 18px; }
+.replyLabel { display: block; font-size: 12px; font-weight: 700; color: #52637a; margin-bottom: 6px; }
+.replyBox { width: 100%; border: 1px solid #c7d3e2; border-radius: 8px; padding: 10px; font: inherit; resize: vertical; }
+.effectNote { color: #52637a; font-size: 13px; margin: 10px 0 0; }
+.copyHint { color: #8592a6; font-size: 12px; margin: 10px 0 0; }
+@media (max-width: 700px) { .shell { padding: 10px; }.customerBand, .request, .grid { grid-template-columns: 1fr; }.customerBand { display: grid; }.sectionHead, .row { align-items: flex-start; flex-direction: column; }.sectionHead p { text-align: left; }.row > div:last-child { width: 100%; justify-content: space-between; }.reviewFacts { grid-template-columns: repeat(2,minmax(0,1fr)); } }
