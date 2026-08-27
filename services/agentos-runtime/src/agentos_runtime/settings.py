@@ -25,6 +25,7 @@ sandbox; that is an explicit, documented Phase B TODO, not a silent gap.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -161,6 +162,24 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         raise ConfigError(
             f"AGENTOS_REQUEST_TIMEOUT_S={timeout_raw!r} is not a number."
         ) from exc
+    # NON-FINITE MUST BE REFUSED, AND `<= 0` DOES NOT DO IT.
+    #
+    # `float("nan")` parses cleanly, and EVERY comparison against NaN is false —
+    # so `nan <= 0` is false and NaN sails straight through a positivity check.
+    # `float("inf")` parses too. Either value then reaches
+    # `asyncio.wait_for(..., timeout=...)` in agent.py, where this runtime raises
+    # `ValueError: cannot convert float NaN to integer` from inside the event
+    # loop: an unstructured framework crash, which is exactly the failure mode
+    # the request deadline exists to replace with a structured timeout outcome.
+    #
+    # Found by adversarial review of the deadline change itself and reproduced,
+    # not theorised. Check finiteness BEFORE positivity, because the positivity
+    # check cannot speak about NaN at all.
+    if not math.isfinite(request_timeout_s):
+        raise ConfigError(
+            "AGENTOS_REQUEST_TIMEOUT_S must be a finite number; "
+            "NaN and infinity are refused. Refusing to start."
+        )
     if request_timeout_s <= 0:
         raise ConfigError("AGENTOS_REQUEST_TIMEOUT_S must be a positive number.")
 

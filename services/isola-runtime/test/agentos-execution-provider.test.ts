@@ -17,6 +17,7 @@ import { createAgentOsExecutionProvider } from "../src/agentos-execution-provide
 import { renderContext } from "../src/context.js";
 import { createSafeFetch } from "../src/egress.js";
 import { findTemplate } from "../src/registry.js";
+import { envConfig } from "./harness.js";
 
 // Built at runtime, not written as a string literal, so no scanner ever has
 // to decide whether it is real — same convention as test/harness.ts's
@@ -147,6 +148,36 @@ describe("createAgentOsExecutionProvider", () => {
       expect(result.httpStatus).toBe(504);
       expect(result.reason).toContain("agentos_timeout_after_50ms");
     }
+  });
+
+  it("SYMMETRY GUARD: a non-finite AGENTOS_TIMEOUT_MS can never reach the deadline", () => {
+    /**
+     * The Python sidecar had exactly this defect: `float("nan")` parses, every
+     * comparison against NaN is false so a `<= 0` guard cannot see it, and the
+     * value reached `asyncio.wait_for` and crashed the event loop. It was fixed
+     * there with an explicit finiteness check.
+     *
+     * This side is ALREADY safe, and this test pins WHY so the reason cannot
+     * quietly disappear: `int()` in config.ts parses with `Number.parseInt` and
+     * then guards `!Number.isFinite(parsed) || parsed <= 0`, falling back. Both
+     * "nan" and "Infinity" become NaN at parse and are rejected there.
+     *
+     * It matters because the deadline is `Math.min(request, options)`, and
+     * `Math.min(50, NaN)` is NaN — a poisoned deadline that never fires, which
+     * is the same "configuration with no effect" failure FIX 3A closed.
+     */
+    for (const raw of ["nan", "NaN", "Infinity", "-Infinity", "not-a-number"]) {
+      const cfg = envConfig({ AGENTOS_TIMEOUT_MS: raw });
+      expect(Number.isFinite(cfg.agentOsTimeoutMs)).toBe(true);
+      expect(cfg.agentOsTimeoutMs).toBeGreaterThan(0);
+      // and the value it feeds must not poison the tighter-of-two computation
+      expect(Number.isFinite(Math.min(50_000, cfg.agentOsTimeoutMs))).toBe(true);
+    }
+
+    // POSITIVE CONTROL — without this, the loop above would pass equally
+    // against a parser that ignored the variable entirely and always returned
+    // the default. A real value must still be read and applied.
+    expect(envConfig({ AGENTOS_TIMEOUT_MS: "1234" }).agentOsTimeoutMs).toBe(1234);
   });
 
   it("FIX 3A: the configured AGENTOS_TIMEOUT_MS wins when it is the tighter one", async () => {

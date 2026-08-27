@@ -110,6 +110,37 @@ def test_invalid_timeout_refuses_to_load(tmp_path):
         load_settings(env)
 
 
+@pytest.mark.parametrize("raw", ["nan", "NaN", "inf", "-inf", "Infinity"])
+def test_non_finite_timeout_refuses_to_load(tmp_path, raw):
+    """
+    `float("nan")` PARSES, and every comparison against NaN is false — so a
+    positivity check (`<= 0`) cannot see it. Left unrefused, the value reaches
+    `asyncio.wait_for(..., timeout=...)` and this runtime raises
+    `ValueError: cannot convert float NaN to integer` from inside the event
+    loop: an unstructured framework crash, which is precisely what the request
+    deadline exists to replace with a structured timeout outcome.
+
+    Found by adversarial review of the deadline change itself, and reproduced
+    before being fixed. `inf` is refused for the same reason: a deadline that
+    never fires is not a deadline.
+    """
+    env = _env(tmp_path, AGENTOS_REQUEST_TIMEOUT_S=raw)
+    with pytest.raises(ConfigError, match="AGENTOS_REQUEST_TIMEOUT_S"):
+        load_settings(env)
+
+
+def test_POSITIVE_CONTROL_finite_timeout_still_loads_and_is_applied(tmp_path):
+    """
+    Without this, the five refusals above would pass equally against a settings
+    loader that had simply learned to reject every timeout value. This proves a
+    valid value is still accepted AND carried through to the Settings object,
+    so the refusals above are discriminating rather than indiscriminate.
+    """
+    env = _env(tmp_path, AGENTOS_REQUEST_TIMEOUT_S="42.5")
+    settings = load_settings(env)
+    assert settings.request_timeout_s == 42.5
+
+
 def test_zero_timeout_refuses_to_load(tmp_path):
     env = _env(tmp_path, AGENTOS_REQUEST_TIMEOUT_S="0")
     with pytest.raises(ConfigError, match="positive"):
