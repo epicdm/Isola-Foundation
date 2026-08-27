@@ -49,6 +49,27 @@ const nextConfig: NextConfig = {
     ];
   },
 
+  /**
+   * Deliberate, scoped framing permission for the Chatwoot Customer 360
+   * Dashboard App. No X-Frame-Options/CSP existed before this, so the app
+   * could be framed by ANY origin; this restricts it to exactly the two
+   * Chatwoot hosts that embed it. Never '*'.
+   */
+  async headers() {
+    return [
+      {
+        source: '/:path*',
+        headers: [
+          {
+            key: 'Content-Security-Policy',
+            value:
+              "frame-ancestors 'self' https://inbox.epic.dm https://isola-chat.saas00.epic.dm",
+          },
+        ],
+      },
+    ];
+  },
+
   images: {
     remotePatterns: [
       // Google profile photos (Replit Auth via Google)
