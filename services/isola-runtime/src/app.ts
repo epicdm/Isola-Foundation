@@ -434,7 +434,9 @@ export function createRuntime(deps: AppDeps): Runtime {
   const agentOsProvider: ExecutionProvider | null =
     deps.agentOsProvider !== undefined
       ? deps.agentOsProvider
-      : config.agentOsBaseUrl !== null && config.agentOsSharedSecret !== null
+      : config.agentOsEnabled &&
+          config.agentOsBaseUrl !== null &&
+          config.agentOsSharedSecret !== null
         ? createAgentOsExecutionProvider({
             baseUrl: config.agentOsBaseUrl,
             sharedSecret: config.agentOsSharedSecret,
@@ -900,6 +902,7 @@ export function createRuntime(deps: AppDeps): Runtime {
     // it is NOT what decides AgentOS routing: `config.agentOsTenantId` is.
     const tenantId = extractTenantId(body.context);
     const agentOsEligibility = evaluateAgentOsEligibility({
+      enabled: config.agentOsEnabled,
       templateId: template.id,
       requestTenantId: tenantId,
       exposure,
@@ -928,7 +931,9 @@ export function createRuntime(deps: AppDeps): Runtime {
       return;
     }
 
-    let executionProvider: ExecutionProvider;
+    // `null` means "the direct-model provider, created lazily inside the
+    // guarded block" — see the FIX 5 note below.
+    let executionProvider: ExecutionProvider | null;
     // The tenant the run EXECUTES as. For an AgentOS run this is the
     // server-configured value the allowlist resolved — never the caller's.
     let executionTenantId: string | null = tenantId;
@@ -956,7 +961,23 @@ export function createRuntime(deps: AppDeps): Runtime {
       executionProvider = agentOsProvider;
       executionTenantId = agentOsEligibility.tenantId;
     } else {
-      executionProvider = createDirectModelExecutionProvider(clientForTemplate(template));
+      // DEFERRED ON PURPOSE (FIX 5). `clientForTemplate` THROWS when a template
+      // declares its own brain but the credential env var is unset — which is
+      // exactly isola-internal-manager@v1 with HERMES_API_KEY absent. Creating
+      // the client here, outside the guarded block below, let that throw escape
+      // as an UNSTRUCTURED 500: no run recorded, no failureCategory, none of
+      // the structured provider response the runtime intends.
+      //
+      // Measured, not assumed — see test/hermes-500-mechanism.test.ts, which
+      // also proves the competing egress explanation cannot be the mechanism
+      // when the credential is absent (the credential check runs first, so the
+      // allowlist is never consulted).
+      //
+      // The creation now happens INSIDE the try, so a missing brain credential
+      // becomes the same structured 502 provider_error any other dependency
+      // failure produces. A template with its credential present behaves
+      // exactly as before.
+      executionProvider = null;
     }
 
     const rendered = renderContext(body.context, template.maxContextBytes);
@@ -1322,7 +1343,12 @@ export function createRuntime(deps: AppDeps): Runtime {
         // (only epic-staff-operations-coordinator@v1, only tenant 8D3dp3z,
         // only exposure INTERNAL — see the routing gate above). Neither path
         // is visible from here; this block only ever sees an ExecutionResult.
-        const result = await executionProvider.execute({
+        // FIX 5: created here, inside the guard, so a template whose declared
+        // brain has no configured credential fails STRUCTURALLY rather than
+        // throwing an unstructured 500 out of the handler.
+        const provider =
+          executionProvider ?? createDirectModelExecutionProvider(clientForTemplate(template));
+        const result = await provider.execute({
           template,
           // SERVER-decided for the AgentOS path; the caller's descriptive value
           // for every other template (unchanged — the direct provider ignores it).
@@ -1381,10 +1407,21 @@ export function createRuntime(deps: AppDeps): Runtime {
         // future one that does must still fail closed here rather than crash
         // the request unhandled.
         brainMs = now() - tBrainStart;
-        status = "internal_error";
-        failureCategory = `internal_error (${err instanceof Error ? err.name : "unknown"})`;
-        httpStatus = 500;
-        outcome = "internal_error";
+        // FIX 5: `clientForTemplate` throws this when a template declares its
+        // own brain and that brain's credential is unset. It is a dependency
+        // problem, so it gets the SAME structured 502 provider_error as any
+        // other — not the unstructured 500 it used to escape as.
+        if (err instanceof ModelProviderError) {
+          status = "provider_error";
+          failureCategory = err.message;
+          httpStatus = 502;
+          outcome = "provider_error";
+        } else {
+          status = "internal_error";
+          failureCategory = `internal_error (${err instanceof Error ? err.name : "unknown"})`;
+          httpStatus = 500;
+          outcome = "internal_error";
+        }
       }
 
       // ---- settle the reservation and meter the real cost ------------------

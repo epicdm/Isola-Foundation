@@ -34,6 +34,14 @@ export interface AgentOsRunEnvelope {
   readonly tenantId: string;
   readonly templateId: string;
   readonly exposure: Exposure;
+  /**
+   * The SERVER-AUTHORITATIVE system instruction, resolved by Node. Kept as its
+   * own field, never merged into `context`: the sidecar uses this as the
+   * system-level instruction source and treats `context` strictly as
+   * caller-supplied data, so the "context is data, not instruction" boundary
+   * survives the hop.
+   */
+  readonly systemPrompt: string;
   readonly context: string;
 }
 
@@ -110,17 +118,51 @@ export function createAgentOsExecutionProvider(
         tenantId: request.tenantId,
         templateId: request.template.id,
         exposure: request.exposure,
+        // SERVER-AUTHORITATIVE instructions. Resolved by Node (compiled-in
+        // template prompt, or the Paperclip charter when this template is
+        // bound in PAPERCLIP_INSTRUCTIONS_MAP) and carried explicitly, so the
+        // sidecar runs the charter the operator actually resolved rather than
+        // silently falling back to its own compiled-in copy. It is a SEPARATE
+        // field from `context` on purpose: context is caller-supplied data and
+        // must never be able to become the instruction source.
+        systemPrompt: request.systemPrompt,
         context: buildUserMessage(request.renderedContext),
       };
+
+      /**
+       * THE TIGHTER OF THE TWO DEADLINES WINS.
+       *
+       * `request.timeoutMs` is the per-run deadline (the tighter of the
+       * template's and RUNTIME_MODEL_TIMEOUT_MS, computed in app.ts);
+       * `options.timeoutMs` is the operator's AGENTOS_TIMEOUT_MS ceiling for
+       * this hop specifically. Until now only the first was ever read, so
+       * AGENTOS_TIMEOUT_MS was configuration with no effect — a setting that
+       * looks applied and is not (CLAUDE.md Law 24's corollary).
+       */
+      const deadlineMs = Math.min(request.timeoutMs, options.timeoutMs);
 
       const controller = new AbortController();
       let timedOut = false;
       const timer = setTimeout(() => {
         timedOut = true;
         controller.abort();
-      }, request.timeoutMs);
+      }, deadlineMs);
       if (typeof timer.unref === "function") timer.unref();
 
+      const timedOutResult = (): ExecutionResult => ({
+        status: "failed",
+        category: "timeout",
+        reason: `agentos_timeout_after_${deadlineMs}ms`,
+        httpStatus: 504,
+        invalidOutput: false,
+      });
+
+      // THE TIMER STAYS ARMED THROUGH BODY CONSUMPTION. It used to be cleared
+      // in a `finally` that ran as soon as the headers arrived, so a sidecar
+      // that returned headers and then stalled mid-body hung past the deadline
+      // while still holding a budget reservation. Everything below runs inside
+      // this try, and the timer is cleared once — in the outer finally.
+      try {
       let response: Response;
       try {
         response = await options.safeFetch(url, {
@@ -134,15 +176,7 @@ export function createAgentOsExecutionProvider(
           signal: controller.signal,
         });
       } catch (err) {
-        if (timedOut) {
-          return {
-            status: "failed",
-            category: "timeout",
-            reason: `agentos_timeout_after_${request.timeoutMs}ms`,
-            httpStatus: 504,
-            invalidOutput: false,
-          };
-        }
+        if (timedOut) return timedOutResult();
         if (err instanceof EgressBlockedError) {
           return {
             status: "failed",
@@ -152,15 +186,7 @@ export function createAgentOsExecutionProvider(
             invalidOutput: false,
           };
         }
-        if (err instanceof Error && err.name === "AbortError") {
-          return {
-            status: "failed",
-            category: "timeout",
-            reason: `agentos_timeout_after_${request.timeoutMs}ms`,
-            httpStatus: 504,
-            invalidOutput: false,
-          };
-        }
+        if (err instanceof Error && err.name === "AbortError") return timedOutResult();
         const name = err instanceof Error ? err.name : "unknown";
         return {
           status: "failed",
@@ -169,8 +195,6 @@ export function createAgentOsExecutionProvider(
           httpStatus: 502,
           invalidOutput: false,
         };
-      } finally {
-        clearTimeout(timer);
       }
 
       if (response.status === 401 || response.status === 403) {
@@ -198,17 +222,11 @@ export function createAgentOsExecutionProvider(
 
       let payload: unknown;
       try {
+        // The deadline is still armed here: a body that never finishes
+        // arriving aborts and lands on the timeout branch below.
         payload = await response.json();
       } catch {
-        if (timedOut) {
-          return {
-            status: "failed",
-            category: "timeout",
-            reason: `agentos_timeout_after_${request.timeoutMs}ms`,
-            httpStatus: 504,
-            invalidOutput: false,
-          };
-        }
+        if (timedOut) return timedOutResult();
         return {
           status: "failed",
           category: "provider_error",
@@ -260,6 +278,11 @@ export function createAgentOsExecutionProvider(
         model: parsed.model,
         usage: parsed.usage,
       };
+      } finally {
+        // Cleared exactly once, after the response body has been fully
+        // consumed — never before, or a stalled body would outlive its deadline.
+        clearTimeout(timer);
+      }
     },
   };
 }

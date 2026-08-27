@@ -25,6 +25,7 @@ const CONFIGURED = AGENTOS_ALLOWED_TENANT;
 describe("evaluateAgentOsEligibility", () => {
   it("is a no-op for every template other than the gated one", () => {
     const result = evaluateAgentOsEligibility({
+      enabled: true,
       templateId: "isola-ai-sales-front-desk-agent@v1",
       requestTenantId: null,
       exposure: "PUBLIC",
@@ -37,6 +38,7 @@ describe("evaluateAgentOsEligibility", () => {
     // Proves isolation: a request for an unrelated template carrying the
     // allowlisted tenant string must not be treated as an AgentOS concern at all.
     const result = evaluateAgentOsEligibility({
+      enabled: true,
       templateId: "isola-internal-manager@v1",
       requestTenantId: CONFIGURED,
       exposure: "INTERNAL",
@@ -47,6 +49,7 @@ describe("evaluateAgentOsEligibility", () => {
 
   it("is eligible when the request names no tenant at all — the SERVER supplies it", () => {
     const result = evaluateAgentOsEligibility({
+      enabled: true,
       templateId: AGENTOS_ALLOWED_TEMPLATE_ID,
       requestTenantId: null,
       exposure: AGENTOS_ALLOWED_EXPOSURE,
@@ -57,6 +60,7 @@ describe("evaluateAgentOsEligibility", () => {
 
   it("is eligible when the request merely ECHOES the configured tenant", () => {
     const result = evaluateAgentOsEligibility({
+      enabled: true,
       templateId: AGENTOS_ALLOWED_TEMPLATE_ID,
       requestTenantId: CONFIGURED,
       exposure: AGENTOS_ALLOWED_EXPOSURE,
@@ -70,6 +74,7 @@ describe("evaluateAgentOsEligibility", () => {
     // tenant; the caller forges the historically-allowlisted constant. Before
     // the fix this matched a compiled-in constant and routed. It must refuse.
     const result = evaluateAgentOsEligibility({
+      enabled: true,
       templateId: AGENTOS_ALLOWED_TEMPLATE_ID,
       requestTenantId: AGENTOS_ALLOWED_TENANT,
       exposure: AGENTOS_ALLOWED_EXPOSURE,
@@ -81,6 +86,7 @@ describe("evaluateAgentOsEligibility", () => {
 
   it("refuses a request naming any tenant other than the configured one", () => {
     const result = evaluateAgentOsEligibility({
+      enabled: true,
       templateId: AGENTOS_ALLOWED_TEMPLATE_ID,
       requestTenantId: "someone-elses-tenant",
       exposure: AGENTOS_ALLOWED_EXPOSURE,
@@ -94,6 +100,7 @@ describe("evaluateAgentOsEligibility", () => {
     // Silently rewriting a caller's stated tenant would hide a misrouted
     // integration behind a working-looking run.
     const result = evaluateAgentOsEligibility({
+      enabled: true,
       templateId: AGENTOS_ALLOWED_TEMPLATE_ID,
       requestTenantId: "someone-elses-tenant",
       exposure: AGENTOS_ALLOWED_EXPOSURE,
@@ -104,6 +111,7 @@ describe("evaluateAgentOsEligibility", () => {
 
   it("reports not_configured when no server-side tenant is set — never falls back to a constant", () => {
     const result = evaluateAgentOsEligibility({
+      enabled: true,
       templateId: AGENTOS_ALLOWED_TEMPLATE_ID,
       requestTenantId: AGENTOS_ALLOWED_TENANT,
       exposure: AGENTOS_ALLOWED_EXPOSURE,
@@ -114,6 +122,7 @@ describe("evaluateAgentOsEligibility", () => {
 
   it("refuses the wrong exposure for the gated template, even with the right tenant", () => {
     const result = evaluateAgentOsEligibility({
+      enabled: true,
       templateId: AGENTOS_ALLOWED_TEMPLATE_ID,
       requestTenantId: CONFIGURED,
       exposure: "PUBLIC",
@@ -125,6 +134,7 @@ describe("evaluateAgentOsEligibility", () => {
 
   it("checks tenant before exposure — a wrong tenant is named even when exposure is ALSO wrong", () => {
     const result = evaluateAgentOsEligibility({
+      enabled: true,
       templateId: AGENTOS_ALLOWED_TEMPLATE_ID,
       requestTenantId: "wrong-tenant",
       exposure: "PUBLIC",
@@ -136,6 +146,7 @@ describe("evaluateAgentOsEligibility", () => {
 
   it("is case-sensitive on the tenant id — no normalisation, no fuzzy matching", () => {
     const result = evaluateAgentOsEligibility({
+      enabled: true,
       templateId: AGENTOS_ALLOWED_TEMPLATE_ID,
       requestTenantId: CONFIGURED.toLowerCase(),
       exposure: AGENTOS_ALLOWED_EXPOSURE,
@@ -151,6 +162,7 @@ describe("evaluateAgentOsEligibility", () => {
     // Positive control for the whole fix: even on the eligible path, the value
     // that flows onward is the server's.
     const result = evaluateAgentOsEligibility({
+      enabled: true,
       templateId: AGENTOS_ALLOWED_TEMPLATE_ID,
       requestTenantId: null,
       exposure: AGENTOS_ALLOWED_EXPOSURE,
@@ -160,20 +172,87 @@ describe("evaluateAgentOsEligibility", () => {
   });
 });
 
-describe("AGENTOS_TENANT_ID is boot-fatal, like the other two AgentOS settings", () => {
-  it("refuses to boot when the server-side tenant is unset", () => {
-    const errors = bootErrors(envConfig({ AGENTOS_TENANT_ID: undefined }));
+describe("the AGENTOS_ENABLED master switch", () => {
+  it("is OFF when absent — absence must never mean on", () => {
+    expect(envConfig({ AGENTOS_ENABLED: undefined }).agentOsEnabled).toBe(false);
+  });
+
+  it("routes NOTHING into AgentOS when disabled, even a perfectly eligible request", () => {
+    const result = evaluateAgentOsEligibility({
+      enabled: false,
+      templateId: AGENTOS_ALLOWED_TEMPLATE_ID,
+      requestTenantId: CONFIGURED,
+      exposure: AGENTOS_ALLOWED_EXPOSURE,
+      configuredTenantId: CONFIGURED,
+    });
+    expect(result).toEqual({ kind: "not_applicable" });
+  });
+
+  it("does not REFUSE on an AgentOS ground when disabled — a wrong tenant is simply not its business", () => {
+    // A disabled runtime must behave as though the feature does not exist:
+    // no routing AND no refusal, or turning the feature off would still
+    // change how unrelated requests are answered.
+    const result = evaluateAgentOsEligibility({
+      enabled: false,
+      templateId: AGENTOS_ALLOWED_TEMPLATE_ID,
+      requestTenantId: "someone-elses-tenant",
+      exposure: "PUBLIC",
+      configuredTenantId: null,
+    });
+    expect(result).toEqual({ kind: "not_applicable" });
+  });
+});
+
+describe("the AgentOS settings are boot-fatal ONLY when AGENTOS_ENABLED is on", () => {
+  /**
+   * THE PRODUCTION-OUTAGE REGRESSION. `deploy/isola-rt-stack.yml` defines none
+   * of the three AgentOS settings. While they were unconditionally boot-fatal,
+   * deploying this image with that stack file would have boot-refused and taken
+   * the live runtime out of service.
+   */
+  it("DISABLED with none of the three configured: boots clean", () => {
+    const errors = bootErrors(
+      envConfig({
+        AGENTOS_ENABLED: undefined,
+        AGENTOS_BASE_URL: undefined,
+        AGENTOS_SHARED_SECRET: undefined,
+        AGENTOS_TENANT_ID: undefined,
+      }),
+    );
+    expect(errors).toEqual([]);
+  });
+
+  it("ENABLED + missing base URL: boot refused", () => {
+    const errors = bootErrors(
+      envConfig({ AGENTOS_ENABLED: "true", AGENTOS_BASE_URL: undefined }),
+    );
+    expect(errors.join(" | ")).toContain("AGENTOS_BASE_URL is unset");
+  });
+
+  it("ENABLED + missing shared secret: boot refused", () => {
+    const errors = bootErrors(
+      envConfig({ AGENTOS_ENABLED: "true", AGENTOS_SHARED_SECRET: undefined }),
+    );
+    expect(errors.join(" | ")).toContain("AGENTOS_SHARED_SECRET");
+  });
+
+  it("ENABLED + missing tenant: boot refused", () => {
+    const errors = bootErrors(
+      envConfig({ AGENTOS_ENABLED: "true", AGENTOS_TENANT_ID: undefined }),
+    );
     expect(errors.join(" | ")).toContain("AGENTOS_TENANT_ID is unset");
   });
 
-  it("POSITIVE CONTROL: a fully configured AgentOS block is NOT fatal", () => {
-    // Without this, the test above would pass against a bootErrors() that
-    // simply refused everything.
-    expect(bootErrors(envConfig())).toEqual([]);
+  it("POSITIVE CONTROL: ENABLED and fully configured is NOT fatal", () => {
+    // Without this, every refusal test above would pass against a bootErrors()
+    // that simply refused everything.
+    expect(bootErrors(envConfig({ AGENTOS_ENABLED: "true" }))).toEqual([]);
   });
 
   it("the refusal names the VARIABLE, never a credential value", () => {
-    const joined = bootErrors(envConfig({ AGENTOS_TENANT_ID: undefined })).join(" | ");
+    const joined = bootErrors(
+      envConfig({ AGENTOS_ENABLED: "true", AGENTOS_TENANT_ID: undefined }),
+    ).join(" | ");
     expect(joined).not.toContain(envConfig().agentOsSharedSecret);
   });
 });

@@ -23,6 +23,7 @@ Every test in this repo mocks `run_operations_coordinator` (or the
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -50,10 +51,10 @@ class AgentRunOutcome:
 
 
 class AgentRunner(Protocol):
-    async def __call__(self, context_text: str) -> AgentRunOutcome: ...
+    async def __call__(self, context_text: str, system_prompt: str) -> AgentRunOutcome: ...
 
 
-def build_agent(settings: Settings):
+def build_agent(settings: Settings, instructions: str | None = None):
     """Constructs the Agno Agent. Imported lazily inside this function (not at
     module scope) so importing `agentos_runtime.agent` — e.g. from a test that
     only wants `AgentRunOutcome` — never requires `agno`/`openai` to be
@@ -69,9 +70,12 @@ def build_agent(settings: Settings):
         api_key=settings.model_api_key,
         base_url=settings.model_base_url,
     )
+    # The SERVER-AUTHORITATIVE instruction from the envelope when Node sent
+    # one; the compiled-in charter only as the fallback for the AgentOS
+    # control-plane agent built at startup, which has no envelope.
     return Agent(
         model=model,
-        instructions=[OPERATIONS_COORDINATOR_PROMPT],
+        instructions=[instructions or OPERATIONS_COORDINATOR_PROMPT],
         markdown=True,
         telemetry=False,
     )
@@ -84,11 +88,7 @@ def make_run_operations_coordinator(settings: Settings) -> AgentRunner:
     (never at import time — a missing credential must not crash the whole
     process, only fail the one code path that needs it).
     """
-    agent = None
-
-    async def run(context_text: str) -> AgentRunOutcome:
-        nonlocal agent
-
+    async def run(context_text: str, system_prompt: str) -> AgentRunOutcome:
         if settings.model_api_key is None:
             # FAIL CLOSED, per-request, exactly like services/isola-runtime's
             # own MODEL_API_KEY-unset behaviour (a bootWarning there, a 502 on
@@ -101,12 +101,31 @@ def make_run_operations_coordinator(settings: Settings) -> AgentRunner:
             )
 
         try:
-            if agent is None:
-                agent = build_agent(settings)
+            # Built per run: the instruction source is the envelope's
+            # server-authoritative prompt, so the agent cannot be cached across
+            # runs that were given different instructions.
+            agent = build_agent(settings, instructions=system_prompt)
 
             from agno.run.base import RunStatus
 
-            run_output = await agent.arun(context_text)
+            # THE SIDECAR'S OWN DEADLINE. `request_timeout_s` was parsed and
+            # validated in settings.py and then never applied, so a stalled
+            # provider call had no deadline inside this process at all — the
+            # Node-side deadline would fire while this coroutine kept running.
+            try:
+                run_output = await asyncio.wait_for(
+                    agent.arun(context_text), timeout=settings.request_timeout_s
+                )
+            except asyncio.TimeoutError:
+                # STRUCTURED, and never retried: a retry here would stack a
+                # second full model execution behind a caller that has already
+                # given up.
+                return AgentRunOutcome(
+                    completed=False,
+                    failure_reason=(
+                        f"agent_timeout_after_{settings.request_timeout_s}s"
+                    ),
+                )
 
             status = getattr(run_output, "status", None)
             if status != RunStatus.completed:

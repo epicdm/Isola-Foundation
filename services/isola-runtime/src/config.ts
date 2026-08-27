@@ -115,6 +115,20 @@ export interface RuntimeConfig {
 
   // ---- AgentOS sidecar (dec-agentos-private-python-service-behind-node-isola-runtime-2026-08-22) ----
   /**
+   * THE MASTER SWITCH — off unless an operator explicitly turns it on.
+   *
+   * Without this, the three settings below were unconditionally boot-fatal, so
+   * deploying this image with the checked-in production stack file (which
+   * defines none of them) would have BOOT-REFUSED and taken the live runtime
+   * out of service. A feature nobody has authorized for production must not be
+   * able to stop production from starting.
+   *
+   * OFF (default): the runtime boots exactly as it does today, no template
+   * routes into AgentOS, and the settings below are not required.
+   * ON: all three below become mandatory and boot-fatal.
+   */
+  agentOsEnabled: boolean;
+  /**
    * Internal-network-only base URL for the private Python AgentOS sidecar.
    * `null` means "not configured", which is a BOOT FAILURE (see bootErrors)
    * because `epic-staff-operations-coordinator@v1` is unconditionally
@@ -400,6 +414,8 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
     outboxFlushLimit: int(env, "RUNTIME_OUTBOX_FLUSH_LIMIT", 10),
     outboxSweepMs: intAllowZero(env, "RUNTIME_OUTBOX_SWEEP_MS", DEFAULT_OUTBOX_SWEEP_MS),
 
+    // Default FALSE: absence must mean "off", never "on".
+    agentOsEnabled: bool(env, "AGENTOS_ENABLED", false),
     agentOsBaseUrl,
     agentOsSharedSecret: str(env, "AGENTOS_SHARED_SECRET"),
     // NO DEFAULT, deliberately — same reasoning as RUNTIME_BUDGET_FALLBACK_CENTS
@@ -483,20 +499,26 @@ export function bootErrors(config: RuntimeConfig): string[] {
   // a missing AgentOS credential here is a boot refusal: the alternative is
   // a process that starts, looks healthy, and 503s the one template it was
   // built to serve on every single call.
-  if (config.agentOsBaseUrl === null) {
-    errors.push(
-      "AGENTOS_BASE_URL is unset. epic-staff-operations-coordinator@v1 routes through the AgentOS execution provider for its allowlisted tenant/exposure and has no fallback to the direct-model path — set the sidecar's internal-network base URL or the process will 503 every eligible request forever.",
-    );
-  }
-  if (config.agentOsSharedSecret === null) {
-    errors.push(
-      "AGENTOS_SHARED_SECRET (via AGENTOS_SHARED_SECRET_FILE, same convention as MODEL_API_KEY_FILE in entrypoint.sh) is unset. The AgentOS sidecar call cannot be authenticated without it.",
-    );
-  }
-  if (config.agentOsTenantId === null) {
-    errors.push(
-      "AGENTOS_TENANT_ID is unset. It is the tenant the AgentOS path runs as, and it must be chosen by the operator: without it the only remaining way to pick a tenant would be the request body, which is exactly the client-side selection this setting exists to remove. Set it explicitly (expected value: the AGENTOS_ALLOWED_TENANT constant in agentos-allowlist.ts).",
-    );
+  // ONLY when the operator has explicitly switched AgentOS on. With it off,
+  // none of these are required and the runtime boots exactly as it does today
+  // — which is what lets the existing production stack file (which defines
+  // none of them) keep starting the live runtime.
+  if (config.agentOsEnabled) {
+    if (config.agentOsBaseUrl === null) {
+      errors.push(
+        "AGENTOS_ENABLED is on but AGENTOS_BASE_URL is unset. epic-staff-operations-coordinator@v1 then routes through the AgentOS execution provider for its allowlisted tenant/exposure with no fallback to the direct-model path — set the sidecar's internal-network base URL, or turn AGENTOS_ENABLED off.",
+      );
+    }
+    if (config.agentOsSharedSecret === null) {
+      errors.push(
+        "AGENTOS_ENABLED is on but AGENTOS_SHARED_SECRET (via AGENTOS_SHARED_SECRET_FILE, same convention as MODEL_API_KEY_FILE in entrypoint.sh) is unset. The AgentOS sidecar call cannot be authenticated without it.",
+      );
+    }
+    if (config.agentOsTenantId === null) {
+      errors.push(
+        "AGENTOS_ENABLED is on but AGENTOS_TENANT_ID is unset. It is the tenant the AgentOS path runs as, and it must be chosen by the operator: without it the only remaining way to pick a tenant would be the request body, which is exactly the client-side selection this setting exists to remove. Set it explicitly (expected value: the AGENTOS_ALLOWED_TENANT constant in agentos-allowlist.ts).",
+      );
+    }
   }
 
   return errors;

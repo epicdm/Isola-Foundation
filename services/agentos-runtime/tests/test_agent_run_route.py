@@ -21,11 +21,14 @@ from __future__ import annotations
 
 from agentos_runtime.agent import AgentRunOutcome
 
+SERVER_PROMPT = "SERVER-AUTHORITATIVE CHARTER: you are the operations coordinator."
+
 VALID_BODY = {
     "correlationId": "corr-1",
     "tenantId": "8D3dp3z",
     "templateId": "epic-staff-operations-coordinator@v1",
     "exposure": "INTERNAL",
+    "systemPrompt": SERVER_PROMPT,
     "context": "the run context text",
 }
 
@@ -35,7 +38,7 @@ def _auth_headers(secret: str) -> dict[str, str]:
 
 
 def test_valid_auth_and_eligible_request_completes(client, app_module, monkeypatch, base_env):
-    async def fake_run(context_text: str) -> AgentRunOutcome:
+    async def fake_run(context_text: str, system_prompt: str) -> AgentRunOutcome:
         assert context_text == VALID_BODY["context"]
         return AgentRunOutcome(
             completed=True,
@@ -63,7 +66,7 @@ def test_valid_auth_and_eligible_request_completes(client, app_module, monkeypat
 def test_missing_auth_is_rejected_before_agno_logic(client, app_module, monkeypatch):
     called = {"count": 0}
 
-    async def fake_run(context_text: str) -> AgentRunOutcome:
+    async def fake_run(context_text: str, system_prompt: str) -> AgentRunOutcome:
         called["count"] += 1
         return AgentRunOutcome(completed=True, content="should never run")
 
@@ -86,7 +89,7 @@ def test_invalid_secret_is_rejected(client, base_env):
 def test_wrong_tenant_is_refused_before_agno_logic(client, app_module, monkeypatch, base_env):
     called = {"count": 0}
 
-    async def fake_run(context_text: str) -> AgentRunOutcome:
+    async def fake_run(context_text: str, system_prompt: str) -> AgentRunOutcome:
         called["count"] += 1
         return AgentRunOutcome(completed=True, content="should never run")
 
@@ -114,7 +117,7 @@ def test_regression_forged_tenant_is_refused_when_sidecar_is_configured_for_anot
 
     called = {"count": 0}
 
-    async def fake_run(context_text: str) -> AgentRunOutcome:
+    async def fake_run(context_text: str, system_prompt: str) -> AgentRunOutcome:
         called["count"] += 1
         return AgentRunOutcome(completed=True, content="should never run")
 
@@ -151,7 +154,7 @@ def test_wrong_exposure_is_refused(client, base_env):
 def test_dependency_unavailable_returns_clear_failure_not_fabricated_answer(
     client, app_module, monkeypatch, base_env
 ):
-    async def fake_run(context_text: str) -> AgentRunOutcome:
+    async def fake_run(context_text: str, system_prompt: str) -> AgentRunOutcome:
         return AgentRunOutcome(
             completed=False,
             failure_reason="dependency_unavailable (ConnectionError)",
@@ -168,7 +171,7 @@ def test_dependency_unavailable_returns_clear_failure_not_fabricated_answer(
 
 
 def test_agno_non_completed_status_is_treated_as_failed(client, app_module, monkeypatch, base_env):
-    async def fake_run(context_text: str) -> AgentRunOutcome:
+    async def fake_run(context_text: str, system_prompt: str) -> AgentRunOutcome:
         return AgentRunOutcome(completed=False, failure_reason="agno_non_completed_status (ERROR)")
 
     monkeypatch.setattr(app_module, "run_operations_coordinator", fake_run)
@@ -187,7 +190,7 @@ def test_response_body_always_matches_the_declared_schema(client, app_module, mo
     route to emit an ambiguous or malformed body, because pydantic would
     refuse to serialize one.
     """
-    async def fake_run(context_text: str) -> AgentRunOutcome:
+    async def fake_run(context_text: str, system_prompt: str) -> AgentRunOutcome:
         return AgentRunOutcome(completed=True, content="ok")
 
     monkeypatch.setattr(app_module, "run_operations_coordinator", fake_run)
@@ -202,7 +205,7 @@ def test_healthz_is_unauthenticated_and_reveals_nothing(client):
     # header sent, and it must still answer 200: it is one of AgentOS's own
     # DEFAULT excluded_route_paths. No template id, tenant or config value is
     # asserted here on purpose — this only proves it is REACHABLE unauthenticated.
-    res = client.get("/health")
+    res = client.get("/healthz")
     assert res.status_code == 200
     body_text = res.text.lower()
     for leak in ("8d3dp3z", "epic-staff-operations-coordinator", "shared_secret", "jwt"):

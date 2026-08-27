@@ -99,6 +99,22 @@ services:
       RUNTIME_BUDGET_ENFORCEMENT: "true"
       RUNTIME_STATE_DIR: /data/isola-runtime-state
 
+      # ---- AgentOS sidecar: DELIBERATELY OFF IN PRODUCTION ------------------
+      # A PRODUCTION AGENTOS ROLLOUT IS NOT AUTHORIZED. Enabling it is a
+      # separate decision, and this line is the record that the decision has
+      # not been taken.
+      #
+      # Off is also what keeps this stack file able to START the runtime at
+      # all: with AGENTOS_ENABLED on, AGENTOS_BASE_URL, AGENTOS_SHARED_SECRET
+      # and AGENTOS_TENANT_ID all become boot-fatal (config.ts bootErrors), and
+      # this file defines none of them. Turning this on without adding those
+      # three — and standing up the private sidecar they point at — would make
+      # the live runtime boot-refuse and take it out of service.
+      #
+      # With it off: no template routes into AgentOS and every request takes
+      # the existing direct-model path, exactly as it does today.
+      AGENTOS_ENABLED: "false"
+
       # Swarm secrets, resolved by entrypoint.sh. The VALUES are not here.
       MODEL_API_KEY_FILE: /run/secrets/model_api_key
       PAPERCLIP_API_KEY_FILE: /run/secrets/paperclip_api_key

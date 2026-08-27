@@ -24,6 +24,13 @@ class AgentRunEnvelope(BaseModel):
     tenantId: str = Field(min_length=1)
     templateId: str = Field(min_length=1)
     exposure: Exposure
+    # THE SERVER-AUTHORITATIVE INSTRUCTION SOURCE, resolved by Node (the
+    # compiled-in template charter, or the Paperclip charter when the template
+    # is bound in PAPERCLIP_INSTRUCTIONS_MAP). Required: a run whose
+    # instructions the caller could omit would silently fall back to this
+    # service's own compiled-in copy, which is the drift this field removes.
+    # It is a DISTINCT field from `context` and the two are never merged.
+    systemPrompt: str = Field(min_length=1)
     context: str
 
 

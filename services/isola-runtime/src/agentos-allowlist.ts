@@ -49,6 +49,13 @@ export type AgentOsEligibility =
   | { kind: "not_configured" };
 
 export interface AgentOsEligibilityInput {
+  /**
+   * The operator's master switch (`AGENTOS_ENABLED`). When off, NOTHING routes
+   * into AgentOS and every template takes the unchanged direct-model path —
+   * checked FIRST, before any other condition, so a disabled runtime cannot
+   * refuse a request on an AgentOS ground.
+   */
+  enabled: boolean;
   templateId: string;
   /** The tenant id the CALLER supplied, if any. Descriptive, never decisive. */
   requestTenantId: string | null;
@@ -66,6 +73,13 @@ export interface AgentOsEligibilityInput {
 export function evaluateAgentOsEligibility(
   input: AgentOsEligibilityInput,
 ): AgentOsEligibility {
+  // THE MASTER SWITCH, checked before everything else. A disabled runtime
+  // behaves as though this feature does not exist: no routing, and no refusal
+  // on an AgentOS ground either.
+  if (!input.enabled) {
+    return { kind: "not_applicable" };
+  }
+
   if (input.templateId !== AGENTOS_ALLOWED_TEMPLATE_ID) {
     return { kind: "not_applicable" };
   }

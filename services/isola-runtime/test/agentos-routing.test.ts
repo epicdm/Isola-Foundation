@@ -323,6 +323,65 @@ describe("AgentOS routing over HTTP", () => {
   });
 });
 
+describe("AGENTOS_ENABLED off: the eligible template takes the direct-model path", () => {
+  it("routes to the direct model, not AgentOS, and answers normally", async () => {
+    const model = StubModelClient.returning("the direct-model answer");
+    const agentOs = new RecordingAgentOsProvider({
+      status: "completed",
+      content: "AgentOS must not answer when disabled",
+      model: null,
+      usage: null,
+    });
+    server = await startServer({
+      config: envConfig({ AGENTOS_ENABLED: "false" }),
+      modelClient: model,
+      agentOsProvider: agentOs,
+    });
+
+    const res = await invoke(server.url, {
+      bearer: INTERNAL_SECRET,
+      body: {
+        templateId: INTERNAL_TEMPLATE,
+        exposure: "INTERNAL",
+        agentId: "agent-7",
+        runId: "run-disabled-1",
+        context: OVERDUE_FIXTURE,
+      },
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.json["ok"]).toBe(true);
+    // The direct model answered; AgentOS was never consulted.
+    expect(model.calls).toHaveLength(1);
+    expect(agentOs.calls).toHaveLength(0);
+  });
+
+  it("does not refuse a wrong tenant on an AgentOS ground when disabled", async () => {
+    const model = StubModelClient.returning("the direct-model answer");
+    server = await startServer({
+      config: envConfig({ AGENTOS_ENABLED: "false" }),
+      modelClient: model,
+      agentOsProvider: null,
+    });
+
+    const res = await invoke(server.url, {
+      bearer: INTERNAL_SECRET,
+      body: {
+        templateId: INTERNAL_TEMPLATE,
+        exposure: "INTERNAL",
+        agentId: "agent-7",
+        runId: "run-disabled-2",
+        context: { ...OVERDUE_FIXTURE, tenantId: "someone-elses-tenant" },
+      },
+    });
+
+    // Neither agentos_routing_refused (403) nor agentos_not_configured (503).
+    expect(res.status).toBe(200);
+    expect(res.json["outcome"]).toBe("ok");
+    expect(model.calls).toHaveLength(1);
+  });
+});
+
 /**
  * The scenario the ratified decision is actually about
  * (`dec-ai1b-inline-agent-answer-may-return-without-recorder-2026-08-27`):

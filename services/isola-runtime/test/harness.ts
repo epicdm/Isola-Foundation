@@ -62,6 +62,11 @@ export const BASE_ENV: EnvRecord = {
   // per-test `agentOsProvider` default from whatever `modelClient` a test
   // supplies, so these two only need to be NON-EMPTY for bootErrors to read
   // clean — no test depends on this exact URL or secret being dialled.
+  // The suite exercises the AgentOS path, so the harness turns the master
+  // switch ON. Production is the opposite (deploy/isola-rt-stack.yml pins it
+  // off) — `agentos-allowlist.test.ts` covers the disabled behaviour, and
+  // `agentos-routing.test.ts` covers a disabled runtime over HTTP.
+  AGENTOS_ENABLED: "true",
   AGENTOS_BASE_URL: "https://agentos-sidecar.internal.example.test",
   AGENTOS_SHARED_SECRET: placeholder("agentos"),
   // The SERVER-SIDE tenant authority. Set to the expected constant, which is

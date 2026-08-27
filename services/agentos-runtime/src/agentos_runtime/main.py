@@ -27,6 +27,7 @@ Boot sequence, and why the order matters:
 
 from __future__ import annotations
 
+import json
 import time
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status as http_status
@@ -35,7 +36,7 @@ from fastapi.responses import JSONResponse
 
 from agentos_runtime.agent import build_agent, make_run_operations_coordinator
 from agentos_runtime.allowlist import evaluate_eligibility
-from agentos_runtime.logging_utils import configure_logging, log_run_event
+from agentos_runtime.logging_utils import configure_logging, log_run_event, logger
 from agentos_runtime.schemas import AgentRunEnvelope, AgentRunResponse, AgentRunUsage
 from agentos_runtime.security import make_verify_shared_secret
 from agentos_runtime.settings import load_settings
@@ -50,6 +51,19 @@ base_app = FastAPI(title="isola-agentos-sidecar", docs_url=None, redoc_url=None)
 
 verify_shared_secret = make_verify_shared_secret(settings)
 run_operations_coordinator = make_run_operations_coordinator(settings)
+
+
+@base_app.get("/healthz")
+async def healthz() -> dict[str, str]:
+    """OUR liveness probe, owned by this file so it survives the route
+    lockdown below (which removes Agno's routers wholesale, health included).
+
+    Deliberately NOT `/health`: that path is Agno's, and defining ours there
+    would collide during `get_app()` under `on_route_conflict="error"`.
+    Unauthenticated on purpose, and it reveals nothing — no template list, no
+    tenant, no config value.
+    """
+    return {"status": "ok"}
 
 
 # No custom /health route here: AgentOS's own `get_app()` already registers
@@ -124,7 +138,10 @@ async def agent_run(
         )
         raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail=eligibility.reason)
 
-    outcome = await run_operations_coordinator(envelope.context)
+    # `systemPrompt` is the instruction source; `context` stays caller-supplied
+    # DATA. They are passed as separate arguments and never concatenated here,
+    # so nothing inside the context can be promoted to a system instruction.
+    outcome = await run_operations_coordinator(envelope.context, envelope.systemPrompt)
     duration_ms = (time.monotonic() - started) * 1000
 
     if not outcome.completed:
@@ -181,7 +198,104 @@ def _mount_agent_os(app: FastAPI) -> FastAPI:
     )
     final_app = agent_os.get_app()
     _exempt_self_authenticating_route(final_app, "/v1/agent-run")
+    # `/healthz` is ours and unauthenticated; Agno's default exemption list
+    # names `/health`, not this path, so it must be exempted explicitly or the
+    # blanket JWT middleware would 401 the container's own liveness probe.
+    _exempt_self_authenticating_route(final_app, "/healthz")
+    enforce_single_execution_entrance(final_app)
     return final_app
+
+
+# The ONLY paths this service may serve. Everything else — including every
+# Agno built-in — is removed before the app serves traffic.
+#
+# `/healthz` is OURS, defined on base_app above, deliberately not Agno's
+# `/health`: the lockdown removes Agno's included routers wholesale (that is
+# how it removes the execution routes), and Agno's health route travels inside
+# one of them. Defining our own at `/health` instead would collide with Agno's
+# during `get_app()` and trip `on_route_conflict="error"`, so it gets its own
+# path and survives the lockdown because we own it directly.
+ALLOWED_PATHS: frozenset[str] = frozenset({"/healthz", "/v1/agent-run"})
+
+
+def all_registered_paths(app: FastAPI) -> set[str]:
+    """Every path the app can actually route to, INCLUDING nested ones.
+
+    FastAPI 0.141.1 does not flatten `include_router` into
+    `app.router.routes` — it stores lazy `_IncludedRouter` wrappers whose real
+    `APIRoute`s hang off `.original_router.routes`. A scan that only read the
+    top level would therefore report a handful of entries while dozens of
+    routes were live behind them, and would look clean while being blind.
+    """
+    found: set[str] = set()
+
+    def walk(routes) -> None:
+        for route in routes or []:
+            path = getattr(route, "path", None)
+            if isinstance(path, str):
+                found.add(path)
+            inner = getattr(route, "original_router", None)
+            if inner is not None:
+                walk(getattr(inner, "routes", []))
+            elif not isinstance(path, str):
+                walk(getattr(route, "routes", []))
+
+    walk(app.router.routes)
+    return found
+
+
+def enforce_single_execution_entrance(app: FastAPI) -> list[str]:
+    """STRUCTURALLY REMOVE every route that is not the one execution entrance.
+
+    WHY THIS IS NEEDED, and why it is a removal rather than configuration:
+    `AgentOS.get_app()` unconditionally registers its built-in routers
+    (`_add_built_in_routes` plus the session/memory/metrics/eval/knowledge/
+    traces/database/components/schedule/approval/service-account routers — read
+    from agno 3.0.1's own `agno/os/app.py`). Among them are
+    `POST /agents/{agent_id}/runs`, `.../runs/{run_id}/continue` and
+    `POST /teams/{team_id}/runs`: fully-functional model-execution entrances
+    that bypass `/v1/agent-run`'s shared-secret check, the tenant/template/
+    exposure allowlist, correlation logging and the deadline.
+
+    Checked against current Agno documentation (Context7, 2026-08-27) before
+    writing this: the `AgentOS` constructor exposes no parameter to skip those
+    routers, and Agno's own security guidance is to put a gateway in front —
+    which was explicitly ruled insufficient here, because the control must not
+    depend on network position or on possession of a JWT.
+
+    So the surface is reduced on the app object itself, before it ever serves:
+    the router's route list is REPLACED with only the allowlisted paths. A
+    removed route does not 403 — it does not exist, and returns 404.
+
+    Returns the paths removed, so a caller (and the tests) can enumerate the
+    before/after inventory rather than trusting this to have worked.
+    """
+    before = all_registered_paths(app)
+
+    kept = []
+    for route in list(app.router.routes):
+        path = getattr(route, "path", None)
+        if isinstance(path, str) and path in ALLOWED_PATHS:
+            kept.append(route)
+        # Everything else is dropped, INCLUDING the `_IncludedRouter` wrappers
+        # Agno's routers arrive in — dropping the wrapper drops every route it
+        # carries, which is precisely how the execution entrances are removed.
+    app.router.routes = kept
+
+    after = all_registered_paths(app)
+    removed = sorted(before - after)
+    if removed:
+        logger.info(
+            json.dumps(
+                {
+                    "event": "route_lockdown",
+                    "keptPaths": sorted(after),
+                    "removedCount": len(removed),
+                },
+                sort_keys=True,
+            )
+        )
+    return removed
 
 
 def _exempt_self_authenticating_route(app: FastAPI, path: str) -> None:
