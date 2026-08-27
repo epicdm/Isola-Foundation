@@ -39,14 +39,16 @@ import {
   createInstructionsProvider,
   type InstructionsProvider,
 } from "./instructions.js";
-import {
-  ModelInvalidOutputError,
-  ModelProviderError,
-  ModelTimeoutError,
-} from "./errors.js";
+import { ModelProviderError } from "./errors.js";
 import { createLogger, type Logger } from "./log.js";
 import { buildIdempotencyKey, MeteringService, type MeteringOptions } from "./metering.js";
 import { createOpenAiCompatibleClient, type ModelClient } from "./model.js";
+import { evaluateAgentOsEligibility } from "./agentos-allowlist.js";
+import { createAgentOsExecutionProvider } from "./agentos-execution-provider.js";
+import {
+  createDirectModelExecutionProvider,
+  type ExecutionProvider,
+} from "./execution-provider.js";
 import type { TokenUsage } from "./money.js";
 import { createPaperclipApi, type PaperclipApi, type PaperclipCall } from "./paperclip.js";
 import {
@@ -73,6 +75,7 @@ import {
 import {
   RESPONSE_CONTRACT_VERSION,
   RESPONSE_MODES,
+  type PersistenceState,
   completionStateForOutcome,
   inlineFailureBody,
   inlineHttpStatus,
@@ -110,13 +113,27 @@ export type Outcome =
   /** 503: measured spend has not reached the ledger. Fail closed, do not run. */
   | "cost_delivery_unconfirmed"
   /** A duplicate of a run that is still in flight. Nothing was done twice. */
-  | "duplicate_run_suppressed";
+  | "duplicate_run_suppressed"
+  /**
+   * 403: the request matched the AgentOS-gated template id but not its
+   * tenant/exposure allowlist. Refused outright — never routed to the
+   * direct-model path instead, which would silently defeat the enforcement.
+   */
+  | "agentos_routing_refused"
+  /** 503: the request is AgentOS-eligible but AGENTOS_BASE_URL/AGENTOS_SHARED_SECRET are unset. */
+  | "agentos_not_configured";
 
 export interface AppDeps {
   config: RuntimeConfig;
   logger?: Logger;
   /** Injected in tests; defaults to the real allowlisted OpenAI-compatible client. */
   modelClient?: ModelClient;
+  /**
+   * Injected in tests; defaults to a real AgentOS HTTP client when
+   * config.agentOsBaseUrl/agentOsSharedSecret are set, else `null` (which
+   * fails closed with `agentos_not_configured` for any eligible request).
+   */
+  agentOsProvider?: ExecutionProvider | null;
   /** Injected in tests; defaults to Paperclip-or-Null based on config. */
   recorder?: RunRecorder;
   /** Injected in tests; defaults to the real Paperclip REST client, or null. */
@@ -404,6 +421,30 @@ export function createRuntime(deps: AppDeps): Runtime {
     return made;
   };
 
+  /**
+   * THE PRIVATE AGENTOS SIDECAR CLIENT — one instance for the whole process,
+   * exactly like `modelClient` above. `null` when unconfigured; the request
+   * path below fails closed with `agentos_not_configured` rather than ever
+   * substituting the direct-model path for a request already decided to be
+   * AgentOS-eligible (see agentos-allowlist.ts). In production `bootErrors`
+   * (config.ts) refuses to start the process at all in that state — this
+   * null-check is defence in depth for anything that constructs the app
+   * without going through server.ts's boot gate (as every test here does).
+   */
+  const agentOsProvider: ExecutionProvider | null =
+    deps.agentOsProvider !== undefined
+      ? deps.agentOsProvider
+      : config.agentOsEnabled &&
+          config.agentOsBaseUrl !== null &&
+          config.agentOsSharedSecret !== null
+        ? createAgentOsExecutionProvider({
+            baseUrl: config.agentOsBaseUrl,
+            sharedSecret: config.agentOsSharedSecret,
+            safeFetch,
+            timeoutMs: config.agentOsTimeoutMs,
+          })
+        : null;
+
   const recorder =
     deps.recorder ??
     createRecorder({
@@ -646,9 +687,14 @@ export function createRuntime(deps: AppDeps): Runtime {
             runId: ctx.runId,
             // The stored string, returned as stored. Never re-rendered.
             answerText,
-            // A completed run is one Paperclip accepted, so there is no
-            // recorder error to carry.
-            recorderError: null,
+            // A stored `completed` means persistence did not FAIL, so a
+            // `recorded:false` record can only be the skipped-unconfigured
+            // case. Records written before this contract always had
+            // `recorded:true` on a completed run, so they map to "recorded"
+            // and replay exactly as they did before.
+            persistence: prior.recorded ? "recorded" : "skipped_unconfigured",
+            // Replayed as stored — the original run's reason, not invented here.
+            recorderError: prior.recorderError,
             transitioned: prior.transitioned,
             issueStatus: prior.transitionStatus,
             replay: true,
@@ -842,6 +888,98 @@ export function createRuntime(deps: AppDeps): Runtime {
 
     // ---- authorised: do the work synchronously ----------------------------
     const exposure = decision.exposure;
+
+    // ---- AgentOS routing gate ----------------------------------------------
+    // This is the FIRST tenant enforcement anywhere in this service.
+    // `extractTenantId` has always been a best-effort, descriptive extraction
+    // (conversation.ts) — nothing gated on it until this template existed.
+    // For every template OTHER than epic-staff-operations-coordinator@v1 this
+    // is a complete no-op: `evaluateAgentOsEligibility` returns
+    // `not_applicable` immediately and execution falls through to the
+    // unchanged direct-model path below, exactly as it always has.
+    // DESCRIPTIVE ONLY — this is what the CALLER said its tenant is. It is
+    // still used for the conversation-issue description exactly as before, and
+    // it is NOT what decides AgentOS routing: `config.agentOsTenantId` is.
+    const tenantId = extractTenantId(body.context);
+    const agentOsEligibility = evaluateAgentOsEligibility({
+      enabled: config.agentOsEnabled,
+      templateId: template.id,
+      requestTenantId: tenantId,
+      exposure,
+      configuredTenantId: config.agentOsTenantId,
+    });
+
+    if (agentOsEligibility.kind === "refused") {
+      // Matched the gated template id but failed tenant or exposure: refuse
+      // outright. NEVER fall through to the direct-model path here — that
+      // would silently defeat the only tenant boundary this service has.
+      finish(
+        403,
+        "agentos_routing_refused",
+        { error: agentOsEligibility.reason },
+        {
+          agentId,
+          runId,
+          templateId: template.id,
+          templateExposure: template.exposure,
+          credentialExposure,
+          tenantId,
+          reason: agentOsEligibility.reason,
+        },
+        { completionState: "rejected", failureCategory: agentOsEligibility.reason },
+      );
+      return;
+    }
+
+    // `null` means "the direct-model provider, created lazily inside the
+    // guarded block" — see the FIX 5 note below.
+    let executionProvider: ExecutionProvider | null;
+    // The tenant the run EXECUTES as. For an AgentOS run this is the
+    // server-configured value the allowlist resolved — never the caller's.
+    let executionTenantId: string | null = tenantId;
+    if (agentOsEligibility.kind === "eligible" || agentOsEligibility.kind === "not_configured") {
+      if (agentOsEligibility.kind === "not_configured" || agentOsProvider === null) {
+        finish(
+          503,
+          "agentos_not_configured",
+          {
+            error:
+              "AgentOS execution provider is not configured (AGENTOS_BASE_URL / AGENTOS_SHARED_SECRET / AGENTOS_TENANT_ID unset)",
+          },
+          {
+            agentId,
+            runId,
+            templateId: template.id,
+            templateExposure: template.exposure,
+            credentialExposure,
+            tenantId,
+          },
+          { completionState: "rejected", failureCategory: "agentos_not_configured" },
+        );
+        return;
+      }
+      executionProvider = agentOsProvider;
+      executionTenantId = agentOsEligibility.tenantId;
+    } else {
+      // DEFERRED ON PURPOSE (FIX 5). `clientForTemplate` THROWS when a template
+      // declares its own brain but the credential env var is unset — which is
+      // exactly isola-internal-manager@v1 with HERMES_API_KEY absent. Creating
+      // the client here, outside the guarded block below, let that throw escape
+      // as an UNSTRUCTURED 500: no run recorded, no failureCategory, none of
+      // the structured provider response the runtime intends.
+      //
+      // Measured, not assumed — see test/hermes-500-mechanism.test.ts, which
+      // also proves the competing egress explanation cannot be the mechanism
+      // when the credential is absent (the credential check runs first, so the
+      // allowlist is never consulted).
+      //
+      // The creation now happens INSIDE the try, so a missing brain credential
+      // becomes the same structured 502 provider_error any other dependency
+      // failure produces. A template with its credential present behaves
+      // exactly as before.
+      executionProvider = null;
+    }
+
     const rendered = renderContext(body.context, template.maxContextBytes);
     const model = config.modelNameOverride ?? template.model;
     resolvedModel = model;
@@ -1199,47 +1337,85 @@ export function createRuntime(deps: AppDeps): Runtime {
       const tBrainStart = now();
 
       try {
-        const result = await clientForTemplate(template).complete({
+        // Provider-shaped, not client-shaped: `executionProvider` is either
+        // the DirectModelExecutionProvider wrapping `clientForTemplate` (every
+        // template except the one below) or the AgentOsExecutionProvider
+        // (only epic-staff-operations-coordinator@v1, only tenant 8D3dp3z,
+        // only exposure INTERNAL — see the routing gate above). Neither path
+        // is visible from here; this block only ever sees an ExecutionResult.
+        // FIX 5: created here, inside the guard, so a template whose declared
+        // brain has no configured credential fails STRUCTURALLY rather than
+        // throwing an unstructured 500 out of the handler.
+        const provider =
+          executionProvider ?? createDirectModelExecutionProvider(clientForTemplate(template));
+        const result = await provider.execute({
+          template,
+          // SERVER-decided for the AgentOS path; the caller's descriptive value
+          // for every other template (unchanged — the direct provider ignores it).
+          tenantId: executionTenantId,
+          exposure,
           model,
+          systemPrompt: resolvedPrompt.prompt,
+          renderedContext: rendered,
+          correlationId,
           timeoutMs,
-          messages: [
-            { role: "system", content: resolvedPrompt.prompt },
-            { role: "user", content: userMessage },
-          ],
         });
         brainMs = now() - tBrainStart;
-        status = "succeeded";
-        content = result.content;
-        httpStatus = 200;
-        outcome = "ok";
-        if (result.usage !== null) {
-          // `promptTokens` includes the cached subset; billing splits them.
-          const cached = result.usage.cachedPromptTokens ?? 0;
-          const prompt = result.usage.promptTokens ?? 0;
-          usage = {
-            inputTokens: Math.max(0, prompt - cached),
-            cachedInputTokens: cached,
-            outputTokens: result.usage.completionTokens ?? 0,
-          };
+        if (result.status === "completed") {
+          status = "succeeded";
+          content = result.content;
+          httpStatus = 200;
+          outcome = "ok";
+          if (result.usage !== null) {
+            // `promptTokens` includes the cached subset; billing splits them.
+            const cached = result.usage.cachedPromptTokens ?? 0;
+            const prompt = result.usage.promptTokens ?? 0;
+            usage = {
+              inputTokens: Math.max(0, prompt - cached),
+              cachedInputTokens: cached,
+              outputTokens: result.usage.completionTokens ?? 0,
+            };
+          }
+        } else {
+          // NEVER fabricate an answer here. The write-back says the run
+          // failed. This mirrors, field for field, what the inline
+          // ModelClient try/catch used to do — see execution-provider.ts's
+          // DirectModelExecutionProvider, which reproduces it verbatim — so a
+          // direct-model failure is byte-for-byte identical to before this
+          // seam existed. An AgentOS failure (timeout, non-200, malformed or
+          // non-"completed" body) lands on the exact same three statuses,
+          // distinguished only by a `failureCategory` string prefixed
+          // `agentos_...` for operator traceability. There is no retry here
+          // and no fallback to a different provider.
+          failureCategory = result.reason;
+          httpStatus = result.httpStatus;
+          invalidOutput = result.invalidOutput;
+          if (result.category === "timeout") {
+            status = "timed_out";
+            outcome = "model_timeout";
+          } else if (result.category === "provider_error") {
+            status = "provider_error";
+            outcome = "provider_error";
+          } else {
+            status = "internal_error";
+            outcome = "internal_error";
+          }
         }
       } catch (err) {
-        // Recorded on the FAILURE path too. A timeout's brainMs is the most
-        // useful number there is when asking whether the ceiling is wrong or the
-        // upstream is; omitting it would leave exactly the case we most need.
+        // Defence in depth: no ExecutionProvider implementation above should
+        // ever throw (each maps its own failures to ExecutionResult), but a
+        // future one that does must still fail closed here rather than crash
+        // the request unhandled.
         brainMs = now() - tBrainStart;
-        // NEVER fabricate an answer here. The write-back says the run failed.
-        if (err instanceof ModelTimeoutError) {
-          status = "timed_out";
-          failureCategory = `model_timeout_after_${timeoutMs}ms`;
-          httpStatus = 504;
-          outcome = "model_timeout";
-        } else if (err instanceof ModelProviderError) {
+        // FIX 5: `clientForTemplate` throws this when a template declares its
+        // own brain and that brain's credential is unset. It is a dependency
+        // problem, so it gets the SAME structured 502 provider_error as any
+        // other — not the unstructured 500 it used to escape as.
+        if (err instanceof ModelProviderError) {
           status = "provider_error";
           failureCategory = err.message;
           httpStatus = 502;
           outcome = "provider_error";
-          // Subclass of the above: same status, same outcome, same category.
-          invalidOutput = err instanceof ModelInvalidOutputError;
         } else {
           status = "internal_error";
           failureCategory = `internal_error (${err instanceof Error ? err.name : "unknown"})`;
@@ -1277,7 +1453,7 @@ export function createRuntime(deps: AppDeps): Runtime {
           ref: conversationRef,
           companyId,
           call,
-          tenantId: extractTenantId(body.context),
+          tenantId,
           correlationId,
           runId: paperclipRunId,
           agentId,
@@ -1322,12 +1498,25 @@ export function createRuntime(deps: AppDeps): Runtime {
       // HTTP status. It is logged and surfaced as `recorded:false`.
       let recorded = false;
       let recorderError: string | null = null;
+      /**
+       * WHETHER THE ANSWER WAS WRITTEN DOWN — orthogonal to `completionState`.
+       *
+       * Defaults to `failed`, the fail-closed value: every branch below sets it
+       * explicitly, and a future branch that forgets to inherits the safe one.
+       * `recorded` and `recorderError` keep their exact previous meanings so
+       * nothing downstream that reads them changes behaviour.
+       */
+      let persistence: PersistenceState = "failed";
       /** Wall time of the Paperclip write-back. 0 when no record was attempted. */
       let recordMs = 0;
       if (conversationFailure !== null) {
         // There is no issue to write to. The recorder is not called: it would
         // fail on the missing {issueId} anyway, and reporting the real reason is
         // more useful than reporting the symptom.
+        // A run that NEEDED an issue and could not get one. A write was
+        // required and did not happen, so this stays a genuine failure — it is
+        // not the "no recorder configured" deployment property.
+        persistence = "failed";
         recorded = false;
         recorderError = conversationFailure;
         logger.error({
@@ -1346,8 +1535,19 @@ export function createRuntime(deps: AppDeps): Runtime {
           await recorder.record(runOutcome);
           recordMs = now() - tRecordStart;
           recorded = recorder.kind !== "null";
-          if (recorder.kind === "null") recorderError = "no recorder configured";
+          if (recorder.kind === "null") {
+            // NO WRITE WAS ATTEMPTED. `NullRunRecorder.record()` is a no-op, so
+            // reaching here with a null recorder means nothing was tried and
+            // nothing went wrong — a deployment property, not a fault.
+            recorderError = "no recorder configured";
+            persistence = "skipped_unconfigured";
+          } else {
+            persistence = "recorded";
+          }
         } catch (err) {
+          // A CONFIGURED recorder attempted a write and it did not succeed.
+          // This is the real persistence failure, and it stays fail-closed.
+          persistence = "failed";
           recorded = false;
           recorderError = err instanceof Error ? err.message : "unknown recorder failure";
           logger.error({
@@ -1402,17 +1602,30 @@ export function createRuntime(deps: AppDeps): Runtime {
       const persistedAnswer = runOutcome.content;
 
       /**
-       * The truthful end state.
+       * The truthful end state — MODE-INDEPENDENT, deliberately.
        *
-       * `completed` requires BOTH that the model answered and that Paperclip
-       * accepted the write-back. A recorder failure is `persistence_failed`:
-       * the answer exists but was not persisted, so it is not handed out — the
-       * caller would otherwise reply to a customer with text that no record
-       * anywhere contains.
+       * `completed` requires that the model answered, that persistence did not
+       * FAIL, and that the answer is non-empty.
+       *
+       * The change from `!recorded` to `persistence === "failed"` is the whole
+       * fix (dec-ai1b-inline-agent-answer-may-return-without-recorder-2026-08-27):
+       * `!recorded` was true both when a configured recorder failed AND when no
+       * recorder was configured at all, so a deployment property was reported
+       * as a runtime fault. A CONFIGURED recorder that fails is still
+       * `persistence_failed` and still withholds the answer — unchanged.
+       *
+       * This stays mode-independent on purpose: `metering.finalize` stores it,
+       * and a later replay in EITHER mode must reproduce what that mode would
+       * have returned. Making it depend on `responseMode` would break that.
+       * The MODE decides what to DO with this state, further down.
+       *
+       * Note the ORDER is unchanged: persistence is judged before the answer's
+       * emptiness, so an empty answer with skipped persistence is still
+       * `invalid_output` and never a success.
        */
       const completionState: CompletionState =
         outcome === "ok"
-          ? !recorded
+          ? persistence === "failed"
             ? "persistence_failed"
             : persistedAnswer === null || persistedAnswer.trim().length === 0
               ? "invalid_output"
@@ -1530,7 +1743,13 @@ export function createRuntime(deps: AppDeps): Runtime {
               runId,
               // Same reference the recorder received. Not a copy of a copy.
               answerText: persistedAnswer as string,
-              recorderError: null,
+              // `completionState === "completed"` guarantees persistence is not
+              // "failed", so this ternary is exhaustive rather than a cast.
+              // The body derives `recorded` from it and cannot overstate it.
+              persistence: persistence === "recorded" ? "recorded" : "skipped_unconfigured",
+              // Carries "no recorder configured" on the skipped path, so the
+              // response states plainly why nothing was written.
+              recorderError,
               transitioned: transition.transitioned,
               issueStatus: transition.status,
               replay: false,

@@ -31,8 +31,13 @@
 /**
  * Bumped whenever the shape of an inline body changes in a way a client could
  * observe. Carried on every inline response so the gateway can assert on it.
+ *
+ * v2 (dec-ai1b-inline-agent-answer-may-return-without-recorder-2026-08-27):
+ * the success body gained a `persistence` field, and its `recorded` flag is no
+ * longer hardcoded `true` — it is now derived from `persistence`, so a body
+ * can never claim an answer was written when nothing was.
  */
-export const RESPONSE_CONTRACT_VERSION = 1;
+export const RESPONSE_CONTRACT_VERSION = 2;
 
 export const RESPONSE_MODES = ["none", "inline"] as const;
 export type ResponseMode = (typeof RESPONSE_MODES)[number];
@@ -74,6 +79,34 @@ export function isCompletionState(value: unknown): value is CompletionState {
     typeof value === "string" && (COMPLETION_STATES as readonly string[]).includes(value)
   );
 }
+
+/**
+ * WHETHER THE ANSWER WAS WRITTEN DOWN — a dimension ORTHOGONAL to
+ * `CompletionState`, and deliberately separate from it.
+ *
+ * Until 2026-08-27 these were conflated: `recorded = recorder.kind !== "null"`
+ * meant a deliberately-unconfigured recorder and a recorder that ATTEMPTED a
+ * write and FAILED both produced `persistence_failed`. Those are different
+ * facts about different things — one is a deployment property, the other is a
+ * runtime fault — and only the second is a reason to withhold an answer.
+ *
+ *  - `recorded`             a write was attempted and accepted.
+ *  - `skipped_unconfigured` NO write was attempted, because no recorder is
+ *                           configured. Not a failure; nothing went wrong.
+ *                           The answer still exists and is still truthful —
+ *                           it simply is not persisted anywhere, and any
+ *                           surface carrying it must say so.
+ *  - `failed`               a CONFIGURED recorder attempted a write and it did
+ *                           not succeed. This remains fail-closed everywhere:
+ *                           the answer is withheld, exactly as before.
+ *
+ * Per dec-ai1b-inline-agent-answer-may-return-without-recorder-2026-08-27.
+ */
+export const PERSISTENCE_STATES = ["recorded", "skipped_unconfigured", "failed"] as const;
+export type PersistenceState = (typeof PERSISTENCE_STATES)[number];
+
+/** The two persistence states a completed run may carry. `failed` cannot complete. */
+export type CompletedPersistenceState = Exclude<PersistenceState, "failed">;
 
 export type ResponseModeDecision =
   | { kind: "ok"; mode: ResponseMode }
@@ -120,7 +153,18 @@ export interface InlineSuccessArgs {
    * variable it gave the write-back; it must never re-render or re-derive it.
    */
   answerText: string;
-  recorderError: null;
+  /**
+   * Whether the answer was actually written down. `failed` is not accepted
+   * here by TYPE: a run whose configured recorder failed cannot reach a
+   * success body at all, which is the fail-closed guarantee made structural.
+   */
+  persistence: CompletedPersistenceState;
+  /**
+   * Widened from `null` in v2. A `skipped_unconfigured` run carries the
+   * reason it was not written ("no recorder configured"), because a success
+   * body that silently omitted it would read as though it HAD been written.
+   */
+  recorderError: string | null;
   transitioned: boolean;
   issueStatus: string | null;
   replay: boolean;
@@ -156,8 +200,14 @@ function usageFields(usage: InlineUsage): Record<string, unknown> {
 }
 
 /**
- * The success body. Reachable only with an answer in hand and only after the
- * write-back was accepted — `completionState` is hardcoded to `"completed"`.
+ * The success body. Reachable only with an answer in hand, and only when the
+ * write-back was accepted OR was never attempted because no recorder is
+ * configured — `completionState` is hardcoded to `"completed"`.
+ *
+ * `recorded` is DERIVED from `persistence`, never passed in. Until v2 it was
+ * hardcoded `true`, which made this body assert a write had happened even on
+ * the path where nothing had been written. A field that cannot be set
+ * independently cannot drift from the fact it describes.
  */
 export function inlineSuccessBody(args: InlineSuccessArgs): Record<string, unknown> {
   return {
@@ -169,7 +219,10 @@ export function inlineSuccessBody(args: InlineSuccessArgs): Record<string, unkno
     runId: args.runId,
     answerText: args.answerText,
     failureCategory: null,
-    recorded: true,
+    // NEVER hardcoded. `skipped_unconfigured` => false, and there is no
+    // argument through which a caller could claim otherwise.
+    recorded: args.persistence === "recorded",
+    persistence: args.persistence,
     recorderError: args.recorderError,
     transitioned: args.transitioned,
     issueStatus: args.issueStatus,

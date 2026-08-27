@@ -158,6 +158,9 @@ describe("POST /v1/invoke auth", () => {
     expect(res.json["egressAllowlist"]).toEqual([
       "api.deepseek.com",
       "paperclip.example.test",
+      // Contributed by AGENTOS_BASE_URL (harness BASE_ENV) — the sidecar host
+      // must be reachable through safeFetch for the AgentOS provider to work.
+      "agentos-sidecar.internal.example.test",
       // Contributed by the internal-manager template's declared brain.
       "hermes-tunnel",
     ]);

@@ -249,7 +249,7 @@ describe("no issue context", () => {
     const { server, paperclip, logger } = await boot();
     const res = await invoke(server.url, {
       bearer: INTERNAL_SECRET,
-      body: body({ context: { fixture: "overdue-invoices", invoices: [] } }),
+      body: body({ context: { fixture: "overdue-invoices", invoices: [], tenantId: "8D3dp3z" } }),
     });
 
     expect(res.status).toBe(200);
@@ -268,7 +268,7 @@ describe("no issue context", () => {
     });
     const res = await invoke(server.url, {
       bearer: INTERNAL_SECRET,
-      body: body({ context: { nothing: "here" } }),
+      body: body({ context: { nothing: "here", tenantId: "8D3dp3z" } }),
     });
     expect(res.status).toBe(504);
     expect(paperclip.transitions).toHaveLength(0);
@@ -286,7 +286,7 @@ describe("no issue context", () => {
       const { server, paperclip } = await boot();
       await invoke(server.url, {
         bearer: INTERNAL_SECRET,
-        body: body({ context, runId: `run-${label}` }),
+        body: body({ context: { ...context, tenantId: "8D3dp3z" }, runId: `run-${label}` }),
       });
       expect(paperclip.transitions).toHaveLength(1);
       expect(paperclip.transitions[0]!.issueId).toMatch(/^I-\d$/);
@@ -297,7 +297,7 @@ describe("no issue context", () => {
     const { server, paperclip } = await boot();
     await invoke(server.url, {
       bearer: INTERNAL_SECRET,
-      body: body({ context: { issues: [{ id: "I-9" }] } }),
+      body: body({ context: { issues: [{ id: "I-9" }], tenantId: "8D3dp3z" } }),
     });
     expect(paperclip.transitions).toHaveLength(0);
   });

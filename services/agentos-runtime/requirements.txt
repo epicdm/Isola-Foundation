@@ -1,0 +1,82 @@
+# Exact pins — full transitive closure, resolved and verified installable in
+# a clean scratch venv (Python 3.14.2, pip 25.3) on 2026-08-27:
+#
+#   python -m venv .venv
+#   .venv/bin/pip install agno==3.0.1 fastapi==0.141.1 "uvicorn[standard]==0.52.4" openai
+#   .venv/bin/pip freeze
+#
+# Every line below is exactly what that install produced — nothing hand-added,
+# nothing loosened to a range. Rebuilding the image months from now installs
+# the exact bytes this was tested against, the same discipline
+# services/isola-runtime/package-lock.json already enforces on the Node side.
+#
+# agno==3.0.1 supersedes the 2.9.0 referenced by
+# ev-agno-local-inference-capability-proven-qwen25-1-5b-2026-08-22 (that
+# evidence predates this pin by 5 days on this fast-moving package; 3.0.1 is
+# simply what PyPI resolved when this was pinned, not a deliberate skip).
+#
+# `agnoctl`, `typer`, `rich`, `questionary`, `shellingham`, `docstring_parser`,
+# `markdown-it-py`, `mdurl`, `Pygments`, `wcwidth`, `prompt_toolkit` and
+# `packaging` are agno's own CLI-tool dependency chain — this service never
+# invokes agnoctl, but pip resolved them as part of installing `agno` and they
+# are pinned for a reproducible install, not because this service uses them.
+agno==3.0.1
+agnoctl==0.2.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.14.2
+certifi==2026.7.22
+click==8.5.0
+colorama==0.4.6
+docstring_parser==0.18.0
+fastapi==0.141.1
+h11==0.16.0
+h2==4.4.1
+hpack==4.2.0
+httpcore==1.0.9
+httpcore2==2.12.0
+httptools==0.8.0
+httpx==0.28.1
+httpx2==2.12.0
+hyperframe==6.1.0
+idna==3.19
+jiter==0.16.0
+markdown-it-py==4.2.0
+mdurl==0.1.2
+openai==3.5.0
+packaging==26.3
+prompt_toolkit==3.0.53
+pydantic==2.13.4
+pydantic-settings==2.15.0
+pydantic_core==2.46.4
+Pygments==2.21.0
+# NOT resolved by the initial `pip install agno fastapi uvicorn openai` above —
+# added and pinned separately once AgentOS's own built-in
+# `/agents/{agent_id}/runs` router (registered by `agno.os.AgentOS`, even
+# though our own `/v1/agent-run` route never uses Form data) turned out to
+# require it: FastAPI raises at ROUTE-REGISTRATION time, not at request time,
+# if a mounted route declares a Form/UploadFile parameter and this is absent —
+# so its absence is a hard import-time crash, verified in a scratch venv.
+python-multipart==0.0.32
+# ALSO not resolved by the initial install — AgentOS's own JWT auth
+# middleware (`agno.os.middleware.jwt`, wired up because this service passes
+# `authorization=True`, a hard architecture-ruling requirement) does
+# `import jwt` at request-dispatch time and crashes every request with
+# `ModuleNotFoundError` if this is absent. Verified the same way: a real
+# request through a scratch venv's TestClient, not a guess.
+PyJWT==2.13.0
+python-dotenv==1.2.3
+PyYAML==6.0.3
+questionary==2.1.1
+rich==15.0.0
+shellingham==1.5.4
+sniffio==1.3.1
+starlette==1.6.0
+truststore==0.10.4
+typer==0.27.1
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+uvicorn[standard]==0.52.4
+watchfiles==1.2.0
+wcwidth==0.8.2
+websockets==17.1

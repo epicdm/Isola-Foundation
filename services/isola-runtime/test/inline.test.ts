@@ -549,17 +549,128 @@ describe("inline failures are structured, truthful and answerless", () => {
     expect(replay.json["answerText"]).toBeNull();
   });
 
-  it("no recorder configured is a persistence failure, not a success", async () => {
-    // PAPERCLIP_API_KEY unset in production means NullRunRecorder: the answer
-    // is never written anywhere, so inline must not claim it was.
+  /**
+   * SUPERSEDED TEST, DELIBERATELY INVERTED — read this before assuming a
+   * weakened assertion.
+   *
+   * This block previously asserted "no recorder configured is a persistence
+   * failure, not a success" (inline + NullRunRecorder => 502,
+   * persistence_failed, answerText null). That behaviour was ratified away by
+   * `dec-ai1b-inline-agent-answer-may-return-without-recorder-2026-08-27`,
+   * which rules that for `responseMode:"inline"` a null/unconfigured recorder
+   * is a valid NON-PERSISTED execution state, not a run failure.
+   *
+   * The old test was the bodyguard of the conflated condition (CLAUDE.md Law
+   * 28). It is replaced — NOT deleted and not silently loosened — by the block
+   * below, which is strictly MORE demanding: it requires the answer AND
+   * requires the response to state honestly that nothing was written. The
+   * fail-closed cases it used to sit beside (a CONFIGURED recorder that fails,
+   * above) are untouched and still green, and are the positive control that
+   * this change did not simply disable persistence enforcement.
+   */
+  it("no recorder configured returns the answer as a non-persisted success", async () => {
+    // PAPERCLIP_API_KEY unset in production means NullRunRecorder: no write is
+    // ever ATTEMPTED. That is a deployment property, not a runtime fault.
+    const { server, model } = await boot({ recorder: new NullRunRecorder() });
+    const res = await invoke(server.url, {
+      bearer: INTERNAL_SECRET,
+      body: inlineBody("r1"),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.json["ok"]).toBe(true);
+    expect(res.json["completionState"]).toBe("completed");
+    expect(res.json["answerText"]).toBe(ANSWER);
+    expect(model.calls).toHaveLength(1);
+  });
+
+  it("that non-persisted success states it was NOT recorded and says why", async () => {
     const { server } = await boot({ recorder: new NullRunRecorder() });
     const res = await invoke(server.url, {
       bearer: INTERNAL_SECRET,
       body: inlineBody("r1"),
     });
+
+    // The whole point of the ruling: return the answer, but never pretend it
+    // was written down.
+    expect(res.json["recorded"]).toBe(false);
+    expect(res.json["persistence"]).toBe("skipped_unconfigured");
+    expect(String(res.json["recorderError"])).toContain("no recorder configured");
+    // The observable shape changed, so the contract version must have moved.
+    expect(res.json["contractVersion"]).toBe(RESPONSE_CONTRACT_VERSION);
+    expect(RESPONSE_CONTRACT_VERSION).toBeGreaterThan(1);
+  });
+
+  it("POSITIVE CONTROL: a working recorder still reports recorded:true / persistence recorded", async () => {
+    // Without this, the two assertions above could pass against a build that
+    // simply never reports a successful write at all.
+    const { server } = await boot();
+    const res = await invoke(server.url, {
+      bearer: INTERNAL_SECRET,
+      body: inlineBody("r1"),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.json["completionState"]).toBe("completed");
+    expect(res.json["recorded"]).toBe(true);
+    expect(res.json["persistence"]).toBe("recorded");
+    expect(res.json["answerText"]).toBe(ANSWER);
+  });
+
+  it("a skipped-persistence run REPLAYS as the same non-persisted success", async () => {
+    // The stored completionState is mode-independent, so the answer is now
+    // retained and an inline replay returns it — without a second model call
+    // and without ever claiming it was persisted.
+    const { server, model } = await boot({ recorder: new NullRunRecorder() });
+    await invoke(server.url, { bearer: INTERNAL_SECRET, body: inlineBody("r1") });
+    const replay = await invoke(server.url, {
+      bearer: INTERNAL_SECRET,
+      body: inlineBody("r1"),
+    });
+
+    expect(model.calls).toHaveLength(1);
+    expect(replay.status).toBe(200);
+    expect(replay.json["replay"]).toBe(true);
+    expect(replay.json["completionState"]).toBe("completed");
+    expect(replay.json["answerText"]).toBe(ANSWER);
+    expect(replay.json["recorded"]).toBe(false);
+    expect(replay.json["persistence"]).toBe("skipped_unconfigured");
+  });
+
+  it("an EMPTY answer with skipped persistence is still invalid_output, never a success", async () => {
+    // Skipping persistence must not become a way for an empty or whitespace
+    // answer to be reported as completed.
+    const { server } = await boot({
+      recorder: new NullRunRecorder(),
+      model: modelReturning("   "),
+    });
+    const res = await invoke(server.url, {
+      bearer: INTERNAL_SECRET,
+      body: inlineBody("r1"),
+    });
+
+    expect(res.status).toBe(502);
+    expect(res.json["ok"]).toBe(false);
+    expect(res.json["completionState"]).toBe("invalid_output");
+    expect(res.json["answerText"]).toBeNull();
+  });
+
+  it("a CONFIGURED recorder that fails is still fail-closed in inline mode", async () => {
+    // The distinction the whole change rests on: attempted-and-failed is not
+    // the same as never-attempted, and only the first withholds the answer.
+    const { server } = await boot({
+      recorder: new RecordingRecorder(new RecorderError("write-back returned HTTP 502")),
+    });
+    const res = await invoke(server.url, {
+      bearer: INTERNAL_SECRET,
+      body: inlineBody("r1"),
+    });
+
     expect(res.status).toBe(502);
     expect(res.json["completionState"]).toBe("persistence_failed");
     expect(res.json["answerText"]).toBeNull();
+    expect(res.json["recorded"]).toBe(false);
+    expect(res.json["persistence"]).toBeUndefined();
   });
 
   it("timeout", async () => {

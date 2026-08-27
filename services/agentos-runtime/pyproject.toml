@@ -1,0 +1,37 @@
+[project]
+name = "agentos-runtime"
+version = "0.1.0"
+description = "Private AgentOS sidecar for epic-staff-operations-coordinator@v1 (AI-1A). Not a public service — see README.md."
+requires-python = ">=3.12"
+# Kept in lockstep with requirements.txt, which is the pinned, pip-installable
+# source of truth (see that file's header for exactly how it was resolved).
+# Declared here too, per the task spec, so `pip install .` and dependency
+# scanners that read pyproject.toml see the same direct dependencies.
+dependencies = [
+  "agno==3.0.1",
+  "fastapi==0.141.1",
+  "uvicorn[standard]==0.52.4",
+  "openai==3.5.0",
+  "pydantic==2.13.4",
+  "pydantic-settings==2.15.0",
+  "python-multipart==0.0.32",
+  "PyJWT==2.13.0",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+pythonpath = ["src"]
