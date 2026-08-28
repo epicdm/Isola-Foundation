@@ -42,13 +42,66 @@ export const MAGNUS_REGISTRATION_SERVER = 'voice00.epic.dm';
  */
 export const DOMINICA_LOCAL_PREFIX_RULES = '*/1767/7,767/1767/10';
 
+/**
+ * Numbers provisioning must NEVER draw, claim or route to.
+ *
+ * ── THIS LIST EXISTS IN MORE THAN ONE PLACE (CLAUDE.md §2 law 21) ──
+ * It MUST stay in agreement with:
+ *   1. CLAUDE.md §4 "Protected numbers" — the law this set implements.
+ *   2. `PROTECTED_OPERATIONAL_DIDS` in `lib/voice-routing.ts`, which now
+ *      derives from this set rather than restating it. Add operational-only
+ *      numbers there, protected numbers here.
+ *   3. `PROTECTED_NUMBERS` in `.claude/hooks/lib/isola-topology.js`
+ *      (advisory guard, carries Meta pnids).
+ * If you edit any one of them, edit the others in the SAME change and say so.
+ * A remediation applied to one copy is a moved problem, not a fix.
+ * Filed as `def-forbidden-dids-list-diverges-and-omits-protected-6737-2026-08-28`,
+ * where 6737 was protected by CLAUDE.md but absent from every code copy.
+ *
+ * ── WHY ABSENCE IS DANGEROUS ──
+ * This set is enforced twice in this file — as a draw filter in
+ * `drawAvailableDid` and as the last-line refusal in `claimDid` — and a third
+ * time, via voice-routing.ts, against customer-supplied forward targets. A
+ * number absent from the set passes ALL THREE silently.
+ *
+ * ── FULL FORMS ARE NOT DERIVABLE FROM THE 4-DIGIT SHORT NAME ──
+ * Most protected numbers are `1767818XXXX`, but 6737 is NOT: it is
+ * `1767295`6737, a different NPA-NXX. Never construct an entry by pattern —
+ * look the number up.
+ */
 export const FORBIDDEN_DIDS = new Set([
-  '17678183742',
-  '17678189525',
-  '17678180001',
-  '17678188326',
-  '17678180000',
-  '17678189043',
+  // ── CLAUDE.md §4 protected numbers ──
+  '17678183742', // 3742 — EPIC's sole public customer-facing front door.
+  '17678189043', // 9043 — Hermes internal owner/staff line; out of scope.
+  '17678189525', // 9525 — Anansi, intentional per-phone override.
+  '17678180001', // 0001 — Personal Line Concierge. Still protected: per
+  //                CLAUDE.md §4, "protected now means live product surface,
+  //                not do not approach" (dec-concierge-number-0001-ratified-2026-08-28).
+  '17672956737', // 6737 — EPIC Front Desk / Customer Zero (pnid 278390858690809,
+  //                WABA 227366173803234). NOTE THE 1767295 PREFIX — this is a
+  //                Meta/WhatsApp number and, measured read-only against
+  //                voice00 on 2026-08-28, it has NO row in the Magnus `did`
+  //                table at all. So `drawAvailableDid` could never have drawn
+  //                it (its /^1767818\d{4}$/ pool pattern excludes it outright).
+  //                It is listed here because `claimDid` and the forward-target
+  //                validator accept ANY number, not just pool DIDs — and the
+  //                forward-target path was a live gap until this change.
+
+  // ── operational numbers protected in code but not named in CLAUDE.md §4 ──
+  // Both predate this file. Retained deliberately: removing a protection on
+  // no evidence is the dangerous direction.
+  '17678188326', // 8326 — the "Isola AgriLink" pilot tenant agent's LIVE WhatsApp
+  //                number (Meta phoneId 973224172551529, company a4c4193c); see
+  //                bff-v2 AGENT-PERSONA-LEDGER.md. It is an assigned number that
+  //                sits INSIDE bff-v2's 17678185000-17678188999 mint range, so
+  //                without this entry a minter hands out a live agent's line.
+  '17678180000', // 0000 — "live public demo line" per
+  //                docs/isola/ISOLA-PERSONAL-PRODUCT-CONTRACT.md:181; provisioned
+  //                in bff-v2 as the `wa-voice-entrypoint` SIP endpoint.
+  //                CAVEAT: no ratified decision record was found for this entry,
+  //                and bff-v2's app/api/isola/available-numbers/route.ts still
+  //                lists it in DID_POOL — i.e. one live surface would offer it
+  //                out. Kept pending an owner ruling; do not remove on silence.
 ]);
 
 export class VoiceProvisioningError extends Error {

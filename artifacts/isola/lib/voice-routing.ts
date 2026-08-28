@@ -29,7 +29,7 @@
 
 import type { MagnusConfig } from '@/engines/magnus';
 import { magnusRequest } from '@/engines/magnus';
-import { findDidDestinationForDid, readSipAccount, patchSipDialTimeout, patchSipForward, ConflictingDidDestinationsError } from './magnus-voice';
+import { findDidDestinationForDid, readSipAccount, patchSipDialTimeout, patchSipForward, ConflictingDidDestinationsError, FORBIDDEN_DIDS } from './magnus-voice';
 
 // ── Section 1: code-level routing model ─────────────────────────────────────
 
@@ -331,14 +331,31 @@ export async function readVoiceRoutingSnapshot(
 
 // ── Section 6: forward-target validation ────────────────────────────────────
 
-const PROTECTED_OPERATIONAL_DIDS = new Set([
-  '17678183742',
-  '17678189525',
-  '17678180001',
-  '17678188326',
-  '17678180000',
-  '17678189043',
-  '17678187536',
+/**
+ * Numbers a customer may never point a forward target at.
+ *
+ * DERIVED, NOT RESTATED. This used to be a hand-maintained second copy of
+ * `FORBIDDEN_DIDS`, and it drifted: both copies omitted 6737, the live EPIC
+ * Front Desk / Customer Zero number, so `validateForwardTarget` would have
+ * accepted it as a customer's forward destination
+ * (`def-forbidden-dids-list-diverges-and-omits-protected-6737-2026-08-28`).
+ * It is now built FROM `FORBIDDEN_DIDS` so the two cannot diverge again —
+ * add protected numbers there, and only forward-specific extras below.
+ *
+ * Note this check does NOT require the candidate to be a Magnus DID: it runs
+ * against an arbitrary customer-supplied number, which is why 6737 belongs
+ * here even though it has no row in the Magnus `did` table.
+ */
+const PROTECTED_OPERATIONAL_DIDS = new Set<string>([
+  ...FORBIDDEN_DIDS,
+  // Forward-target-only additions (not part of the provisioning draw pool).
+  '17678187536', // 7536 — one of EPIC's own WhatsApp-capable business DIDs, a
+  //                "keeper" line listed alongside 3742/9525 in bff-v2's
+  //                OWN_BUSINESS_DIDS / KEEPER_DIDS sets (it is a self-echo
+  //                source: Meta replays our outbound as inbound `from` it).
+  //                CAVEAT: bff-v2's scripts/cleanup-17678187536.ts calls it a
+  //                "CC1 orphan from S4 failure" and deprovisions it. Keeper vs
+  //                orphan is unreconciled; retained until an owner rules.
 ]);
 
 export interface ForwardTargetValidationCtx {
