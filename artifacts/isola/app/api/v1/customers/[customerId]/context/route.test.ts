@@ -157,12 +157,22 @@ describe('a customer that exists', () => {
     }
   })
 
-  it('offers the six governed actions and no others', async () => {
+  it('offers the seven governed actions and no others', async () => {
     const res = await GET(request(), params())
     const body = await res.json()
 
     expect(body.availableActions.map((a: { actionType: string }) => a.actionType).sort()).toEqual(
-      ['activity.schedule', 'followup.schedule', 'lead.create', 'lead.update', 'note.create', 'task.create'].sort(),
+      [
+        'activity.schedule',
+        // S8-W1. Offered here because this surface's role may propose it; the
+        // send itself is only reachable from the C360 panel's confirm flow.
+        'document.send',
+        'followup.schedule',
+        'lead.create',
+        'lead.update',
+        'note.create',
+        'task.create',
+      ].sort(),
     )
   })
 

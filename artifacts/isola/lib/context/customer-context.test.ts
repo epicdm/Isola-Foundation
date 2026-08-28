@@ -302,12 +302,20 @@ describe('activity is partial when one of its sources did not answer', () => {
 /* ── actions offered ───────────────────────────────────────────────────────*/
 
 describe('the actions offered are the ones both gates permit', () => {
-  it('offers a manager the six governed actions and flags the one needing approval', async () => {
+  it('offers a manager the seven governed actions and flags the one needing approval', async () => {
     const response = await assemble(caller())
     const offered = response.availableActions.map((a) => a.actionType).sort()
 
     expect(offered).toEqual(
-      ['activity.schedule', 'followup.schedule', 'lead.create', 'lead.update', 'note.create', 'task.create'].sort(),
+      [
+        'activity.schedule',
+        'document.send',
+        'followup.schedule',
+        'lead.create',
+        'lead.update',
+        'note.create',
+        'task.create',
+      ].sort(),
     )
     expect(response.availableActions.find((a) => a.actionType === 'lead.update')?.requiresApproval).toBe(true)
     expect(response.availableActions.find((a) => a.actionType === 'note.create')?.requiresApproval).toBe(false)

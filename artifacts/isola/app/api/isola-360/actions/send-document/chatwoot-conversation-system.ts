@@ -1,6 +1,20 @@
 /**
  * The concrete ConversationSystem, backed by Chatwoot's Application API.
  *
+ * WHY THIS LIVES BESIDE THE ROUTE AND NOT IN `lib/governed/executors/`
+ * -------------------------------------------------------------------
+ * `engines/chatwoot.ts` is on the legacy manifest (disposition: remove, to be
+ * replaced by a Lane 2 send contract), and `lib/governed` is a PERMANENT module
+ * root that a test forbids from importing legacy transport. That boundary is
+ * right: the governed lane should know about a `ConversationSystem` PORT, not
+ * about Chatwoot. So the port lives in `lib/governed/executors/conversation.ts`,
+ * and this — the only file that names the provider — sits at the transport edge,
+ * exactly as `createOdooRecordSystem` is injected from the customer-actions
+ * route rather than reached for from inside the lifecycle.
+ *
+ * When Lane 2 ships its send contract, THIS file is what gets replaced, and
+ * nothing under `lib/governed` has to change.
+ *
  * This is the ONLY adapter permitted to put a customer-visible message on the
  * wire for S8. It posts into a conversation and lets that conversation's OWNING
  * channel deliver — there is no channel selection here, no number, no provider,
@@ -18,10 +32,8 @@
  */
 
 import { addMessage, findMessage, type ChatwootConfig } from '@/engines/chatwoot'
-
-import { DependencyUnavailable } from '../action'
-
-import type { ConversationSystem } from './conversation'
+import { DependencyUnavailable } from '@/lib/governed/action'
+import type { ConversationSystem } from '@/lib/governed/executors/conversation'
 
 /**
  * Chatwoot's client throws `Error("<fn> failed (<status>): <body>")`. The status

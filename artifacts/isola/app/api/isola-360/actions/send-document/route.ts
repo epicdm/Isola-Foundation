@@ -54,7 +54,7 @@ import {
 } from '@/lib/customer-360/document-message'
 import { runCustomerAction } from '@/lib/governed/customer-actions'
 import { buildConversationExecutors } from '@/lib/governed/executors/conversation'
-import { createChatwootConversationSystem } from '@/lib/governed/executors/chatwoot-conversation-system'
+import { createChatwootConversationSystem } from './chatwoot-conversation-system'
 import { prismaLedgerStore } from '@/lib/operations/ledger'
 import type { ChatwootContextHint } from '@/lib/customer-360/chatwoot-context'
 

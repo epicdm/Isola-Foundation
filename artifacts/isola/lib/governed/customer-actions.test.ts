@@ -7,6 +7,7 @@ import { DependencyUnavailable } from './action'
 import { runCustomerAction, type CustomerActionRequest } from './customer-actions'
 import { buildExecutors, type RecordSystem } from './executors'
 import { GOVERNED_ACTION_CATALOGUE } from './executors/catalogue'
+import { buildConversationExecutors, type ConversationSystem } from './executors/conversation'
 
 /* ── a cooperative system of record ────────────────────────────────────────*/
 
@@ -45,6 +46,32 @@ function recordSystem(mode: Mode = 'ok'): RecordSystem {
   }
 }
 
+/**
+ * The sending lane's counterpart. `ok` stores what was posted and reads it back
+ * visible; the other modes mirror `recordSystem` so the shared lifecycle tests
+ * exercise both lanes identically.
+ */
+function conversationSystem(mode: Mode = 'ok'): ConversationSystem {
+  const stored = new Map<string, Record<string, unknown>>()
+  let seq = 0
+  return {
+    postCustomerVisibleMessage: async ({ body }) => {
+      if (mode === 'down') throw new DependencyUnavailable('chatwoot', 'connection reset by peer')
+      if (mode === 'refused') throw new Error('chatwoot: 422 unprocessable')
+      const externalId = `msg-${++seq}`
+      stored.set(externalId, { id: externalId, content: body, private: false })
+      return { externalId }
+    },
+    readMessage: async ({ externalId }) => {
+      if (mode === 'silent') return null
+      if (mode === 'wrong') return { id: externalId, content: 'not what was sent', private: false }
+      return stored.get(externalId) ?? null
+    },
+  }
+}
+
+const SEND_BODY = 'Hi Patricia,\n\nHere are the details of your quotation S00001:\n\nTotal: USD 273.70'
+
 const PAYLOADS: Readonly<Record<string, Record<string, unknown>>> = {
   'note.create': { body: 'called the customer back' },
   'task.create': { title: 'Chase the router swap' },
@@ -52,6 +79,13 @@ const PAYLOADS: Readonly<Record<string, Record<string, unknown>>> = {
   'lead.create': { name: 'Second line for the shop' },
   'lead.update': { stage: 'qualified' },
   'followup.schedule': { note: 'Check the line held', dueDate: '2026-09-02' },
+  'document.send': {
+    conversationId: 15,
+    documentId: 1,
+    documentKind: 'quotation',
+    documentReference: 'S00001',
+    body: SEND_BODY,
+  },
 }
 
 let ledger: FakeLedgerStore
@@ -75,7 +109,13 @@ const request = (over: Partial<CustomerActionRequest> = {}): CustomerActionReque
 
 const ports = (mode: Mode = 'ok') => ({
   ledger,
-  executors: buildExecutors(recordSystem(mode)),
+  // BOTH lanes: the record-writing executors and the one sending executor. The
+  // catalogue describes all of them, so a runtime that assembled only one lane
+  // would report a declared action as unimplemented.
+  executors: [
+    ...buildExecutors(recordSystem(mode)),
+    ...buildConversationExecutors(conversationSystem(mode)),
+  ],
   now: () => new Date('2026-08-01T12:00:00Z'),
 })
 
