@@ -172,6 +172,48 @@ export const GOVERNED_ACTION_CATALOGUE: readonly GovernedActionMeta[] = [
     ],
     expectedResult: 'The follow-up is read back by its note before it is reported as done.',
   },
+  {
+    actionType: 'document.send',
+    label: 'Send this document to the customer',
+    writes:
+      'Posts the document details as a customer-visible message in this Chatwoot conversation, delivered by the channel that owns the conversation. It changes nothing in Odoo.',
+    riskLevel: 'high',
+    allowedRoles: ['staff', 'manager', 'owner'],
+    // No approval gate is wired for this action, and that is deliberate: an
+    // action listed in ACTIONS_REQUIRING_APPROVAL can never execute here,
+    // because no approval verdict source exists. The gate is the explicit human
+    // confirm click in the panel, which is why this may never be called from
+    // anything but a person pressing a button.
+    requiresApproval: false,
+    fields: [
+      {
+        name: 'conversationId',
+        label: 'Conversation',
+        kind: 'number',
+        required: true,
+        help: 'The Chatwoot conversation this is posted into. Proven to belong to this workspace before anything is sent.',
+      },
+      { name: 'documentId', label: 'Document', kind: 'number', required: true },
+      {
+        name: 'documentKind',
+        label: 'Kind',
+        kind: 'choice',
+        required: true,
+        choices: ['quotation', 'invoice'],
+      },
+      { name: 'documentReference', label: 'Reference', kind: 'text', required: true },
+      {
+        name: 'body',
+        label: 'Message',
+        kind: 'longtext',
+        required: true,
+        maxLength: 4000,
+        help: 'Composed by Isola from the verified Odoo document. It is not free text and is not written by the operator.',
+      },
+    ],
+    expectedResult:
+      'The message is read back from Chatwoot — identical text, and confirmed NOT private — before it is reported as sent.',
+  },
 ] as const
 
 export const GOVERNED_ACTION_TYPES: readonly string[] = GOVERNED_ACTION_CATALOGUE.map(

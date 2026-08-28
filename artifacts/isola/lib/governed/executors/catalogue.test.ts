@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { ACTIONS_BY_ROLE, ACTIONS_REQUIRING_APPROVAL } from '@/lib/context/resolve-context'
 
+import { buildConversationExecutors, type ConversationSystem } from './conversation'
 import { buildExecutors, type RecordSystem } from './index'
 import {
   GOVERNED_ACTION_CATALOGUE,
@@ -22,7 +23,19 @@ const NEVER: RecordSystem = new Proxy({} as RecordSystem, {
   },
 })
 
-const executors = buildExecutors(NEVER)
+const NEVER_CONVERSATION: ConversationSystem = new Proxy({} as ConversationSystem, {
+  get: (_t, prop) => () => {
+    throw new Error(`validate() must not reach the conversation system (called ${String(prop)})`)
+  },
+})
+
+/**
+ * BOTH executor lanes. The sending lane lives in its own module so that
+ * `./index.ts` can keep asserting it never sends anything; the catalogue
+ * describes every registered action regardless of which lane implements it, so
+ * the drift check has to assemble both or it would report a phantom mismatch.
+ */
+const executors = [...buildExecutors(NEVER), ...buildConversationExecutors(NEVER_CONVERSATION)]
 const executorFor = (actionType: string) => executors.find((e) => e.actionType === actionType)
 
 /** A payload built from the catalogue's own description of the action. */
@@ -43,7 +56,7 @@ function payloadFrom(meta: GovernedActionMeta, omit?: string): Record<string, un
 describe('the catalogue describes the executors that actually exist', () => {
   it('describes exactly the registered action types, no more and no fewer', () => {
     expect([...GOVERNED_ACTION_TYPES].sort()).toEqual(executors.map((e) => e.actionType).sort())
-    expect(GOVERNED_ACTION_CATALOGUE).toHaveLength(6)
+    expect(GOVERNED_ACTION_CATALOGUE).toHaveLength(7)
   })
 
   it.each(GOVERNED_ACTION_CATALOGUE.map((m) => [m.actionType, m] as const))(
@@ -102,11 +115,12 @@ describe('note.create is the canonical name', () => {
 /* ── the two lists have to agree ───────────────────────────────────────────*/
 
 describe('an offered action is one BOTH gates permit', () => {
-  it('offers a manager all six', () => {
+  it('offers a manager all seven', () => {
     const offered = availableActionsFor('manager', ACTIONS_BY_ROLE.manager).map((a) => a.actionType)
     expect(offered.sort()).toEqual(
       [
         'activity.schedule',
+        'document.send',
         'followup.schedule',
         'lead.create',
         'lead.update',
@@ -114,6 +128,18 @@ describe('an offered action is one BOTH gates permit', () => {
         'task.create',
       ].sort(),
     )
+  })
+
+  it('does not offer a service account the one action that reaches a customer', () => {
+    // service_account inherits STAFF_ACTIONS, which lists document.send. The
+    // executor's allowedRoles is the gate that actually stops it, and this
+    // asserts the two lists disagree in the SAFE direction rather than by luck.
+    expect(ACTIONS_BY_ROLE.service_account).toContain('document.send')
+    const offered = availableActionsFor(
+      'service_account',
+      ACTIONS_BY_ROLE.service_account,
+    ).map((a) => a.actionType)
+    expect(offered).not.toContain('document.send')
   })
 
   it('does not offer staff the manager-only lead update', () => {
