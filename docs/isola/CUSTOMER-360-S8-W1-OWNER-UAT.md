@@ -2,7 +2,7 @@
 
 **Slice:** S8-W1 — send an existing quotation or invoice into the customer's
 Chatwoot conversation.
-**Commit:** `6cabce3122cd8523d9b2659b13547a8a838a43cf` (image tag `6cabce31`)
+**Commit:** `7a9e2999ff974820505818cf3a9df2b6126eb887` (image tag `7a9e2999`)
 **Authorised by:** `dec-chatwoot-is-the-customer-interface-full-two-way-odoo-2026-08-28`
 (the S8 owner gate)
 
@@ -27,33 +27,42 @@ before telling you it was sent.
 
 ---
 
-## Before you start
+## Before you start — read this, it decides whether a customer gets a message
 
-Staging reads a **separate, non-production Odoo** (`isola_erp` on host03) seeded
-with test data. The customer you will see, "Patricia Yvonne Armour", is seeded
-test data — **not** the real Odoo customer of the same name. Nothing you do in
-steps 1–7 touches EPIC's real books.
+There are two different places you can do this, and they are not equally safe.
 
-Step 8 is different, and is called out on its own.
+**Steps 1–7 use conversation #28**, in the inbox named
+`ZZ ACCEPTANCE ONLY - epic-front-desk-prod (no WhatsApp, no Meta)`. That inbox is
+an API channel with no WhatsApp and no Meta connection, so a message posted there
+**cannot reach anyone's phone by any route**. The contact is EPIC's own
+acceptance canary. This is the safe half.
+
+**Step 8 is a real customer**, and is called out separately with its own warning.
+
+Staging also reads a **separate, non-production Odoo** (`isola_erp` on host03)
+seeded with test data. The account you will see in steps 1–7, "S8-W1 Verification
+Account", is fabricated for this test. Nothing in steps 1–7 touches EPIC's real
+books or any real person.
 
 ---
 
 ## Steps 1–7 — the safe walkthrough
 
 **1. Open the panel.**
-Go to `https://inbox.epic.dm`, sign in, open **account 2**, and open the
-conversation the lane has prepared for this walkthrough. Click the
-**Customer 360** tab in the right-hand panel.
+Go to `https://inbox.epic.dm`, sign in, and open **account 2 → conversation #28**
+("EPIC Acceptance Canary (Packet 5D-RR)"). Check the header says
+`ZZ ACCEPTANCE ONLY … (no WhatsApp, no Meta)` before continuing — that line is
+what makes these steps safe. Then click the **Customer 360 (STAGING)** tab.
 
 If you see "Customer 360 is unavailable — Sign in to Isola", sign in once with
 your `epic.owner` credentials (a separate login from Chatwoot) and return.
 
 **2. Confirm you are looking at staging data.**
-The panel should show **Patricia Yvonne Armour**, `+1 767 295 1770`. Under
-**Sales** you should see quotation **S00001** for **USD 273.70**; under
-**Billing**, invoice **INV/2026/00001** for **USD 217.35**, unpaid.
+The panel should show **S8-W1 Verification Account**, `+1 500 555 0006`. Under
+**Sales**: quotation **S00004** for **US$48.30**. Under **Billing**: invoice
+**INV/2026/00002** for **US$56.35**, unpaid.
 
-If you see EPIC's real customers instead, stop and say so — that would mean
+If you see a real EPIC customer instead, **stop and say so** — that would mean
 staging is reading production Odoo, which it must not.
 
 **3. Notice what is offered and what is not.**
@@ -62,8 +71,12 @@ verified total or currency shows that button greyed out, with a reason on hover.
 That is deliberate: a document we cannot describe truthfully is one we refuse to
 send rather than send vaguely.
 
+You will also see **Open in Odoo** greyed out here. That is correct on staging —
+the staging Odoo is reachable only over an internal address, and rather than
+show you a link that would not open, the panel offers none.
+
 **4. Open the review.**
-Click **Send to customer** on quotation **S00001**. A panel opens showing:
+Click **Send to customer** on quotation **S00004**. A panel opens showing:
 - the document, the amount, and which conversation it will post into
 - **the exact message text** that will be sent — read it
 - a line stating plainly that this posts a visible reply and cannot be unsent
@@ -73,25 +86,31 @@ currency code, and invite a reply. It should contain no link, no attachment
 claim, and nothing suggesting the customer has agreed to anything.
 
 **5. Cancel first.**
-Click **Cancel**. Nothing is sent. Confirm no new message appeared in the
-conversation. This is worth doing before you send anything.
+Click **Cancel**. Nothing is sent. Switch to the **Messages** tab and confirm no
+new message appeared. This is worth doing before you send anything.
 
 **6. Send it.**
 Re-open **Send to customer** and click **Confirm and send to the customer**.
 
-You should get a badge reporting the outcome, and it should say **sent** only
-after Isola has read the message back out of Chatwoot. A reference id is shown
-so the action can be traced later.
+You should see **"Done and confirmed — Written, and read back from the system of
+record to prove it"**, plus a reference id so the action can be traced later.
+That wording matters: it says *sent* only after Isola has read the message back
+out of Chatwoot, not merely because the request succeeded.
 
-Now look at the conversation itself: exactly **one** new visible message,
-matching the text you reviewed, word for word.
+Now open **Messages**: exactly **one** new visible message, matching the text you
+reviewed, word for word.
 
 **7. Prove it cannot double-send.**
 Click **Send to customer** on the same document again and confirm again.
-You should NOT get a second message in the conversation — the second attempt is
-recognised as the same operation and replays the first result.
 
-Check the conversation once more: still exactly one message.
+You should get **"Already recorded"**, and the row should now read
+**"Already sent — not sent again"**. Check Messages once more: still exactly one
+message. The second attempt was recognised as the same operation and refused to
+write again.
+
+**Optional:** repeat steps 4–6 with invoice **INV/2026/00002** to see how an
+invoice reads — it should also state the unpaid status in plain words, not as an
+Odoo status code.
 
 ---
 
@@ -105,8 +124,9 @@ Check the conversation once more: still exactly one message.
 This is the actual acceptance test for the slice: everything above proves the
 mechanism, this proves the product.
 
-1. Choose a real customer conversation where sending their quotation or invoice
-   is something you would genuinely want to do right now.
+1. Choose a real customer conversation in a **WhatsApp** inbox (for example
+   `EPIC 295-6737 WhatsApp`) where sending their quotation or invoice is
+   something you would genuinely want to do right now.
 2. Open Customer 360 → the document → **Send to customer**.
 3. **Read the exact message.** You are the last check before a customer reads it.
 4. If anything is wrong — wrong amount, wrong currency, wrong tone, wrong
