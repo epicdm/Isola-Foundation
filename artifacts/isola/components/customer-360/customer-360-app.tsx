@@ -7,6 +7,7 @@ import {
   type ChatwootContextHint,
 } from '@/lib/customer-360/chatwoot-context';
 import type { Customer360Response, Customer360Snapshot } from '@/lib/customer-360/contracts';
+import { sendBadgeText, type SendOutcome } from '@/lib/customer-360/send-badge';
 import styles from './customer-360.module.css';
 
 type Phase =
@@ -172,12 +173,9 @@ export function RecommendedActionCard({
   );
 }
 
-export interface SendOutcome {
-  success: boolean;
-  label: string;
-  detail: string;
-  operationId: string | null;
-}
+// The badge wording lives in lib/customer-360/send-badge.ts, free of CSS
+// imports, so a test can actually execute it. See that module's header.
+export type { SendOutcome };
 
 type SendPhase =
   | { kind: 'previewing' }
@@ -264,6 +262,9 @@ export function SendDocumentReview({
         label: result?.label ?? 'Not sent',
         detail: result?.detail ?? result?.error ?? 'No result was returned.',
         operationId: result?.operationId ?? null,
+        lifecycle: typeof result?.lifecycle === 'string' ? result.lifecycle : 'unknown',
+        // Default FALSE on anything unrecognised: an absent proof is not a proof.
+        readbackProven: result?.readbackProven === true,
       };
       setPhase({ kind: 'settled', outcome });
       onSent(documentKey(hint, doc), outcome);
@@ -424,7 +425,7 @@ function DocumentList({ title, empty, items, hint, sent, onSend }: {
           <strong>{item.reference}</strong>
           <p>{item.kind} · {item.paymentState ?? item.state ?? 'State unavailable'}</p>
           {/* Only a proven readback prints as sent. Anything else says what it was. */}
-          {outcome && <p className={styles.copyHint}>{outcome.success ? `Sent — ${outcome.label}` : `Not sent — ${outcome.label}`}</p>}
+          {outcome && <p className={styles.copyHint}>{sendBadgeText(outcome)}</p>}
         </div>
         <div>
           <span>{formatMoney(item.total, item.currency)}</span>
