@@ -33,11 +33,20 @@
  *
  * THE TENANT BOUNDARY IS PROVEN BEFORE ANYTHING IS PROPOSED
  * --------------------------------------------------------
- * Three independent checks, all against this session's tenant and none against a
- * value the browser supplied: the Chatwoot door must be bound to this workspace,
- * the conversation must exist in this workspace's mirror, and the document must
- * appear in the Odoo snapshot for THAT conversation's customer. A document id
- * belonging to another customer is therefore unsendable even if guessed.
+ * Three checks, all against this session's tenant, and — since 2026-08-28 — each
+ * one CHAINED to the previous rather than merely passing beside it:
+ *
+ *   1. the conversation must exist in this workspace's mirror;
+ *   2. the Chatwoot door is resolved FROM THAT CONVERSATION, never from the
+ *      browser, and the caller's hint may only disagree and cause a refusal;
+ *   3. the document must appear in the Odoo snapshot for THAT conversation's
+ *      customer.
+ *
+ * The chaining is the point. An earlier version ran 1 and 2 independently, with
+ * the door taken from the browser hint, so all three could pass while the door
+ * and the conversation belonged to DIFFERENT customers — and the message was
+ * delivered to the wrong one. See def-c360-send-target-not-bound-to-
+ * conversation-binding-2026-08-28.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -92,6 +101,82 @@ function refusal(lifecycle: string, detail: string) {
   )
 }
 
+interface ResolvedDoor {
+  base_url: string
+  account_id: string
+  inbox_id: string | null
+  token: string
+}
+
+type DoorResolution =
+  | { ok: true; binding: ResolvedDoor }
+  | { ok: false; kind: string; detail: string }
+
+/**
+ * Resolve the Chatwoot door for a conversation FROM THE CONVERSATION ITSELF.
+ *
+ * Never from the browser. The caller's hint may then be compared against this
+ * result, but it can only ever DISAGREE and cause a refusal — it can never
+ * select the door.
+ *
+ * Two sources, in order of authority:
+ *   1. chatwoot_binding_id — the explicit link. Preferred whenever present.
+ *   2. chatwoot_inbox_id   — the conversation's own inbox. Used when the binding
+ *      link is null, which is every existing row as measured 2026-08-28. It must
+ *      resolve to EXACTLY ONE binding for this tenant; two candidates means the
+ *      door is genuinely ambiguous and the honest answer is to refuse, not to
+ *      pick the first.
+ *
+ * Neither present → refuse. A conversation whose door cannot be established is
+ * a conversation we cannot prove we are allowed to speak into.
+ */
+async function resolveConversationDoor(
+  tenantId: string,
+  conversation: { chatwoot_binding_id: string | null; chatwoot_inbox_id: string | null },
+): Promise<DoorResolution> {
+  const select = { base_url: true, account_id: true, inbox_id: true, token: true } as const
+
+  if (conversation.chatwoot_binding_id) {
+    const binding = await prisma.chatwootBinding.findFirst({
+      where: { id: conversation.chatwoot_binding_id, tenant_id: tenantId },
+      select,
+    })
+    if (!binding) {
+      return {
+        ok: false,
+        kind: 'permission_denied',
+        detail:
+          'This conversation’s Chatwoot connection does not belong to the current Isola workspace. Nothing was sent.',
+      }
+    }
+    return { ok: true, binding }
+  }
+
+  if (conversation.chatwoot_inbox_id) {
+    const candidates = await prisma.chatwootBinding.findMany({
+      where: { tenant_id: tenantId, inbox_id: conversation.chatwoot_inbox_id },
+      select,
+      take: 2,
+    })
+    if (candidates.length === 1) return { ok: true, binding: candidates[0] }
+    return {
+      ok: false,
+      kind: candidates.length === 0 ? 'permission_denied' : 'validation_failed',
+      detail:
+        candidates.length === 0
+          ? 'This conversation’s Chatwoot inbox is not linked to the current Isola workspace. Nothing was sent.'
+          : 'This conversation’s Chatwoot inbox matches more than one connection, so the destination is not certain. Nothing was sent.',
+    }
+  }
+
+  return {
+    ok: false,
+    kind: 'validation_failed',
+    detail:
+      'This conversation is not linked to a Chatwoot connection, so there is no verified place to send it. Nothing was sent.',
+  }
+}
+
 export async function POST(req: NextRequest) {
   const ctx = await getSessionFromCookie(req.headers.get('cookie') ?? '')
   if (!ctx) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -132,27 +217,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'idempotencyKey is required' }, { status: 400 })
   }
 
-  // ── Boundary 1: the Chatwoot door belongs to THIS workspace. ───────────────
-  const binding = await prisma.chatwootBinding.findFirst({
-    where: {
-      tenant_id: tenantId,
-      account_id: String(hint.accountIdHint),
-      inbox_id: String(hint.inboxIdHint),
-    },
-    select: { base_url: true, account_id: true, token: true },
-  })
-  if (!binding) {
-    return refusal(
-      'permission_denied',
-      'This Chatwoot inbox is not linked to the current Isola workspace. Nothing was sent.',
-    )
-  }
-
-  // ── Boundary 2: the conversation exists in THIS workspace's mirror. ────────
+  // ── Boundary 1: the conversation exists in THIS workspace's mirror. ────────
+  //
+  // Resolved FIRST, because the conversation — not the browser — is the
+  // authority on which Chatwoot door this customer's messages belong behind.
   const conversation = await prisma.conversation.findFirst({
     where: { tenant_id: tenantId, chatwoot_conversation_id: hint.conversationDisplayIdHint },
     select: {
       customer_phone: true,
+      chatwoot_binding_id: true,
+      chatwoot_inbox_id: true,
       messages: {
         where: { role: 'user' },
         orderBy: { created_at: 'desc' },
@@ -165,6 +239,42 @@ export async function POST(req: NextRequest) {
     return refusal(
       'permission_denied',
       'This conversation has not reached the Isola customer mirror. Nothing was sent.',
+    )
+  }
+
+  // ── Boundary 2: the door is THE CONVERSATION'S OWN door. ───────────────────
+  //
+  // This route previously resolved the binding by tenant + account + inbox with
+  // BOTH the account and the inbox taken from the browser hint, and never
+  // compared the result against the conversation. Each check passed alone and
+  // nothing tied them together: a tenant may hold more than one active binding
+  // (ChatwootBinding's CW00 note), so a caller could pair door B with a
+  // conversation belonging to door A and the message would be delivered into a
+  // DIFFERENT customer's conversation while every tenant check still passed.
+  //
+  // schema.prisma states the rule for Conversation.chatwoot_binding_id: resolve
+  // "the Chatwoot account/inbox from chatwoot_binding_id only, and fail closed
+  // when it is null (legacy row) or inconsistent". app/api/customer/escalate/
+  // route.ts already does this, after two live incidents in July 2026.
+  //
+  // MEASURED 2026-08-28: chatwoot_binding_id is NULL on every existing mirror
+  // row, so binding-id-only would refuse every send including the working path.
+  // chatwoot_inbox_id IS populated and is equally the conversation's own record,
+  // so it is the documented fallback. What is never accepted is the hint.
+  const doorFromConversation = await resolveConversationDoor(tenantId, conversation)
+  if (!doorFromConversation.ok) return refusal(doorFromConversation.kind, doorFromConversation.detail)
+  const binding = doorFromConversation.binding
+
+  // The hint is now only a CLAIM about where the caller believes they are. If it
+  // disagrees with the conversation's own door, that is caller confusion or an
+  // attempt — never something to resolve silently in either direction.
+  if (
+    binding.account_id !== String(hint.accountIdHint) ||
+    (binding.inbox_id ?? '') !== String(hint.inboxIdHint)
+  ) {
+    return refusal(
+      'validation_failed',
+      'This conversation belongs to a different Chatwoot inbox than the one this panel is open on. Nothing was sent.',
     )
   }
 
@@ -226,8 +336,28 @@ export async function POST(req: NextRequest) {
   }
 
   // ── The confirmation is bound to the exact bytes that were reviewed. ───────
+  //
+  // REQUIRED, not merely checked-when-present. This guard was previously
+  // `if (previewFingerprint && ...)`, so omitting the field skipped it entirely
+  // — and since a preview is not required either, a caller could execute a send
+  // with NO HUMAN HAVING SEEN ANY VERSION OF THE TEXT. The action catalogue did
+  // not list this field either, so anything built from the catalogue omitted it
+  // by construction, which is the opposite of a guard: it protected exactly the
+  // callers that already had a human in front of them, and nothing else.
+  //
+  // It is now required in three places that must agree — here, in the catalogue,
+  // and in the executor's validate() — and the fingerprint travels IN the payload
+  // so the ledger hashes it as part of the authorised arguments.
+  //
+  // A rule that names a consequence the system does not produce is a wish.
   const previewFingerprint = str(body.previewFingerprint)
-  if (previewFingerprint && previewFingerprint !== composed.fingerprint) {
+  if (!previewFingerprint) {
+    return refusal(
+      'validation_failed',
+      'This send was not confirmed against a reviewed message, so nothing was sent. Open the document and review the message before sending.',
+    )
+  }
+  if (previewFingerprint !== composed.fingerprint) {
     return refusal(
       'argument_conflict',
       'This document changed in Odoo since you reviewed it, so nothing was sent. Close this and open it again to review the current version.',
@@ -261,6 +391,9 @@ export async function POST(req: NextRequest) {
         documentKind: composed.documentKind,
         documentReference: composed.documentReference,
         body: composed.body,
+        // Part of the authorised arguments, so the ledger's requestHash covers
+        // the exact text a human approved — not just the document it was about.
+        previewFingerprint: composed.fingerprint,
       },
       actorPrincipalId: ctx.user.id,
       actorRole: actorRoleFor(ctx.isAdmin, homeOwner, membershipRole),

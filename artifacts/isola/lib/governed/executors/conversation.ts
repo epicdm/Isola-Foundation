@@ -85,6 +85,15 @@ export function buildConversationExecutors(
             detail: `documentKind must be one of ${SENDABLE_KINDS.join(', ')}`,
           }
         }
+        // The reviewed-text binding is validated HERE as well as at the route,
+        // and it travels in the payload rather than beside it, so it becomes part
+        // of the AUTHORISED ARGUMENTS the ledger hashes. That has a second
+        // benefit beyond this executor: a replay carrying a different fingerprint
+        // now raises argument_conflict instead of quietly returning the earlier
+        // result for a message nobody reviewed.
+        if (!str(payload.previewFingerprint)) {
+          return { ok: false, detail: 'previewFingerprint is required — a send must be bound to reviewed text' }
+        }
         if (!str(payload.documentReference)) {
           return { ok: false, detail: 'documentReference is required' }
         }

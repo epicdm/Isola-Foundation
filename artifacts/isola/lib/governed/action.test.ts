@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   DependencyUnavailable,
+  WriteIndeterminate,
   runGovernedAction,
   type ActionExecutor,
   type ActionPorts,
@@ -137,8 +138,64 @@ describe('governed action — a dependency being down is its own outcome', () =>
     expect(r.outcome).toBe('EXECUTION_FAILED')
   })
 
+  it('READBACK_FAILED when the write MAY have landed — not DEPENDENCY_UNAVAILABLE', async () => {
+    // The third case. A timeout on a POST proves neither that the write was
+    // refused nor that it never arrived. Reporting it as "not reached, nothing
+    // written, trying again is reasonable" is what sent a customer the same
+    // document twice. READBACK_FAILED's presentation says the true thing:
+    // something was written, we cannot prove what, re-sending is unsafe.
+    const r = await runGovernedAction(
+      PROPOSAL,
+      ports({
+        executors: [
+          executor({
+            execute: async () => {
+              throw new WriteIndeterminate('chatwoot', 'The operation was aborted due to timeout')
+            },
+          }),
+        ],
+      }),
+    )
+    expect(r.outcome).toBe('READBACK_FAILED')
+    expect(r.outcome).not.toBe('DEPENDENCY_UNAVAILABLE')
+    expect(r.detail).toContain('chatwoot')
+  })
+
+  it('CONTROL: the three failure kinds produce three DIFFERENT outcomes', async () => {
+    // Without this, all three assertions above would still pass against a
+    // runtime that had been broken to answer READBACK_FAILED for everything.
+    const outcomeFor = async (thrown: unknown) =>
+      (
+        await runGovernedAction(
+          PROPOSAL,
+          ports({
+            executors: [
+              executor({
+                execute: async () => {
+                  throw thrown
+                },
+              }),
+            ],
+          }),
+        )
+      ).outcome
+
+    const down = await outcomeFor(new DependencyUnavailable('odoo', 'ECONNREFUSED'))
+    const refused = await outcomeFor(new Error('field customer_id is required'))
+    const unknown = await outcomeFor(new WriteIndeterminate('chatwoot', 'aborted'))
+
+    expect(new Set([down, refused, unknown]).size).toBe(3)
+    expect(down).toBe('DEPENDENCY_UNAVAILABLE')
+    expect(refused).toBe('EXECUTION_FAILED')
+    expect(unknown).toBe('READBACK_FAILED')
+  })
+
   it('neither failure returns an empty success', async () => {
-    for (const thrown of [new DependencyUnavailable('odoo', 'down'), new Error('refused')]) {
+    for (const thrown of [
+      new DependencyUnavailable('odoo', 'down'),
+      new Error('refused'),
+      new WriteIndeterminate('chatwoot', 'aborted'),
+    ]) {
       const r = await runGovernedAction(
         PROPOSAL,
         ports({

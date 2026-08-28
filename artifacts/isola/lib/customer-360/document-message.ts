@@ -77,12 +77,57 @@ function firstName(full: string): string {
   return trimmed.split(/\s+/)[0]
 }
 
-/** ISO or Odoo date → a plain human date. Unparseable input renders nothing. */
+/**
+ * Where EPIC does business. Customer- and owner-facing text renders here; ledger
+ * and audit records stay UTC. Dominica does not observe DST, so this is a fixed
+ * UTC-4 and no seasonal shift can move a rendered date across midnight.
+ */
+export const BUSINESS_TIMEZONE = 'America/Dominica'
+
+/**
+ * Odoo date or datetime → a plain human date. Unparseable input renders nothing.
+ *
+ * TWO KINDS OF INPUT, AND THEY MUST NOT BE TREATED ALIKE.
+ *
+ * `account.move.invoice_date` is a DATE: "2026-08-27". It names a calendar day
+ * and carries no instant, so it is rendered verbatim. Converting it to a zone is
+ * not a correction, it is a corruption — `new Date('2026-08-27')` is UTC
+ * midnight, and rendering THAT in UTC-4 yields "26 August", so the customer is
+ * told an invoice is dated the day before the one Odoo holds.
+ *
+ * `sale.order.date_order` is a DATETIME in UTC: "2026-08-27 14:05:00". That IS
+ * an instant, and the day a customer should read is the day it was in Dominica,
+ * not in UTC — an order placed 21:30 local on the 27th is 01:30 UTC on the 28th,
+ * and UTC would name the wrong day just as surely.
+ *
+ * So: a bare date is a calendar day and is never shifted; a timestamp is an
+ * instant and renders in the business timezone. Getting this backwards moves a
+ * customer-facing date by one day, in one direction or the other.
+ */
 function humanDate(raw: string | null): string {
   if (!raw) return ''
-  const d = new Date(raw)
+  const trimmed = raw.trim()
+  if (!trimmed) return ''
+
+  const isCalendarDay = /^\d{4}-\d{2}-\d{2}$/.test(trimmed)
+
+  // Odoo datetimes are UTC but arrive with no zone marker, and `new Date` reads a
+  // bare "YYYY-MM-DD HH:MM:SS" as LOCAL time. Say UTC explicitly.
+  const normalised = isCalendarDay
+    ? `${trimmed}T00:00:00Z`
+    : /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(trimmed)
+      ? `${trimmed.replace(' ', 'T')}Z`
+      : trimmed
+
+  const d = new Date(normalised)
   if (Number.isNaN(d.getTime())) return ''
-  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })
+
+  return d.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: isCalendarDay ? 'UTC' : BUSINESS_TIMEZONE,
+  })
 }
 
 /**
@@ -120,6 +165,26 @@ export function composeDocumentMessage(
   if (typeof doc.total !== 'number' || !Number.isFinite(doc.total)) return null
   const currency = (doc.currency ?? '').trim()
   if (!currency) return null
+
+  // AN UNPOSTED INVOICE IS NOT A DEBT, AND MUST NEVER BE SENT AS ONE.
+  //
+  // Odoo gives a draft `account.move` payment_state 'not_paid' and the
+  // placeholder name '/'. Composed without this guard, a draft produces
+  // "Here are the details of your invoice /, dated ... Total: XCD 1,234.00.
+  // This invoice is currently unpaid." — a payment demand, under EPIC's name,
+  // for a document that does not legally exist yet.
+  //
+  // This is not an edge case here: def-receivables-headline-figure-is-mostly-
+  // draft-invoices-2026-08-13 established that EPIC's ledger carries a large
+  // draft population, so it is the COMMON case.
+  //
+  // The projection already applies posted-only to the money it REPORTS
+  // (odoo-projection.ts skips state !== 'posted' when summing balances). This
+  // applies the same rule to the money we ASSERT to a customer.
+  //
+  // Quotations are deliberately unaffected: a draft quotation is a real,
+  // sendable thing — it is the entire subject of the S3 recommendation.
+  if (doc.kind === 'invoice' && (doc.state ?? '').trim() !== 'posted') return null
 
   const label = KIND_LABEL[doc.kind]
   const name = firstName(customerName)

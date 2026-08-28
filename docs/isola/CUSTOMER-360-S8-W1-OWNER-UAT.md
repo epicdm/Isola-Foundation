@@ -114,26 +114,34 @@ Odoo status code.
 
 ---
 
-## Step 8 — the real customer send (READ THIS BEFORE CLICKING)
+## Step 8 — WITHDRAWN 2026-08-28. Do not run it.
 
-> ⚠️ **This step sends a real WhatsApp message to a real customer.**
-> It is not a test. The customer will receive it on their phone, it will come
-> from EPIC, and it cannot be unsent. Do this only when you are willing for that
-> specific customer to receive that specific message.
+> 🛑 **This step has been pulled. Do not send into a real customer conversation
+> from this panel until it returns, rewritten.**
 
-This is the actual acceptance test for the slice: everything above proves the
-mechanism, this proves the product.
+Step 8 previously asked you to send a quotation or invoice into a real WhatsApp
+conversation — the example given was `EPIC 295-6737 WhatsApp`, which is EPIC's
+front desk and a protected number.
 
-1. Choose a real customer conversation in a **WhatsApp** inbox (for example
-   `EPIC 295-6737 WhatsApp`) where sending their quotation or invoice is
-   something you would genuinely want to do right now.
-2. Open Customer 360 → the document → **Send to customer**.
-3. **Read the exact message.** You are the last check before a customer reads it.
-4. If anything is wrong — wrong amount, wrong currency, wrong tone, wrong
-   customer — click **Cancel** and tell the lane. A cancel here is a successful
-   test, not a failed one.
-5. If it is right, confirm. Then check the customer's conversation and confirm
-   they received exactly what you approved.
+**Why it was pulled.** An independent review of the code found that sending a
+document from this panel also, silently, hands that conversation over to human
+handling and switches the AI off for it — because the send is posted with an
+agent credential, which Chatwoot and our own webhook cannot tell apart from a
+human agent typing a reply. The panel does not say this is happening, the action
+catalogue does not list it, and it is not recorded in the governed action log.
+
+That makes step 8 an undeclared ownership change on a live customer-facing
+surface, which is not something a walkthrough may ask an owner to perform.
+
+**What is still safe.** Steps 1–7 are unaffected and remain the walkthrough.
+They run in `ZZ ACCEPTANCE ONLY - epic-front-desk-prod (no WhatsApp, no Meta)`,
+against seeded data in a non-production Odoo.
+
+**When it comes back.** After the fix ships, this step returns rewritten: the
+send will either not change conversation ownership, or it will say plainly on
+screen that it is about to and require that to be confirmed. It will also name
+one specific pre-agreed conversation rather than letting the reader choose a
+live one.
 
 ---
 

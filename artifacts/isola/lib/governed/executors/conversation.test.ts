@@ -13,6 +13,8 @@ function validPayload(over: Record<string, unknown> = {}) {
     documentKind: 'quotation',
     documentReference: 'S00001',
     body: BODY,
+    // The reviewed-text binding travels in the payload so the ledger hashes it.
+    previewFingerprint: 'a'.repeat(64),
     ...over,
   }
 }
@@ -51,6 +53,10 @@ describe('document.send — validation', () => {
     ['documentKind', { documentKind: undefined }],
     ['documentReference', { documentReference: '  ' }],
     ['body', { body: '' }],
+    // A send that is not bound to text a human reviewed is refused by the
+    // executor as well as by the route. Three enforcement points, one rule.
+    ['previewFingerprint', { previewFingerprint: undefined }],
+    ['previewFingerprint (blank)', { previewFingerprint: '   ' }],
   ])('refuses a payload missing %s', (_field, over) => {
     expect(e.validate(validPayload(over)).ok).toBe(false)
   })

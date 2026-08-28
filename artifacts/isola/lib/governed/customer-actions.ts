@@ -207,6 +207,37 @@ export async function runCustomerAction(
     })
   }
 
+  // ── A prior attempt whose WRITE COULD NOT BE PROVEN is never re-executed. ──
+  //
+  // The ledger reclaims any failed row, and for most failures that is correct: a
+  // refusal and an unreachable dependency BOTH prove nothing was written, so
+  // running again is safe and usually what the operator wants. READBACK_FAILED
+  // proves the opposite of nothing — something may well be sitting in the system
+  // of record. On a customer-visible send, re-executing that is precisely how one
+  // customer receives the same document twice.
+  //
+  // The reclaim has already happened by the time we see this, so the row must be
+  // put back to failed before returning; leaving it claimed would make every
+  // later attempt read as in-flight forever (the hazard writeAudit notes below).
+  //
+  // def-c360-send-timeout-classified-as-non-delivery-enables-duplicate-2026-08-28
+  if (claim.status === 'retry_after_failure' && claim.previousFailureClass === 'READBACK_FAILED') {
+    await failOperation(
+      claim.recordId,
+      {
+        failureClass: 'READBACK_FAILED',
+        detail: 'earlier attempt could not be proven; re-execution refused rather than risking a duplicate',
+      },
+      ports.ledger,
+    )
+    return outcome(req, 'readback_failed', {
+      operationId: claim.operationId,
+      auditRef: claim.operationId,
+      readbackProven: false,
+      detail: LIFECYCLE_PRESENTATION.readback_failed.sentence,
+    })
+  }
+
   const recordId = claim.recordId
   const operationId = claim.operationId
 

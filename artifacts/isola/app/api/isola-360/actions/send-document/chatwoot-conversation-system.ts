@@ -32,24 +32,51 @@
  */
 
 import { addMessage, findMessage, type ChatwootConfig } from '@/engines/chatwoot'
-import { DependencyUnavailable } from '@/lib/governed/action'
+import { DependencyUnavailable, WriteIndeterminate } from '@/lib/governed/action'
 import type { ConversationSystem } from '@/lib/governed/executors/conversation'
 
-/**
- * Chatwoot's client throws `Error("<fn> failed (<status>): <body>")`. The status
- * is the one bit that decides retry-ability, so it is parsed back out rather
- * than guessed. An unparseable error is treated as DOWN — the safer default,
- * because calling an outage a refusal strands a real send with no retry.
- */
-function classify(err: unknown, dependency: string): never {
+/** Chatwoot's client throws `Error("<fn> failed (<status>): <body>")`. */
+function httpStatusOf(err: unknown): number {
   const message = err instanceof Error ? err.message : String(err)
-  const status = Number(/\((\d{3})\)/.exec(message)?.[1] ?? NaN)
+  return Number(/\((\d{3})\)/.exec(message)?.[1] ?? NaN)
+}
 
+const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err))
+
+/**
+ * READ failures. A read changes nothing, so there are only two cases: the
+ * platform refused us (4xx), or we could not reach it. Retrying a read is always
+ * safe, which is why "unparseable → DOWN" is the right default HERE.
+ */
+function classifyRead(err: unknown, dependency: string): never {
+  const status = httpStatusOf(err)
   if (Number.isInteger(status) && status >= 400 && status < 500) {
-    // A genuine refusal by the platform. Not a dependency outage.
-    throw new Error(message)
+    throw new Error(messageOf(err))
   }
-  throw new DependencyUnavailable(dependency, message)
+  throw new DependencyUnavailable(dependency, messageOf(err))
+}
+
+/**
+ * WRITE failures, and they are NOT the same shape as read failures.
+ *
+ * This adapter previously shared one classifier with the read path, and that is
+ * the whole defect: on a write, "we could not reach it" is a CLAIM ABOUT THE
+ * WORLD that a timeout does not license. The bytes may have gone out. Chatwoot
+ * may have created the message and been slow to answer. `AbortSignal.timeout`
+ * fires with no HTTP status at all, so the old "unparseable → DOWN" default
+ * resolved the ambiguous case to the one reading that invites a duplicate.
+ *
+ * Only a clean 4xx proves nothing was written — the platform answered, and it
+ * said no. Everything else, 5xx included, is INDETERMINATE: a 5xx can be
+ * returned after the row exists.
+ */
+function classifyWrite(err: unknown, dependency: string): never {
+  const status = httpStatusOf(err)
+  if (Number.isInteger(status) && status >= 400 && status < 500) {
+    // The platform answered and refused. Nothing was written. Safe to say so.
+    throw new Error(messageOf(err))
+  }
+  throw new WriteIndeterminate(dependency, messageOf(err))
 }
 
 export function createChatwootConversationSystem(
@@ -63,13 +90,18 @@ export function createChatwootConversationSystem(
         const created = await addMessage(config, conversationId, body, 'outgoing')
         const id = Number(created?.id)
         if (!Number.isInteger(id) || id <= 0) {
-          // A create response we cannot identify is not proof of anything. Say so
-          // rather than inventing an id the readback would then fail to find.
-          throw new Error('Chatwoot accepted the message but returned no usable id')
+          // A create response we cannot identify is not proof of anything — and
+          // critically, not proof of NOTHING either. Chatwoot answered; we simply
+          // cannot name what it made. That is indeterminate, not a refusal.
+          throw new WriteIndeterminate(
+            'chatwoot',
+            'Chatwoot accepted the message but returned no usable id',
+          )
         }
         return { externalId: String(id) }
       } catch (err) {
-        classify(err, 'chatwoot')
+        if (err instanceof WriteIndeterminate) throw err
+        classifyWrite(err, 'chatwoot')
       }
     },
 
@@ -79,7 +111,7 @@ export function createChatwootConversationSystem(
       try {
         return await findMessage(config, conversationId, id)
       } catch (err) {
-        classify(err, 'chatwoot')
+        classifyRead(err, 'chatwoot')
       }
     },
   }

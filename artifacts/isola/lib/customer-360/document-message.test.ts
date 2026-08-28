@@ -129,6 +129,85 @@ describe('composeDocumentMessage — what a customer is told', () => {
     expect(out.body).not.toContain('unpaid')
   })
 
+  /* ── an UNPOSTED invoice is not a debt (F20) ─────────────────────────────*/
+
+  it('REFUSES a draft invoice — a customer is never sent a demand for an unposted move', () => {
+    // Exactly the shape Odoo produces for a draft: name is the placeholder '/',
+    // payment_state is already 'not_paid', and the total is real. Without the
+    // state guard every one of those fields passes and the customer receives
+    // "your invoice /, ... Total: USD 217.35. This invoice is currently unpaid."
+    const draft: Customer360Document = {
+      ...invoice,
+      state: 'draft',
+      reference: '/',
+      paymentState: 'not_paid',
+    }
+    expect(composeDocumentMessage(draft, 'Patricia')).toBeNull()
+  })
+
+  it('REFUSES a draft invoice even when it carries a real reference', () => {
+    // The reference is not the guard — the state is. A draft that has been given
+    // a name must still not be sent.
+    expect(
+      composeDocumentMessage({ ...invoice, state: 'draft' }, 'Patricia'),
+    ).toBeNull()
+  })
+
+  it('REFUSES a cancelled invoice, and anything whose state is unknown', () => {
+    expect(composeDocumentMessage({ ...invoice, state: 'cancel' }, 'Patricia')).toBeNull()
+    expect(composeDocumentMessage({ ...invoice, state: null }, 'Patricia')).toBeNull()
+  })
+
+  it('POSITIVE CONTROL: the same invoice, POSTED, still composes and still sends', () => {
+    // Without this the three refusals above would pass just as well against a
+    // composer that had been broken to refuse every invoice.
+    const out = composeDocumentMessage(invoice, 'Patricia')
+    expect(out).not.toBeNull()
+    expect(out!.body).toContain('INV/2026/00001')
+    expect(out!.body).toContain('USD 217.35')
+  })
+
+  it('POSITIVE CONTROL: a DRAFT QUOTATION is still sendable — the rule is invoice-only', () => {
+    // The S3 recommendation exists to send draft quotations. If the state guard
+    // had been written against `doc.state` without checking the kind, this
+    // fixture — state 'draft' — would have stopped composing.
+    expect(quotation.state).toBe('draft')
+    expect(composeDocumentMessage(quotation, 'Patricia')).not.toBeNull()
+  })
+
+  /* ── the date a customer reads is the date Odoo holds ────────────────────*/
+
+  it('renders a bare invoice DATE as the calendar day Odoo holds, never shifted', () => {
+    // `invoice_date` is a Date, not an instant. Rendering UTC midnight in UTC-4
+    // would yield "26 August" and tell the customer their invoice is dated the
+    // day before the one in Odoo.
+    const out = composeDocumentMessage({ ...invoice, date: '2026-08-27' }, 'Patricia')!
+    expect(out.body).toContain('27 August 2026')
+    expect(out.body).not.toContain('26 August 2026')
+  })
+
+  it('renders a quotation TIMESTAMP in the business day, not the UTC day', () => {
+    // `date_order` IS an instant, in UTC. 01:30 UTC on the 28th was 21:30 on the
+    // 27th in Dominica — the day the customer and the owner both experienced.
+    // Rendering this one in UTC would name the wrong day just as surely as
+    // shifting the bare date above.
+    const out = composeDocumentMessage(
+      { ...quotation, date: '2026-08-28 01:30:00' },
+      'Patricia',
+    )!
+    expect(out.body).toContain('27 August 2026')
+    expect(out.body).not.toContain('28 August 2026')
+  })
+
+  it('CONTROL: the two date kinds are treated DIFFERENTLY, not both one way', () => {
+    // Without this, both assertions above would pass against a formatter pinned
+    // to whichever single zone happened to suit the two fixtures.
+    const bare = composeDocumentMessage({ ...invoice, date: '2026-08-28' }, 'P')!
+    const instant = composeDocumentMessage({ ...quotation, date: '2026-08-28 01:30:00' }, 'P')!
+    expect(bare.body).toContain('28 August 2026')
+    expect(instant.body).toContain('27 August 2026')
+  })
+
   /* ── the fingerprint binds a confirmation to exact bytes ─────────────────*/
 
   it('fingerprints the exact body, and a changed amount changes it', () => {

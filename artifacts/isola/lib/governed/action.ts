@@ -94,6 +94,39 @@ export class DependencyUnavailable extends Error {
   }
 }
 
+/**
+ * Raised by an executor when a WRITE MAY OR MAY NOT HAVE LANDED.
+ *
+ * The third case, and the one that was missing. `DependencyUnavailable` asserts
+ * the system of record never received the write; an ordinary Error asserts it
+ * received and refused. A request that timed out, or failed after the bytes went
+ * out, asserts NEITHER — and reporting it as "not reached, nothing written,
+ * trying again is reasonable" is the most dangerous of the three, because on a
+ * customer-visible send it invites a SECOND message to a customer who already
+ * received the first.
+ *
+ * Measured 2026-08-28 (def-c360-send-timeout-classified-as-non-delivery-enables-
+ * duplicate-2026-08-28): a 10s abort on the Chatwoot POST carried no HTTP status,
+ * was classified as a dependency outage, and told the operator nothing was
+ * written — while the message sat in the customer's conversation.
+ *
+ * This maps to READBACK_FAILED, whose presentation already says the true thing:
+ * something was written, we cannot prove what, do not treat it as done, and
+ * re-sending is unsafe.
+ *
+ * An ambiguous negative is not a finding — it is an ambiguity, and it must be
+ * reported as one.
+ */
+export class WriteIndeterminate extends Error {
+  constructor(
+    public readonly dependency: string,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'WriteIndeterminate'
+  }
+}
+
 export type ApprovalVerdict =
   | { state: 'pending'; approvalId: string }
   | { state: 'granted'; approvalId: string }
@@ -276,12 +309,22 @@ export async function runGovernedAction(
   try {
     ;({ externalId } = await executor.execute(proposal))
   } catch (err) {
-    // A dependency being DOWN is not the same as a write being REFUSED.
-    const down = err instanceof DependencyUnavailable
-    const outcome: ActionOutcome = down ? 'DEPENDENCY_UNAVAILABLE' : 'EXECUTION_FAILED'
-    const detail = down
-      ? `dependency ${(err as DependencyUnavailable).dependency} unavailable: ${err.message}`
-      : `execution failed: ${err instanceof Error ? err.message : String(err)}`
+    // THREE cases, not two. A dependency being DOWN is not the same as a write
+    // being REFUSED, and neither is the same as a write whose fate is UNKNOWN.
+    // Collapsing the third into the first is what turns a delivered message into
+    // a second delivered message.
+    const indeterminate = err instanceof WriteIndeterminate
+    const down = !indeterminate && err instanceof DependencyUnavailable
+    const outcome: ActionOutcome = indeterminate
+      ? 'READBACK_FAILED'
+      : down
+        ? 'DEPENDENCY_UNAVAILABLE'
+        : 'EXECUTION_FAILED'
+    const detail = indeterminate
+      ? `write to ${(err as WriteIndeterminate).dependency} did not confirm: ${err.message}`
+      : down
+        ? `dependency ${(err as DependencyUnavailable).dependency} unavailable: ${err.message}`
+        : `execution failed: ${err instanceof Error ? err.message : String(err)}`
     const auditId = await ports.writeAudit({
       proposal,
       outcome,

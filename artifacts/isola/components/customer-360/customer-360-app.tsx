@@ -297,6 +297,21 @@ export function SendDocumentReview({
         <p className={styles.effectNote}>
           Sending posts this as a visible reply in conversation #{hint.conversationDisplayIdHint}. It does not change anything in Odoo, and it cannot be unsent.
         </p>
+        {/*
+          F21. This effect was real before it was ever stated: the message is
+          posted with an agent credential, which Chatwoot and our own webhook
+          cannot tell apart from a human agent typing a reply, so the
+          conversation moves to human handling and the assistant stops. The
+          handover is CORRECT — a person sending a business document should own
+          the reply that comes back — but it was happening silently, which is
+          the defect. It is disclosed here, before the click, not discovered
+          afterwards when a customer's question goes unanswered.
+        */}
+        <p className={styles.effectNote}>
+          <strong>This also moves the conversation to you.</strong> The AI assistant stops replying
+          in conversation #{hint.conversationDisplayIdHint} once you send, so the customer’s next
+          message is yours to answer.
+        </p>
       </>}
 
       {phase.kind === 'settled' && <p className={phase.outcome.success ? styles.copyHint : styles.effectNote}>
@@ -398,6 +413,14 @@ export function Customer360App() {
 function sendability(item: Customer360Snapshot['documents'][number]): { ok: true } | { ok: false; why: string } {
   if (item.kind !== 'quotation' && item.kind !== 'invoice') {
     return { ok: false, why: 'Only quotations and invoices can be sent to a customer.' };
+  }
+  // A draft invoice is not a debt. It stays VISIBLE — an operator wants to know
+  // it exists — but it is not sendable, because the message would demand payment
+  // for a document Odoo has not posted, under Odoo's placeholder reference '/'.
+  // The server refuses this independently; the button is disabled so we never
+  // offer an action whose only possible outcome is a refusal.
+  if (item.kind === 'invoice' && (item.state ?? '').trim() !== 'posted') {
+    return { ok: false, why: 'This invoice is still a draft in Odoo, so it cannot be sent to a customer. Post it in Odoo first.' };
   }
   if (item.total == null) return { ok: false, why: 'This record has no verified total, so it cannot be sent.' };
   if (!item.currency) return { ok: false, why: 'This record has no verified currency, so it cannot be sent.' };

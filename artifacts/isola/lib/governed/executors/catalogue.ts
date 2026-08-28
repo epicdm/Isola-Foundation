@@ -176,7 +176,7 @@ export const GOVERNED_ACTION_CATALOGUE: readonly GovernedActionMeta[] = [
     actionType: 'document.send',
     label: 'Send this document to the customer',
     writes:
-      'Posts the document details as a customer-visible message in this Chatwoot conversation, delivered by the channel that owns the conversation. It changes nothing in Odoo.',
+      'Posts the document details as a customer-visible message in this Chatwoot conversation, delivered by the channel that owns the conversation. It changes nothing in Odoo. It DOES move the conversation to human handling — the AI assistant stops replying there until a human hands it back.',
     riskLevel: 'high',
     allowedRoles: ['staff', 'manager', 'owner'],
     // No approval gate is wired for this action, and that is deliberate: an
@@ -202,6 +202,17 @@ export const GOVERNED_ACTION_CATALOGUE: readonly GovernedActionMeta[] = [
         choices: ['quotation', 'invoice'],
       },
       { name: 'documentReference', label: 'Reference', kind: 'text', required: true },
+      {
+        name: 'previewFingerprint',
+        label: 'Reviewed message fingerprint',
+        kind: 'text',
+        required: true,
+        // Listed because omitting it from this catalogue is what let callers
+        // built from the catalogue skip the human-review binding entirely. The
+        // route now REFUSES a send without it; the field must be visible here or
+        // the catalogue describes a call that cannot succeed.
+        help: 'sha256 of the exact message text a human reviewed. The send is refused without it, and refused again if the document has changed since.',
+      },
       {
         name: 'body',
         label: 'Message',

@@ -85,6 +85,8 @@ const PAYLOADS: Readonly<Record<string, Record<string, unknown>>> = {
     documentKind: 'quotation',
     documentReference: 'S00001',
     body: SEND_BODY,
+    // Bound to reviewed text; part of the authorised arguments the ledger hashes.
+    previewFingerprint: 'b'.repeat(64),
   },
 }
 
