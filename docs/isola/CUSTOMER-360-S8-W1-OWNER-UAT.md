@@ -92,10 +92,18 @@ new message appeared. This is worth doing before you send anything.
 **6. Send it.**
 Re-open **Send to customer** and click **Confirm and send to the customer**.
 
-You should see **"Done and confirmed — Written, and read back from the system of
-record to prove it"**, plus a reference id so the action can be traced later.
-That wording matters: it says *sent* only after Isola has read the message back
-out of Chatwoot, not merely because the request succeeded.
+The row should read **"Posted into the conversation — read back from the system
+of record"**, plus a reference id so the action can be traced later.
+
+That wording is deliberate and it is worth reading twice. It says **posted**, not
+**sent**. Isola has read the message back out of Chatwoot and proved it is there,
+word for word and visible to the customer — that is real proof, and it is more
+than most systems give you. What it does **not** prove is that WhatsApp has
+delivered it to the handset, because Chatwoot hands off to Meta afterwards and
+tells us nothing about what happens next. Outside the 24-hour reply window Meta
+can refuse a message Chatwoot has already stored. So the panel claims exactly
+what it measured and no more. Delivery status is a real improvement and it is on
+the list; it is not in this slice.
 
 Now open **Messages**: exactly **one** new visible message, matching the text you
 reviewed, word for word.
@@ -103,10 +111,13 @@ reviewed, word for word.
 **7. Prove it cannot double-send.**
 Click **Send to customer** on the same document again and confirm again.
 
-You should get **"Already recorded"**, and the row should now read
-**"Already sent — not sent again"**. Check Messages once more: still exactly one
-message. The second attempt was recognised as the same operation and refused to
-write again.
+The row should now read **"Already posted — not posted again"**. Check Messages
+once more: still exactly one message. The second attempt was recognised as the
+same operation and refused to write again.
+
+If instead you see **"Still sending — not confirmed yet"**, the first attempt is
+still running. Wait for it to settle and look at Messages; do not send again and
+do not post the document by hand.
 
 **Optional:** repeat steps 4–6 with invoice **INV/2026/00002** to see how an
 invoice reads — it should also state the unpaid status in plain words, not as an

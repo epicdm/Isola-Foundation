@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { LIFECYCLE_PRESENTATION } from '@/lib/customer-workspace/contract'
 import { createFakeLedgerStore, type FakeLedgerStore } from '@/lib/operations/fake-ledger-store'
 
-import { DependencyUnavailable } from './action'
+import { DependencyUnavailable, WriteIndeterminate } from './action'
 import { runCustomerAction, type CustomerActionRequest } from './customer-actions'
 import { buildExecutors, type RecordSystem } from './executors'
 import { GOVERNED_ACTION_CATALOGUE } from './executors/catalogue'
@@ -119,6 +119,144 @@ const ports = (mode: Mode = 'ok') => ({
     ...buildConversationExecutors(conversationSystem(mode)),
   ],
   now: () => new Date('2026-08-01T12:00:00Z'),
+})
+
+/* ── the duplicate a customer must never receive ───────────────────────────*/
+
+/**
+ * The mechanism that stops one customer being sent the same document twice.
+ *
+ * A POST that times out proves NOTHING: the message may be in the conversation.
+ * The adapter reports that as WriteIndeterminate → READBACK_FAILED, and the
+ * ledger must then refuse to re-execute on a repeat of the same idempotency key
+ * — even though it happily reclaims a failed row for every other failure kind,
+ * because those DO prove nothing was written.
+ *
+ * Until these tests existed the mechanism was asserted only by its own comment.
+ */
+describe('an unproven send is never re-executed', () => {
+  /** Posts successfully, then never confirms — exactly a timed-out POST. */
+  function indeterminateOnce(): { system: ConversationSystem; posts: () => number } {
+    let posts = 0
+    return {
+      posts: () => posts,
+      system: {
+        postCustomerVisibleMessage: async () => {
+          posts += 1
+          throw new WriteIndeterminate('chatwoot', 'The operation was aborted due to timeout')
+        },
+        readMessage: async () => null,
+      },
+    }
+  }
+
+  it('refuses the retry, and the executor is NOT called a second time', async () => {
+    const { system, posts } = indeterminateOnce()
+    const p = {
+      ledger,
+      executors: buildConversationExecutors(system),
+      now: () => new Date('2026-08-01T12:00:00Z'),
+    }
+    const req = request({
+      actionType: 'document.send',
+      payload: PAYLOADS['document.send'],
+      idempotencyKey: 'dup-guard-1',
+    })
+
+    const first = await runCustomerAction(req, p)
+    expect(first.lifecycle).toBe('readback_failed')
+    expect(posts()).toBe(1)
+
+    const second = await runCustomerAction(req, p)
+    expect(second.lifecycle).toBe('readback_failed')
+    // THE ASSERTION THAT MATTERS: the customer did not receive it twice.
+    expect(posts()).toBe(1)
+  })
+
+  it('leaves the row FAILED, not stranded as claimed, so a third attempt behaves', async () => {
+    // claimOperation reclaims BEFORE the refusal runs, nulling failure_code. If
+    // the restoring write is skipped or throws, the row stays `claimed` and every
+    // later attempt reads in_flight forever — for a message that is sitting in
+    // the customer's conversation.
+    const { system, posts } = indeterminateOnce()
+    const p = {
+      ledger,
+      executors: buildConversationExecutors(system),
+      now: () => new Date('2026-08-01T12:00:00Z'),
+    }
+    const req = request({
+      actionType: 'document.send',
+      payload: PAYLOADS['document.send'],
+      idempotencyKey: 'dup-guard-2',
+    })
+
+    await runCustomerAction(req, p)
+    await runCustomerAction(req, p)
+    const third = await runCustomerAction(req, p)
+
+    expect(third.lifecycle).toBe('readback_failed')
+    expect(third.lifecycle).not.toBe('executing')
+    expect(posts()).toBe(1)
+  })
+
+  it('preserves the ORIGINAL failure detail instead of overwriting it', async () => {
+    // The first attempt's detail names what could not be proven. A generic
+    // replacement would delete the only diagnostic after one extra click.
+    const { system } = indeterminateOnce()
+    const p = {
+      ledger,
+      executors: buildConversationExecutors(system),
+      now: () => new Date('2026-08-01T12:00:00Z'),
+    }
+    const req = request({
+      actionType: 'document.send',
+      payload: PAYLOADS['document.send'],
+      idempotencyKey: 'dup-guard-3',
+    })
+
+    await runCustomerAction(req, p)
+    await runCustomerAction(req, p)
+
+    const rows = ledger.rows()
+    expect(rows).toHaveLength(1)
+    expect(rows[0].state).toBe('failed')
+    expect(rows[0].failureClass).toBe('READBACK_FAILED')
+    expect(rows[0].failureDetail).toContain('aborted due to timeout')
+  })
+
+  it('CONTROL: a DEPENDENCY_UNAVAILABLE failure still retries — the refusal is specific', async () => {
+    // Without this, all three assertions above would pass against a runtime that
+    // had been broken to refuse every retry. A dependency that was never reached
+    // proves nothing was written, so retrying is safe and expected.
+    let posts = 0
+    let down = true
+    const system: ConversationSystem = {
+      postCustomerVisibleMessage: async ({ body }) => {
+        posts += 1
+        if (down) throw new DependencyUnavailable('chatwoot', 'ECONNREFUSED')
+        return { externalId: 'msg-1' }
+      },
+      readMessage: async () => ({ id: 'msg-1', content: SEND_BODY, private: false }),
+    }
+    const p = {
+      ledger,
+      executors: buildConversationExecutors(system),
+      now: () => new Date('2026-08-01T12:00:00Z'),
+    }
+    const req = request({
+      actionType: 'document.send',
+      payload: PAYLOADS['document.send'],
+      idempotencyKey: 'dup-guard-4',
+    })
+
+    const first = await runCustomerAction(req, p)
+    expect(first.lifecycle).toBe('dependency_unavailable')
+
+    down = false
+    const second = await runCustomerAction(req, p)
+    expect(second.lifecycle).toBe('completed_verified')
+    expect(posts).toBe(2)
+  })
 })
 
 /* ── all six are actually reachable ────────────────────────────────────────*/

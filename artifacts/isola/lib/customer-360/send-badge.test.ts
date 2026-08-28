@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
+import { ACTION_LIFECYCLE_STATES } from '@/lib/customer-workspace/contract'
+
 import {
+  IN_FLIGHT_BADGE,
   POSTED_BADGE,
   REPLAY_PROVEN_BADGE,
   REPLAY_UNPROVEN_BADGE,
+  UNKNOWN_BADGE,
   UNPROVEN_BADGE,
   sendBadgeText,
   type SendOutcome,
@@ -79,10 +83,71 @@ describe('sendBadgeText — what a document row says after an attempt', () => {
     ).toBe('Not sent — Refused')
   })
 
-  it('treats an unrecognised lifecycle as not-sent rather than guessing', () => {
-    expect(sendBadgeText(outcome({ lifecycle: 'unknown', label: 'Not sent' }))).toBe(
-      'Not sent — Not sent',
+  it('treats an unrecognised lifecycle as UNCONFIRMED, never as not-sent', () => {
+    // "Not sent" is a claim about the world. For a state we do not recognise we
+    // cannot make it, and making it wrongly is what causes a duplicate send.
+    expect(sendBadgeText(outcome({ lifecycle: 'some_state_added_later', label: 'Whatever' }))).toBe(
+      UNKNOWN_BADGE,
     )
+  })
+
+  it('says STILL SENDING while the write is in flight — not "Not sent"', () => {
+    // `executing` means the write reached the system of record and the outcome
+    // is not known yet. It is reachable in ordinary use: the ledger claim is
+    // held for up to ~20s and Chatwoot re-mounts the panel on a conversation
+    // switch, resetting the per-instance in-flight guard. It previously fell
+    // through to "Not sent — Running", which invites the operator to post the
+    // document by hand while the first one is still landing.
+    const text = sendBadgeText(outcome({ lifecycle: 'executing', label: 'Running' }))
+    expect(text).toBe(IN_FLIGHT_BADGE)
+    expect(text).not.toContain('Not sent')
+  })
+
+  /**
+   * The completeness test. The earlier version swept SIX hand-picked lifecycles
+   * and omitted `executing` — the one that was broken. Iterating the contract
+   * itself is the difference between a sweep that can miss a state and one that
+   * cannot: a lifecycle added to ACTION_LIFECYCLE_STATES later is covered the
+   * day it is added.
+   */
+  it('no lifecycle claims "Not sent" unless it PROVES nothing was written', () => {
+    const mayClaimNotSent = new Set([
+      'draft',
+      'validation_failed',
+      'permission_denied',
+      'approval_required',
+      'approval_pending',
+      'approval_rejected',
+      'dependency_unavailable',
+      'execution_failed',
+      'executor_unavailable',
+      'argument_conflict',
+    ])
+
+    for (const lifecycle of ACTION_LIFECYCLE_STATES) {
+      for (const proven of [true, false]) {
+        const text = sendBadgeText(
+          outcome({ lifecycle, label: 'Label', readbackProven: proven, success: false }),
+        )
+        if (!mayClaimNotSent.has(lifecycle)) {
+          expect(
+            text.includes('Not sent'),
+            `${lifecycle} must not claim "Not sent" — it does not prove nothing was written`,
+          ).toBe(false)
+        }
+      }
+    }
+  })
+
+  it('CONTROL: the states that DO prove nothing was written still say so', () => {
+    // Without this the sweep above would pass against a function that had been
+    // broken to never say "Not sent" at all.
+    expect(sendBadgeText(outcome({ lifecycle: 'execution_failed', label: 'Refused' }))).toBe(
+      'Not sent — Refused',
+    )
+    expect(
+      sendBadgeText(outcome({ lifecycle: 'permission_denied', label: 'Not permitted' })),
+    ).toBe('Not sent — Not permitted')
   })
 
   it('leads an unproven write with the UNCERTAINTY, not with "Not sent"', () => {

@@ -222,14 +222,40 @@ export async function runCustomerAction(
   //
   // def-c360-send-timeout-classified-as-non-delivery-enables-duplicate-2026-08-28
   if (claim.status === 'retry_after_failure' && claim.previousFailureClass === 'READBACK_FAILED') {
-    await failOperation(
-      claim.recordId,
-      {
-        failureClass: 'READBACK_FAILED',
-        detail: 'earlier attempt could not be proven; re-execution refused rather than risking a duplicate',
-      },
-      ports.ledger,
-    )
+    // The reclaim has ALREADY run by the time we get here — the row is now
+    // `claimed` with failure_code nulled, and `previousFailureClass` above is the
+    // only surviving trace of it, read from the pre-reclaim snapshot. So this
+    // restore is not tidiness: without it the row is stranded `claimed`, every
+    // later attempt reads in_flight, and the ledger no longer records that the
+    // write was ever indeterminate.
+    //
+    // It must therefore never be allowed to fail silently, and it must not
+    // overwrite the original diagnosis. The first attempt's detail says WHAT
+    // could not be proven ("write to chatwoot did not confirm: aborted"); a
+    // generic replacement would delete the only evidence after one extra click.
+    try {
+      await failOperation(
+        claim.recordId,
+        {
+          failureClass: 'READBACK_FAILED',
+          detail:
+            claim.previousFailureDetail ??
+            'earlier attempt could not be proven; re-execution refused rather than risking a duplicate',
+        },
+        ports.ledger,
+      )
+    } catch {
+      // The row may now be stranded `claimed`. Say so rather than throwing out
+      // of a route with no try/catch and answering 500 — and escalate, because
+      // a human has to look at both the conversation and the ledger row.
+      return outcome(req, 'readback_failed', {
+        operationId: claim.operationId,
+        auditRef: claim.operationId,
+        readbackProven: false,
+        detail:
+          'An earlier attempt could not be confirmed, and this one could not be recorded either. Do not send again — check the conversation, and report this operation id.',
+      })
+    }
     return outcome(req, 'readback_failed', {
       operationId: claim.operationId,
       auditRef: claim.operationId,

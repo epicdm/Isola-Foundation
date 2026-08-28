@@ -219,20 +219,47 @@ describe('the message goes to the conversation it says it is going to', () => {
   })
 
   it('never resolves the door from the caller’s account/inbox', async () => {
+    // Runs BOTH resolution paths, because the earlier version of this test used
+    // only the default fixture — where chatwoot_binding_id is null — so
+    // bindingFindFirstMock was never called, the loop body never executed, and
+    // the test asserted precisely nothing while passing.
+    conversationOn({ chatwoot_binding_id: 'bind-a' })
+    bindingFindFirstMock.mockResolvedValue(DOOR_A)
     await POST(
       request({
         hint: hintFor(DOOR_A),
         documentId: 9,
         documentKind: 'invoice',
-        idempotencyKey: 'k3',
+        idempotencyKey: 'k3a',
         previewFingerprint: 'x',
       }),
     )
+
+    conversationOn()
+    await POST(
+      request({
+        hint: hintFor(DOOR_A),
+        documentId: 9,
+        documentKind: 'invoice',
+        idempotencyKey: 'k3b',
+        previewFingerprint: 'x',
+      }),
+    )
+
+    // Control: the loops below are only meaningful if a lookup actually happened.
+    expect(bindingFindFirstMock.mock.calls.length).toBeGreaterThan(0)
+    expect(bindingFindManyMock.mock.calls.length).toBeGreaterThan(0)
+
     // The old route called findFirst({ account_id, inbox_id }) straight from the
-    // hint. Any such lookup is the defect returning.
+    // hint. Any such lookup, on either path, is the defect returning.
     for (const call of bindingFindFirstMock.mock.calls) {
       expect(call[0]?.where?.account_id).toBeUndefined()
       expect(call[0]?.where?.inbox_id).toBeUndefined()
+    }
+    for (const call of bindingFindManyMock.mock.calls) {
+      // The inbox fallback keys on the CONVERSATION's inbox, never the hint's.
+      expect(call[0]?.where?.account_id).toBeUndefined()
+      expect(call[0]?.where?.inbox_id).toBe(DOOR_A.inbox_id)
     }
   })
 
@@ -368,6 +395,17 @@ describe('a send must be bound to text a human reviewed', () => {
 
 describe('only a posted invoice reaches a customer', () => {
   it('REFUSES a draft invoice even when the caller asks for it directly', async () => {
+    // The refusal must come from the POSTED-ONLY guard, not incidentally from the
+    // fingerprint check. An earlier version of this test passed a junk
+    // fingerprint, so deleting the guard entirely still produced success:false —
+    // via argument_conflict — and the test could not tell the two apart.
+    // A draft cannot be previewed either, so the fingerprint is taken from the
+    // POSTED document first, then the document is swapped to draft.
+    const preview = await POST(
+      request({ hint: hintFor(DOOR_A), documentId: 9, documentKind: 'invoice', preview: true }),
+    )
+    const { fingerprint } = await preview.json()
+
     readCustomer360Mock.mockResolvedValue({
       ...snapshot,
       documents: [{ ...POSTED_INVOICE, state: 'draft', reference: '/' }],
@@ -379,13 +417,30 @@ describe('only a posted invoice reaches a customer', () => {
         documentId: 9,
         documentKind: 'invoice',
         idempotencyKey: 'k10',
-        previewFingerprint: 'x',
+        previewFingerprint: fingerprint,
       }),
     )
     const body = await res.json()
 
     expect(body.success).toBe(false)
+    expect(body.lifecycle).toBe('validation_failed')
+    expect(body.lifecycle).not.toBe('argument_conflict')
     expect(runCustomerActionMock).not.toHaveBeenCalled()
+  })
+
+  it('PREVIEW of a draft invoice is refused too — it never composes at all', async () => {
+    readCustomer360Mock.mockResolvedValue({
+      ...snapshot,
+      documents: [{ ...POSTED_INVOICE, state: 'draft', reference: '/' }],
+    })
+
+    const res = await POST(
+      request({ hint: hintFor(DOOR_A), documentId: 9, documentKind: 'invoice', preview: true }),
+    )
+    const body = await res.json()
+
+    expect(body.preview).toBeUndefined()
+    expect(body.success).toBe(false)
   })
 })
 

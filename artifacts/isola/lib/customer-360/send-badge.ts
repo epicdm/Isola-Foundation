@@ -61,11 +61,58 @@ export const REPLAY_UNPROVEN_BADGE =
 export const UNPROVEN_BADGE =
   'May have been posted — not confirmed. Check the conversation before trying again';
 
+/**
+ * Still running. NOT "not sent" — the write has already been handed to the
+ * system of record and the outcome is simply not known yet.
+ *
+ * This state is reachable in ordinary use: the ledger claim is held for up to
+ * ~20s (POST timeout plus readback timeout), and the panel's in-flight guard is
+ * a per-instance ref that Chatwoot resets whenever it re-mounts the iframe — as
+ * it does when an operator switches conversation and comes back. A second click
+ * in that window answers `executing`.
+ */
+export const IN_FLIGHT_BADGE =
+  'Still sending — not confirmed yet. Do not send it again until this settles';
+
+/**
+ * The default for anything not explicitly known to be safe. It says the one true
+ * thing available: we cannot confirm, so go and look.
+ */
+export const UNKNOWN_BADGE = 'Not confirmed — check the conversation before sending again';
+
+/**
+ * THE ONLY LIFECYCLES THAT MAY SAY "Not sent".
+ *
+ * An allowlist, not a fallthrough, and that is the whole point. Every state here
+ * PROVES nothing reached the customer: the request was refused, held, or never
+ * left. Anything else — in flight, unproven, or a state added to the contract
+ * after this was written — falls to UNKNOWN_BADGE, because telling an operator
+ * "Not sent" about a message that IS sent is how the same customer receives the
+ * same document twice. That defect was fixed in the ledger and then reappeared
+ * here, in the wording, through a default that looked harmless.
+ */
+const PROVES_NOTHING_WAS_WRITTEN: ReadonlySet<string> = new Set([
+  'draft',
+  'validation_failed',
+  'permission_denied',
+  'approval_required',
+  'approval_pending',
+  'approval_rejected',
+  'dependency_unavailable',
+  'execution_failed',
+  'executor_unavailable',
+  'argument_conflict',
+]);
+
 export function sendBadgeText(outcome: SendOutcome): string {
   if (outcome.success) return POSTED_BADGE;
   if (outcome.lifecycle === 'idempotent_replay') {
     return outcome.readbackProven ? REPLAY_PROVEN_BADGE : REPLAY_UNPROVEN_BADGE;
   }
   if (outcome.lifecycle === 'readback_failed') return UNPROVEN_BADGE;
-  return `Not sent — ${outcome.label}`;
+  if (outcome.lifecycle === 'executing') return IN_FLIGHT_BADGE;
+  if (PROVES_NOTHING_WAS_WRITTEN.has(outcome.lifecycle)) {
+    return `Not sent — ${outcome.label}`;
+  }
+  return UNKNOWN_BADGE;
 }
