@@ -322,7 +322,20 @@ Host **deepseek 66.118.37.12**. These are live checkouts served by running proce
 > `fix/bffv2-retire-dashboard-reseller-campaigns-broadcast`).
 
 **Protected numbers** — 3742 (sole public front door) · 9043 (Hermes internal, out of
-scope) · 6737 (Front Desk / Customer Zero) · 0001 (legacy, do not touch) · 9525 (Anansi).
+scope) · 6737 (Front Desk / Customer Zero) · 9525 (Anansi).
+
+**0001 is the Personal Line Concierge — no longer "legacy, do not touch."**
+`+1 767 818 0001` (`phone_number_id 1023804347491554`) is the customer's own EPIC agent on
+WhatsApp, ratified by `dec-concierge-number-0001-ratified-2026-08-28`, which explicitly closes
+the open question left by `decision-isola-whatsapp-number-role-map-2026-07-24` — the source of
+the old "legacy" line. Per-number routing keeps it isolated from the 6737/3742 business front
+desk. Its **engine** is the deployed bff-v2 lite-concierge (Production Register, commit
+`5384908c`) — REUSED, never rebuilt or rewired, and changeable only through the Promotion
+Process. Its **governance identity** is Paperclip agent `39df5efc-0a14-476d-a1c8-8d1b4bbf4692`
+(owner-approved 2026-08-28). The identity is not the engine: in v1 the deterministic engine
+produces every customer-facing word, and the agent's charter is the governance record, not the
+speaker. Still protected — protected now means *live product surface*, not *do not approach*.
+
 Shared WABA `272252189309178` carries 11 numbers: flip webhooks **per phone, never per
 WABA**, and re-check `GET /{waba}/subscribed_apps` after any Chatwoot inbox change.
 
