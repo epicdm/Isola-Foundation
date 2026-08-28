@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   CHATWOOT_FETCH_INFO_REQUEST,
   parseChatwootContext,
@@ -59,9 +59,120 @@ function loadSnapshot(hint: ChatwootContextHint, setPhase: (phase: Phase) => voi
     });
 }
 
+/** S3: the review/edit/copy surface for one suggested reply. No network call. */
+export function ReplyReview({
+  snapshot,
+  onClose,
+}: {
+  snapshot: Customer360Snapshot;
+  onClose: () => void;
+}) {
+  const action = snapshot.recommendedAction;
+  const [draft, setDraft] = useState(action?.suggestedReply ?? '');
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  if (!action) return null;
+
+  return (
+    <div className={styles.overlay} role="dialog" aria-modal="true" aria-label="Review suggested reply">
+      <section className={styles.reviewCard}>
+        <h2>Review before you use this</h2>
+        <dl className={styles.reviewFacts}>
+          <div><dt>Customer</dt><dd>{snapshot.customer.name}</dd></div>
+          <div><dt>Conversation</dt><dd>#{snapshot.conversation.displayId}</dd></div>
+          <div><dt>Quotation</dt><dd>{action.document.reference} · {action.document.state ?? 'state unavailable'}</dd></div>
+          <div><dt>Amount</dt><dd>{formatMoney(action.document.total, action.document.currency)}</dd></div>
+        </dl>
+
+        <label className={styles.replyLabel} htmlFor="c360-reply-draft">Proposed reply — edit freely</label>
+        <textarea
+          ref={textareaRef}
+          id="c360-reply-draft"
+          className={styles.replyBox}
+          value={draft}
+          onChange={(e) => { setDraft(e.target.value); setCopyState('idle'); }}
+          rows={5}
+        />
+
+        <p className={styles.effectNote}>
+          This will place text on your clipboard. It will not send a message or change Odoo.
+        </p>
+
+        <div className={styles.reviewActions}>
+          <button
+            className={styles.secondaryBtn}
+            onClick={onClose}
+          >
+            Cancel
+          </button>
+          <button
+            className={styles.primaryBtn}
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(draft);
+                setCopyState('copied');
+              } catch {
+                // Measured: Chatwoot's Dashboard App iframe carries no
+                // allow="clipboard-write", so the Clipboard API is denied by
+                // the browser's default Permissions Policy for cross-origin
+                // iframes. Selecting the text turns the honest fallback
+                // message into a one-keystroke (Ctrl/Cmd+C) action instead
+                // of requiring the operator to click into the box and
+                // select-all themselves.
+                textareaRef.current?.select();
+                setCopyState('failed');
+              }
+            }}
+          >
+            {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Selected — press Ctrl/Cmd+C to copy' : 'Copy suggested reply'}
+          </button>
+        </div>
+        <p className={styles.copyHint}>
+          Chatwoot does not currently support inserting text into its reply box from a
+          Dashboard App — this copies the text so you can paste it into your reply yourself.
+        </p>
+      </section>
+    </div>
+  );
+}
+
+/** S3: one evidence-backed recommendation, shown only when Odoo produced one. */
+export function RecommendedActionCard({
+  snapshot,
+  onPrepareReply,
+}: {
+  snapshot: Customer360Snapshot;
+  onPrepareReply: () => void;
+}) {
+  const action = snapshot.recommendedAction;
+  if (!action) return null;
+
+  return (
+    <section className={styles.recommendation}>
+      <div className={styles.sectionHead}>
+        <div><span className={styles.eyebrow}>Recommended action</span><h2>{action.headline}</h2></div>
+      </div>
+      <dl className={styles.reviewFacts}>
+        <div><dt>Document</dt><dd>{action.document.reference}</dd></div>
+        <div><dt>State</dt><dd>{action.document.state ?? 'unavailable'}</dd></div>
+        <div><dt>Amount</dt><dd>{formatMoney(action.document.total, action.document.currency)}</dd></div>
+        <div><dt>Odoo as of</dt><dd>{new Date(snapshot.verifiedAt).toLocaleTimeString()}</dd></div>
+      </dl>
+      <p className={styles.reasoning}>{action.reasoning}</p>
+      <div className={styles.reviewActions}>
+        {action.document.odooLink
+          ? <a className={styles.secondaryBtn} href={action.document.odooLink} target="_blank" rel="noopener noreferrer">Open quotation in Odoo</a>
+          : <button className={styles.secondaryBtn} disabled title="No verified deep link for this record">Open quotation in Odoo</button>}
+        <button className={styles.primaryBtn} onClick={onPrepareReply}>Prepare reply</button>
+      </div>
+    </section>
+  );
+}
+
 export function Customer360App() {
   const [phase, setPhase] = useState<Phase>({ kind: 'waiting' });
   const [tab, setTab] = useState<'overview' | 'sales' | 'billing' | 'support'>('overview');
+  const [reviewOpen, setReviewOpen] = useState(false);
 
   useEffect(() => {
     const listener = (event: MessageEvent) => {
@@ -101,6 +212,9 @@ export function Customer360App() {
       <div className={styles.guide}><strong>Suggested next step</strong><p>{recommendation}</p></div>
     </section>
 
+    <RecommendedActionCard snapshot={snapshot} onPrepareReply={() => setReviewOpen(true)} />
+    {reviewOpen && <ReplyReview snapshot={snapshot} onClose={() => setReviewOpen(false)} />}
+
     <nav className={styles.tabs} aria-label="Customer workspace">
       {([['overview','360 overview'],['sales','Sales'],['billing','Billing'],['support','Support']] as const).map(([id,label]) => <button key={id} className={tab === id ? styles.activeTab : ''} onClick={() => setTab(id)}>{label}</button>)}
     </nav>
@@ -118,5 +232,5 @@ export function Customer360App() {
 }
 
 function DocumentList({ title, empty, items }: { title: string; empty: string; items: Customer360Snapshot['documents'] }) {
-  return <section className={styles.list}><div className={styles.sectionHead}><div><span className={styles.eyebrow}>Odoo records</span><h2>{title}</h2></div><p>Review the source record before sending anything.</p></div>{items.length ? items.map((item) => <article className={styles.row} key={`${item.kind}-${item.id}`}><div><strong>{item.reference}</strong><p>{item.kind} · {item.paymentState ?? item.state ?? 'State unavailable'}</p></div><div><span>{formatMoney(item.total, item.currency)}</span><button disabled title="Send/review action lands in the next slice">Review</button></div></article>) : <p className={styles.empty}>{empty}</p>}</section>;
+  return <section className={styles.list}><div className={styles.sectionHead}><div><span className={styles.eyebrow}>Odoo records</span><h2>{title}</h2></div><p>Review the source record before sending anything.</p></div>{items.length ? items.map((item) => <article className={styles.row} key={`${item.kind}-${item.id}`}><div><strong>{item.reference}</strong><p>{item.kind} · {item.paymentState ?? item.state ?? 'State unavailable'}</p></div><div><span>{formatMoney(item.total, item.currency)}</span>{item.odooLink ? <a className={styles.rowLink} href={item.odooLink} target="_blank" rel="noopener noreferrer">Open in Odoo</a> : <button disabled title="No verified deep link for this record">Open in Odoo</button>}</div></article>) : <p className={styles.empty}>{empty}</p>}</section>;
 }

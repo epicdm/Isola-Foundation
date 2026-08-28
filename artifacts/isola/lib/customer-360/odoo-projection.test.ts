@@ -4,6 +4,9 @@ const json2Call = vi.fn();
 
 vi.mock('@/engines/odoo', () => ({
   json2Call: (...args: unknown[]) => json2Call(...args),
+  // Unused by this projection directly, but lib/context/customer-sources.ts
+  // (imported transitively for odooDeepLink) reads it at module scope.
+  findCustomerByPhone: vi.fn(),
 }));
 
 import { readCustomer360 } from './odoo-projection';
@@ -110,5 +113,105 @@ describe('Odoo Customer 360 projection', () => {
   it('does not misreport an Odoo outage as customer-not-found', async () => {
     json2Call.mockRejectedValue(new Error('Odoo unavailable'));
     await expect(readCustomer360(config, '+17670000000', { displayId: 61, currentRequest: null })).rejects.toThrow('Odoo unavailable');
+  });
+
+  describe('S3 — recommended action and deep links', () => {
+    it('recommends reviewing a draft quotation, with a reply built from verified facts', async () => {
+      json2Call.mockImplementation(async (_config: unknown, model: string) => {
+        if (model === 'res.partner') return [{ id: 42, name: 'Patricia Yvonne Armour', email: 'p@example.test', phone: '+17672951770', city: null }];
+        if (model === 'sale.order') return [{ id: 670, name: 'S00670', state: 'draft', amount_total: 4272.6, currency_id: [1, 'XCD'], date_order: '2026-08-20' }];
+        return [];
+      });
+
+      const result = await readCustomer360(config, '+17672951770', { displayId: 15, currentRequest: null });
+
+      expect(result?.recommendedAction).not.toBeNull();
+      expect(result?.recommendedAction?.kind).toBe('review-draft-quotation');
+      expect(result?.recommendedAction?.headline).toContain('S00670');
+      expect(result?.recommendedAction?.document.reference).toBe('S00670');
+      // Verified facts only — the exact amount, currency and first name Odoo returned.
+      expect(result?.recommendedAction?.suggestedReply).toContain('Patricia');
+      expect(result?.recommendedAction?.suggestedReply).toContain('S00670');
+      expect(result?.recommendedAction?.suggestedReply).toMatch(/XCD|\$/);
+      // Never claims the document was sent, attached or accepted.
+      expect(result?.recommendedAction?.suggestedReply.toLowerCase()).not.toContain('sent');
+      expect(result?.recommendedAction?.suggestedReply.toLowerCase()).not.toContain('attached');
+      expect(result?.recommendedAction?.suggestedReply.toLowerCase()).not.toContain('accepted');
+    });
+
+    it('withholds the recommendation for a non-draft quote rather than reusing draft wording', async () => {
+      json2Call.mockImplementation(async (_config: unknown, model: string) => {
+        if (model === 'res.partner') return [{ id: 42, name: 'C', email: null, phone: '+17670000000', city: null }];
+        if (model === 'sale.order') return [{ id: 8, name: 'S0008', state: 'sale', amount_total: 100, currency_id: [1, 'XCD'], date_order: '2026-08-20' }];
+        return [];
+      });
+      const result = await readCustomer360(config, '+17670000000', { displayId: 1, currentRequest: null });
+      expect(result?.recommendedAction).toBeNull();
+    });
+
+    it('withholds the recommendation when there is no quotation at all', async () => {
+      json2Call.mockImplementation(async (_config: unknown, model: string) => {
+        if (model === 'res.partner') return [{ id: 42, name: 'C', email: null, phone: '+17670000000', city: null }];
+        return [];
+      });
+      const result = await readCustomer360(config, '+17670000000', { displayId: 1, currentRequest: null });
+      expect(result?.recommendedAction).toBeNull();
+    });
+
+    it('never guesses a currency in the suggested reply when Odoo did not supply one', async () => {
+      json2Call.mockImplementation(async (_config: unknown, model: string) => {
+        if (model === 'res.partner') return [{ id: 42, name: 'Jo', email: null, phone: '+17670000000', city: null }];
+        if (model === 'sale.order') return [{ id: 9, name: 'S0009', state: 'draft', amount_total: 50, currency_id: false, date_order: '2026-08-20' }];
+        return [];
+      });
+      const result = await readCustomer360(config, '+17670000000', { displayId: 1, currentRequest: null });
+      expect(result?.recommendedAction?.document.currency).toBeNull();
+      expect(result?.recommendedAction?.suggestedReply).toContain('currency unknown');
+      // never a fabricated code
+      expect(result?.recommendedAction?.suggestedReply).not.toMatch(/XCD|USD|EUR/);
+    });
+
+    it('builds the correct sale.order deep link from the server-resolved instance', async () => {
+      json2Call.mockImplementation(async (_config: unknown, model: string) => {
+        if (model === 'res.partner') return [{ id: 42, name: 'C', email: null, phone: '+17670000000', city: null }];
+        if (model === 'sale.order') return [{ id: 670, name: 'S00670', state: 'draft', amount_total: 100, currency_id: [1, 'XCD'], date_order: '2026-08-20' }];
+        return [];
+      });
+      const result = await readCustomer360(config, '+17670000000', { displayId: 1, currentRequest: null });
+      expect(result?.documents[0]?.odooLink).toBe('https://odoo.invalid/odoo/sale.order/670');
+    });
+
+    it('refuses a deep link against a sandbox origin, even though the record and id are valid', async () => {
+      json2Call.mockImplementation(async (_config: unknown, model: string) => {
+        if (model === 'res.partner') return [{ id: 42, name: 'C', email: null, phone: '+17670000000', city: null }];
+        if (model === 'sale.order') return [{ id: 670, name: 'S00670', state: 'draft', amount_total: 100, currency_id: [1, 'XCD'], date_order: '2026-08-20' }];
+        return [];
+      });
+      const sandboxConfig = { url: 'https://epic_sandbox.odoo.com', apiKey: 'not-used', db: 'test' };
+      const result = await readCustomer360(sandboxConfig, '+17670000000', { displayId: 1, currentRequest: null });
+      expect(result?.documents[0]?.odooLink).toBeNull();
+    });
+
+    it('refuses a deep link against a non-https origin', async () => {
+      json2Call.mockImplementation(async (_config: unknown, model: string) => {
+        if (model === 'res.partner') return [{ id: 42, name: 'C', email: null, phone: '+17670000000', city: null }];
+        if (model === 'sale.order') return [{ id: 670, name: 'S00670', state: 'draft', amount_total: 100, currency_id: [1, 'XCD'], date_order: '2026-08-20' }];
+        return [];
+      });
+      const httpConfig = { url: 'http://odoo.invalid', apiKey: 'not-used', db: 'test' };
+      const result = await readCustomer360(httpConfig, '+17670000000', { displayId: 1, currentRequest: null });
+      expect(result?.documents[0]?.odooLink).toBeNull();
+    });
+
+    it('CONTROL — the allowed-origin check genuinely discriminates (an ordinary tenant host is allowed)', async () => {
+      json2Call.mockImplementation(async (_config: unknown, model: string) => {
+        if (model === 'res.partner') return [{ id: 42, name: 'C', email: null, phone: '+17670000000', city: null }];
+        if (model === 'sale.order') return [{ id: 5, name: 'S0005', state: 'draft', amount_total: 100, currency_id: [1, 'XCD'], date_order: '2026-08-20' }];
+        return [];
+      });
+      const legitConfig = { url: 'https://some-other-tenant.odoo.com', apiKey: 'not-used', db: 'test' };
+      const result = await readCustomer360(legitConfig, '+17670000000', { displayId: 1, currentRequest: null });
+      expect(result?.documents[0]?.odooLink).toBe('https://some-other-tenant.odoo.com/odoo/sale.order/5');
+    });
   });
 });
