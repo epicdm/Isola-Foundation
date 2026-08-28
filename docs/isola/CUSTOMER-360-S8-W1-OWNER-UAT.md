@@ -2,9 +2,20 @@
 
 **Slice:** S8-W1 — send an existing quotation or invoice into the customer's
 Chatwoot conversation.
-**Commit:** `7a9e2999ff974820505818cf3a9df2b6126eb887` (image tag `7a9e2999`)
+**Commit:** `8802d19` — this script describes THAT build and no earlier one.
 **Authorised by:** `dec-chatwoot-is-the-customer-interface-full-two-way-odoo-2026-08-28`
 (the S8 owner gate)
+
+> ⚠️ **Check the build before you start.** This script previously pinned
+> `7a9e2999`, a build that says **"Sent"** where this script now says
+> **"Posted"**, and which has none of the safety wording added since. Running
+> this script against that image produces a walkthrough where every expected
+> string is wrong — and the step-7 warning about a send still in flight cannot
+> appear at all, because that build has no such state. If what you see does not
+> match what is written here, **stop and tell the lane** rather than working
+> around it: a mismatch means the script and the build have drifted apart, which
+> has already happened three times on this document, and the acceptance record it
+> produces would be worthless.
 
 ---
 
@@ -80,6 +91,20 @@ Click **Send to customer** on quotation **S00004**. A panel opens showing:
 - the document, the amount, and which conversation it will post into
 - **the exact message text** that will be sent — read it
 - a line stating plainly that this posts a visible reply and cannot be unsent
+- **"This also moves the conversation to you. The AI assistant stops replying …
+  so the customer's next message is yours to answer."**
+
+That last line is new, and it is there because the effect was real before it was
+ever stated. Sending a document has always handed the conversation to a human and
+stopped the AI on it — the panel simply never said so. That is the correct
+behaviour: if a customer replies "what is this charge?", a person should be
+answering, not a scripted bot. What was wrong was that it happened silently.
+
+Also note what is **not** yet fixed: the handover is recorded against the
+Chatwoot account the send used, not against you personally, so the history says
+a Chatwoot user took over rather than naming which member of staff. That fix
+lives in another service and is tracked separately. Nothing here claims it is
+done.
 
 Read the message. It should name the quotation, the exact amount with its
 currency code, and invite a reply. It should contain no link, no attachment
@@ -135,14 +160,21 @@ conversation — the example given was `EPIC 295-6737 WhatsApp`, which is EPIC's
 front desk and a protected number.
 
 **Why it was pulled.** An independent review of the code found that sending a
-document from this panel also, silently, hands that conversation over to human
-handling and switches the AI off for it — because the send is posted with an
-agent credential, which Chatwoot and our own webhook cannot tell apart from a
-human agent typing a reply. The panel does not say this is happening, the action
-catalogue does not list it, and it is not recorded in the governed action log.
+document from this panel also hands that conversation over to human handling and
+switches the AI off for it — because the send is posted with an agent credential,
+which Chatwoot and our own webhook cannot tell apart from a human agent typing a
+reply. At the time, nothing said so: not the panel, not the action catalogue.
 
-That makes step 8 an undeclared ownership change on a live customer-facing
+That made step 8 an **undeclared** ownership change on a live customer-facing
 surface, which is not something a walkthrough may ask an owner to perform.
+
+**What has changed since, and what has not.** The panel now states the handover
+before you click, and the action catalogue lists it (you will see that line in
+step 4). What is still outstanding is the **attribution**: the transition is
+recorded against the Chatwoot account the send used rather than against you, and
+that write lives in another service. Until it names the person who acted, this
+step stays withdrawn — a live handover on the front desk should be traceable to
+a named member of staff, not to a shared credential.
 
 **What is still safe.** Steps 1–7 are unaffected and remain the walkthrough.
 They run in `ZZ ACCEPTANCE ONLY - epic-front-desk-prod (no WhatsApp, no Meta)`,

@@ -66,6 +66,10 @@ import { buildConversationExecutors } from '@/lib/governed/executors/conversatio
 import { createChatwootConversationSystem } from './chatwoot-conversation-system'
 import { prismaLedgerStore } from '@/lib/operations/ledger'
 import type { ChatwootContextHint } from '@/lib/customer-360/chatwoot-context'
+import {
+  LIFECYCLE_PRESENTATION,
+  type ActionLifecycleState,
+} from '@/lib/customer-workspace/contract'
 
 export const revalidate = 0
 
@@ -93,10 +97,20 @@ function actorRoleFor(isAdmin: boolean, homeOwner: boolean, membershipRole: stri
   return membershipRole === 'manager' || membershipRole === 'owner' ? 'manager' : 'staff'
 }
 
-/** A refusal that is about the ACTION, reported the house way: 200 + lifecycle. */
+/**
+ * A refusal that is about the ACTION, reported the house way: 200 + lifecycle.
+ *
+ * `label` is included because the panel's badge formats `Not sent — ${label}`
+ * and falls back to the literal 'Not sent' when the field is absent. Omitting it
+ * made every route-level refusal render as "Not sent — Not sent", which names
+ * nothing: a permission refusal, a stale document and an unreachable Odoo all
+ * read identically on the row. The settled dialog still carries the full detail;
+ * this is so the ROW says which kind of refusal it was.
+ */
 function refusal(lifecycle: string, detail: string) {
+  const label = LIFECYCLE_PRESENTATION[lifecycle as ActionLifecycleState]?.label ?? 'Not sent'
   return NextResponse.json(
-    { lifecycle, success: false, detail, operationId: null, readbackProven: false },
+    { lifecycle, success: false, label, detail, operationId: null, readbackProven: false },
     { status: 200 },
   )
 }

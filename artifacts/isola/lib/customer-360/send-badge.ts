@@ -24,6 +24,8 @@
  * DELIVERED state when — and only when — delivery was proven.
  */
 
+import type { ActionLifecycleState } from '@/lib/customer-workspace/contract';
+
 export interface SendOutcome {
   success: boolean;
   label: string;
@@ -91,7 +93,7 @@ export const UNKNOWN_BADGE = 'Not confirmed — check the conversation before se
  * same document twice. That defect was fixed in the ledger and then reappeared
  * here, in the wording, through a default that looked harmless.
  */
-const PROVES_NOTHING_WAS_WRITTEN: ReadonlySet<string> = new Set([
+const PROVES_NOTHING_WAS_WRITTEN: ReadonlySet<ActionLifecycleState> = new Set<ActionLifecycleState>([
   'draft',
   'validation_failed',
   'permission_denied',
@@ -111,7 +113,7 @@ export function sendBadgeText(outcome: SendOutcome): string {
   }
   if (outcome.lifecycle === 'readback_failed') return UNPROVEN_BADGE;
   if (outcome.lifecycle === 'executing') return IN_FLIGHT_BADGE;
-  if (PROVES_NOTHING_WAS_WRITTEN.has(outcome.lifecycle)) {
+  if (PROVES_NOTHING_WAS_WRITTEN.has(outcome.lifecycle as ActionLifecycleState)) {
     return `Not sent — ${outcome.label}`;
   }
   return UNKNOWN_BADGE;
