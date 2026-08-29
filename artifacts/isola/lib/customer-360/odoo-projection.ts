@@ -4,8 +4,11 @@ import type {
   Customer360Balance,
   Customer360Document,
   Customer360Loop,
+  Customer360ObjectDetail,
   Customer360RecommendedAction,
   Customer360Snapshot,
+  Customer360Stage,
+  DetailAvailability,
 } from './contracts';
 
 function text(value: unknown): string | null {
@@ -227,6 +230,168 @@ export async function readCustomer360(
     openLoops,
     openLoopsAvailable,
     recommendedAction: recommendedAction(documents, partner.name),
+  };
+}
+
+/* ── one object, opened inside the customer workspace ──────────────────────── */
+
+/**
+ * Distinguish "this Odoo does not have that model" from "the read failed".
+ *
+ * Odoo's JSON-2 API answers 404 for a model the instance does not carry, and
+ * `json2Call` surfaces the status in the thrown message. Measured 2026-08-29 on
+ * isola_erp: crm.lead, helpdesk.ticket and stock.picking all 404 while
+ * sale.order and account.move answer on the same credential — so the 404 is a
+ * fact about the instance, not about Odoo, and production may differ.
+ */
+function availabilityFromError(err: unknown): DetailAvailability {
+  const message = err instanceof Error ? err.message : String(err);
+  if (/\(404\)/.test(message)) return 'not-supported';
+  // 403 is a GRANT, not a capability. Measured 2026-08-29: production Odoo
+  // answers 403 for crm.lead on the ai-operations service account while
+  // answering 200 for helpdesk.ticket and stock.picking on the same key. The
+  // module is there; the account cannot read it. Saying "unavailable" would
+  // describe that as a data problem and hide a one-line ACL fix.
+  if (/\(403\)/.test(message)) return 'not-permitted';
+  return 'unavailable';
+}
+
+async function readSection<T>(
+  run: () => Promise<T[]>,
+): Promise<{ rows: T[]; availability: DetailAvailability }> {
+  try {
+    return { rows: await run(), availability: 'available' };
+  } catch (err) {
+    // An empty array is NEVER returned as if the read had succeeded.
+    return { rows: [], availability: availabilityFromError(err) };
+  }
+}
+
+/**
+ * The stage rail for an order, derived ENTIRELY from fields Odoo actually holds.
+ *
+ * The reference design's rail is Deal→Order→Fulfilled→Invoiced→Paid, but
+ * "Fulfilled" requires stock.picking, which is not installed. Rather than draw a
+ * step nothing can justify, this derives four honest stages from `state` and
+ * `invoice_status`.
+ */
+function orderStages(state: string | null, invoiceStatus: string | null): Customer360Stage[] {
+  const confirmed = state === 'sale' || state === 'done';
+  const invoiced = invoiceStatus === 'invoiced';
+  const at = !confirmed ? 0 : !invoiced ? 1 : 2;
+  return ['Quotation', 'Confirmed', 'Invoiced'].map((label, i) => ({
+    key: label.toLowerCase(),
+    label,
+    state: i < at ? 'done' : i === at ? 'current' : 'upcoming',
+  }));
+}
+
+/** The invoice rail, from `state` and `payment_state` — both real fields. */
+function invoiceStages(state: string | null, paymentState: string | null): Customer360Stage[] {
+  const posted = state === 'posted';
+  const paid = paymentState === 'paid';
+  const partial = paymentState === 'partial';
+  const at = !posted ? 0 : paid ? 3 : partial ? 2 : 1;
+  return ['Draft', 'Posted', 'Part paid', 'Paid'].map((label, i) => ({
+    key: label.toLowerCase().replace(' ', '-'),
+    label,
+    state: i < at ? 'done' : i === at ? 'current' : 'upcoming',
+  }));
+}
+
+/**
+ * Read ONE object belonging to ONE partner.
+ *
+ * PARTNER-PINNED, and that is not defensive tidiness. The domain carries
+ * `partner_id = partnerId` as well as the record id, so a caller cannot address
+ * a record that is not this customer's — without it the route becomes an
+ * enumeration oracle over the whole ledger. The send route already models this:
+ * it re-reads the snapshot and finds the document within it, and collapses "not
+ * yours" and "does not exist" into one wording so neither can be distinguished
+ * from outside.
+ */
+export async function readCustomer360Object(
+  config: OdooConfig,
+  partnerId: number,
+  kind: 'quotation' | 'order' | 'invoice',
+  recordId: number,
+): Promise<Customer360ObjectDetail | null> {
+  if (!Number.isInteger(recordId) || recordId <= 0) return null;
+  const isInvoice = kind === 'invoice';
+  const model = isInvoice ? 'account.move' : 'sale.order';
+
+  const head = await json2Call(config, model, 'search_read', {
+    domain: isInvoice
+      ? [['id', '=', recordId], ['partner_id', '=', partnerId], ['move_type', '=', 'out_invoice']]
+      : [['id', '=', recordId], ['partner_id', '=', partnerId]],
+    fields: isInvoice
+      ? ['id', 'name', 'state', 'payment_state', 'amount_total', 'currency_id', 'invoice_date', 'invoice_date_due']
+      : ['id', 'name', 'state', 'invoice_status', 'amount_total', 'currency_id', 'date_order'],
+    limit: 1,
+  }, 12000) as Record<string, unknown>[];
+
+  const row = head[0];
+  if (!row) return null;
+
+  const lines = await readSection(async () => await json2Call(config, isInvoice ? 'account.move.line' : 'sale.order.line', 'search_read', {
+    domain: [[isInvoice ? 'move_id' : 'order_id', '=', recordId]],
+    fields: isInvoice
+      ? ['id', 'name', 'quantity', 'price_unit', 'price_subtotal', 'display_type']
+      : ['id', 'name', 'product_uom_qty', 'price_unit', 'price_subtotal'],
+    limit: 60,
+  }, 12000) as Promise<Record<string, unknown>[]>);
+
+  // Payments exist only for invoices. A quotation has none — that is a fact
+  // about the object, not a failed read, so it reports `available` and empty.
+  const payments = isInvoice
+    ? await readSection(async () => await json2Call(config, 'account.payment', 'search_read', {
+        domain: [['partner_id', '=', partnerId], ['state', '=', 'paid']],
+        fields: ['id', 'amount', 'currency_id', 'date', 'name'],
+        order: 'date desc',
+        limit: 20,
+      }, 12000) as Promise<Record<string, unknown>[]>)
+    : { rows: [] as Record<string, unknown>[], availability: 'available' as DetailAvailability };
+
+  const state = text(row.state);
+  const paymentState = isInvoice ? text(row.payment_state) : null;
+
+  return {
+    kind,
+    id: recordId,
+    reference: String(row.name ?? ''),
+    state,
+    paymentState,
+    total: number(row.amount_total),
+    currency: currencyCode(row.currency_id),
+    date: text(isInvoice ? row.invoice_date : row.date_order),
+    dueDate: isInvoice ? text(row.invoice_date_due) : null,
+    odooLink: safeOdooLink(config.url, model, recordId),
+    stages: isInvoice
+      ? invoiceStages(state, paymentState)
+      : orderStages(state, text(row.invoice_status)),
+    // Odoo marks section and note rows with a display_type; they are layout,
+    // not money, and must not appear as line items.
+    lines: lines.rows
+      .filter((l) => !text(l.display_type))
+      .map((l) => ({
+        id: Number(l.id),
+        label: String(l.name ?? ''),
+        quantity: number(isInvoice ? l.quantity : l.product_uom_qty),
+        unitPrice: number(l.price_unit),
+        // Odoo's own subtotal. We never recompute qty × price: tax, discount
+        // and rounding are the ledger's business, and a figure we derived
+        // ourselves could disagree with the invoice the customer holds.
+        subtotal: number(l.price_subtotal),
+      })),
+    linesAvailability: lines.availability,
+    payments: payments.rows.map((p) => ({
+      id: Number(p.id),
+      amount: number(p.amount),
+      currency: currencyCode(p.currency_id),
+      date: text(p.date),
+      reference: text(p.name),
+    })),
+    paymentsAvailability: payments.availability,
   };
 }
 
