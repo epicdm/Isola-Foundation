@@ -1,54 +1,56 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+/**
+ * The CHATWOOT container for the Customer 360 cockpit.
+ *
+ * One of two containers around a single pure view. This one knows about
+ * Chatwoot: it performs the `postMessage` handshake to learn which conversation
+ * it is embedded in, fetches everything, and hands the view plain props. The
+ * portal's container will do the same job with a route param instead of a
+ * handshake, and render the identical view.
+ *
+ * Everything framework- or host-specific lives here on purpose:
+ *   · `'use client'`
+ *   · the Chatwoot handshake
+ *   · every fetch
+ *   · the idempotency key, which is keyed to the CONVERSATION so a sent badge
+ *     can never land on a sibling row
+ *
+ * The view knows none of it.
+ */
+
+import { useCallback, useEffect, useRef, useState } from 'react';
+
 import {
   CHATWOOT_FETCH_INFO_REQUEST,
   parseChatwootContext,
   type ChatwootContextHint,
 } from '@/lib/customer-360/chatwoot-context';
-import type {
-  Customer360ObjectDetail,
-  Customer360Response,
-  Customer360Snapshot,
-  Customer360Stage,
-  DetailAvailability,
-} from '@/lib/customer-360/contracts';
-import { sendBadgeText, type SendOutcome } from '@/lib/customer-360/send-badge';
+import type { Customer360Response, Customer360Snapshot } from '@/lib/customer-360/contracts';
+import type { SendOutcome } from '@/lib/customer-360/send-badge';
+import {
+  CustomerWorkspaceView,
+  type NestedPhase,
+  type NestedTarget,
+  type SendPhase,
+  type WorkspaceTab,
+} from './workspace-view';
 import styles from './customer-360.module.css';
+
+type Document = Customer360Snapshot['documents'][number];
 
 type Phase =
   | { kind: 'waiting' }
   | { kind: 'loading'; hint: ChatwootContextHint }
-  // The hint is carried into `ready` because S8-W1 needs to name the exact
-  // conversation it is posting into, and that locator must be the same one the
-  // snapshot was resolved from — not re-derived later from a second message.
+  // The hint is carried into `ready` because a send must name the exact
+  // conversation it is posting into, and that locator must be the one the
+  // snapshot was resolved from — never re-derived later from a second message.
   | { kind: 'ready'; snapshot: Customer360Snapshot; hint: ChatwootContextHint }
   | { kind: 'message'; title: string; body: string; retry?: ChatwootContextHint };
 
-/**
- * Format an amount in ITS OWN currency.
- *
- * The previous single formatter hardcoded XCD and was applied to every figure,
- * so a USD invoice rendered as EC$. A wrong number wearing a confident currency
- * symbol is the failure mode this workspace exists to prevent: an operator can
- * read it straight to a customer. When Odoo did not give us a currency we show
- * the bare amount and say so, rather than guessing one.
- */
-function formatMoney(amount: number | null | undefined, currency: string | null | undefined): string {
-  if (amount == null) return '—';
-  if (!currency) return `${amount.toLocaleString('en-DM')} (currency unknown)`;
-  try {
-    return new Intl.NumberFormat('en-DM', { style: 'currency', currency }).format(amount);
-  } catch {
-    // An unrecognised ISO code must not throw the whole panel away.
-    return `${amount.toLocaleString('en-DM')} ${currency}`;
-  }
-}
-
-/** Balances are never combined; each currency is its own line. */
-function formatBalances(balances: Customer360Snapshot['balances']): string {
-  if (!balances.length) return 'No posted balance';
-  return balances.map((b) => formatMoney(b.amount, b.currency)).join(' + ');
+/** A key that is stable for one document in one conversation. */
+export function documentKey(hint: ChatwootContextHint, doc: Document): string {
+  return `${hint.conversationDisplayIdHint}:${doc.kind}:${doc.id}`;
 }
 
 function loadSnapshot(hint: ChatwootContextHint, setPhase: (phase: Phase) => void) {
@@ -69,485 +71,23 @@ function loadSnapshot(hint: ChatwootContextHint, setPhase: (phase: Phase) => voi
     });
 }
 
-/** S3: the review/edit/copy surface for one suggested reply. No network call. */
-export function ReplyReview({
-  snapshot,
-  onClose,
-}: {
-  snapshot: Customer360Snapshot;
-  onClose: () => void;
-}) {
-  const action = snapshot.recommendedAction;
-  const [draft, setDraft] = useState(action?.suggestedReply ?? '');
-  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  if (!action) return null;
-
-  return (
-    <div className={styles.overlay} role="dialog" aria-modal="true" aria-label="Review suggested reply">
-      <section className={styles.reviewCard}>
-        <h2>Review before you use this</h2>
-        <dl className={styles.reviewFacts}>
-          <div><dt>Customer</dt><dd>{snapshot.customer.name}</dd></div>
-          <div><dt>Conversation</dt><dd>#{snapshot.conversation.displayId}</dd></div>
-          <div><dt>Quotation</dt><dd>{action.document.reference} · {action.document.state ?? 'state unavailable'}</dd></div>
-          <div><dt>Amount</dt><dd>{formatMoney(action.document.total, action.document.currency)}</dd></div>
-        </dl>
-
-        <label className={styles.replyLabel} htmlFor="c360-reply-draft">Proposed reply — edit freely</label>
-        <textarea
-          ref={textareaRef}
-          id="c360-reply-draft"
-          className={styles.replyBox}
-          value={draft}
-          onChange={(e) => { setDraft(e.target.value); setCopyState('idle'); }}
-          rows={5}
-        />
-
-        <p className={styles.effectNote}>
-          This will place text on your clipboard. It will not send a message or change Odoo.
-        </p>
-
-        <div className={styles.reviewActions}>
-          <button
-            className={styles.secondaryBtn}
-            onClick={onClose}
-          >
-            Cancel
-          </button>
-          <button
-            className={styles.primaryBtn}
-            onClick={async () => {
-              try {
-                await navigator.clipboard.writeText(draft);
-                setCopyState('copied');
-              } catch {
-                // Measured: Chatwoot's Dashboard App iframe carries no
-                // allow="clipboard-write", so the Clipboard API is denied by
-                // the browser's default Permissions Policy for cross-origin
-                // iframes. Selecting the text turns the honest fallback
-                // message into a one-keystroke (Ctrl/Cmd+C) action instead
-                // of requiring the operator to click into the box and
-                // select-all themselves.
-                textareaRef.current?.select();
-                setCopyState('failed');
-              }
-            }}
-          >
-            {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Selected — press Ctrl/Cmd+C to copy' : 'Copy suggested reply'}
-          </button>
-        </div>
-        <p className={styles.copyHint}>
-          Chatwoot does not currently support inserting text into its reply box from a
-          Dashboard App — this copies the text so you can paste it into your reply yourself.
-        </p>
-      </section>
-    </div>
-  );
-}
-
-/** S3: one evidence-backed recommendation, shown only when Odoo produced one. */
-export function RecommendedActionCard({
-  snapshot,
-  onPrepareReply,
-}: {
-  snapshot: Customer360Snapshot;
-  onPrepareReply: () => void;
-}) {
-  const action = snapshot.recommendedAction;
-  if (!action) return null;
-
-  return (
-    <section className={styles.recommendation}>
-      <div className={styles.sectionHead}>
-        <div><span className={styles.eyebrow}>Recommended action</span><h2>{action.headline}</h2></div>
-      </div>
-      <dl className={styles.reviewFacts}>
-        <div><dt>Document</dt><dd>{action.document.reference}</dd></div>
-        <div><dt>State</dt><dd>{action.document.state ?? 'unavailable'}</dd></div>
-        <div><dt>Amount</dt><dd>{formatMoney(action.document.total, action.document.currency)}</dd></div>
-        <div><dt>Odoo as of</dt><dd>{new Date(snapshot.verifiedAt).toLocaleTimeString()}</dd></div>
-      </dl>
-      <p className={styles.reasoning}>{action.reasoning}</p>
-      <div className={styles.reviewActions}>
-        {action.document.odooLink
-          ? <a className={styles.secondaryBtn} href={action.document.odooLink} target="_blank" rel="noopener noreferrer">Open quotation in Odoo</a>
-          : <button className={styles.secondaryBtn} disabled title="No verified deep link for this record">Open quotation in Odoo</button>}
-        <button className={styles.primaryBtn} onClick={onPrepareReply}>Prepare reply</button>
-      </div>
-    </section>
-  );
-}
-
-// The badge wording lives in lib/customer-360/send-badge.ts, free of CSS
-// imports, so a test can actually execute it. See that module's header.
-export type { SendOutcome };
-
-type SendPhase =
-  | { kind: 'previewing' }
-  | { kind: 'reviewing'; body: string; fingerprint: string }
-  | { kind: 'sending'; body: string }
-  | { kind: 'settled'; outcome: SendOutcome }
-  | { kind: 'refused'; detail: string };
-
-/** A key that is stable for one document in one conversation. */
-export function documentKey(hint: ChatwootContextHint, doc: Customer360Snapshot['documents'][number]): string {
-  return `${hint.conversationDisplayIdHint}:${doc.kind}:${doc.id}`;
-}
-
-/**
- * S8-W1: review and send ONE existing document into this conversation.
- *
- * WHAT THIS COMPONENT DOES NOT DO
- * ------------------------------
- * It does not compose the message. Every word the customer will read arrives
- * from the server, produced from the verified Odoo document, and is shown here
- * read-only. There is deliberately no textarea: an editable body would make the
- * panel the author of a customer-facing price, which is exactly what the
- * server-side composer exists to prevent.
- *
- * The idempotency key is derived from the conversation, the document AND the
- * fingerprint of the reviewed text. A double-click therefore replays instead of
- * sending twice, while a genuinely changed document produces a different key
- * rather than silently reusing the old confirmation.
- */
-export function SendDocumentReview({
-  hint,
-  document: doc,
-  onClose,
-  onSent,
-}: {
-  hint: ChatwootContextHint;
-  document: Customer360Snapshot['documents'][number];
-  onClose: () => void;
-  onSent: (key: string, outcome: SendOutcome) => void;
-}) {
-  const [phase, setPhase] = useState<SendPhase>({ kind: 'previewing' });
-  const inFlight = useRef(false);
-
-  useEffect(() => {
-    let live = true;
-    fetch('/api/isola-360/actions/send-document', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ hint, documentId: doc.id, documentKind: doc.kind, preview: true }),
-    })
-      .then(async (response) => {
-        const result = await response.json();
-        if (!live) return;
-        if (result?.preview && typeof result.body === 'string') {
-          setPhase({ kind: 'reviewing', body: result.body, fingerprint: result.fingerprint });
-        } else {
-          setPhase({ kind: 'refused', detail: result?.detail ?? result?.error ?? 'This document cannot be sent.' });
-        }
-      })
-      .catch(() => { if (live) setPhase({ kind: 'refused', detail: 'Could not prepare the message. Nothing was sent.' }); });
-    return () => { live = false; };
-  }, [hint, doc.id, doc.kind]);
-
-  async function confirmSend(body: string, fingerprint: string) {
-    if (inFlight.current) return;
-    inFlight.current = true;
-    setPhase({ kind: 'sending', body });
-    try {
-      const response = await fetch('/api/isola-360/actions/send-document', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          hint,
-          documentId: doc.id,
-          documentKind: doc.kind,
-          previewFingerprint: fingerprint,
-          idempotencyKey: `s8w1:${documentKey(hint, doc)}:${fingerprint.slice(0, 16)}`,
-        }),
-      });
-      const result = await response.json();
-      const outcome: SendOutcome = {
-        // Never inferred from res.ok. Exactly one lifecycle state carries success.
-        success: result?.success === true,
-        label: result?.label ?? 'Not sent',
-        detail: result?.detail ?? result?.error ?? 'No result was returned.',
-        operationId: result?.operationId ?? null,
-        lifecycle: typeof result?.lifecycle === 'string' ? result.lifecycle : 'unknown',
-        // Default FALSE on anything unrecognised: an absent proof is not a proof.
-        readbackProven: result?.readbackProven === true,
-        // Present only on a proven replay. Shown, not asserted.
-        priorReadback: result?.priorReadback ?? null,
-      };
-      setPhase({ kind: 'settled', outcome });
-      onSent(documentKey(hint, doc), outcome);
-    } catch {
-      setPhase({ kind: 'refused', detail: 'The request did not complete, so it is not known whether the message was sent. Re-open to check the conversation before retrying.' });
-    } finally {
-      inFlight.current = false;
-    }
-  }
-
-  return <div className={styles.overlay} role="dialog" aria-modal="true" aria-label={`Send ${doc.reference} to the customer`}>
-    <section className={styles.reviewCard}>
-      <span className={styles.eyebrow}>Send to customer</span>
-      <h2>{doc.reference}</h2>
-
-      <dl className={styles.reviewFacts}>
-        <div><dt>Document</dt><dd>{doc.kind} {doc.reference}</dd></div>
-        <div><dt>Amount</dt><dd>{formatMoney(doc.total, doc.currency)}</dd></div>
-        <div><dt>Conversation</dt><dd>#{hint.conversationDisplayIdHint}</dd></div>
-        <div><dt>Delivered by</dt><dd>The channel that owns this conversation</dd></div>
-      </dl>
-
-      {phase.kind === 'previewing' && <p className={styles.copyHint}>Preparing the message from the Odoo record…</p>}
-
-      {phase.kind === 'refused' && <p className={styles.effectNote}>{phase.detail}</p>}
-
-      {(phase.kind === 'reviewing' || phase.kind === 'sending') && <>
-        <span className={styles.replyLabel}>This exact message will be sent to the customer</span>
-        <pre className={styles.replyBox}>{phase.body}</pre>
-        <p className={styles.effectNote}>
-          Sending posts this as a visible reply in conversation #{hint.conversationDisplayIdHint}. It does not change anything in Odoo, and it cannot be unsent.
-        </p>
-        {/*
-          F21. This effect was real before it was ever stated: the message is
-          posted with an agent credential, which Chatwoot and our own webhook
-          cannot tell apart from a human agent typing a reply, so the
-          conversation moves to human handling and the assistant stops. The
-          handover is CORRECT — a person sending a business document should own
-          the reply that comes back — but it was happening silently, which is
-          the defect. It is disclosed here, before the click, not discovered
-          afterwards when a customer's question goes unanswered.
-        */}
-        <p className={styles.effectNote}>
-          <strong>This also moves the conversation to you.</strong> The AI assistant stops replying
-          in conversation #{hint.conversationDisplayIdHint} once you send, so the customer’s next
-          message is yours to answer.
-        </p>
-      </>}
-
-      {phase.kind === 'settled' && <>
-        <p className={phase.outcome.success ? styles.copyHint : styles.effectNote}>
-          <strong>{sendBadgeText(phase.outcome)}</strong>
-          {phase.outcome.detail ? <> — {phase.outcome.detail}</> : null}
-          {phase.outcome.operationId && <><br /><small>Reference {phase.outcome.operationId}</small></>}
-        </p>
-
-        {/*
-          A REPLAY SHOWS THE MESSAGE, IT DOES NOT ASSERT IT.
-          "Already posted" asks the operator to take our word. The proof exists
-          — it is the readback that made the first attempt verified — so we show
-          the text the customer received and when. Rendered only when the server
-          returned a proven prior readback; a replay we cannot evidence says
-          nothing extra rather than showing a plausible reconstruction.
-        */}
-        {phase.outcome.priorReadback?.content && <>
-          <span className={styles.replyLabel}>
-            What the customer already received
-            {phase.outcome.priorReadback.at
-              ? ` — ${new Date(phase.outcome.priorReadback.at).toLocaleString()}`
-              : ''}
-          </span>
-          <pre className={styles.replyBox}>{phase.outcome.priorReadback.content}</pre>
-          <p className={styles.copyHint}>
-            Read back from the conversation, not re-composed here. Nothing was sent again.
-          </p>
-        </>}
-      </>}
-
-      <div className={styles.reviewActions}>
-        {phase.kind === 'reviewing' && <button className={styles.primaryBtn} onClick={() => confirmSend(phase.body, phase.fingerprint)}>
-          Confirm and send to the customer
-        </button>}
-        {phase.kind === 'sending' && <button className={styles.primaryBtn} disabled>Sending…</button>}
-        <button className={styles.secondaryBtn} onClick={onClose}>
-          {phase.kind === 'settled' ? 'Close' : 'Cancel'}
-        </button>
-      </div>
-    </section>
-  </div>;
-}
-
-/**
- * EVERY TENANT-FACING LABEL IN THIS SURFACE, IN ONE PLACE.
- *
- * A tenant's industry rotates terminology — Customers become Patients or
- * Clients, ticket ids take a CAS or JOB prefix, roles change. That engine is a
- * SHARED PLATFORM LAYER owned by the Lumen lane
- * (dec-domain-vertical-engine-is-shared-platform-layer-c360-consumes-2026-08-29);
- * this cockpit CONSUMES it and must never grow its own vertical logic.
- *
- * So there is no industry branching here, and no guessed nouns. These are the
- * BASE labels. When the shared `useDomain()` contract lands, each becomes
- * `domain.nav[id] ?? BASE_LABELS[id]` and the entity nouns come from
- * `entity.Cap` — one edit in one file, not a hunt through JSX.
- *
- * The fail-safe is the shared engine's own: an unknown or empty industry
- * resolves to these generic labels. Never a guessed vertical.
- *
- * NOTE: the shared module lives at `src/routes/isola/domain/` in isola-portal,
- * a different repository from this one, so it cannot be imported directly
- * today. The `IsolaDomain` type needs to be reachable from both before wiring.
- */
-const BASE_LABELS = {
-  overview: 'Overview',
-  sales: 'Sales',
-  billing: 'Billing',
-  support: 'Support',
-  deals: 'Deals',
-  tickets: 'Tickets',
-  quotation: 'quotation',
-  order: 'order',
-  invoice: 'invoice',
-} as const;
-
-/** One object opened inside the customer. Null when the customer is the view. */
-type NestedTarget = { kind: 'quotation' | 'order' | 'invoice'; id: number; reference: string };
-
-type NestedPhase =
-  | { kind: 'loading' }
-  | { kind: 'ready'; detail: Customer360ObjectDetail }
-  | { kind: 'message'; text: string };
-
-/**
- * The stage rail. Every step is derived from a real Odoo field — see
- * `orderStages` / `invoiceStages` in the projection. A rail with a step nothing
- * can justify would be decoration wearing the appearance of state.
- */
-function StageRail({ stages }: { stages: Customer360Stage[] }) {
-  if (!stages.length) return null;
-  return <ol className={styles.stageRail} aria-label="Progress">
-    {stages.map((s) => (
-      <li key={s.key} className={`${styles.stage} ${s.state === 'done' ? styles.stageDone : s.state === 'current' ? styles.stageCurrent : ''}`}>
-        <span className={styles.stageDot} aria-hidden="true">{s.state === 'done' ? '✓' : ''}</span>
-        <span>{s.label}</span>
-      </li>
-    ))}
-  </ol>;
-}
-
-/**
- * A section that could not be read says so, and says WHICH KIND of could-not.
- *
- * Four states, because "nothing to show" has four causes that mean entirely
- * different things to whoever is reading the screen — and two of them are
- * actionable by a person: a missing module can be installed, a refused read can
- * be granted. Collapsing them into "no data" hides both.
- */
-function SectionState({ availability, empty }: { availability: DetailAvailability; empty: string }) {
-  if (availability === 'available') {
-    return <div className={styles.empty}><p>{empty}</p></div>;
-  }
-  const text =
-    availability === 'not-supported'
-      ? 'This Odoo does not have that feature installed, so there is nothing to read.'
-      : availability === 'not-permitted'
-        ? 'Isola is not permitted to read this in Odoo. That is a permission that can be granted — it is not a missing feature.'
-        : 'Odoo did not answer for this. This is not a statement that there is none.';
-  return <div className={styles.unavailable}>{text}</div>;
-}
-
-function NestedObjectView({ target, phase, onBack, onSend, sent, hint }: {
-  target: NestedTarget;
-  phase: NestedPhase;
-  onBack: () => void;
-  onSend: (item: Customer360Snapshot['documents'][number]) => void;
-  sent: Record<string, SendOutcome>;
-  hint: ChatwootContextHint;
-}) {
-  const [sub, setSub] = useState<'overview' | 'lines' | 'payments'>('overview');
-  const isInvoice = target.kind === 'invoice';
-
-  return <section className={styles.card}>
-    {/* Breadcrumb: you never left the customer — this opened inside it. */}
-    <div className={styles.breadcrumb}>
-      <button type="button" className={styles.crumbLink} onClick={onBack}>Customer</button>
-      <span aria-hidden="true">›</span>
-      <span className={styles.crumbCurrent}>{target.reference}</span>
-    </div>
-
-    {phase.kind === 'loading' && <div className={styles.empty}><p>Reading {target.reference} from Odoo…</p></div>}
-    {phase.kind === 'message' && <div className={styles.unavailable}>{phase.text}</div>}
-
-    {phase.kind === 'ready' && <>
-      <div className={styles.objectHead}>
-        <div className={styles.identityBody}>
-          <h2 className={styles.identityTitle}>{phase.detail.reference}</h2>
-          <p className={styles.identityMeta}>
-            <span>{phase.detail.kind}</span>
-            {phase.detail.dueDate && <><span>·</span><span>due {phase.detail.dueDate}</span></>}
-          </p>
-        </div>
-        <span className={`${styles.rowAmount} ${styles.tnum}`}>
-          {formatMoney(phase.detail.total, phase.detail.currency)}
-        </span>
-        {phase.detail.odooLink
-          ? <a className={styles.secondaryBtn} href={phase.detail.odooLink} target="_blank" rel="noopener noreferrer">Open in Odoo</a>
-          : <button type="button" className={styles.secondaryBtn} disabled title="No verified deep link for this record">Open in Odoo</button>}
-      </div>
-
-      <StageRail stages={phase.detail.stages} />
-
-      <nav className={styles.subTabs} aria-label={`${phase.detail.reference} sections`}>
-        {([['overview', 'Overview'], ['lines', 'Lines'], ...(isInvoice ? [['payments', 'Payments'] as const] : [])] as const).map(([id, label]) => (
-          <button
-            key={id}
-            type="button"
-            className={`${styles.subTab} ${sub === id ? styles.subTabOn : ''}`}
-            aria-current={sub === id ? 'true' : undefined}
-            onClick={() => setSub(id)}
-          >{label}</button>
-        ))}
-      </nav>
-
-      {sub === 'overview' && <dl className={styles.reviewFacts}>
-        <div><dt>State</dt><dd>{phase.detail.state ?? 'unavailable'}</dd></div>
-        {isInvoice && <div><dt>Payment</dt><dd>{phase.detail.paymentState ?? 'unavailable'}</dd></div>}
-        <div><dt>Dated</dt><dd>{phase.detail.date ?? '—'}</dd></div>
-        <div><dt>Total</dt><dd className={styles.tnum}>{formatMoney(phase.detail.total, phase.detail.currency)}</dd></div>
-      </dl>}
-
-      {sub === 'lines' && (phase.detail.lines.length
-        ? phase.detail.lines.map((l: Customer360ObjectDetail["lines"][number]) => <article className={styles.row} key={l.id}>
-            <div className={styles.rowBody}>
-              <div className={styles.rowRef}>{l.label}</div>
-              <p className={styles.rowMeta}>
-                <span className={styles.tnum}>{l.quantity ?? '—'}</span>
-                <span>×</span>
-                <span className={styles.tnum}>{formatMoney(l.unitPrice, phase.detail.currency)}</span>
-              </p>
-            </div>
-            {/* Odoo's own subtotal, never qty × price recomputed here. */}
-            <span className={`${styles.rowAmount} ${styles.tnum}`}>{formatMoney(l.subtotal, phase.detail.currency)}</span>
-          </article>)
-        : <SectionState availability={phase.detail.linesAvailability} empty="Odoo answered, and this record has no lines." />)}
-
-      {sub === 'payments' && (phase.detail.payments.length
-        ? phase.detail.payments.map((p: Customer360ObjectDetail["payments"][number]) => <article className={styles.row} key={p.id}>
-            <div className={styles.rowBody}>
-              <div className={styles.rowRef}>{p.reference ?? 'Payment'}</div>
-              <p className={styles.rowMeta}><span>{p.date ?? 'No date'}</span></p>
-            </div>
-            <span className={`${styles.rowAmount} ${styles.tnum}`}>{formatMoney(p.amount, p.currency)}</span>
-          </article>)
-        : <SectionState availability={phase.detail.paymentsAvailability} empty="Odoo answered, and no payments are recorded against this invoice." />)}
-    </>}
-  </section>;
-}
-
 export function Customer360App() {
   const [phase, setPhase] = useState<Phase>({ kind: 'waiting' });
-  const [tab, setTab] = useState<'overview' | 'sales' | 'billing' | 'support'>('overview');
-  const [reviewOpen, setReviewOpen] = useState(false);
-  const [sendTarget, setSendTarget] = useState<Customer360Snapshot['documents'][number] | null>(null);
-  /** Keyed by conversation+document, so a sent badge cannot land on a sibling row. */
+  const [tab, setTab] = useState<WorkspaceTab>('overview');
+  const [replyOpen, setReplyOpen] = useState(false);
   const [sent, setSent] = useState<Record<string, SendOutcome>>({});
   /*
-    NESTED STATE LIVES BESIDE `phase`, NOT BELOW IT.
+    ALL OF THIS STATE LIVES BESIDE `phase`, NOT BELOW IT.
     `phase` is the unmount boundary: every Chatwoot appContext re-broadcast calls
-    loadSnapshot, which resets phase to `loading` and unmounts the whole tree
-    under it. Anything held below would be destroyed by a re-broadcast the
-    operator never caused — `tab`, `sendTarget` and `sent` survive only because
-    they are siblings, and this must be one too.
+    loadSnapshot, which resets phase to `loading` and unmounts the tree under it.
+    Anything held below would be destroyed by a re-broadcast the operator never
+    caused.
   */
   const [nested, setNested] = useState<NestedTarget | null>(null);
   const [nestedPhase, setNestedPhase] = useState<NestedPhase>({ kind: 'loading' });
+  const [sendDoc, setSendDoc] = useState<Document | null>(null);
+  const [sendPhase, setSendPhase] = useState<SendPhase>({ kind: 'previewing' });
+  const inFlight = useRef(false);
 
   useEffect(() => {
     const listener = (event: MessageEvent) => {
@@ -581,298 +121,98 @@ export function Customer360App() {
     return () => { live = false; };
   }, [nested, phase]);
 
+  /** Preview the exact text, server-composed, the moment the dialog opens. */
+  useEffect(() => {
+    if (!sendDoc || phase.kind !== 'ready') return;
+    let live = true;
+    setSendPhase({ kind: 'previewing' });
+    fetch('/api/isola-360/actions/send-document', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ hint: phase.hint, documentId: sendDoc.id, documentKind: sendDoc.kind, preview: true }),
+    })
+      .then(async (response) => {
+        const result = await response.json();
+        if (!live) return;
+        if (result?.preview && typeof result.body === 'string') {
+          setSendPhase({ kind: 'reviewing', body: result.body, fingerprint: result.fingerprint });
+        } else {
+          setSendPhase({ kind: 'refused', detail: result?.detail ?? result?.error ?? 'This document cannot be sent.' });
+        }
+      })
+      .catch(() => { if (live) setSendPhase({ kind: 'refused', detail: 'Could not prepare the message. Nothing was sent.' }); });
+    return () => { live = false; };
+  }, [sendDoc, phase]);
+
+  const confirmSend = useCallback(async (body: string, fingerprint: string) => {
+    if (phase.kind !== 'ready' || !sendDoc || inFlight.current) return;
+    inFlight.current = true;
+    setSendPhase({ kind: 'sending', body });
+    try {
+      const response = await fetch('/api/isola-360/actions/send-document', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          hint: phase.hint,
+          documentId: sendDoc.id,
+          documentKind: sendDoc.kind,
+          previewFingerprint: fingerprint,
+          idempotencyKey: `s8w1:${documentKey(phase.hint, sendDoc)}:${fingerprint.slice(0, 16)}`,
+        }),
+      });
+      const result = await response.json();
+      const outcome: SendOutcome = {
+        // Never inferred from res.ok. Exactly one lifecycle state carries success.
+        success: result?.success === true,
+        label: result?.label ?? 'Not sent',
+        detail: result?.detail ?? result?.error ?? 'No result was returned.',
+        operationId: result?.operationId ?? null,
+        lifecycle: typeof result?.lifecycle === 'string' ? result.lifecycle : 'unknown',
+        // Default FALSE on anything unrecognised: an absent proof is not a proof.
+        readbackProven: result?.readbackProven === true,
+        // Present only on a proven replay. Shown, not asserted.
+        priorReadback: result?.priorReadback ?? null,
+      };
+      setSendPhase({ kind: 'settled', outcome });
+      setSent((prior) => ({ ...prior, [documentKey(phase.hint, sendDoc)]: outcome }));
+    } catch {
+      setSendPhase({
+        kind: 'refused',
+        detail: 'The request did not complete, so it is not known whether the message was sent. Re-open to check the conversation before retrying.',
+      });
+    } finally {
+      inFlight.current = false;
+    }
+  }, [phase, sendDoc]);
+
   if (phase.kind === 'waiting' || phase.kind === 'loading') {
     return <main className={styles.shell}><div className={styles.loading}>Loading the customer workspace…</div></main>;
   }
   if (phase.kind === 'message') {
-    return <main className={styles.shell}><section className={styles.notice}><h1>{phase.title}</h1><p>{phase.body}</p>{phase.retry && <button onClick={() => loadSnapshot(phase.retry!, setPhase)}>Try again</button>}</section></main>;
+    return <main className={styles.shell}><section className={styles.notice}>
+      <h1>{phase.title}</h1>
+      <p>{phase.body}</p>
+      {phase.retry && <button onClick={() => loadSnapshot(phase.retry!, setPhase)}>Try again</button>}
+    </section></main>;
   }
 
-  const { snapshot } = phase;
+  const hint = phase.hint;
 
-  /**
-   * ONE PREDICATE PER TAB, NAMED ONCE, USED FOR BOTH THE COUNT AND THE ROWS.
-   *
-   * The count on a tab and the list under it must be the same set. Previously
-   * the overview counted `kind === 'quotation'` while the Sales tab listed
-   * `kind !== 'invoice'`, so a customer with two quotations and three orders
-   * saw "2" above five rows. The design pack this styling comes from has the
-   * identical defect — its `deals` and `orders` counts are both the length of
-   * the orders array — so it could not be copied, only fixed.
-   */
-  const salesDocs = snapshot.documents.filter((d) => d.kind !== 'invoice');
-  const invoiceDocs = snapshot.documents.filter((d) => d.kind === 'invoice');
-  const loops = snapshot.openLoops;
-
-  /** Undefined renders no badge at all. A "0" chip is noise; its absence says the same thing. */
-  const counts: Partial<Record<typeof tab, number>> = {
-    sales: salesDocs.length || undefined,
-    billing: invoiceDocs.length || undefined,
-    // Only a successful read may produce a count. When Odoo did not answer we
-    // show no badge rather than a zero that would read as "none exist".
-    support: snapshot.openLoopsAvailable ? loops.length || undefined : undefined,
-  };
-
-  const TABS = [
-    ['overview', 'Overview'],
-    ['sales', 'Sales'],
-    ['billing', 'Billing'],
-    ['support', 'Support'],
-  ] as const;
-
-  const checkedAt = new Date(snapshot.verifiedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  const freshnessClass =
-    snapshot.freshness === 'unavailable' ? styles.freshnessUnavailable
-      : snapshot.freshness === 'stale' ? styles.freshnessStale
-        : undefined;
-  const freshnessText =
-    snapshot.freshness === 'unavailable' ? 'Odoo did not answer — this may be out of date'
-      : snapshot.freshness === 'stale' ? `Last confirmed ${checkedAt} — may be out of date`
-        : `Read from Odoo at ${checkedAt}`;
-
-  return <main className={styles.shell}>
-    <header className={styles.identityBar}>
-      <div className={styles.identityBody}>
-        <h1 className={styles.identityTitle}>{snapshot.customer.name}</h1>
-        <p className={styles.identityMeta}>
-          <span>{snapshot.customer.phone ?? 'No phone'}</span>
-          <span>·</span>
-          <span>{snapshot.customer.email ?? 'No email'}</span>
-        </p>
-      </div>
-      <span className={styles.verifiedChip}>Verified Odoo customer</span>
-      <div className={styles.balanceBlock}>
-        <span className={styles.balanceLabel}>Balance due</span>
-        <strong className={`${styles.balanceValue} ${styles.tnum}`}>{formatBalances(snapshot.balances)}</strong>
-        <small className={`${styles.balanceNote} ${freshnessClass ?? ''}`}>
-          {snapshot.balances.length > 1 ? 'Separate currencies — not combined' : freshnessText}
-        </small>
-      </div>
-    </header>
-
-    {/*
-      ONE recommendation surface, server-derived and evidence-gated. The
-      browser-side "Suggested next step" that used to sit beside it is gone: it
-      emitted a sentence unconditionally and its overdue test read an absent
-      residual as "not overdue", which is an unanswered read rendered as a fact
-      about money. Silence is the honest answer when nothing warrants one.
-    */}
-    <RecommendedActionCard snapshot={snapshot} onPrepareReply={() => setReviewOpen(true)} />
-    {reviewOpen && <ReplyReview snapshot={snapshot} onClose={() => setReviewOpen(false)} />}
-    {sendTarget && <SendDocumentReview
-      hint={phase.hint}
-      document={sendTarget}
-      onClose={() => setSendTarget(null)}
-      onSent={(key, outcome) => setSent((prior) => ({ ...prior, [key]: outcome }))}
-    />}
-
-    <nav className={styles.tabs} aria-label="Customer workspace">
-      {TABS.map(([id, label]) => (
-        <button
-          key={id}
-          type="button"
-          className={`${styles.tab} ${tab === id ? styles.activeTab : ''}`}
-          aria-current={tab === id ? 'page' : undefined}
-          // Switching tab returns to the customer level. An object opened under
-          // Billing must not still be showing when the operator moves to Sales.
-          onClick={() => { setNested(null); setTab(id); }}
-        >
-          {label}
-          {counts[id] !== undefined && <span className={styles.tabCount}>{counts[id]}</span>}
-        </button>
-      ))}
-    </nav>
-
-    <div className={styles.body}>
-      {/*
-        The nested object REPLACES the tab body, not the page. The identity bar,
-        the tab row and the dialogs all stay mounted above it — the customer is
-        still the container; an order or invoice simply opened inside it.
-      */}
-      {nested && <NestedObjectView
-        target={nested}
-        phase={nestedPhase}
-        onBack={() => setNested(null)}
-        onSend={setSendTarget}
-        sent={sent}
-        hint={phase.hint}
-      />}
-
-      {!nested && tab === 'overview' && <section className={styles.grid}>
-        <article className={`${styles.card} ${styles.tile}`}>
-          <span className={styles.eyebrow}>Sales</span>
-          <strong className={`${styles.tileValue} ${styles.tnum}`}>{salesDocs.length}</strong>
-          <p className={styles.tileNote}>{salesDocs.length === 1 ? 'quotation or order' : 'quotations and orders'}</p>
-          <button type="button" className={styles.tileLink} onClick={() => setTab('sales')}>Review sales →</button>
-        </article>
-        <article className={`${styles.card} ${styles.tile}`}>
-          <span className={styles.eyebrow}>Billing</span>
-          <strong className={`${styles.tileValue} ${styles.tnum}`}>{invoiceDocs.length}</strong>
-          <p className={styles.tileNote}>{invoiceDocs.length === 1 ? 'invoice' : 'invoices'} · Odoo remains the record</p>
-          <button type="button" className={styles.tileLink} onClick={() => setTab('billing')}>Review billing →</button>
-        </article>
-        <article className={`${styles.card} ${styles.tile}`}>
-          <span className={styles.eyebrow}>Open work</span>
-          <strong className={`${styles.tileValue} ${snapshot.openLoopsAvailable ? styles.tnum : ''}`}>
-            {snapshot.openLoopsAvailable ? loops.length : 'Unavailable'}
-          </strong>
-          <p className={styles.tileNote}>
-            {snapshot.openLoopsAvailable
-              ? (loops[0]?.title ?? 'Nothing open in Odoo')
-              : 'Odoo did not answer. This is not a statement that none exist.'}
-          </p>
-          <button type="button" className={styles.tileLink} onClick={() => setTab('support')}>Review open work →</button>
-        </article>
-      </section>}
-
-      {!nested && tab === 'sales' && <DocumentList
-        title="Quotations and orders"
-        note="Review the source record before sending anything."
-        empty="Odoo answered, and this customer has no quotations or orders."
-        items={salesDocs} hint={phase.hint} sent={sent} onSend={setSendTarget} onOpen={setNested} />}
-
-      {!nested && tab === 'billing' && <DocumentList
-        title="Invoices"
-        note="Only a posted invoice can be sent to a customer."
-        empty="Odoo answered, and this customer has no invoices."
-        items={invoiceDocs} hint={phase.hint} sent={sent} onSend={setSendTarget} onOpen={setNested} />}
-
-      {!nested && tab === 'support' && <section className={styles.card}>
-        <div className={styles.sectionHead}>
-          <div><span className={styles.eyebrow}>Close the loop</span><h2>Open customer work</h2></div>
-          <p>Review before creating a duplicate.</p>
-        </div>
-        {!snapshot.openLoopsAvailable
-          ? <div className={styles.unavailable}>
-              <strong>Odoo did not answer for opportunities or tasks.</strong>
-              This is not a statement that there is none. Open the customer in Odoo before
-              assuming there is no open work.
-            </div>
-          : loops.length
-            ? loops.map((loop) => <article className={styles.row} key={`${loop.kind}-${loop.id}`}>
-                <div className={styles.rowBody}>
-                  <div className={styles.rowRef}>{loop.title}</div>
-                  <p className={styles.rowMeta}>
-                    <span className={styles.state}>{loop.kind}</span>
-                    <span>{loop.state ?? 'State unavailable'}</span>
-                    <span>·</span>
-                    <span>{loop.due ?? 'No due date'}</span>
-                  </p>
-                </div>
-                <div className={styles.rowActions}>
-                  {loop.odooLink
-                    ? <a className={styles.secondaryBtn} href={loop.odooLink} target="_blank" rel="noopener noreferrer">Open in Odoo</a>
-                    : <button type="button" className={styles.secondaryBtn} disabled title="No verified deep link for this record">Open in Odoo</button>}
-                </div>
-              </article>)
-            : <div className={styles.empty}>
-                <p className={styles.emptyTitle}>Nothing open</p>
-                <p>Odoo answered, and this customer has no open opportunities or tasks.</p>
-              </div>}
-      </section>}
-    </div>
-  </main>;
-}
-
-/**
- * A document is offerable for sending only when the server could actually
- * compose a message for it: a sendable kind, a verified total and a verified
- * currency. Offering a button whose only possible outcome is a refusal is worse
- * than not offering it — the same reasoning the action catalogue applies to
- * actions a role may not perform.
- */
-function sendability(item: Customer360Snapshot['documents'][number]): { ok: true } | { ok: false; why: string } {
-  if (item.kind !== 'quotation' && item.kind !== 'invoice') {
-    return { ok: false, why: 'Only quotations and invoices can be sent to a customer.' };
-  }
-  // A draft invoice is not a debt. It stays VISIBLE — an operator wants to know
-  // it exists — but it is not sendable, because the message would demand payment
-  // for a document Odoo has not posted, under Odoo's placeholder reference '/'.
-  // The server refuses this independently; the button is disabled so we never
-  // offer an action whose only possible outcome is a refusal.
-  if (item.kind === 'invoice' && (item.state ?? '').trim() !== 'posted') {
-    return { ok: false, why: 'This invoice is still a draft in Odoo, so it cannot be sent to a customer. Post it in Odoo first.' };
-  }
-  if (item.total == null) return { ok: false, why: 'This record has no verified total, so it cannot be sent.' };
-  if (!item.currency) return { ok: false, why: 'This record has no verified currency, so it cannot be sent.' };
-  return { ok: true };
-}
-
-/**
- * The state a customer-facing record is in, as a semantic chip.
- *
- * Colour is a second channel, never the only one — the word itself is the
- * label, so the meaning survives monochrome and a screen reader. `paid` reads
- * as settled, an unpaid posted invoice as money outstanding, a draft as
- * not-yet-real. Anything unrecognised renders neutral rather than being dressed
- * in a colour we cannot justify.
- */
-function stateChip(item: Customer360Snapshot['documents'][number]): { label: string; tone: string } {
-  const payment = (item.paymentState ?? '').trim();
-  const state = (item.state ?? '').trim();
-
-  if (item.kind === 'invoice') {
-    if (state && state !== 'posted') return { label: state === 'draft' ? 'Draft' : state, tone: styles.state };
-    if (payment === 'paid') return { label: 'Paid', tone: `${styles.state} ${styles.stateOk}` };
-    if (payment === 'partial') return { label: 'Part paid', tone: `${styles.state} ${styles.stateWarn}` };
-    if (payment === 'not_paid') return { label: 'Unpaid', tone: `${styles.state} ${styles.stateDanger}` };
-  }
-  if (!state) return { label: 'State unavailable', tone: styles.state };
-  if (state === 'draft') return { label: 'Draft', tone: styles.state };
-  if (state === 'sent') return { label: 'Sent', tone: `${styles.state} ${styles.stateWarn}` };
-  if (state === 'sale' || state === 'done') return { label: 'Confirmed', tone: `${styles.state} ${styles.stateOk}` };
-  if (state === 'cancel') return { label: 'Cancelled', tone: styles.state };
-  return { label: state, tone: styles.state };
-}
-
-function DocumentList({ title, note, empty, items, hint, sent, onSend, onOpen }: {
-  title: string;
-  note: string;
-  empty: string;
-  items: Customer360Snapshot['documents'];
-  hint: ChatwootContextHint;
-  sent: Record<string, SendOutcome>;
-  onSend: (item: Customer360Snapshot['documents'][number]) => void;
-  onOpen?: (target: NestedTarget) => void;
-}) {
-  return <section className={styles.card}>
-    <div className={styles.sectionHead}>
-      <div><span className={styles.eyebrow}>Odoo records</span><h2>{title}</h2></div>
-      <p>{note}</p>
-    </div>
-    {items.length ? items.map((item) => {
-      const can = sendability(item);
-      const outcome = sent[documentKey(hint, item)];
-      const chip = stateChip(item);
-      return <article className={styles.row} key={`${item.kind}-${item.id}`}>
-        <div className={styles.rowBody}>
-          {/* The reference opens the object INSIDE the customer. Not a link —
-              nothing navigates; the workspace becomes this object's workspace. */}
-          {onOpen
-            ? <button type="button" className={styles.rowOpen} onClick={() => onOpen({ kind: item.kind, id: item.id, reference: item.reference })}>
-                {item.reference}
-              </button>
-            : <div className={styles.rowRef}>{item.reference}</div>}
-          <p className={styles.rowMeta}>
-            <span className={chip.tone}>{chip.label}</span>
-            <span>{item.kind}</span>
-            {/* Only a proven readback prints as posted. Anything else says what it was. */}
-            {outcome && <><span>·</span><span>{sendBadgeText(outcome)}</span></>}
-          </p>
-        </div>
-        <span className={`${styles.rowAmount} ${styles.tnum}`}>{formatMoney(item.total, item.currency)}</span>
-        <div className={styles.rowActions}>
-          {item.odooLink
-            ? <a className={styles.secondaryBtn} href={item.odooLink} target="_blank" rel="noopener noreferrer">Open in Odoo</a>
-            : <button type="button" className={styles.secondaryBtn} disabled title="No verified deep link for this record">Open in Odoo</button>}
-          {can.ok
-            ? <button type="button" className={styles.primaryBtn} onClick={() => onSend(item)}>Send to customer</button>
-            : <button type="button" className={styles.btn} disabled title={can.why}>Send to customer</button>}
-        </div>
-      </article>;
-    }) : <div className={styles.empty}>
-      <p className={styles.emptyTitle}>Nothing here</p>
-      <p>{empty}</p>
-    </div>}
-  </section>;
+  return <CustomerWorkspaceView
+    snapshot={phase.snapshot}
+    tab={tab}
+    onTabChange={setTab}
+    nested={nested ? { target: nested, phase: nestedPhase } : null}
+    onOpenObject={setNested}
+    onCloseObject={() => setNested(null)}
+    outcomeFor={(doc) => sent[documentKey(hint, doc)]}
+    send={sendDoc ? { doc: sendDoc, phase: sendPhase } : null}
+    onSendOpen={setSendDoc}
+    onSendConfirm={confirmSend}
+    onSendClose={() => setSendDoc(null)}
+    replyOpen={replyOpen}
+    onReplyOpen={() => setReplyOpen(true)}
+    onReplyClose={() => setReplyOpen(false)}
+    destinationLabel={`conversation #${hint.conversationDisplayIdHint}`}
+  />;
 }

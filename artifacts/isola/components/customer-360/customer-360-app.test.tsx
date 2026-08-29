@@ -14,7 +14,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { Customer360Snapshot } from '@/lib/customer-360/contracts';
 
-import { RecommendedActionCard, ReplyReview } from './customer-360-app';
+import { RecommendedActionCard, ReplyReview } from './workspace-view';
 
 // The S8-W1 badge wording is pinned in lib/customer-360/send-badge.test.ts.
 // It deliberately does NOT live here: this file imports a component that
