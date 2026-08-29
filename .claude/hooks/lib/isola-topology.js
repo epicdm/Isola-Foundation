@@ -69,7 +69,7 @@ const LIVE_CHECKOUTS = [
  */
 const DEPLOYED_TRUNKS = {
   'epicdm/isolav2': 'fix/bffv2-retire-dashboard-reseller-campaigns-broadcast',
-  'epicdm/Isola-Foundation': 'main (deploy source is the Replit workspace checkout, NOT GitHub main)',
+  'epicdm/Isola-Foundation': 'main (deploys to host03 — EasyPanel ingress/builds + digest-pinned Compose/Swarm stacks; Replit retired 2026-08-12)',
 };
 
 /**
@@ -128,8 +128,40 @@ const DESTRUCTIVE_RULES = [
     why: 'Destructive SQL (object removal). Use a reviewed migration through the validated path.',
   },
   {
+    // 2026-08-28 — FALSE POSITIVE CLOSED, and the block above documented a
+    // property this rule did not have. It read
+    //     '\\b' + VERB.wipe + '\\s+(table\\s+)?["a-z0-9_.]'
+    // which needs only the bare verb, a space, and a letter — a bare
+    // substring in all but name. A Tailwind class list, `class="<verb> font-
+    // medium"`, satisfies it: verb, space, then the `f` of `font`. It blocked
+    // a React component containing no SQL.
+    //
+    // Its sibling in ~/.claude/hooks/enforce-safety.js carried the identical
+    // defect and was fixed the same day. Two enforcement points, one bug —
+    // exactly what CLAUDE.md §7 warns of: "it lives in TWO places. Verifying
+    // one does not verify the other." The first fix was verified, the second
+    // was found only because the very next command tripped it.
+    //
+    // Same family as dec-enforce-safety-gated-to-operations-2026-08-19: a
+    // guard that binds to VOCABULARY rather than an OPERATION protects
+    // nothing, and teaches people to phrase around it — which is one step
+    // from switching it off.
+    //
+    // NOW REQUIRES SQL CONTEXT as well as the verb: the TABLE/ONLY keyword, a
+    // database client on the line, or a .sql target. Every destructive form
+    // stays refused; a CSS class does not. Coverage removed: none — the old
+    // pattern never matched the filesystem `truncate -s 0 file` form either,
+    // since `-` is absent from its character class.
     id: 'sql-wipe-table',
-    re: new RegExp('\\b' + VERB.wipe + '\\s+(table\\s+)?["a-z0-9_.]', 'i'),
+    re: new RegExp(
+      '(?=.*\\b' + VERB.wipe + '\\s+(table\\s+|only\\s+)?["a-z0-9_.])' +
+        '(?:' +
+        '.*\\b' + VERB.wipe + '\\s+(table|only)\\b' +
+        '|.*\\b(psql|mysql|mariadb|sqlite3|pg_dump|pg_restore|clickhouse-client|cockroach|mongosh)\\b' +
+        '|.*\\.sql\\b' +
+        ')',
+      'i'
+    ),
     why: 'Destructive SQL (whole-table wipe).',
   },
   {

@@ -368,8 +368,17 @@ with no safe fallback · uncertainty whether a governance floor is safely closed
 
 **Routine bugs and research questions are not stop conditions** — investigate and proceed.
 
-Owner-only actions: Meta asset changes · Replit Publish · real customer contact · real
-payment · broad launch · merging to a protected branch.
+Owner-only actions: Meta asset changes · production promotion (a host03 stack deploy) ·
+real customer contact · real payment · broad launch · merging to a protected branch.
+
+> **Replit is retired as a deploy path.** `decision-no-further-replit-publish-2026-08-12`,
+> `dec-THE-MISSION-isola-on-host03-two-testable-milestones-2026-08-14` and
+> `dec-correction-foundation-replit-retired-deploy-model-stale-2026-08-29`: Isola runs
+> entirely on **host03**. EasyPanel owns ingress, domains, certs and image builds;
+> production service lifecycle runs as **digest-pinned Compose/Swarm stacks**
+> (`dec-host03-deploy-hygiene-is-a-consolidation-prerequisite-2026-08-14`). Reject any
+> plan referencing the Replit workspace checkout, `/home/runner/workspace`,
+> `isola-foundation.replit.app` or the ssh-replit bridge.
 
 ## 7. Skills
 

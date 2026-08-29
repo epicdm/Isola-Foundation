@@ -69,7 +69,7 @@ const LIVE_CHECKOUTS = [
  */
 const DEPLOYED_TRUNKS = {
   'epicdm/isolav2': 'fix/bffv2-retire-dashboard-reseller-campaigns-broadcast',
-  'epicdm/Isola-Foundation': 'main (deploy source is the Replit workspace checkout, NOT GitHub main)',
+  'epicdm/Isola-Foundation': 'main (deploys to host03 — EasyPanel ingress/builds + digest-pinned Compose/Swarm stacks; Replit retired 2026-08-12)',
 };
 
 /**
