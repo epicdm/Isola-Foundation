@@ -326,5 +326,31 @@ export function getSetupChecklist(): SecretStatus[] {
       configured: process.env.FLOWISE_AGENT_TOOLS_ENABLED === 'true',
       required: false,
     },
+    // ── Customer 360 server-to-server read surface ───────────────────────────
+    // Registered here so an operator can see WHETHER each is configured without
+    // anyone reading a value. All three are needed together: a token with no
+    // tenant binding fails closed rather than defaulting to some tenant, which
+    // is how "one key over all tenants" would otherwise arrive by omission.
+    {
+      key: 'ISOLA_360_SERVICE_TOKEN',
+      label:
+        'Service token for the Customer 360 read surface (portal → Foundation). Distinct from ISOLA_AGENT_TOOLS_TOKEN on purpose — that one gates a Flowise tool catalogue and must never reach customer data. Rotation program: yes.',
+      configured: !!process.env.ISOLA_360_SERVICE_TOKEN,
+      required: false,
+    },
+    {
+      key: 'ISOLA_360_SERVICE_TENANT_ID',
+      label:
+        'The ONE tenant the Customer 360 service token may read. The tenant is configuration, never a request parameter — a service caller cannot name a tenant.',
+      configured: !!process.env.ISOLA_360_SERVICE_TENANT_ID,
+      required: false,
+    },
+    {
+      key: 'ISOLA_360_SERVICE_ENABLED',
+      label:
+        'Set to "true" to enable the Customer 360 server-to-server read surface (kill-switch, default off)',
+      configured: process.env.ISOLA_360_SERVICE_ENABLED === 'true',
+      required: false,
+    },
   ];
 }
