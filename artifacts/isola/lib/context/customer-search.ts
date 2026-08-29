@@ -157,7 +157,12 @@ export async function searchCustomers(
       phone: str(r.phone),
       city: str(r.city),
       street: str(r.street),
-      isCompany: r.is_company === true,
+      // Missing defaults to TRUE, converged with lib/customer-360's projection
+      // (dec 2026-08-29). The two surfaces read the same Odoo field and had
+      // OPPOSITE defaults on an absent value. The cockpit picks a greeting from
+      // this, and addressing a company as "Hi Marisol," is the worse of the two
+      // errors — so an unknown is treated as a company on both sides now.
+      isCompany: r.is_company !== false,
       companyName: nameOf(r.parent_id),
       active: r.active !== false,
       link: odooDeepLink(odooBaseUrl, 'res.partner', Number.isInteger(id) ? id : null),

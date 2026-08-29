@@ -99,7 +99,26 @@ async function findCustomerStrict(config: OdooConfig, phone: string): Promise<Od
 }
 
 /**
- * One partner-scoped Odoo projection for the embedded Chatwoot workspace.
+ * Resolve a partner by its Odoo id.
+ *
+ * Same discipline as findCustomerStrict: a transport failure THROWS rather than
+ * returning null, because "Odoo did not answer" and "there is no such customer"
+ * must not collapse. The caller turns the first into `unavailable` and the
+ * second into `not-found`, and they mean opposite things to a reader.
+ */
+async function findCustomerById(config: OdooConfig, partnerId: number): Promise<OdooCustomer | null> {
+  if (!Number.isSafeInteger(partnerId) || partnerId <= 0) return null;
+  const rows = await json2Call(config, 'res.partner', 'search_read', {
+    domain: [['id', '=', partnerId]],
+    fields: CUSTOMER_FIELDS,
+    limit: 1,
+  }, 12000) as OdooCustomer[];
+  return rows[0] ?? null;
+}
+
+/**
+ * One partner-scoped Odoo projection for the embedded Chatwoot workspace,
+ * addressed by the conversation's phone number.
  * It creates nothing and every read is pinned to the resolved partner id.
  */
 export async function readCustomer360(
@@ -109,6 +128,38 @@ export async function readCustomer360(
 ): Promise<Customer360Snapshot | null> {
   const partner = await findCustomerStrict(config, phone);
   if (!partner) return null;
+  return projectPartner(config, partner, conversation);
+}
+
+/**
+ * THE SAME PROJECTION, addressed by customer id instead of by phone.
+ *
+ * This is the portal's door. It exists because a customer list emits a customer
+ * LOCATOR, and until now the cockpit could only be reached from a Chatwoot
+ * conversation — so the one experience the ruling describes (list → cockpit)
+ * had no way to complete.
+ *
+ * It deliberately shares `projectPartner` with the phone-addressed read rather
+ * than growing a parallel projection. Two projections over the same customer
+ * would drift, and the drift would show up as the two surfaces disagreeing
+ * about a balance, which is the failure this whole workspace exists to prevent.
+ */
+export async function readCustomer360ById(
+  config: OdooConfig,
+  partnerId: number,
+  conversation: Customer360Snapshot['conversation'],
+): Promise<Customer360Snapshot | null> {
+  const partner = await findCustomerById(config, partnerId);
+  if (!partner) return null;
+  return projectPartner(config, partner, conversation);
+}
+
+/** Everything below the partner resolution, shared by both doors. */
+async function projectPartner(
+  config: OdooConfig,
+  partner: OdooCustomer,
+  conversation: Customer360Snapshot['conversation'],
+): Promise<Customer360Snapshot> {
   const partnerId = partner.id;
 
   const [sales, invoices, opportunitiesRaw, tasksRaw] = await Promise.all([

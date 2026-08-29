@@ -56,7 +56,13 @@ export interface Customer360Snapshot {
   verifiedAt: string;
   freshness: Freshness;
   conversation: {
-    displayId: number;
+    /**
+     * NULL when the cockpit was addressed by customer id rather than opened
+     * from a conversation — the portal's door. It is not "unknown"; there
+     * genuinely is no conversation, and a surface that renders a destination
+     * from this must say so rather than invent one.
+     */
+    displayId: number | null;
     currentRequest: string | null;
   };
   customer: {

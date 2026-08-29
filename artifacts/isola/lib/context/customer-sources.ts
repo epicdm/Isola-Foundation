@@ -172,7 +172,10 @@ export async function readCustomer(
     phone: str(r.phone),
     city: str(r.city),
     street: str(r.street),
-    isCompany: r.is_company === true,
+    // Missing defaults to TRUE — see the note in customer-search.ts. Both
+    // surfaces must answer this the same way or the same customer reads as a
+    // person in one place and a company in the other.
+    isCompany: r.is_company !== false,
     companyName: nameOf(r.parent_id),
     active: r.active !== false,
   }))
