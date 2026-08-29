@@ -107,8 +107,12 @@ function actorRoleFor(isAdmin: boolean, homeOwner: boolean, membershipRole: stri
  * read identically on the row. The settled dialog still carries the full detail;
  * this is so the ROW says which kind of refusal it was.
  */
-function refusal(lifecycle: string, detail: string) {
-  const label = LIFECYCLE_PRESENTATION[lifecycle as ActionLifecycleState]?.label ?? 'Not sent'
+function refusal(lifecycle: ActionLifecycleState, detail: string) {
+  // Typed, not `string`, so a lifecycle that has no presentation entry cannot be
+  // introduced at a call site. Untyped, someone adding a new refusal kind gets a
+  // clean typecheck, no failing test, and a silent return to "Not sent — Not
+  // sent" — the exact defect this function was changed to remove.
+  const label = LIFECYCLE_PRESENTATION[lifecycle]?.label ?? 'Not sent'
   return NextResponse.json(
     { lifecycle, success: false, label, detail, operationId: null, readbackProven: false },
     { status: 200 },
@@ -124,7 +128,9 @@ interface ResolvedDoor {
 
 type DoorResolution =
   | { ok: true; binding: ResolvedDoor }
-  | { ok: false; kind: string; detail: string }
+  // `kind` is the lifecycle this refusal will be reported as, so it carries the
+  // same type the refusal helper demands rather than a bare string.
+  | { ok: false; kind: ActionLifecycleState; detail: string }
 
 /**
  * Resolve the Chatwoot door for a conversation FROM THE CONVERSATION ITSELF.

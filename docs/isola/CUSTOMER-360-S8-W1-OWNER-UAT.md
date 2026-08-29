@@ -91,8 +91,9 @@ Click **Send to customer** on quotation **S00004**. A panel opens showing:
 - the document, the amount, and which conversation it will post into
 - **the exact message text** that will be sent — read it
 - a line stating plainly that this posts a visible reply and cannot be unsent
-- **"This also moves the conversation to you. The AI assistant stops replying …
-  so the customer's next message is yours to answer."**
+- **"This also moves the conversation to you. The AI assistant stops replying
+  in conversation #28 once you send, so the customer’s next message is yours to
+  answer."**
 
 That last line is new, and it is there because the effect was real before it was
 ever stated. Sending a document has always handed the conversation to a human and
@@ -140,9 +141,9 @@ The row should now read **"Already posted — not posted again"**. Check Message
 once more: still exactly one message. The second attempt was recognised as the
 same operation and refused to write again.
 
-If instead you see **"Still sending — not confirmed yet"**, the first attempt is
-still running. Wait for it to settle and look at Messages; do not send again and
-do not post the document by hand.
+If instead you see **"Still sending — not confirmed yet. Do not send it again
+until this settles"**, the first attempt is still running. Wait for it to settle
+and look at Messages; do not send again and do not post the document by hand.
 
 **Optional:** repeat steps 4–6 with invoice **INV/2026/00002** to see how an
 invoice reads — it should also state the unpaid status in plain words, not as an
