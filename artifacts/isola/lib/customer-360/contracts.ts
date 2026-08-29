@@ -65,6 +65,16 @@ export interface Customer360Snapshot {
     email: string | null;
     phone: string | null;
     city: string | null;
+    /**
+     * Odoo's own `res.partner.is_company`. Carried because the composer must
+     * not greet an organisation by its first word — "Hi EPIC," for EPIC
+     * Communications Inc, "Hi S8-W1," for an account name.
+     *
+     * This is read from the authority rather than guessed from the string.
+     * A name-shape heuristic would be wrong in both directions: it would
+     * mangle "Ng" and personalise "Atlas Trading".
+     */
+    isCompany: boolean;
   };
   /**
    * Outstanding residual PER CURRENCY, on posted invoices only.

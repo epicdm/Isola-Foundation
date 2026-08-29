@@ -331,7 +331,7 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  const composed = composeDocumentMessage(document, snapshot.customer.name)
+  const composed = composeDocumentMessage(document, snapshot.customer.name, snapshot.customer.isCompany)
   if (!composed) {
     return refusal(
       'validation_failed',
@@ -446,6 +446,9 @@ export async function POST(req: NextRequest) {
       retryWrite: outcome.presentation.retryWrite,
       retryReadback: outcome.presentation.retryReadback,
       readbackProven: outcome.readbackProven,
+      // On a replay, the message the customer already received and when. The
+      // panel shows it instead of asserting it happened.
+      priorReadback: outcome.priorReadback,
       documentReference: composed.documentReference,
     },
     { status: 200 },

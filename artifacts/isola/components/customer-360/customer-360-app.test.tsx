@@ -26,7 +26,7 @@ const baseSnapshot = (over: Partial<Customer360Snapshot> = {}): Customer360Snaps
   verifiedAt: '2026-08-27T12:00:00.000Z',
   freshness: 'fresh',
   conversation: { displayId: 15, currentRequest: null },
-  customer: { id: 163, name: 'Patricia Yvonne Armour', email: 'p@example.test', phone: '+17672951770', city: null },
+  customer: { id: 163, name: 'Patricia Yvonne Armour', email: 'p@example.test', phone: '+17672951770', city: null, isCompany: false },
   balances: [],
   documents: [],
   openLoops: [],

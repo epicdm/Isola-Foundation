@@ -42,8 +42,10 @@ describe('composeDocumentMessage — what a customer is told', () => {
     expect(out.documentId).toBe(1)
   })
 
-  it('greets by first name only, never the full Odoo partner string', () => {
-    const out = composeDocumentMessage(quotation, 'Patricia Yvonne Armour')!
+  it('greets an INDIVIDUAL by first name only, never the full Odoo partner string', () => {
+    // The third argument is Odoo's own `is_company`. It is required to get a
+    // personal greeting at all — see the company cases below.
+    const out = composeDocumentMessage(quotation, 'Patricia Yvonne Armour', false)!
     expect(out.body).toContain('Hi Patricia,')
     expect(out.body).not.toContain('Yvonne Armour')
   })
@@ -51,6 +53,47 @@ describe('composeDocumentMessage — what a customer is told', () => {
   it('falls back to a neutral greeting rather than inventing a name', () => {
     const out = composeDocumentMessage(quotation, '   ')!
     expect(out.body.startsWith('Hello,')).toBe(true)
+  })
+
+  /* ── greeting a COMPANY, which is not a person ───────────────────────────*/
+
+  it('never greets an organisation by its first word', () => {
+    // "Hi EPIC," for EPIC Communications Inc reads as unmistakably
+    // machine-generated, in a message whose whole point is to look like
+    // something EPIC would have written.
+    const out = composeDocumentMessage(quotation, 'EPIC Communications Inc', true)!
+    expect(out.body.startsWith('Hello,')).toBe(true)
+    expect(out.body).not.toContain('Hi EPIC')
+  })
+
+  it('POSITIVE CONTROL: an individual IS still greeted by first name', () => {
+    // Without this, the rule above would pass just as well against a composer
+    // broken to greet nobody personally, ever.
+    const out = composeDocumentMessage(quotation, 'Patricia Yvonne Armour', false)!
+    expect(out.body.startsWith('Hi Patricia,')).toBe(true)
+  })
+
+  it('refuses a first token that is plainly not a name, even for an individual', () => {
+    // Measured live: the account "S8-W1 Verification Account" produced
+    // "Hi S8-W1,". A token with digits or punctuation is not a salutation.
+    expect(
+      composeDocumentMessage(quotation, 'S8-W1 Verification Account', false)!.body.startsWith('Hello,'),
+    ).toBe(true)
+    expect(composeDocumentMessage(quotation, '3M Dominica', false)!.body.startsWith('Hello,')).toBe(true)
+    // A single letter is an initial, not a name.
+    expect(composeDocumentMessage(quotation, 'J Smith', false)!.body.startsWith('Hello,')).toBe(true)
+  })
+
+  it('accepts names with accents, apostrophes and hyphens — the rule is not ASCII-only', () => {
+    expect(composeDocumentMessage(quotation, 'Zoë Baptiste', false)!.body).toContain('Hi Zoë,')
+    expect(composeDocumentMessage(quotation, "O’Brien Family", false)!.body).toContain('Hi O’Brien,')
+    expect(composeDocumentMessage(quotation, 'Jean-Luc Charles', false)!.body).toContain('Hi Jean-Luc,')
+  })
+
+  it('defaults to the FORMAL greeting when the flag is not supplied', () => {
+    // The cost of over-formality to a person is trivial; the cost of "Hi EPIC,"
+    // to a company is a message that reads as broken. Default to the safe side.
+    expect(composeDocumentMessage(quotation, 'Patricia Armour')!.body.startsWith('Hello,')).toBe(true)
   })
 
   /* ── the refusals. Each one has the positive control above it. ───────────*/

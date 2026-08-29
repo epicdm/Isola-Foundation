@@ -71,10 +71,29 @@ export function documentMessageFingerprint(body: string): string {
   return createHash('sha256').update(body, 'utf8').digest('hex')
 }
 
-function firstName(full: string): string {
-  const trimmed = full.trim()
-  if (!trimmed) return ''
-  return trimmed.split(/\s+/)[0]
+/**
+ * The greeting, and the rule is deliberately conservative: personalise ONLY
+ * when we can justify it, otherwise be polite and generic.
+ *
+ * "Hi EPIC," for EPIC Communications Inc, or "Hi S8-W1," for an account named
+ * "S8-W1 Verification Account", is the failure this exists to prevent. It is a
+ * small thing that reads as unmistakably machine-generated, in a message whose
+ * whole purpose is to be something EPIC would have written.
+ *
+ * The authority is Odoo's `res.partner.is_company`, not the shape of the
+ * string. A name-shape heuristic is wrong in both directions — it mangles
+ * short surnames and personalises "Atlas Trading" — so the flag decides, and
+ * the string is only checked for the narrow case of a token that plainly is
+ * not a name (digits, punctuation, a single letter).
+ */
+function greetingFor(full: string, isCompany: boolean): string {
+  if (isCompany) return 'Hello,'
+  const first = full.trim().split(/\s+/)[0] ?? ''
+  // A personal first name is alphabetic and more than one character. Anything
+  // else — "S8-W1", "3M", "J" — gets the neutral greeting rather than a
+  // salutation that would read as broken.
+  if (!/^\p{L}[\p{L}'’-]+$/u.test(first)) return 'Hello,'
+  return `Hi ${first},`
 }
 
 /**
@@ -154,6 +173,7 @@ function money(amount: number, currency: string): string {
 export function composeDocumentMessage(
   doc: Customer360Document,
   customerName: string,
+  isCompany = true,
 ): ComposedDocumentMessage | null {
   if (!isSendableKind(doc.kind)) return null
   if (!Number.isInteger(doc.id) || doc.id <= 0) return null
@@ -187,8 +207,7 @@ export function composeDocumentMessage(
   if (doc.kind === 'invoice' && (doc.state ?? '').trim() !== 'posted') return null
 
   const label = KIND_LABEL[doc.kind]
-  const name = firstName(customerName)
-  const greeting = name ? `Hi ${name},` : 'Hello,'
+  const greeting = greetingFor(customerName, isCompany)
   const dated = humanDate(doc.date)
 
   const lines: string[] = [

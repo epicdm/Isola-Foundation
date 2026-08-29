@@ -216,6 +216,11 @@ export async function readCustomer360(
       email: partner.email,
       phone: partner.phone,
       city: partner.city,
+      // Odoo's own flag. Absent or non-boolean defaults to TRUE — the safe
+      // direction, because the cost of an over-formal greeting to a person is
+      // trivial and the cost of "Hi EPIC," to a company is a message that
+      // reads as machine-generated.
+      isCompany: partner.is_company !== false,
     },
     balances,
     documents,

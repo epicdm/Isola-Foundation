@@ -34,6 +34,14 @@ export interface SendOutcome {
   lifecycle: string;
   /** Whether an authoritative readback proved the message exists and is visible. */
   readbackProven: boolean;
+  /**
+   * On a replay, the message the customer already received, and when.
+   *
+   * The badge still says what happened; this lets the panel SHOW it. An
+   * operator who can read the text and its timestamp does not have to trust a
+   * sentence — and a replay is exactly the moment trust is being asked for.
+   */
+  priorReadback?: { content: string | null; at: string | null } | null;
 }
 
 /**

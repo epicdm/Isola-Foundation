@@ -265,6 +265,8 @@ export function SendDocumentReview({
         lifecycle: typeof result?.lifecycle === 'string' ? result.lifecycle : 'unknown',
         // Default FALSE on anything unrecognised: an absent proof is not a proof.
         readbackProven: result?.readbackProven === true,
+        // Present only on a proven replay. Shown, not asserted.
+        priorReadback: result?.priorReadback ?? null,
       };
       setPhase({ kind: 'settled', outcome });
       onSent(documentKey(hint, doc), outcome);
@@ -314,10 +316,34 @@ export function SendDocumentReview({
         </p>
       </>}
 
-      {phase.kind === 'settled' && <p className={phase.outcome.success ? styles.copyHint : styles.effectNote}>
-        <strong>{phase.outcome.label}</strong> — {phase.outcome.detail}
-        {phase.outcome.operationId && <><br /><small>Reference {phase.outcome.operationId}</small></>}
-      </p>}
+      {phase.kind === 'settled' && <>
+        <p className={phase.outcome.success ? styles.copyHint : styles.effectNote}>
+          <strong>{sendBadgeText(phase.outcome)}</strong>
+          {phase.outcome.detail ? <> — {phase.outcome.detail}</> : null}
+          {phase.outcome.operationId && <><br /><small>Reference {phase.outcome.operationId}</small></>}
+        </p>
+
+        {/*
+          A REPLAY SHOWS THE MESSAGE, IT DOES NOT ASSERT IT.
+          "Already posted" asks the operator to take our word. The proof exists
+          — it is the readback that made the first attempt verified — so we show
+          the text the customer received and when. Rendered only when the server
+          returned a proven prior readback; a replay we cannot evidence says
+          nothing extra rather than showing a plausible reconstruction.
+        */}
+        {phase.outcome.priorReadback?.content && <>
+          <span className={styles.replyLabel}>
+            What the customer already received
+            {phase.outcome.priorReadback.at
+              ? ` — ${new Date(phase.outcome.priorReadback.at).toLocaleString()}`
+              : ''}
+          </span>
+          <pre className={styles.replyBox}>{phase.outcome.priorReadback.content}</pre>
+          <p className={styles.copyHint}>
+            Read back from the conversation, not re-composed here. Nothing was sent again.
+          </p>
+        </>}
+      </>}
 
       <div className={styles.reviewActions}>
         {phase.kind === 'reviewing' && <button className={styles.primaryBtn} onClick={() => confirmSend(phase.body, phase.fingerprint)}>

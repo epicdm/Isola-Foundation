@@ -89,6 +89,18 @@ export interface CustomerActionOutcome {
   /** Whether an authoritative readback proved the write. */
   readbackProven: boolean
   approvalRef: string | null
+  /**
+   * The readback of the EARLIER attempt, on a replay only.
+   *
+   * A replay that merely asserts "already posted" asks the operator to take our
+   * word for it. The proof already exists — the readback that made the first
+   * attempt verified — and showing it is strictly better than a sentence about
+   * it: the operator sees the text the customer actually received, and when.
+   *
+   * Null whenever there is nothing proven to show, which includes an unproven
+   * replay. Never a substitute for `readbackProven`.
+   */
+  priorReadback: { content: string | null; at: string | null } | null
 }
 
 export interface CustomerActionPorts {
@@ -114,8 +126,27 @@ function outcome(
     detail: presentation.sentence,
     readbackProven: false,
     approvalRef: null,
+    priorReadback: null,
     ...over,
   }
+}
+
+/**
+ * Pull the customer-visible text and its timestamp out of a stored readback.
+ *
+ * The readback is whatever the executor proved; for a Chatwoot send that is the
+ * message row. Shapes vary by executor, so every field is read defensively and
+ * anything unrecognised yields null rather than a guess — a replay that cannot
+ * show the message must say nothing, not show the wrong thing.
+ */
+function priorReadbackOf(readback: unknown): { content: string | null; at: string | null } | null {
+  if (!readback || typeof readback !== 'object') return null
+  const row = readback as Record<string, unknown>
+  const content = typeof row.content === 'string' && row.content.trim() ? row.content : null
+  const rawAt = row.created_at ?? row.createdAt ?? null
+  const at = typeof rawAt === 'string' && rawAt.trim() ? rawAt : null
+  if (!content && !at) return null
+  return { content, at }
 }
 
 /**
@@ -200,6 +231,11 @@ export async function runCustomerAction(
       auditRef: claim.operationId,
       readbackProven:
         claim.status === 'already_completed' ? !!claim.record.envelope?.readback : false,
+      // Show the message the customer actually received, not a claim about it.
+      priorReadback:
+        claim.status === 'already_completed'
+          ? priorReadbackOf(claim.record.envelope?.readback)
+          : null,
       detail:
         claim.status === 'argument_conflict'
           ? LIFECYCLE_PRESENTATION.argument_conflict.sentence
