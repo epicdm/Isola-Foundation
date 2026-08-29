@@ -175,6 +175,8 @@ export async function readCustomer360(
       state: displayName(row.stage_id),
       due: text(row.date_deadline),
       value: number(row.expected_revenue),
+      // Same builder as the document links; only the model differs.
+      odooLink: safeOdooLink(config.url, 'crm.lead', Number(row.id)),
     })),
     ...tasks.map((row) => ({
       id: Number(row.id),
@@ -182,6 +184,7 @@ export async function readCustomer360(
       kind: 'task' as const,
       state: displayName(row.stage_id),
       due: text(row.date_deadline),
+      odooLink: safeOdooLink(config.url, 'project.task', Number(row.id)),
     })),
   ];
 

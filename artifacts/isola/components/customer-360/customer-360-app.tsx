@@ -358,26 +358,74 @@ export function Customer360App() {
   }
 
   const { snapshot } = phase;
-  const quotations = snapshot.documents.filter((item) => item.kind === 'quotation');
-  const invoices = snapshot.documents.filter((item) => item.kind === 'invoice');
-  const recommendation = (() => {
-    const overdue = invoices.find((item) => (item.residual ?? 0) > 0);
-    if (overdue) return `Confirm whether ${overdue.reference} is the customer’s concern, then review the balance before replying.`;
-    if (snapshot.openLoops.length) return `There is already open work for this customer. Review it before creating a duplicate.`;
-    return 'Confirm the request, then use the customer history to choose the next action.';
-  })();
+
+  /**
+   * ONE PREDICATE PER TAB, NAMED ONCE, USED FOR BOTH THE COUNT AND THE ROWS.
+   *
+   * The count on a tab and the list under it must be the same set. Previously
+   * the overview counted `kind === 'quotation'` while the Sales tab listed
+   * `kind !== 'invoice'`, so a customer with two quotations and three orders
+   * saw "2" above five rows. The design pack this styling comes from has the
+   * identical defect — its `deals` and `orders` counts are both the length of
+   * the orders array — so it could not be copied, only fixed.
+   */
+  const salesDocs = snapshot.documents.filter((d) => d.kind !== 'invoice');
+  const invoiceDocs = snapshot.documents.filter((d) => d.kind === 'invoice');
+  const loops = snapshot.openLoops;
+
+  /** Undefined renders no badge at all. A "0" chip is noise; its absence says the same thing. */
+  const counts: Partial<Record<typeof tab, number>> = {
+    sales: salesDocs.length || undefined,
+    billing: invoiceDocs.length || undefined,
+    // Only a successful read may produce a count. When Odoo did not answer we
+    // show no badge rather than a zero that would read as "none exist".
+    support: snapshot.openLoopsAvailable ? loops.length || undefined : undefined,
+  };
+
+  const TABS = [
+    ['overview', 'Overview'],
+    ['sales', 'Sales'],
+    ['billing', 'Billing'],
+    ['support', 'Support'],
+  ] as const;
+
+  const checkedAt = new Date(snapshot.verifiedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const freshnessClass =
+    snapshot.freshness === 'unavailable' ? styles.freshnessUnavailable
+      : snapshot.freshness === 'stale' ? styles.freshnessStale
+        : undefined;
+  const freshnessText =
+    snapshot.freshness === 'unavailable' ? 'Odoo did not answer — this may be out of date'
+      : snapshot.freshness === 'stale' ? `Last confirmed ${checkedAt} — may be out of date`
+        : `Read from Odoo at ${checkedAt}`;
 
   return <main className={styles.shell}>
-    <header className={styles.customerBand}>
-      <div><span className={styles.eyebrow}>Verified Odoo customer</span><h1>{snapshot.customer.name}</h1><p>{snapshot.customer.phone ?? 'No phone'} · {snapshot.customer.email ?? 'No email'}</p></div>
-      <div className={styles.pulse}><span>Balance due</span><strong>{formatBalances(snapshot.balances)}</strong><small>{snapshot.balances.length > 1 ? 'Separate currencies — not combined' : `Checked ${new Date(snapshot.verifiedAt).toLocaleTimeString()}`}</small></div>
+    <header className={styles.identityBar}>
+      <div className={styles.identityBody}>
+        <h1 className={styles.identityTitle}>{snapshot.customer.name}</h1>
+        <p className={styles.identityMeta}>
+          <span>{snapshot.customer.phone ?? 'No phone'}</span>
+          <span>·</span>
+          <span>{snapshot.customer.email ?? 'No email'}</span>
+        </p>
+      </div>
+      <span className={styles.verifiedChip}>Verified Odoo customer</span>
+      <div className={styles.balanceBlock}>
+        <span className={styles.balanceLabel}>Balance due</span>
+        <strong className={`${styles.balanceValue} ${styles.tnum}`}>{formatBalances(snapshot.balances)}</strong>
+        <small className={`${styles.balanceNote} ${freshnessClass ?? ''}`}>
+          {snapshot.balances.length > 1 ? 'Separate currencies — not combined' : freshnessText}
+        </small>
+      </div>
     </header>
 
-    <section className={styles.request}>
-      <div><span className={styles.eyebrow}>Current request</span><p>{snapshot.conversation.currentRequest ?? 'Read the current Chatwoot message and confirm the customer’s intent.'}</p></div>
-      <div className={styles.guide}><strong>Suggested next step</strong><p>{recommendation}</p></div>
-    </section>
-
+    {/*
+      ONE recommendation surface, server-derived and evidence-gated. The
+      browser-side "Suggested next step" that used to sit beside it is gone: it
+      emitted a sentence unconditionally and its overdue test read an absent
+      residual as "not overdue", which is an unanswered read rendered as a fact
+      about money. Silence is the honest answer when nothing warrants one.
+    */}
     <RecommendedActionCard snapshot={snapshot} onPrepareReply={() => setReviewOpen(true)} />
     {reviewOpen && <ReplyReview snapshot={snapshot} onClose={() => setReviewOpen(false)} />}
     {sendTarget && <SendDocumentReview
@@ -388,18 +436,94 @@ export function Customer360App() {
     />}
 
     <nav className={styles.tabs} aria-label="Customer workspace">
-      {([['overview','360 overview'],['sales','Sales'],['billing','Billing'],['support','Support']] as const).map(([id,label]) => <button key={id} className={tab === id ? styles.activeTab : ''} onClick={() => setTab(id)}>{label}</button>)}
+      {TABS.map(([id, label]) => (
+        <button
+          key={id}
+          type="button"
+          className={`${styles.tab} ${tab === id ? styles.activeTab : ''}`}
+          aria-current={tab === id ? 'page' : undefined}
+          onClick={() => setTab(id)}
+        >
+          {label}
+          {counts[id] !== undefined && <span className={styles.tabCount}>{counts[id]}</span>}
+        </button>
+      ))}
     </nav>
 
-    {tab === 'overview' && <section className={styles.grid}>
-      <article className={styles.card}><span className={styles.eyebrow}>Commercial</span><strong>{quotations.length} quotations</strong><p>{invoices.length} invoices · {snapshot.openLoopsAvailable ? `${snapshot.openLoops.filter((x) => x.kind === 'opportunity').length} opportunities` : 'opportunities unavailable'}</p><button onClick={() => setTab('sales')}>Review sales</button></article>
-      <article className={styles.card}><span className={styles.eyebrow}>Open loops</span><strong>{snapshot.openLoopsAvailable ? `${snapshot.openLoops.length} items need follow-up` : 'Open work unavailable'}</strong><p>{snapshot.openLoopsAvailable ? (snapshot.openLoops[0]?.title ?? 'No open Odoo work found.') : 'Odoo did not answer for opportunities or tasks. This is not a statement that none exist.'}</p><button onClick={() => setTab('support')}>Review loops</button></article>
-      <article className={styles.card}><span className={styles.eyebrow}>Account</span><strong>{formatBalances(snapshot.balances)}</strong><p>Odoo remains the authoritative record.</p><button onClick={() => setTab('billing')}>Review billing</button></article>
-    </section>}
+    <div className={styles.body}>
+      {tab === 'overview' && <section className={styles.grid}>
+        <article className={`${styles.card} ${styles.tile}`}>
+          <span className={styles.eyebrow}>Sales</span>
+          <strong className={`${styles.tileValue} ${styles.tnum}`}>{salesDocs.length}</strong>
+          <p className={styles.tileNote}>{salesDocs.length === 1 ? 'quotation or order' : 'quotations and orders'}</p>
+          <button type="button" className={styles.tileLink} onClick={() => setTab('sales')}>Review sales →</button>
+        </article>
+        <article className={`${styles.card} ${styles.tile}`}>
+          <span className={styles.eyebrow}>Billing</span>
+          <strong className={`${styles.tileValue} ${styles.tnum}`}>{invoiceDocs.length}</strong>
+          <p className={styles.tileNote}>{invoiceDocs.length === 1 ? 'invoice' : 'invoices'} · Odoo remains the record</p>
+          <button type="button" className={styles.tileLink} onClick={() => setTab('billing')}>Review billing →</button>
+        </article>
+        <article className={`${styles.card} ${styles.tile}`}>
+          <span className={styles.eyebrow}>Open work</span>
+          <strong className={`${styles.tileValue} ${snapshot.openLoopsAvailable ? styles.tnum : ''}`}>
+            {snapshot.openLoopsAvailable ? loops.length : 'Unavailable'}
+          </strong>
+          <p className={styles.tileNote}>
+            {snapshot.openLoopsAvailable
+              ? (loops[0]?.title ?? 'Nothing open in Odoo')
+              : 'Odoo did not answer. This is not a statement that none exist.'}
+          </p>
+          <button type="button" className={styles.tileLink} onClick={() => setTab('support')}>Review open work →</button>
+        </article>
+      </section>}
 
-    {tab === 'sales' && <DocumentList title="Sales documents" empty="No quotations or orders found." items={snapshot.documents.filter((x) => x.kind !== 'invoice')} hint={phase.hint} sent={sent} onSend={setSendTarget} />}
-    {tab === 'billing' && <DocumentList title="Invoices" empty="No customer invoices found." items={invoices} hint={phase.hint} sent={sent} onSend={setSendTarget} />}
-    {tab === 'support' && <section className={styles.list}><div className={styles.sectionHead}><div><span className={styles.eyebrow}>Close the loop</span><h2>Open customer work</h2></div><p>Review before creating a duplicate.</p></div>{!snapshot.openLoopsAvailable ? <p className={styles.empty}>Odoo did not answer for opportunities or tasks. Review the customer directly in Odoo before assuming there is no open work.</p> : snapshot.openLoops.length ? snapshot.openLoops.map((loop) => <article className={styles.row} key={`${loop.kind}-${loop.id}`}><div><strong>{loop.title}</strong><p>{loop.kind} · {loop.state ?? 'State unavailable'}</p></div><div><span>{loop.due ?? 'No due date'}</span><button disabled title="Exact Odoo deep link lands in the next slice">Open in Odoo</button></div></article>) : <p className={styles.empty}>No open Odoo work found.</p>}</section>}
+      {tab === 'sales' && <DocumentList
+        title="Quotations and orders"
+        note="Review the source record before sending anything."
+        empty="Odoo answered, and this customer has no quotations or orders."
+        items={salesDocs} hint={phase.hint} sent={sent} onSend={setSendTarget} />}
+
+      {tab === 'billing' && <DocumentList
+        title="Invoices"
+        note="Only a posted invoice can be sent to a customer."
+        empty="Odoo answered, and this customer has no invoices."
+        items={invoiceDocs} hint={phase.hint} sent={sent} onSend={setSendTarget} />}
+
+      {tab === 'support' && <section className={styles.card}>
+        <div className={styles.sectionHead}>
+          <div><span className={styles.eyebrow}>Close the loop</span><h2>Open customer work</h2></div>
+          <p>Review before creating a duplicate.</p>
+        </div>
+        {!snapshot.openLoopsAvailable
+          ? <div className={styles.unavailable}>
+              <strong>Odoo did not answer for opportunities or tasks.</strong>
+              This is not a statement that there is none. Open the customer in Odoo before
+              assuming there is no open work.
+            </div>
+          : loops.length
+            ? loops.map((loop) => <article className={styles.row} key={`${loop.kind}-${loop.id}`}>
+                <div className={styles.rowBody}>
+                  <div className={styles.rowRef}>{loop.title}</div>
+                  <p className={styles.rowMeta}>
+                    <span className={styles.state}>{loop.kind}</span>
+                    <span>{loop.state ?? 'State unavailable'}</span>
+                    <span>·</span>
+                    <span>{loop.due ?? 'No due date'}</span>
+                  </p>
+                </div>
+                <div className={styles.rowActions}>
+                  {loop.odooLink
+                    ? <a className={styles.secondaryBtn} href={loop.odooLink} target="_blank" rel="noopener noreferrer">Open in Odoo</a>
+                    : <button type="button" className={styles.secondaryBtn} disabled title="No verified deep link for this record">Open in Odoo</button>}
+                </div>
+              </article>)
+            : <div className={styles.empty}>
+                <p className={styles.emptyTitle}>Nothing open</p>
+                <p>Odoo answered, and this customer has no open opportunities or tasks.</p>
+              </div>}
+      </section>}
+    </div>
   </main>;
 }
 
@@ -427,39 +551,74 @@ function sendability(item: Customer360Snapshot['documents'][number]): { ok: true
   return { ok: true };
 }
 
-function DocumentList({ title, empty, items, hint, sent, onSend }: {
+/**
+ * The state a customer-facing record is in, as a semantic chip.
+ *
+ * Colour is a second channel, never the only one — the word itself is the
+ * label, so the meaning survives monochrome and a screen reader. `paid` reads
+ * as settled, an unpaid posted invoice as money outstanding, a draft as
+ * not-yet-real. Anything unrecognised renders neutral rather than being dressed
+ * in a colour we cannot justify.
+ */
+function stateChip(item: Customer360Snapshot['documents'][number]): { label: string; tone: string } {
+  const payment = (item.paymentState ?? '').trim();
+  const state = (item.state ?? '').trim();
+
+  if (item.kind === 'invoice') {
+    if (state && state !== 'posted') return { label: state === 'draft' ? 'Draft' : state, tone: styles.state };
+    if (payment === 'paid') return { label: 'Paid', tone: `${styles.state} ${styles.stateOk}` };
+    if (payment === 'partial') return { label: 'Part paid', tone: `${styles.state} ${styles.stateWarn}` };
+    if (payment === 'not_paid') return { label: 'Unpaid', tone: `${styles.state} ${styles.stateDanger}` };
+  }
+  if (!state) return { label: 'State unavailable', tone: styles.state };
+  if (state === 'draft') return { label: 'Draft', tone: styles.state };
+  if (state === 'sent') return { label: 'Sent', tone: `${styles.state} ${styles.stateWarn}` };
+  if (state === 'sale' || state === 'done') return { label: 'Confirmed', tone: `${styles.state} ${styles.stateOk}` };
+  if (state === 'cancel') return { label: 'Cancelled', tone: styles.state };
+  return { label: state, tone: styles.state };
+}
+
+function DocumentList({ title, note, empty, items, hint, sent, onSend }: {
   title: string;
+  note: string;
   empty: string;
   items: Customer360Snapshot['documents'];
   hint: ChatwootContextHint;
   sent: Record<string, SendOutcome>;
   onSend: (item: Customer360Snapshot['documents'][number]) => void;
 }) {
-  return <section className={styles.list}>
+  return <section className={styles.card}>
     <div className={styles.sectionHead}>
       <div><span className={styles.eyebrow}>Odoo records</span><h2>{title}</h2></div>
-      <p>Review the source record before sending anything.</p>
+      <p>{note}</p>
     </div>
     {items.length ? items.map((item) => {
       const can = sendability(item);
       const outcome = sent[documentKey(hint, item)];
+      const chip = stateChip(item);
       return <article className={styles.row} key={`${item.kind}-${item.id}`}>
-        <div>
-          <strong>{item.reference}</strong>
-          <p>{item.kind} · {item.paymentState ?? item.state ?? 'State unavailable'}</p>
-          {/* Only a proven readback prints as sent. Anything else says what it was. */}
-          {outcome && <p className={styles.copyHint}>{sendBadgeText(outcome)}</p>}
+        <div className={styles.rowBody}>
+          <div className={styles.rowRef}>{item.reference}</div>
+          <p className={styles.rowMeta}>
+            <span className={chip.tone}>{chip.label}</span>
+            <span>{item.kind}</span>
+            {/* Only a proven readback prints as posted. Anything else says what it was. */}
+            {outcome && <><span>·</span><span>{sendBadgeText(outcome)}</span></>}
+          </p>
         </div>
-        <div>
-          <span>{formatMoney(item.total, item.currency)}</span>
+        <span className={`${styles.rowAmount} ${styles.tnum}`}>{formatMoney(item.total, item.currency)}</span>
+        <div className={styles.rowActions}>
           {item.odooLink
-            ? <a className={styles.rowLink} href={item.odooLink} target="_blank" rel="noopener noreferrer">Open in Odoo</a>
-            : <button disabled title="No verified deep link for this record">Open in Odoo</button>}
+            ? <a className={styles.secondaryBtn} href={item.odooLink} target="_blank" rel="noopener noreferrer">Open in Odoo</a>
+            : <button type="button" className={styles.secondaryBtn} disabled title="No verified deep link for this record">Open in Odoo</button>}
           {can.ok
-            ? <button className={styles.primaryBtn} onClick={() => onSend(item)}>Send to customer</button>
-            : <button disabled title={can.why}>Send to customer</button>}
+            ? <button type="button" className={styles.primaryBtn} onClick={() => onSend(item)}>Send to customer</button>
+            : <button type="button" className={styles.btn} disabled title={can.why}>Send to customer</button>}
         </div>
       </article>;
-    }) : <p className={styles.empty}>{empty}</p>}
+    }) : <div className={styles.empty}>
+      <p className={styles.emptyTitle}>Nothing here</p>
+      <p>{empty}</p>
+    </div>}
   </section>;
 }

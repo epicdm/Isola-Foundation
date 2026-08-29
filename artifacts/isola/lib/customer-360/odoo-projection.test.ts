@@ -181,6 +181,37 @@ describe('Odoo Customer 360 projection', () => {
       expect(result?.documents[0]?.odooLink).toBe('https://odoo.invalid/odoo/sale.order/670');
     });
 
+    it('builds deep links for OPEN WORK too, not only documents', async () => {
+      // Open work previously carried a permanently disabled "Open in Odoo"
+      // button whose tooltip promised a slice that had already shipped. The
+      // link uses the identical model-agnostic builder; only the model differs.
+      json2Call.mockImplementation(async (_config: unknown, model: string) => {
+        if (model === 'res.partner') return [{ id: 42, name: 'C', email: null, phone: '+17670000000', city: null }];
+        if (model === 'crm.lead') return [{ id: 9, name: 'Second line', stage_id: [2, 'Qualified'], expected_revenue: 500, date_deadline: null }];
+        if (model === 'project.task') return [{ id: 4, name: 'Install', stage_id: [1, 'New'], date_deadline: null }];
+        return [];
+      });
+      const result = await readCustomer360(config, '+17670000000', { displayId: 1, currentRequest: null });
+
+      const lead = result?.openLoops.find((l) => l.kind === 'opportunity');
+      const task = result?.openLoops.find((l) => l.kind === 'task');
+      expect(lead?.odooLink).toBe('https://odoo.invalid/odoo/crm.lead/9');
+      expect(task?.odooLink).toBe('https://odoo.invalid/odoo/project.task/4');
+    });
+
+    it('refuses an OPEN WORK deep link on a sandbox origin, exactly as it does for documents', async () => {
+      // The guard is the shared builder, so it must hold for loops too. Without
+      // this, a link could be honest for documents and fabricated for loops.
+      json2Call.mockImplementation(async (_config: unknown, model: string) => {
+        if (model === 'res.partner') return [{ id: 42, name: 'C', email: null, phone: '+17670000000', city: null }];
+        if (model === 'crm.lead') return [{ id: 9, name: 'Second line', stage_id: [2, 'Qualified'], expected_revenue: 500, date_deadline: null }];
+        return [];
+      });
+      const sandboxConfig = { url: 'https://epic_sandbox.odoo.com', apiKey: 'not-used', db: 'test' };
+      const result = await readCustomer360(sandboxConfig, '+17670000000', { displayId: 1, currentRequest: null });
+      expect(result?.openLoops[0]?.odooLink).toBeNull();
+    });
+
     it('refuses a deep link against a sandbox origin, even though the record and id are valid', async () => {
       json2Call.mockImplementation(async (_config: unknown, model: string) => {
         if (model === 'res.partner') return [{ id: 42, name: 'C', email: null, phone: '+17670000000', city: null }];

@@ -40,6 +40,16 @@ export interface Customer360Loop {
   state: string | null;
   due: string | null;
   value?: number | null;
+  /**
+   * The exact record in the authoritative Odoo instance, built server-side the
+   * same way document links are. Null when it cannot be honestly constructed.
+   *
+   * Open work previously carried a permanently disabled button whose tooltip
+   * promised "the next slice" — a slice that had since shipped. The link uses
+   * the identical model-agnostic builder the documents use; only the model name
+   * differs.
+   */
+  odooLink: string | null;
 }
 
 export interface Customer360Snapshot {

@@ -1,40 +1,497 @@
-.shell { min-height: 100vh; background: #f3f6fa; color: #162033; padding: 18px; font: 14px/1.45 system-ui, sans-serif; }
-.customerBand, .request, .card, .list, .notice { border: 1px solid #dbe3ed; border-radius: 14px; background: #fff; box-shadow: 0 1px 2px rgba(15,23,42,.05); }
-.customerBand { display: flex; justify-content: space-between; gap: 18px; padding: 18px 20px; background: linear-gradient(120deg,#eef5ff,#fff 56%); }
-.customerBand h1, .sectionHead h2, .notice h1 { margin: 3px 0; font-size: 20px; }
-.customerBand p, .request p, .card p, .row p, .sectionHead p, .notice p { margin: 4px 0 0; color: #657188; }
-.eyebrow { color: #52637a; font-size: 11px; font-weight: 750; letter-spacing: .07em; text-transform: uppercase; }
-.pulse { min-width: 160px; padding: 10px 14px; border-radius: 10px; background: #e8f1ff; display: grid; gap: 2px; }
-.pulse span, .pulse small { color: #52637a; font-size: 11px; }.pulse strong { font-size: 18px; color: #154f9e; }
-.request { display: grid; grid-template-columns: 1.2fr 1fr; gap: 14px; margin-top: 12px; padding: 15px 18px; background: #fbfcfe; }
-.guide { padding: 11px 13px; border-left: 4px solid #2878d0; border-radius: 8px; background: #edf5ff; }
-.tabs { display: flex; gap: 6px; margin: 14px 0 10px; padding: 5px; border-radius: 11px; background: #e9eef5; overflow-x: auto; }
-.tabs button, .card button, .row button, .notice button { border: 0; border-radius: 8px; background: transparent; color: #52637a; padding: 9px 12px; font-weight: 700; cursor: pointer; }
-.tabs .activeTab { background: #fff; color: #175aa7; box-shadow: 0 1px 3px rgba(15,23,42,.1); }
-.grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; }
-.card { padding: 16px; background: #fff; }.card strong { display: block; margin-top: 8px; font-size: 16px; }.card button { margin-top: 12px; padding-left: 0; color: #1769bd; }
-.list { padding: 16px; }.sectionHead { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 10px; }.sectionHead p { max-width: 260px; text-align: right; }
-.row { display: flex; justify-content: space-between; gap: 14px; align-items: center; padding: 13px 4px; border-top: 1px solid #e7edf4; }.row > div:last-child { display: flex; gap: 10px; align-items: center; }.row button { background: #edf3fa; }.row button:disabled { cursor: not-allowed; opacity: .55; }
-.loading, .notice { max-width: 620px; margin: 80px auto; padding: 24px; }.empty { color: #657188; padding: 18px 0; }
-.rowLink { border-radius: 8px; background: #edf3fa; color: #1769bd; padding: 9px 12px; font-weight: 700; text-decoration: none; }
+/* ============================================================
+   Customer 360 — the panel's own stylesheet, improved in place.
 
-/* S3: recommended action + review/copy surface */
-.recommendation { border: 1px solid #dbe3ed; border-radius: 14px; background: #fff; box-shadow: 0 1px 2px rgba(15,23,42,.05); padding: 16px 18px; margin-top: 12px; }
-.recommendation h2 { margin: 3px 0; font-size: 17px; }
-.reasoning { color: #52637a; margin: 8px 0 0; }
-.reviewFacts { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 10px; margin: 12px 0; }
-.reviewFacts div { background: #f6f9fc; border-radius: 8px; padding: 8px 10px; }
-.reviewFacts dt { font-size: 11px; color: #52637a; text-transform: uppercase; letter-spacing: .05em; }
-.reviewFacts dd { margin: 2px 0 0; font-weight: 700; }
-.reviewActions { display: flex; gap: 10px; margin-top: 12px; }
-.primaryBtn { border: 0; border-radius: 8px; background: #175aa7; color: #fff; padding: 10px 16px; font-weight: 700; cursor: pointer; }
-.secondaryBtn { border: 1px solid #c7d3e2; border-radius: 8px; background: #fff; color: #175aa7; padding: 9px 15px; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; }
-.secondaryBtn:disabled { cursor: not-allowed; opacity: .55; }
-.overlay { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 50; }
-.reviewCard { background: #fff; border-radius: 14px; max-width: 560px; width: 100%; padding: 22px; box-shadow: 0 10px 40px rgba(15,23,42,.25); }
-.reviewCard h2 { margin: 0 0 12px; font-size: 18px; }
-.replyLabel { display: block; font-size: 12px; font-weight: 700; color: #52637a; margin-bottom: 6px; }
-.replyBox { width: 100%; border: 1px solid #c7d3e2; border-radius: 8px; padding: 10px; font: inherit; resize: vertical; }
-.effectNote { color: #52637a; font-size: 13px; margin: 10px 0 0; }
-.copyHint { color: #8592a6; font-size: 12px; margin: 10px 0 0; }
-@media (max-width: 700px) { .shell { padding: 10px; }.customerBand, .request, .grid { grid-template-columns: 1fr; }.customerBand { display: grid; }.sectionHead, .row { align-items: flex-start; flex-direction: column; }.sectionHead p { text-align: left; }.row > div:last-child { width: 100%; justify-content: space-between; }.reviewFacts { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+   WHY THE TOKENS SIT ON `.shell` AND NOT ON `:root`
+   -------------------------------------------------
+   `app/globals.css` and `app/layout.tsx` are shared by every page in this
+   app, including `app/(marketing)/personal-line/page.tsx`. Defining these
+   custom properties globally would change Personal Line's rendering as a
+   side effect of a Customer 360 design pass. They are therefore scoped to
+   this component's own root element, which a CSS module guarantees.
+
+   WHY THERE IS NO `.lumen` WRAPPER
+   --------------------------------
+   dec-lumen-improve-apptension-not-replace-agents-management-is-the-point-
+   2026-08-28 REMOVES the .lumen-scoped CSS island: Lumen is not a parallel
+   design system living beside the app's own. Its good ideas — type rhythm,
+   card and status treatment, tabular figures, honest empty/loading/error
+   states — are folded INTO this component's native stylesheet. There is one
+   stylesheet for this panel and this is it.
+
+   VALUES ARE COPIED, NOT REINTERPRETED
+   ------------------------------------
+   Colour, radius, shadow and type values come from the design's own
+   `styles.css`; the tab row, count chip, identity bar, record row and
+   next-best-action band were extracted to named classes by the design lane
+   and verified against `customer.jsx` line by line before being used here.
+   A value that was reinterpreted rather than copied is a defect.
+   ============================================================ */
+
+.shell {
+  /* ---- brand ---- */
+  --brand-50: #F7EEF5;
+  --brand-100: #EEDCEA;
+  --brand-400: #A86A9D;
+  --brand-500: #884E80;
+  --brand-600: #6F3F69;
+
+  /* ---- surfaces & ink ---- */
+  --bg: #F4F1F7;
+  --surface: #FFFFFF;
+  --surface-2: #FAF8FC;
+  --surface-3: #F2EEF6;
+  --border: #E8E3EE;
+  --border-strong: #D7CFE0;
+  --text: #211A26;
+  --text-muted: #6B6175;
+  --text-subtle: #968CA1;
+
+  /* ---- status. Semantic, and separate from the brand accent. ---- */
+  --ok: #1FAE5A;
+  --ok-bg: #E4F8EC;
+  --ok-ink: #126B38;
+  --warn: #E0890B;
+  --warn-bg: #FCF0DC;
+  --warn-ink: #8A5406;
+  --danger: #DC3B4B;
+  --danger-bg: #FBE6E8;
+  --danger-ink: #9B2130;
+
+  /* ---- the AI accent, deliberately never reused for brand chrome, so an
+         AI affordance always reads as AI ---- */
+  --ai-50: #EEF1FF;
+  --ai-100: #E0E5FF;
+  --ai-500: #5B68FF;
+  --ai-600: #4450E6;
+
+  /* ---- shape & depth ---- */
+  --r-xs: 7px;
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-pill: 999px;
+  --sh-1: 0 1px 2px rgba(43, 27, 42, .06), 0 1px 1px rgba(43, 27, 42, .04);
+  --sh-2: 0 2px 8px rgba(43, 27, 42, .07), 0 1px 2px rgba(43, 27, 42, .05);
+  --sh-3: 0 10px 30px rgba(43, 27, 42, .12), 0 3px 8px rgba(43, 27, 42, .07);
+  --ring: 0 0 0 3px var(--brand-100);
+
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The panel renders inside a Chatwoot iframe, which follows the host's
+   theme. Redefine only the tokens; every rule below reads through them. */
+@media (prefers-color-scheme: dark) {
+  .shell {
+    --brand-50: #2A1E2C;
+    --brand-100: #3A2A3C;
+    --brand-500: #C68FBE;
+    --brand-600: #B179A8;
+    --bg: #141017;
+    --surface: #1D1722;
+    --surface-2: #241D2A;
+    --surface-3: #2C2433;
+    --border: #322A39;
+    --border-strong: #403649;
+    --text: #F2ECF6;
+    --text-muted: #AEA3B8;
+    --text-subtle: #7E7388;
+    --ok: #4ED18A;
+    --ok-bg: #15351F;
+    --ok-ink: #8FE6B4;
+    --warn: #F0AC46;
+    --warn-bg: #3A2A10;
+    --warn-ink: #F5C983;
+    --danger: #F2717F;
+    --danger-bg: #3A1C20;
+    --danger-ink: #FFB3BC;
+    --ai-50: #1E2140;
+    --ai-600: #8E97FF;
+    --sh-1: 0 1px 2px rgba(0, 0, 0, .4);
+    --sh-2: 0 2px 10px rgba(0, 0, 0, .45);
+    --sh-3: 0 12px 34px rgba(0, 0, 0, .5);
+    --ring: 0 0 0 3px rgba(198, 143, 190, .25);
+  }
+}
+
+.shell *,
+.shell *::before,
+.shell *::after { box-sizing: border-box; }
+.shell button { font-family: inherit; cursor: pointer; }
+.shell :focus-visible { outline: none; box-shadow: var(--ring); border-radius: var(--r-sm); }
+
+/* Amounts, counts and dates line up in columns. Without tabular figures a
+   list of prices is ragged and genuinely harder to compare. */
+.tnum { font-variant-numeric: tabular-nums; }
+
+/* ---- identity bar ------------------------------------------------------
+   Copied from the design's `.identitybar*`. Name, who they are, how to
+   reach them — and the balance, which is the one number an operator wants
+   before they say anything. */
+.identityBar {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  flex-wrap: wrap;
+}
+.identityBody { min-width: 0; flex: 1; }
+.identityTitle {
+  font-size: 15.5px;
+  font-weight: 750;
+  line-height: 1.1;
+  letter-spacing: -.01em;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.identityMeta {
+  font-size: 12px;
+  color: var(--text-muted);
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 2px 0 0;
+}
+.verifiedChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 9px;
+  border-radius: var(--r-pill);
+  background: var(--brand-50);
+  color: var(--brand-600);
+  font-size: 11px;
+  font-weight: 700;
+  flex: none;
+}
+.balanceBlock { text-align: right; flex: none; }
+.balanceLabel {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+  display: block;
+}
+.balanceValue {
+  font-size: 17px;
+  font-weight: 750;
+  letter-spacing: -.01em;
+  display: block;
+}
+.balanceNote { font-size: 11px; color: var(--text-muted); display: block; }
+
+/* ---- next best action band --------------------------------------------
+   Copied from `.nba*`. One recommendation, tone-carried, one action — never
+   a list. Renders only when the server produced one. */
+.nba {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 9px 14px;
+  border-radius: var(--r-md);
+  background: var(--ai-50);
+  flex-wrap: wrap;
+  margin: 12px 16px 0;
+}
+.nbaBrand { background: var(--brand-50); }
+.nbaLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ai-600);
+  flex: none;
+}
+.nbaBrand .nbaLabel { color: var(--brand-600); }
+.nbaText { flex: 1; min-width: 140px; font-size: 12.8px; color: var(--text); }
+.nbaCta {
+  background: var(--ai-600);
+  color: #fff;
+  flex: none;
+  border: 0;
+  border-radius: var(--r-sm);
+  padding: 0 13px;
+  height: 30px;
+  font-size: 12.5px;
+  font-weight: 650;
+}
+.nbaBrand .nbaCta { background: var(--brand-600); }
+
+/* ---- tab row ----------------------------------------------------------
+   Copied from `.recordtabs` / `.recordtab` / `.tabcount`. The count chip is
+   quieter than the label on purpose, and renders ONLY when non-zero — a "0"
+   badge is noise, and its absence says the same thing. */
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  background: var(--surface);
+  margin-top: 12px;
+}
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: none;
+  background: transparent;
+  padding: 10px 14px;
+  font-size: 13.3px;
+  font-weight: 650;
+  white-space: nowrap;
+  color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.activeTab { color: var(--brand-600); border-bottom-color: var(--brand-500); }
+.tabCount {
+  height: 17px;
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  padding: 0 5px;
+  background: var(--surface-3);
+  color: var(--text-subtle);
+  border-radius: var(--r-pill);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- body -------------------------------------------------------------- */
+.body { padding: 14px 16px 28px; display: flex; flex-direction: column; gap: 14px; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--sh-1);
+}
+.cardPad { padding: 16px 18px; }
+
+.sectionHead {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px 18px 10px;
+}
+.sectionHead h2 { margin: 2px 0 0; font-size: 16px; font-weight: 750; letter-spacing: -.014em; }
+.sectionHead p { margin: 0; font-size: 12.5px; color: var(--text-muted); max-width: 34ch; text-align: right; }
+.eyebrow {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+
+/* ---- summary tiles ---- */
+.grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.tile { padding: 15px 16px; }
+.tileValue {
+  display: block;
+  margin-top: 7px;
+  font-size: 19px;
+  font-weight: 750;
+  letter-spacing: -.02em;
+}
+.tileNote { margin: 4px 0 0; font-size: 12.5px; color: var(--text-muted); }
+.tileLink {
+  margin-top: 11px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--brand-600);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+/* ---- record rows ------------------------------------------------------
+   Copied from `.recordrow*`: reference · state · amount · action, with the
+   amount in tabular figures so a column of prices aligns. */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 18px;
+  border-top: 1px solid var(--border);
+}
+.rowBody { flex: 1; min-width: 0; }
+.rowRef {
+  font-size: 13.5px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rowMeta { margin: 3px 0 0; font-size: 12px; color: var(--text-muted); display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.rowAmount { text-align: right; flex: none; font-size: 13.5px; font-weight: 700; }
+.rowActions { display: flex; gap: 8px; align-items: center; flex: none; }
+
+/* State as a chip, coloured semantically — readable at a glance and still
+   readable in monochrome because the word is the label. */
+.state {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--surface-3);
+  color: var(--text-muted);
+}
+.stateOk { background: var(--ok-bg); color: var(--ok-ink); }
+.stateWarn { background: var(--warn-bg); color: var(--warn-ink); }
+.stateDanger { background: var(--danger-bg); color: var(--danger-ink); }
+
+/* ---- buttons ---- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: var(--r-sm);
+  font-size: 12.5px;
+  font-weight: 650;
+  border: 1px solid transparent;
+  background: var(--surface-3);
+  color: var(--text);
+  white-space: nowrap;
+}
+.btn:hover { background: var(--border); }
+.btn:disabled { opacity: .55; cursor: not-allowed; }
+.primaryBtn { background: var(--brand-500); color: #fff; box-shadow: var(--sh-1); border: 0; }
+.primaryBtn:hover { background: var(--brand-600); }
+.primaryBtn:disabled { opacity: .55; cursor: not-allowed; }
+.secondaryBtn {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: var(--r-sm);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+.secondaryBtn:disabled { opacity: .55; cursor: not-allowed; }
+
+/* ---- honest states ----------------------------------------------------
+   "We could not check" and "there is none" are DIFFERENT states and must
+   never look alike. `.empty` is a successful read that found nothing;
+   `.unavailable` is a read that did not answer. The second carries a
+   warning tone precisely so it cannot be mistaken for the first. */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 34px 24px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.emptyTitle { font-size: 14.5px; font-weight: 700; color: var(--text); margin: 0 0 4px; }
+.unavailable {
+  margin: 0 18px 18px;
+  padding: 12px 14px;
+  border-radius: var(--r-sm);
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+  font-size: 12.8px;
+  border-left: 3px solid var(--warn);
+}
+.unavailable strong { display: block; margin-bottom: 3px; }
+
+.loading, .notice { max-width: 620px; margin: 80px auto; padding: 24px; }
+
+/* Freshness — a state the contract computes and the panel used to hide. */
+.freshness {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-subtle);
+}
+.freshnessStale { color: var(--warn-ink); }
+.freshnessUnavailable { color: var(--danger-ink); }
+
+/* ---- send/reply dialogs ---- */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(43, 27, 42, .45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 50;
+}
+.reviewCard {
+  background: var(--surface);
+  border-radius: var(--r-md);
+  max-width: 560px;
+  width: 100%;
+  padding: 22px;
+  box-shadow: var(--sh-3);
+  max-height: 90vh;
+  overflow-y: auto;
+}
+.reviewCard h2 { margin: 4px 0 12px; font-size: 18px; font-weight: 750; letter-spacing: -.016em; }
+.reviewFacts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+.reviewFacts div { background: var(--surface-3); border-radius: var(--r-sm); padding: 8px 10px; }
+.reviewFacts dt { font-size: 10px; color: var(--text-subtle); text-transform: uppercase; letter-spacing: .06em; font-weight: 800; }
+.reviewFacts dd { margin: 3px 0 0; font-weight: 700; font-size: 13px; }
+.reviewActions { display: flex; gap: 10px; margin-top: 14px; }
+.replyLabel { display: block; font-size: 11px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: var(--text-subtle); margin-bottom: 6px; }
+.replyBox {
+  width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  padding: 11px 12px;
+  font: inherit;
+  font-size: 13px;
+  resize: vertical;
+  background: var(--surface-2);
+  color: var(--text);
+  white-space: pre-wrap;
+}
+.effectNote { color: var(--text-muted); font-size: 12.5px; margin: 10px 0 0; }
+.copyHint { color: var(--text-subtle); font-size: 12px; margin: 10px 0 0; }
+.recommendation { margin: 0; }
+.reasoning { color: var(--text-muted); margin: 10px 0 0; font-size: 13px; }
+
+@media (max-width: 700px) {
+  .grid { grid-template-columns: 1fr; }
+  .identityBar { align-items: flex-start; }
+  .balanceBlock { text-align: left; }
+  .sectionHead { flex-direction: column; }
+  .sectionHead p { text-align: left; max-width: none; }
+  .row { align-items: flex-start; flex-direction: column; }
+  .rowActions { width: 100%; justify-content: space-between; }
+  .rowAmount { text-align: left; }
+  .reviewFacts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
