@@ -16,6 +16,12 @@ import type { Customer360Snapshot } from '@/lib/customer-360/contracts';
 
 import { RecommendedActionCard, ReplyReview } from './customer-360-app';
 
+// The S8-W1 badge wording is pinned in lib/customer-360/send-badge.test.ts.
+// It deliberately does NOT live here: this file imports a component that
+// imports a CSS module, and on some platforms that chain fails to LOAD — which
+// makes every assertion in the file silently not run. Copy a human reads must
+// be pinned somewhere that actually executes.
+
 const baseSnapshot = (over: Partial<Customer360Snapshot> = {}): Customer360Snapshot => ({
   verifiedAt: '2026-08-27T12:00:00.000Z',
   freshness: 'fresh',

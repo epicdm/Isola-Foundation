@@ -204,6 +204,35 @@ export async function addMessage(
 }
 
 /**
+ * Read ONE message back from a conversation, by id.
+ *
+ * This is the authoritative readback for a governed send: the only evidence
+ * that what we posted is really there and really customer-visible. It therefore
+ * THROWS on transport failure rather than returning null — "the platform did not
+ * answer" and "the message is not there" are different facts, and collapsing
+ * them would let an unproven send report as a clean failure.
+ *
+ * Returns null only when the conversation genuinely has no message with that id.
+ */
+export async function findMessage(
+  config: ChatwootConfig,
+  chatwootConversationId: number,
+  messageId: number,
+): Promise<Record<string, unknown> | null> {
+  const res = await fetch(
+    `${base(config)}/conversations/${chatwootConversationId}/messages`,
+    { headers: headers(config), signal: AbortSignal.timeout(10000) },
+  )
+  if (!res.ok) {
+    const err = await res.text().catch(() => '')
+    throw new Error(`findMessage failed (${res.status}): ${err}`)
+  }
+  const data = await res.json()
+  const messages: Array<Record<string, unknown>> = data?.payload ?? []
+  return messages.find((m) => Number(m.id) === messageId) ?? null
+}
+
+/**
  * Add an internal (operator-only) private note to a conversation.
  * Fire-and-forget: swallows all errors, never throws (matches source
  * behavior exactly).

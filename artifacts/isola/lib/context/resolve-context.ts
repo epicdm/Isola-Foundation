@@ -166,6 +166,10 @@ const STAFF_ACTIONS = [
   'task.create',
   'activity.schedule',
   'followup.schedule',
+  // S8-W1. Customer-visible, so the executor restricts it to real people
+  // (staff/manager/owner) and excludes service_account, which this list would
+  // otherwise grant it via the shared STAFF_ACTIONS.
+  'document.send',
 ] as const
 const MANAGER_ACTIONS = [...STAFF_ACTIONS, 'lead.create', 'lead.update', 'task.reassign'] as const
 const OWNER_ACTIONS = [...MANAGER_ACTIONS, 'business_field.update', 'approval.override'] as const
