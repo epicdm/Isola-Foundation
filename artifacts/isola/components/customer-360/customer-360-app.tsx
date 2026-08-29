@@ -6,7 +6,13 @@ import {
   parseChatwootContext,
   type ChatwootContextHint,
 } from '@/lib/customer-360/chatwoot-context';
-import type { Customer360Response, Customer360Snapshot } from '@/lib/customer-360/contracts';
+import type {
+  Customer360ObjectDetail,
+  Customer360Response,
+  Customer360Snapshot,
+  Customer360Stage,
+  DetailAvailability,
+} from '@/lib/customer-360/contracts';
 import { sendBadgeText, type SendOutcome } from '@/lib/customer-360/send-badge';
 import styles from './customer-360.module.css';
 
@@ -358,6 +364,173 @@ export function SendDocumentReview({
   </div>;
 }
 
+/**
+ * EVERY TENANT-FACING LABEL IN THIS SURFACE, IN ONE PLACE.
+ *
+ * A tenant's industry rotates terminology — Customers become Patients or
+ * Clients, ticket ids take a CAS or JOB prefix, roles change. That engine is a
+ * SHARED PLATFORM LAYER owned by the Lumen lane
+ * (dec-domain-vertical-engine-is-shared-platform-layer-c360-consumes-2026-08-29);
+ * this cockpit CONSUMES it and must never grow its own vertical logic.
+ *
+ * So there is no industry branching here, and no guessed nouns. These are the
+ * BASE labels. When the shared `useDomain()` contract lands, each becomes
+ * `domain.nav[id] ?? BASE_LABELS[id]` and the entity nouns come from
+ * `entity.Cap` — one edit in one file, not a hunt through JSX.
+ *
+ * The fail-safe is the shared engine's own: an unknown or empty industry
+ * resolves to these generic labels. Never a guessed vertical.
+ *
+ * NOTE: the shared module lives at `src/routes/isola/domain/` in isola-portal,
+ * a different repository from this one, so it cannot be imported directly
+ * today. The `IsolaDomain` type needs to be reachable from both before wiring.
+ */
+const BASE_LABELS = {
+  overview: 'Overview',
+  sales: 'Sales',
+  billing: 'Billing',
+  support: 'Support',
+  deals: 'Deals',
+  tickets: 'Tickets',
+  quotation: 'quotation',
+  order: 'order',
+  invoice: 'invoice',
+} as const;
+
+/** One object opened inside the customer. Null when the customer is the view. */
+type NestedTarget = { kind: 'quotation' | 'order' | 'invoice'; id: number; reference: string };
+
+type NestedPhase =
+  | { kind: 'loading' }
+  | { kind: 'ready'; detail: Customer360ObjectDetail }
+  | { kind: 'message'; text: string };
+
+/**
+ * The stage rail. Every step is derived from a real Odoo field — see
+ * `orderStages` / `invoiceStages` in the projection. A rail with a step nothing
+ * can justify would be decoration wearing the appearance of state.
+ */
+function StageRail({ stages }: { stages: Customer360Stage[] }) {
+  if (!stages.length) return null;
+  return <ol className={styles.stageRail} aria-label="Progress">
+    {stages.map((s) => (
+      <li key={s.key} className={`${styles.stage} ${s.state === 'done' ? styles.stageDone : s.state === 'current' ? styles.stageCurrent : ''}`}>
+        <span className={styles.stageDot} aria-hidden="true">{s.state === 'done' ? '✓' : ''}</span>
+        <span>{s.label}</span>
+      </li>
+    ))}
+  </ol>;
+}
+
+/**
+ * A section that could not be read says so, and says WHICH KIND of could-not.
+ *
+ * Four states, because "nothing to show" has four causes that mean entirely
+ * different things to whoever is reading the screen — and two of them are
+ * actionable by a person: a missing module can be installed, a refused read can
+ * be granted. Collapsing them into "no data" hides both.
+ */
+function SectionState({ availability, empty }: { availability: DetailAvailability; empty: string }) {
+  if (availability === 'available') {
+    return <div className={styles.empty}><p>{empty}</p></div>;
+  }
+  const text =
+    availability === 'not-supported'
+      ? 'This Odoo does not have that feature installed, so there is nothing to read.'
+      : availability === 'not-permitted'
+        ? 'Isola is not permitted to read this in Odoo. That is a permission that can be granted — it is not a missing feature.'
+        : 'Odoo did not answer for this. This is not a statement that there is none.';
+  return <div className={styles.unavailable}>{text}</div>;
+}
+
+function NestedObjectView({ target, phase, onBack, onSend, sent, hint }: {
+  target: NestedTarget;
+  phase: NestedPhase;
+  onBack: () => void;
+  onSend: (item: Customer360Snapshot['documents'][number]) => void;
+  sent: Record<string, SendOutcome>;
+  hint: ChatwootContextHint;
+}) {
+  const [sub, setSub] = useState<'overview' | 'lines' | 'payments'>('overview');
+  const isInvoice = target.kind === 'invoice';
+
+  return <section className={styles.card}>
+    {/* Breadcrumb: you never left the customer — this opened inside it. */}
+    <div className={styles.breadcrumb}>
+      <button type="button" className={styles.crumbLink} onClick={onBack}>Customer</button>
+      <span aria-hidden="true">›</span>
+      <span className={styles.crumbCurrent}>{target.reference}</span>
+    </div>
+
+    {phase.kind === 'loading' && <div className={styles.empty}><p>Reading {target.reference} from Odoo…</p></div>}
+    {phase.kind === 'message' && <div className={styles.unavailable}>{phase.text}</div>}
+
+    {phase.kind === 'ready' && <>
+      <div className={styles.objectHead}>
+        <div className={styles.identityBody}>
+          <h2 className={styles.identityTitle}>{phase.detail.reference}</h2>
+          <p className={styles.identityMeta}>
+            <span>{phase.detail.kind}</span>
+            {phase.detail.dueDate && <><span>·</span><span>due {phase.detail.dueDate}</span></>}
+          </p>
+        </div>
+        <span className={`${styles.rowAmount} ${styles.tnum}`}>
+          {formatMoney(phase.detail.total, phase.detail.currency)}
+        </span>
+        {phase.detail.odooLink
+          ? <a className={styles.secondaryBtn} href={phase.detail.odooLink} target="_blank" rel="noopener noreferrer">Open in Odoo</a>
+          : <button type="button" className={styles.secondaryBtn} disabled title="No verified deep link for this record">Open in Odoo</button>}
+      </div>
+
+      <StageRail stages={phase.detail.stages} />
+
+      <nav className={styles.subTabs} aria-label={`${phase.detail.reference} sections`}>
+        {([['overview', 'Overview'], ['lines', 'Lines'], ...(isInvoice ? [['payments', 'Payments'] as const] : [])] as const).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            className={`${styles.subTab} ${sub === id ? styles.subTabOn : ''}`}
+            aria-current={sub === id ? 'true' : undefined}
+            onClick={() => setSub(id)}
+          >{label}</button>
+        ))}
+      </nav>
+
+      {sub === 'overview' && <dl className={styles.reviewFacts}>
+        <div><dt>State</dt><dd>{phase.detail.state ?? 'unavailable'}</dd></div>
+        {isInvoice && <div><dt>Payment</dt><dd>{phase.detail.paymentState ?? 'unavailable'}</dd></div>}
+        <div><dt>Dated</dt><dd>{phase.detail.date ?? '—'}</dd></div>
+        <div><dt>Total</dt><dd className={styles.tnum}>{formatMoney(phase.detail.total, phase.detail.currency)}</dd></div>
+      </dl>}
+
+      {sub === 'lines' && (phase.detail.lines.length
+        ? phase.detail.lines.map((l: Customer360ObjectDetail["lines"][number]) => <article className={styles.row} key={l.id}>
+            <div className={styles.rowBody}>
+              <div className={styles.rowRef}>{l.label}</div>
+              <p className={styles.rowMeta}>
+                <span className={styles.tnum}>{l.quantity ?? '—'}</span>
+                <span>×</span>
+                <span className={styles.tnum}>{formatMoney(l.unitPrice, phase.detail.currency)}</span>
+              </p>
+            </div>
+            {/* Odoo's own subtotal, never qty × price recomputed here. */}
+            <span className={`${styles.rowAmount} ${styles.tnum}`}>{formatMoney(l.subtotal, phase.detail.currency)}</span>
+          </article>)
+        : <SectionState availability={phase.detail.linesAvailability} empty="Odoo answered, and this record has no lines." />)}
+
+      {sub === 'payments' && (phase.detail.payments.length
+        ? phase.detail.payments.map((p: Customer360ObjectDetail["payments"][number]) => <article className={styles.row} key={p.id}>
+            <div className={styles.rowBody}>
+              <div className={styles.rowRef}>{p.reference ?? 'Payment'}</div>
+              <p className={styles.rowMeta}><span>{p.date ?? 'No date'}</span></p>
+            </div>
+            <span className={`${styles.rowAmount} ${styles.tnum}`}>{formatMoney(p.amount, p.currency)}</span>
+          </article>)
+        : <SectionState availability={phase.detail.paymentsAvailability} empty="Odoo answered, and no payments are recorded against this invoice." />)}
+    </>}
+  </section>;
+}
+
 export function Customer360App() {
   const [phase, setPhase] = useState<Phase>({ kind: 'waiting' });
   const [tab, setTab] = useState<'overview' | 'sales' | 'billing' | 'support'>('overview');
@@ -365,6 +538,16 @@ export function Customer360App() {
   const [sendTarget, setSendTarget] = useState<Customer360Snapshot['documents'][number] | null>(null);
   /** Keyed by conversation+document, so a sent badge cannot land on a sibling row. */
   const [sent, setSent] = useState<Record<string, SendOutcome>>({});
+  /*
+    NESTED STATE LIVES BESIDE `phase`, NOT BELOW IT.
+    `phase` is the unmount boundary: every Chatwoot appContext re-broadcast calls
+    loadSnapshot, which resets phase to `loading` and unmounts the whole tree
+    under it. Anything held below would be destroyed by a re-broadcast the
+    operator never caused — `tab`, `sendTarget` and `sent` survive only because
+    they are siblings, and this must be one too.
+  */
+  const [nested, setNested] = useState<NestedTarget | null>(null);
+  const [nestedPhase, setNestedPhase] = useState<NestedPhase>({ kind: 'loading' });
 
   useEffect(() => {
     const listener = (event: MessageEvent) => {
@@ -375,6 +558,28 @@ export function Customer360App() {
     window.parent?.postMessage(CHATWOOT_FETCH_INFO_REQUEST, '*');
     return () => window.removeEventListener('message', listener);
   }, []);
+
+  /** Fetch the opened object. Refuses to render a guess on any failure. */
+  useEffect(() => {
+    if (!nested || phase.kind !== 'ready') return;
+    let live = true;
+    setNestedPhase({ kind: 'loading' });
+    fetch('/api/isola-360/objects', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ hint: phase.hint, objectId: nested.id, objectKind: nested.kind }),
+    })
+      .then(async (response) => {
+        const result = await response.json();
+        if (!live) return;
+        if (result?.state === 'ready') setNestedPhase({ kind: 'ready', detail: result.detail });
+        else setNestedPhase({ kind: 'message', text: result?.message ?? 'This record could not be opened.' });
+      })
+      .catch(() => {
+        if (live) setNestedPhase({ kind: 'message', text: 'This record could not be opened, so nothing is shown for it.' });
+      });
+    return () => { live = false; };
+  }, [nested, phase]);
 
   if (phase.kind === 'waiting' || phase.kind === 'loading') {
     return <main className={styles.shell}><div className={styles.loading}>Loading the customer workspace…</div></main>;
@@ -468,7 +673,9 @@ export function Customer360App() {
           type="button"
           className={`${styles.tab} ${tab === id ? styles.activeTab : ''}`}
           aria-current={tab === id ? 'page' : undefined}
-          onClick={() => setTab(id)}
+          // Switching tab returns to the customer level. An object opened under
+          // Billing must not still be showing when the operator moves to Sales.
+          onClick={() => { setNested(null); setTab(id); }}
         >
           {label}
           {counts[id] !== undefined && <span className={styles.tabCount}>{counts[id]}</span>}
@@ -477,7 +684,21 @@ export function Customer360App() {
     </nav>
 
     <div className={styles.body}>
-      {tab === 'overview' && <section className={styles.grid}>
+      {/*
+        The nested object REPLACES the tab body, not the page. The identity bar,
+        the tab row and the dialogs all stay mounted above it — the customer is
+        still the container; an order or invoice simply opened inside it.
+      */}
+      {nested && <NestedObjectView
+        target={nested}
+        phase={nestedPhase}
+        onBack={() => setNested(null)}
+        onSend={setSendTarget}
+        sent={sent}
+        hint={phase.hint}
+      />}
+
+      {!nested && tab === 'overview' && <section className={styles.grid}>
         <article className={`${styles.card} ${styles.tile}`}>
           <span className={styles.eyebrow}>Sales</span>
           <strong className={`${styles.tileValue} ${styles.tnum}`}>{salesDocs.length}</strong>
@@ -504,19 +725,19 @@ export function Customer360App() {
         </article>
       </section>}
 
-      {tab === 'sales' && <DocumentList
+      {!nested && tab === 'sales' && <DocumentList
         title="Quotations and orders"
         note="Review the source record before sending anything."
         empty="Odoo answered, and this customer has no quotations or orders."
-        items={salesDocs} hint={phase.hint} sent={sent} onSend={setSendTarget} />}
+        items={salesDocs} hint={phase.hint} sent={sent} onSend={setSendTarget} onOpen={setNested} />}
 
-      {tab === 'billing' && <DocumentList
+      {!nested && tab === 'billing' && <DocumentList
         title="Invoices"
         note="Only a posted invoice can be sent to a customer."
         empty="Odoo answered, and this customer has no invoices."
-        items={invoiceDocs} hint={phase.hint} sent={sent} onSend={setSendTarget} />}
+        items={invoiceDocs} hint={phase.hint} sent={sent} onSend={setSendTarget} onOpen={setNested} />}
 
-      {tab === 'support' && <section className={styles.card}>
+      {!nested && tab === 'support' && <section className={styles.card}>
         <div className={styles.sectionHead}>
           <div><span className={styles.eyebrow}>Close the loop</span><h2>Open customer work</h2></div>
           <p>Review before creating a duplicate.</p>
@@ -604,7 +825,7 @@ function stateChip(item: Customer360Snapshot['documents'][number]): { label: str
   return { label: state, tone: styles.state };
 }
 
-function DocumentList({ title, note, empty, items, hint, sent, onSend }: {
+function DocumentList({ title, note, empty, items, hint, sent, onSend, onOpen }: {
   title: string;
   note: string;
   empty: string;
@@ -612,6 +833,7 @@ function DocumentList({ title, note, empty, items, hint, sent, onSend }: {
   hint: ChatwootContextHint;
   sent: Record<string, SendOutcome>;
   onSend: (item: Customer360Snapshot['documents'][number]) => void;
+  onOpen?: (target: NestedTarget) => void;
 }) {
   return <section className={styles.card}>
     <div className={styles.sectionHead}>
@@ -624,7 +846,13 @@ function DocumentList({ title, note, empty, items, hint, sent, onSend }: {
       const chip = stateChip(item);
       return <article className={styles.row} key={`${item.kind}-${item.id}`}>
         <div className={styles.rowBody}>
-          <div className={styles.rowRef}>{item.reference}</div>
+          {/* The reference opens the object INSIDE the customer. Not a link —
+              nothing navigates; the workspace becomes this object's workspace. */}
+          {onOpen
+            ? <button type="button" className={styles.rowOpen} onClick={() => onOpen({ kind: item.kind, id: item.id, reference: item.reference })}>
+                {item.reference}
+              </button>
+            : <div className={styles.rowRef}>{item.reference}</div>}
           <p className={styles.rowMeta}>
             <span className={chip.tone}>{chip.label}</span>
             <span>{item.kind}</span>

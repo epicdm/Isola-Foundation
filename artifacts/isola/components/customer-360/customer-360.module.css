@@ -395,6 +395,105 @@
 }
 .secondaryBtn:disabled { opacity: .55; cursor: not-allowed; }
 
+/* ---- the nested object workspace --------------------------------------
+   An object opened INSIDE the customer. The breadcrumb is the whole point:
+   the operator has not navigated away, so the way back must be visible and
+   the customer must still be named. */
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 11px 18px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border-radius: var(--r-md) var(--r-md) 0 0;
+}
+.crumbLink {
+  border: none;
+  background: transparent;
+  color: var(--brand-600);
+  font: inherit;
+  font-weight: 700;
+  padding: 0;
+}
+.crumbCurrent { font-weight: 700; color: var(--text); }
+
+.objectHead {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  flex-wrap: wrap;
+}
+
+/* Stage rail. Every step is derived from a real Odoo field — a rail with a
+   step nothing can justify would be decoration wearing the look of state. */
+.stageRail {
+  display: flex;
+  align-items: center;
+  list-style: none;
+  margin: 0;
+  padding: 0 18px 14px;
+  overflow-x: auto;
+}
+.stage {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-subtle);
+}
+.stage + .stage { margin-left: 7px; }
+.stage + .stage::before {
+  content: "";
+  width: 18px;
+  height: 2px;
+  background: var(--border);
+  margin-right: 7px;
+  flex: none;
+}
+.stageDot {
+  width: 18px;
+  height: 18px;
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  flex: none;
+}
+.stageDone { color: var(--brand-600); }
+.stageDone .stageDot { background: var(--brand-500); }
+.stageDone + .stage::before { background: var(--brand-500); }
+.stageCurrent { color: var(--brand-600); font-weight: 700; }
+.stageCurrent .stageDot { background: var(--brand-500); }
+
+.subTabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+.subTab {
+  border: none;
+  background: transparent;
+  padding: 9px 12px;
+  font-size: 12.8px;
+  font-weight: 650;
+  color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  white-space: nowrap;
+}
+.subTabOn { color: var(--brand-600); border-bottom-color: var(--brand-500); }
+
 /* ---- honest states ----------------------------------------------------
    "We could not check" and "there is none" are DIFFERENT states and must
    never look alike. `.empty` is a successful read that found nothing;
@@ -495,3 +594,21 @@
   .rowAmount { text-align: left; }
   .reviewFacts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* A record reference that opens the object inside the customer workspace.
+   Styled as the row's title, not as a link: nothing navigates away. */
+.rowOpen {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--brand-600);
+  text-align: left;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rowOpen:hover { text-decoration: underline; }
