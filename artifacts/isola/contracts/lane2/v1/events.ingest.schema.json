@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://isola.epic.dm/contracts/lane2/v1/events.ingest.schema.json",
+  "title": "lane2.events.ingest@1",
+  "description": "Lane 2 REPORTS to Foundation. One way. Foundation projects these into its activity feed and never replies, retries, or steers a conversation from this endpoint. Deduplication on Foundation's side protects Foundation's read model only; transport dedup remains Lane 2's.",
+  "type": "object",
+  "required": [
+    "eventId",
+    "version",
+    "sourceSystem",
+    "eventType",
+    "occurredAt",
+    "companyId",
+    "dedupeKey"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "eventId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "const": "lane2.events.ingest@1"
+    },
+    "sourceSystem": {
+      "type": "string",
+      "description": "Authenticated before the body is parsed."
+    },
+    "eventType": {
+      "enum": [
+        "channel.health",
+        "agent.health",
+        "message.inbound.customer",
+        "message.internal.user",
+        "agent.response",
+        "conversation.created",
+        "conversation.updated",
+        "ownership.ai",
+        "ownership.human_takeover",
+        "ownership.human_reply",
+        "ownership.handback",
+        "delivery.success",
+        "delivery.failure",
+        "provisioning.channel.result",
+        "provisioning.agent.result"
+      ]
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When it happened in the source system. Foundation folds state by THIS, not by arrival, so out-of-order delivery is safe."
+    },
+    "receivedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "companyId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "channelBindingId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "agentRef": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Provider-safe reference. Never a credential."
+    },
+    "conversationRef": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "relatedObjects": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "actorClass": {
+      "enum": [
+        "customer",
+        "staff",
+        "agent",
+        "system"
+      ]
+    },
+    "payload": {
+      "type": "object",
+      "description": "Sanitized. A credential-shaped value anywhere in here causes the WHOLE event to be refused; Foundation will not redact and accept."
+    },
+    "correlationId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "dedupeKey": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

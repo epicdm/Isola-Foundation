@@ -1,0 +1,28 @@
+# codex configuration for the EPIC Staff Operations Coordinator.
+#
+# Lives on the Paperclip durable volume and is selected via CODEX_HOME so it
+# survives a container redeploy.
+#
+# The provider is deliberately NOT called "ollama": codex 0.130.0 reserves that ID
+# for its built-in localhost provider and refuses to override it. Ollama runs on
+# deepseek (66.118.37.12), not here, so we declare a custom provider instead.
+#
+# wire_api MUST be "responses": codex 0.130.0 dropped support for "chat" entirely
+# (it errors at config load, pointing at openai/codex#7782). Verified 2026-08-14 that
+# Ollama 0.32.7 on deepseek serves POST /v1/responses with a correct Responses object,
+# so "responses" is not a compromise here — it is simply the supported wire.
+
+model = "qwen2.5:3b-instruct-q4_K_M"
+model_provider = "epic_ollama"
+
+# The model renders prose from a table it is handed. It never computes.
+# Keep it short and cheap; a long context is not needed and costs wall-clock
+# on a shared CPU host.
+model_max_output_tokens = 1200
+
+[model_providers.epic_ollama]
+name = "EPIC Ollama (deepseek, internal)"
+base_url = "http://66.118.37.12:11434/v1"
+wire_api = "responses"
+# Ollama is unauthenticated and reachable only from allowlisted internal hosts
+# (deepseek ufw). No key is sent; none exists.

@@ -9,6 +9,10 @@ import { getActivitySummary, getConversationOverview, getHandoffState } from '@/
  * Real activity and reporting for the session's tenant. Requires manager-level
  * access; the audit trail within it is owner-only and is not queried at all for
  * a manager.
+ *
+ * This is the workspace/tenant SUMMARY only. The authoritative normalized,
+ * filtered and paginated activity feed is `/api/v1/activity` — a different
+ * contract, and the one to build against for a Recent Work surface.
  */
 export const revalidate = 0;
 

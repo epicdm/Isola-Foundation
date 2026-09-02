@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://isola.epic.dm/contracts/lane2/v1/health.schema.json",
+  "title": "lane2.health.channel|agent@1",
+  "description": "Delivered as an events.ingest event of type channel.health or agent.health. An unrecognised status reads as `unknown` in Foundation, never as healthy.",
+  "type": "object",
+  "required": [
+    "status"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "enum": [
+        "healthy",
+        "degraded",
+        "failed"
+      ]
+    },
+    "detail": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "lastVerifiedAt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    }
+  }
+}

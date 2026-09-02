@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NextRequest } from 'next/server';
 
-const { prismaMock, surfaceHandoffMock, auditMock, resolveEscalationRefMock } = vi.hoisted(() => ({
+const {
+  prismaMock, surfaceHandoffMock, auditMock, resolveEscalationRefMock,
+  requestHumanOwnershipMock, confirmHumanOwnershipMock,
+} = vi.hoisted(() => ({
   prismaMock: {
     conversation: {
       findUnique: vi.fn(),
@@ -19,12 +22,22 @@ const { prismaMock, surfaceHandoffMock, auditMock, resolveEscalationRefMock } = 
   surfaceHandoffMock: vi.fn(),
   auditMock: vi.fn(),
   resolveEscalationRefMock: vi.fn(),
+  requestHumanOwnershipMock: vi.fn(),
+  confirmHumanOwnershipMock: vi.fn(),
 }));
 
 vi.mock('@/lib/prisma', () => ({ prisma: prismaMock }));
 vi.mock('@/lib/chatwoot-handoff', () => ({ surfaceHandoff: surfaceHandoffMock }));
 vi.mock('@/lib/audit', () => ({ audit: auditMock }));
 vi.mock('@/lib/escalation-ref', () => ({ resolveEscalationRef: resolveEscalationRefMock }));
+// Commit 2: the silence gate is an ownership TRANSITION, not a boolean write.
+// The engine's own exactly-once guarantee is proven against a real unique
+// constraint in lib/ownership/transitions.test.ts; here we assert what the
+// ROUTE does with the claim result.
+vi.mock('@/lib/ownership/transitions', () => ({
+  requestHumanOwnership: requestHumanOwnershipMock,
+  confirmHumanOwnership: confirmHumanOwnershipMock,
+}));
 
 import { POST } from './route';
 
@@ -93,11 +106,25 @@ beforeEach(() => {
   prismaMock.chatwootBinding.findUnique.mockResolvedValue(bindingRow());
   prismaMock.conversation.findUnique.mockResolvedValue(conversationRow());
   prismaMock.conversation.update.mockResolvedValue({});
+  // surfaceHandoff now REPORTS what it achieved (it used to return void and
+  // swallow its failures). Default: the surface landed.
+  surfaceHandoffMock.mockResolvedValue({
+    surfaced: true, alreadySurfaced: false,
+    notePosted: true, labelApplied: true, statusOpened: true,
+  });
   // Per-agent ClawithBinding lookup — the "current" clawith_agent_id for
   // bindingRow().agent_id. Tests that want the tenant-level fallback path
   // clear this and set findFirst instead.
   prismaMock.clawithBinding.findUnique.mockResolvedValue({ clawith_agent_id: CLAWITH_AGENT_ID });
   prismaMock.clawithBinding.findFirst.mockResolvedValue(null);
+  requestHumanOwnershipMock.mockResolvedValue({
+    ok: true, status: 'applied', state: 'HUMAN_REQUESTED', episode: 1,
+    operationId: 'corr-1', transitionId: 'tr-1',
+  });
+  confirmHumanOwnershipMock.mockResolvedValue({
+    ok: true, status: 'applied', state: 'HUMAN_OWNED', episode: 1,
+    operationId: 'corr-1:assigned', transitionId: 'tr-2',
+  });
 });
 
 describe('POST /api/customer/escalate — auth', () => {
@@ -315,7 +342,7 @@ describe('POST /api/customer/escalate — ownership resolution (server-side only
 });
 
 describe('POST /api/customer/escalate — successful escalation', () => {
-  it('sets human_handling=true, surfaces into Chatwoot, audits, and returns status=escalated with no ownership payload', async () => {
+  it('claims the ownership transition, surfaces into Chatwoot, audits, and returns status=escalated with no ownership payload', async () => {
     const res = await POST(req({ conversation_ref: REF, summary: 'Wants to cancel service.' }));
     const bodyJson = await res.json();
 
@@ -330,20 +357,38 @@ describe('POST /api/customer/escalate — successful escalation', () => {
     expect(bodyJson.tenant_id).toBeUndefined();
     expect(JSON.stringify(bodyJson)).not.toContain(REF);
 
-    expect(prismaMock.conversation.update).toHaveBeenCalledWith({
-      where: { id: 'conv-1' },
-      data:  { human_handling: true },
-    });
+    // The silence gate is the ownership transition, claimed on the scoped
+    // ref's own correlation id — the value that is stable across a replay.
+    expect(requestHumanOwnershipMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantId:       'tenant-1',
+        conversationId: 'conv-1',
+        operationId:    'corr-1',
+        reason:         'clawith_escalate_to_human',
+      }),
+    );
+    // The legacy boolean is no longer written directly by this route.
+    expect(prismaMock.conversation.update).not.toHaveBeenCalled();
 
     expect(surfaceHandoffMock).toHaveBeenCalledTimes(1);
     const note = surfaceHandoffMock.mock.calls[0][4];
     expect(note).toContain('Wants to cancel service.');
 
+    // Assignment + context publication recorded as HUMAN_OWNED.
+    expect(confirmHumanOwnershipMock).toHaveBeenCalledWith(
+      expect.objectContaining({ operationId: 'corr-1:assigned', episode: 1 }),
+    );
+
     expect(auditMock).toHaveBeenCalledWith(
       expect.objectContaining({
         action:   'escalate_to_human.invoked',
         entityId: 'conv-1',
-        meta:     expect.objectContaining({ already_escalated: false, has_summary: true }),
+        meta:     expect.objectContaining({
+          already_escalated: false,
+          has_summary:       true,
+          ownership_state:   'HUMAN_REQUESTED',
+          claim:             'applied',
+        }),
       }),
     );
   });
@@ -356,35 +401,167 @@ describe('POST /api/customer/escalate — successful escalation', () => {
 });
 
 describe('POST /api/customer/escalate — idempotency (repeat calls)', () => {
-  it('a repeat call with the same still-valid ref still succeeds, still calls surfaceHandoff (which single-fires itself), and reports already_escalated', async () => {
-    prismaMock.conversation.findUnique.mockResolvedValue(conversationRow({ human_handling: true }));
+  it('DUPLICATE ESCALATION APPLIES ONCE — the replay surfaces nothing and reports already_escalated', async () => {
+    // The engine reports `duplicate` for a replayed operation id. The route's
+    // contract is that EVERY side effect is gated on the winning claim, so a
+    // replay produces no assignment, no private note and no handoff message.
+    requestHumanOwnershipMock.mockResolvedValue({
+      ok: true, status: 'duplicate', state: 'HUMAN_REQUESTED', episode: 1,
+      operationId: 'corr-1', transitionId: 'tr-1',
+    });
 
     const res = await POST(req({ conversation_ref: REF }));
     const bodyJson = await res.json();
 
     expect(res.status).toBe(200);
     expect(bodyJson.status).toBe('already_escalated');
-    // human_handling update is still issued (idempotent no-op at the DB layer)
-    expect(prismaMock.conversation.update).toHaveBeenCalledWith({
-      where: { id: 'conv-1' },
-      data:  { human_handling: true },
-    });
-    expect(surfaceHandoffMock).toHaveBeenCalledTimes(1);
+    expect(surfaceHandoffMock).not.toHaveBeenCalled();
+    expect(confirmHumanOwnershipMock).not.toHaveBeenCalled();
     expect(auditMock).toHaveBeenCalledWith(
-      expect.objectContaining({ meta: expect.objectContaining({ already_escalated: true }) }),
+      expect.objectContaining({ meta: expect.objectContaining({ already_escalated: true, claim: 'duplicate' }) }),
     );
   });
 
-  it('a second call with the exact same ref produces the exact same result rather than duplicate state changes', async () => {
+  it('two calls with the same ref produce ONE assignment and ONE private note', async () => {
     const first = await POST(req({ conversation_ref: REF }));
     const firstJson = await first.json();
 
-    prismaMock.conversation.findUnique.mockResolvedValue(conversationRow({ human_handling: true }));
+    requestHumanOwnershipMock.mockResolvedValue({
+      ok: true, status: 'duplicate', state: 'HUMAN_REQUESTED', episode: 1,
+      operationId: 'corr-1', transitionId: 'tr-1',
+    });
     const second = await POST(req({ conversation_ref: REF }));
     const secondJson = await second.json();
 
     expect(firstJson.status).toBe('escalated');
     expect(secondJson.status).toBe('already_escalated');
-    expect(surfaceHandoffMock).toHaveBeenCalledTimes(2); // single-fire behavior lives in surfaceHandoff() itself
+    // Exactly one of the two calls performed the Chatwoot side effects —
+    // this is now a property of the claim, not of surfaceHandoff()'s own
+    // best-effort label/note heuristics.
+    expect(surfaceHandoffMock).toHaveBeenCalledTimes(1);
+    expect(confirmHumanOwnershipMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('an already-human conversation is reported as already_escalated without re-surfacing', async () => {
+    requestHumanOwnershipMock.mockResolvedValue({
+      ok: false, status: 'illegal_transition', state: 'HUMAN_OWNED', episode: 1,
+      operationId: 'corr-1', transitionId: null,
+    });
+    const res = await POST(req({ conversation_ref: REF }));
+    expect((await res.json()).status).toBe('already_escalated');
+    expect(surfaceHandoffMock).not.toHaveBeenCalled();
+  });
+
+  it('fails closed with 409 when the conversation cannot be resolved for ownership', async () => {
+    requestHumanOwnershipMock.mockResolvedValue({
+      ok: false, status: 'unknown_conversation', state: 'HUMAN_OWNED', episode: 0,
+      operationId: 'corr-1', transitionId: null,
+    });
+    const res = await POST(req({ conversation_ref: REF }));
+    expect(res.status).toBe(409);
+    expect(surfaceHandoffMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * E3, REWRITTEN — route half.
+ *
+ * The original E3 assumed Foundation performs the Chatwoot assignment and can
+ * therefore fail at it. It does not: Foundation issues no assignment call, and
+ * the team assignment seen in production is Chatwoot automation rule #3. So E3
+ * passed whether or not anything worked.
+ *
+ * The real failure mode is: NOTHING REACHES CHATWOOT AND FOUNDATION RECORDS
+ * HUMAN_OWNED ANYWAY. That is what these assert.
+ */
+describe('E3 rewritten — ownership is not advanced when the handoff never surfaced', () => {
+  function surfaceFailed() {
+    surfaceHandoffMock.mockResolvedValue({
+      surfaced: false, alreadySurfaced: false,
+      notePosted: false, labelApplied: false, statusOpened: false,
+    });
+  }
+
+  it('does NOT record HUMAN_OWNED when note, label and reopen all failed', async () => {
+    surfaceFailed();
+    await POST(req({ conversation_ref: REF }));
+
+    expect(surfaceHandoffMock).toHaveBeenCalled();
+    // The assertion the old E3 could never make.
+    expect(confirmHumanOwnershipMock).not.toHaveBeenCalled();
+  });
+
+  it('records escalate_to_human.surface_failed with which parts failed', async () => {
+    surfaceFailed();
+    await POST(req({ conversation_ref: REF }));
+
+    const failures = auditMock.mock.calls
+      .map((c: any[]) => c[0])
+      .filter((a: any) => a?.action === 'escalate_to_human.surface_failed');
+    expect(failures).toHaveLength(1);
+    expect(failures[0].meta).toMatchObject({
+      note_posted: false, label_applied: false, status_opened: false,
+    });
+  });
+
+  it('leaves ownership at HUMAN_REQUESTED — the AI stays silent, but nothing claims a person is on it', async () => {
+    surfaceFailed();
+    await POST(req({ conversation_ref: REF }));
+
+    // requestHumanOwnership ran (HUMAN_REQUESTED); confirm did not.
+    expect(requestHumanOwnershipMock).toHaveBeenCalled();
+    expect(confirmHumanOwnershipMock).not.toHaveBeenCalled();
+  });
+
+  it('still records HUMAN_OWNED on the normal path, with a reason that does not claim an assignment', async () => {
+    await POST(req({ conversation_ref: REF }));
+
+    expect(confirmHumanOwnershipMock).toHaveBeenCalledTimes(1);
+    const arg = confirmHumanOwnershipMock.mock.calls[0][0];
+    expect(arg.reason).toBe('chatwoot_context_published');
+    // Foundation never assigns; the reason must not say it did.
+    expect(arg.reason).not.toContain('assignment');
+  });
+
+  it('RECOVERS a conversation stranded at HUMAN_REQUESTED by a previously failed surface', async () => {
+    // First escalation opened the episode but its surfacing failed, so the
+    // conversation sits at HUMAN_REQUESTED. requestHumanOwnership cannot
+    // re-enter (allowedFrom is AI_OWNED/AI_RESUMED), so it refuses — and
+    // without the recovery path this call would skip surfacing forever,
+    // leaving the conversation silent, unsurfaced and unreachable.
+    requestHumanOwnershipMock.mockResolvedValue({
+      ok: false, status: 'invalid_source_state', state: 'HUMAN_REQUESTED', episode: 1,
+      operationId: 'corr-1', transitionId: null,
+    });
+
+    await POST(req({ conversation_ref: REF }));
+
+    expect(surfaceHandoffMock).toHaveBeenCalled();
+    // Surfacing succeeds this time (default mock) → ownership finally advances.
+    expect(confirmHumanOwnershipMock).toHaveBeenCalledTimes(1);
+    expect(confirmHumanOwnershipMock.mock.calls[0][0].episode).toBe(1);
+  });
+
+  it('does NOT re-surface a conversation already confirmed HUMAN_OWNED', async () => {
+    requestHumanOwnershipMock.mockResolvedValue({
+      ok: false, status: 'invalid_source_state', state: 'HUMAN_OWNED', episode: 1,
+      operationId: 'corr-1', transitionId: null,
+    });
+
+    await POST(req({ conversation_ref: REF }));
+
+    // Already owned by a human — nothing to recover, nothing to re-post.
+    expect(surfaceHandoffMock).not.toHaveBeenCalled();
+    expect(confirmHumanOwnershipMock).not.toHaveBeenCalled();
+  });
+
+  it('records HUMAN_OWNED when a prior handoff was already surfaced', async () => {
+    surfaceHandoffMock.mockResolvedValue({
+      surfaced: true, alreadySurfaced: true,
+      notePosted: false, labelApplied: false, statusOpened: false,
+    });
+    await POST(req({ conversation_ref: REF }));
+
+    expect(confirmHumanOwnershipMock).toHaveBeenCalledTimes(1);
   });
 });

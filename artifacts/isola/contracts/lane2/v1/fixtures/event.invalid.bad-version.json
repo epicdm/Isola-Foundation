@@ -1,0 +1,12 @@
+{
+  "eventId": "evt-007",
+  "version": "lane2.events.ingest@99",
+  "sourceSystem": "lane2",
+  "eventType": "agent.response",
+  "occurredAt": "2026-07-31T12:00:00Z",
+  "companyId": "co-1",
+  "actorClass": "agent",
+  "payload": {},
+  "dedupeKey": "x-4",
+  "_expectedRejection": "unknown_version"
+}

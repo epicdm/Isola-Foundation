@@ -1,0 +1,213 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  approvedLabels,
+  bootWarnings,
+  configuredBindings,
+  DEFAULT_CHATWOOT_BASE_URL,
+  DEFAULT_RUNTIME_BASE_URL,
+  loadConfig,
+} from "../src/config.js";
+import { bindingsJson, makeBinding } from "./harness.js";
+
+/**
+ * A DISABLED feature must expand no capability — egress included.
+ *
+ * `loadConfig` used to derive the Magnus host into the allowlist
+ * unconditionally, so merely LANDING the disabled personal-line read widened
+ * the gateway's permitted outbound destinations anywhere `MAGNUS_URL` was
+ * already set and `EGRESS_ALLOWLIST` was not. That contradicts "inert if
+ * landed".
+ */
+describe("Magnus egress is derived only while the personal-line read is enabled", () => {
+  const MAGNUS = "https://magnus.example.test";
+
+  it("disabled + MAGNUS_URL + no explicit allowlist → Magnus absent", () => {
+    const config = loadConfig({
+      MAGNUS_URL: MAGNUS,
+      GATEWAY_VOICE_READ_ENABLED: "false",
+    });
+    expect(config.voiceReadEnabled).toBe(false);
+    expect(config.egressAllowlist).not.toContain("magnus.example.test");
+    // The pre-existing destinations are untouched.
+    expect(config.egressAllowlist).toContain("isola-chat.saas00.epic.dm");
+    expect(config.egressAllowlist).toContain("isola_isola-runtime");
+  });
+
+  it("is absent when the switch is simply unset, which is the default", () => {
+    const config = loadConfig({ MAGNUS_URL: MAGNUS });
+    expect(config.voiceReadEnabled).toBe(false);
+    expect(config.egressAllowlist).not.toContain("magnus.example.test");
+  });
+
+  it("enabled + MAGNUS_URL → Magnus present", () => {
+    const config = loadConfig({
+      MAGNUS_URL: MAGNUS,
+      GATEWAY_VOICE_READ_ENABLED: "true",
+    });
+    expect(config.voiceReadEnabled).toBe(true);
+    expect(config.egressAllowlist).toContain("magnus.example.test");
+  });
+
+  it("an explicit allowlist stays authoritative in both states", () => {
+    const explicit = "only.example.test";
+
+    const disabled = loadConfig({
+      MAGNUS_URL: MAGNUS,
+      EGRESS_ALLOWLIST: explicit,
+      GATEWAY_VOICE_READ_ENABLED: "false",
+    });
+    expect(disabled.egressAllowlist).toEqual([explicit]);
+
+    const enabled = loadConfig({
+      MAGNUS_URL: MAGNUS,
+      EGRESS_ALLOWLIST: explicit,
+      GATEWAY_VOICE_READ_ENABLED: "true",
+    });
+    // An explicit allowlist is never widened by the feature either: the
+    // operator's list is the whole list.
+    expect(enabled.egressAllowlist).toEqual([explicit]);
+    expect(enabled.egressAllowlist).not.toContain("magnus.example.test");
+  });
+
+  it("honours the legacy MAGNUS_BASE_URL name the same way", () => {
+    expect(
+      loadConfig({ MAGNUS_BASE_URL: MAGNUS, GATEWAY_VOICE_READ_ENABLED: "false" })
+        .egressAllowlist,
+    ).not.toContain("magnus.example.test");
+    expect(
+      loadConfig({ MAGNUS_BASE_URL: MAGNUS, GATEWAY_VOICE_READ_ENABLED: "true" })
+        .egressAllowlist,
+    ).toContain("magnus.example.test");
+  });
+
+  it("the kill switch that gates egress is the one the config reports", () => {
+    // Guards against the two decisions drifting apart: the derivation and the
+    // returned field must come from the same parse.
+    for (const raw of ["true", "1", "on", "yes", "enabled"]) {
+      const config = loadConfig({ MAGNUS_URL: MAGNUS, GATEWAY_VOICE_READ_ENABLED: raw });
+      expect(config.voiceReadEnabled).toBe(true);
+      expect(config.egressAllowlist).toContain("magnus.example.test");
+    }
+    for (const raw of ["false", "0", "off", "no", "disabled", "nonsense", ""]) {
+      const config = loadConfig({ MAGNUS_URL: MAGNUS, GATEWAY_VOICE_READ_ENABLED: raw });
+      expect(config.voiceReadEnabled).toBe(false);
+      expect(config.egressAllowlist).not.toContain("magnus.example.test");
+    }
+  });
+});
+
+describe("loadConfig defaults", () => {
+  it("uses the verified Chatwoot host and the private runtime host", () => {
+    const config = loadConfig({});
+    expect(config.chatwootBaseUrl).toBe(DEFAULT_CHATWOOT_BASE_URL);
+    expect(config.runtimeBaseUrl).toBe(DEFAULT_RUNTIME_BASE_URL);
+    expect(config.runtimeInvokePath).toBe("/v1/invoke");
+    expect(config.port).toBe(3000);
+    expect(config.replayWindowSec).toBe(300);
+    expect(config.maxRequestBytes).toBe(1024 * 1024);
+    expect(config.applyLabels).toBe(true);
+    expect(config.answeredLabel).toBe("isola-ai-answered");
+    expect(config.escalatedLabel).toBe("isola-ai-escalated");
+  });
+
+  it("strips a trailing slash off both base urls", () => {
+    const config = loadConfig({
+      CHATWOOT_BASE_URL: "https://chat.example.test/",
+      RUNTIME_BASE_URL: "http://runtime:3000//",
+    });
+    expect(config.chatwootBaseUrl).toBe("https://chat.example.test");
+    expect(config.runtimeBaseUrl).toBe("http://runtime:3000");
+  });
+
+  it("treats an explicitly empty label as 'do not label'", () => {
+    const config = loadConfig({ GATEWAY_LABEL_ANSWERED: "" });
+    expect(config.answeredLabel).toBeNull();
+    expect(config.escalatedLabel).toBe("isola-ai-escalated");
+  });
+
+  it("ignores a nonsense numeric value rather than taking zero", () => {
+    const config = loadConfig({ PORT: "not-a-port", GATEWAY_REPLAY_WINDOW_SEC: "-5" });
+    expect(config.port).toBe(3000);
+    expect(config.replayWindowSec).toBe(300);
+  });
+});
+
+describe("binding validation is a boot gate", () => {
+  it("reports the errors as data rather than throwing", () => {
+    const config = loadConfig({
+      // An exposure nobody defined. INTERNAL became admissible 2026-08-17, so a
+      // recognised-but-internal binding is no longer the boot-gate example.
+      GATEWAY_BINDINGS_JSON: JSON.stringify([{ ...makeBinding(), exposure: "SEMI-PUBLIC" }]),
+    });
+    expect(config.bindings.ok).toBe(false);
+    expect(configuredBindings(config)).toEqual([]);
+    expect(bootWarnings(config).join(" ")).toMatch(/refuse to start/);
+  });
+
+  it("boots with zero bindings and says so", () => {
+    const config = loadConfig({});
+    expect(config.bindings.ok).toBe(true);
+    expect(bootWarnings(config).join(" ")).toMatch(/no inbox is bound/);
+  });
+
+  it("warns loudly when the durable delivery ledger is not configured", () => {
+    // Replaces the old "responseMode inline is not implemented" warning: the
+    // runtime shipped contract v1, and the open dependency is now the ledger.
+    const config = loadConfig({ GATEWAY_BINDINGS_JSON: bindingsJson([makeBinding()]) });
+    const warnings = bootWarnings(config).join(" ");
+    expect(warnings).toMatch(/GATEWAY_LEDGER_URL is unset/);
+    expect(warnings).toMatch(/refuse to start/);
+  });
+
+  it("warns when the ledger lease is not longer than the runtime timeout", () => {
+    // A lease shorter than a legitimate run lets the sweeper steal a healthy
+    // delivery and process it twice.
+    const config = loadConfig({
+      GATEWAY_BINDINGS_JSON: bindingsJson([makeBinding()]),
+      GATEWAY_LEDGER_URL: "postgres://ledger.invalid/db",
+      GATEWAY_LEDGER_LEASE_MS: "1000",
+      GATEWAY_RUNTIME_TIMEOUT_MS: "90000",
+    });
+    expect(bootWarnings(config).join(" ")).toMatch(
+      /GATEWAY_LEDGER_LEASE_MS is not longer than the runtime timeout/,
+    );
+  });
+
+  it("warns when every binding is retired", () => {
+    const config = loadConfig({
+      GATEWAY_BINDINGS_JSON: bindingsJson([makeBinding({ status: "retired" })]),
+    });
+    expect(bootWarnings(config).join(" ")).toMatch(/Every configured binding is retired/);
+  });
+
+  it("warns when the runtime bearer or the admin token is missing", () => {
+    const warnings = bootWarnings(loadConfig({})).join(" ");
+    expect(warnings).toMatch(/RUNTIME_SECRET_PUBLIC is unset/);
+    expect(warnings).toMatch(/GATEWAY_ADMIN_TOKEN is unset/);
+  });
+});
+
+describe("approvedLabels", () => {
+  it("is the two configured labels plus any per-binding extras", () => {
+    const config = loadConfig({});
+    expect(approvedLabels(config)).toEqual(["isola-ai-answered", "isola-ai-escalated"]);
+    expect(approvedLabels(config, makeBinding({ labels: ["vip-lane"] }))).toContain("vip-lane");
+  });
+});
+
+describe("the credential this gateway presents decides what it may invoke", () => {
+  it("prefers the neutral RUNTIME_SECRET when both are set", () => {
+    const c = loadConfig({ RUNTIME_SECRET: "neutral", RUNTIME_SECRET_PUBLIC: "legacy" });
+    expect(c.runtimeSecret).toBe("neutral");
+  });
+
+  it("still accepts RUNTIME_SECRET_PUBLIC alone, so the public deployment is unchanged", () => {
+    // The existing public gateway sets only this. It must keep working untouched.
+    expect(loadConfig({ RUNTIME_SECRET_PUBLIC: "legacy" }).runtimeSecret).toBe("legacy");
+  });
+
+  it("is null when neither is set, so every invocation fails closed", () => {
+    expect(loadConfig({}).runtimeSecret).toBeNull();
+  });
+});

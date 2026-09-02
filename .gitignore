@@ -62,3 +62,34 @@ WAVEB-SOULS.json
 
 artifacts/isola/.next/
 artifacts/isola/.next-preview/
+
+# --- repository contamination (added 2026-07-31 after the Replit Agent incident) ---
+# A git bundle is a whole repository inside this one; it does not belong in the
+# tree. evidence/stage1/isola-stage1.bundle is already TRACKED, so this rule
+# does not affect it — gitignore only governs untracked files.
+*.bundle
+# A timestamped copy of the Prisma schema forks the schema next to the
+# canonical file, where a later edit can land on the wrong one. The canonical
+# schema.prisma and everything under prisma/migrations/ are unaffected.
+schema.prisma.backup.*
+
+# --- governed engineering environment (added 2026-08-05, first source-controlled bootstrap) ---
+# TRACKED, deliberately: .claude/settings.json and .claude/hooks/** — the reusable,
+# machine-independent enforcement layer, plus its packaged mirror under
+# tools/claude-plugins/isola-engineering/hooks/.
+#
+# Everything listed below is per-machine runtime state, a local override, or generated
+# evidence. None of it is reproducible across machines and none of it may enter the
+# repository. Rules are per-path rather than a blanket `.claude/` so that adding a new
+# tracked hook never requires a negation rule.
+.claude/state/
+.claude/memo-evidence/
+.claude/settings.local.json
+.claude/worktrees/
+.claude/**/*.log
+# Credential / OAuth material the CLI may write next to project settings.
+.claude/.credentials.json
+.claude/oauth*.json
+# Packaged plugin tarballs are build output; the unpacked mirror is tracked instead
+# so `package-plugin.js --check` has something to diff against on a fresh clone.
+tools/claude-plugins/*.tgz

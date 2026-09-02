@@ -1,0 +1,241 @@
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  THIS FILE IS A REFERENCE COPY. DO NOT DEPLOY IT.                         ║
+# ║                                                                           ║
+# ║  The AUTHORITY is  /opt/isola/isola-gw-stack.yml  on 66.118.37.110.       ║
+# ║  That file is edited in place at each deploy and carries the current      ║
+# ║  image pin; this copy does not track it and never has.                    ║
+# ║                                                                           ║
+# ║  As of 2026-08-17 this copy still pinned `isola-gateway:13ea8c4`, THREE   ║
+# ║  images behind live. Deploying it would have silently rolled back both    ║
+# ║  conversation memory (09a2856) and the handback strand fix (ea947d8) —    ║
+# ║  a rollback that would look like a successful deploy, because the stack   ║
+# ║  would converge cleanly on an older image.                                ║
+# ║                                                                           ║
+# ║  A stale copy in git is not a second copy. It is the thing most likely    ║
+# ║  to be mistaken for one. Read it for SHAPE and rationale; take the image  ║
+# ║  pin, the env and the secret list from the host file only.                ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+#
+# isola-gateway — hand-deployed Swarm stack. NOT EasyPanel-managed, by design.
+#
+#   deploy:  sudo docker stack deploy -c /opt/isola/isola-gw-stack.yml isolagw
+#            (the HOST file — never this one)
+#   service: isolagw_gateway
+#   url:     https://isola-gw2.saas00.epic.dm
+#
+# WHY THIS EXISTS
+# ---------------
+# EasyPanel's updateAppDeploy schema is capAdd, capDrop, command, groups,
+# replicas, sysctls, tiniInit, zeroDowntime. It cannot express a restart policy
+# and cannot express an image pin, so an EasyPanel-managed service cannot be
+# made Gate C compliant and cannot be converted into one later. The only route
+# on this host is a Compose-managed stack, which is this file.
+#
+# It runs BESIDE the EasyPanel service `isola_isola-gateway` on a different
+# hostname. Nothing is torn down to stand this up, and rollback is deleting this
+# stack and changing nothing else. `*.saas00.epic.dm` is a wildcard onto this
+# host, so the new name needed no DNS work.
+#
+# SCOPE: the gateway only. isola-runtime and isola_ai already run and serve the
+# loop; they are reached over `easypanel-isola` and are deliberately NOT
+# rebuilt here.
+#
+# ── IMAGE PROVENANCE — READ THIS BEFORE CALLING IT "PINNED" ──────────────────
+#
+#   image:     isola-gateway:13ea8c4
+#   image id:  sha256:03bf36e5c3c2f2749fd0ee8a4ef06dcda55366b4cd5206d4a11dff3d968d3f6c
+#   built:     /opt/isola-gw-build/13ea8c4, from `git archive` of commit 13ea8c4
+#              on branch m1/ownership-store-host03-2026-08-14
+#   contains:  b5f4d81 (ownership store) + c54338e (ownership gate on the reply
+#              path) + d2e141e (Swarm-secret entrypoint) + 9715b5b (LF fix)
+#              + b24835f (per-binding Chatwoot host) + a9df3d6 (de-contaminate)
+#
+# This is an IMMUTABLE TAG, not a registry digest pin. There is no registry on
+# this host, and a `@sha256:` reference requires a repoDigest, which only a
+# registry can issue. Claiming a digest pin here would be false. What this gives
+# instead is: a tag that names an exact commit and is never reused, plus the
+# image id recorded above so the running artifact can be checked against this
+# file. That is strictly better than the `:latest` the nine EasyPanel build
+# trees run — those have neither a digest nor a source commit — and it is
+# honestly labelled.
+#
+# ghcr.io/paperclipai/paperclip is the one artifact on this estate with a
+# genuine upstream repoDigest. It is not in this stack, so nothing here claims
+# a pin it does not have.
+#
+# ── SECRETS, AND WHAT THIS DOES NOT PROTECT AGAINST ─────────────────────────
+# Four Swarm secrets, delivered as files under /run/secrets and mapped to the
+# environment variables the service reads by the entrypoint shim (see
+# entrypoint.sh — the read happens outside the app so `node:fs` stays out of
+# src/). No credential is in this file, in the image, or in the repository.
+#
+# STATED PLAINLY, because it is a real property and not a solved one: once the
+# entrypoint has run, the four values live in PID 1's ENVIRONMENT for the life
+# of the process. They are readable at /proc/1/environ by anything running as
+# the same user, and they would appear in a core dump.
+#
+# That is inherent, not an oversight. The service reads its configuration from
+# environment variables, and the alternative — teaching src/config.ts to read a
+# file — would put `node:fs` into the module graph of the only publicly exposed
+# Isola component, which a standing source-scan test forbids. Trading that for
+# a packaging preference is the worse deal.
+#
+# The residual exposure is also narrower than it first looks: an attacker who
+# can read /proc/1/environ is already executing code inside this container as
+# the app user, and can equally read /run/secrets directly. So the environment
+# copy does not widen the blast radius of a compromise; it only means the
+# secrets are not protected AFTER one. The hardening below is aimed at the step
+# before that — not getting execution in the first place.
+#
+# There are no child processes to inherit the environment: the service spawns
+# nothing, `node:child_process` appears nowhere in src/, and the entrypoint
+# `exec`s so no shell survives.
+version: "3.8"
+
+services:
+  gateway:
+    image: isola-gateway:13ea8c4
+
+    # Traefik discovery. THIS HOST RUNS providers.docker, NOT providers.swarm
+    # (TRAEFIK_PROVIDERS_DOCKER=true, Traefik 3.6.7), so Traefik reads CONTAINER
+    # labels — these — and would ignore `deploy.labels`, which is what the
+    # Swarm-provider documentation tells you to use. Getting this wrong produces
+    # a service that deploys cleanly and is simply never routed.
+    #
+    # exposedbydefault is false on this host, so traefik.enable=true is required
+    # rather than optional.
+    labels:
+      traefik.enable: "true"
+      # The container sits on two networks; without this Traefik may pick the
+      # wrong address and route to something unreachable.
+      traefik.docker.network: "easypanel"
+      traefik.http.routers.isolagw.rule: "Host(`isola-gw2.saas00.epic.dm`)"
+      traefik.http.routers.isolagw.entrypoints: "https"
+      traefik.http.routers.isolagw.tls: "true"
+      traefik.http.routers.isolagw.tls.certresolver: "letsencrypt"
+      traefik.http.services.isolagw.loadbalancer.server.port: "3000"
+
+    networks:
+      # Traefik's only network. Ingress arrives here.
+      - easypanel
+      # The private side: isola_isola-ledger-db and isola_isola-runtime.
+      - easypanel-isola
+
+    # ── Hardening ────────────────────────────────────────────────────────────
+    # This is the only publicly reachable Isola component and it is already
+    # taking internet scanner traffic (/.env, /.git/HEAD, /wp-login.php within
+    # minutes of going up). None of the below is needed for the service to
+    # work, which is exactly why it should be on: the process binds :3000 as a
+    # non-root user, spawns nothing, and writes nothing.
+    #
+    # This does NOT protect the credentials from someone who already has code
+    # execution in the container — see the note on secrets below. It reduces
+    # the chance of getting there.
+    cap_drop:
+      - ALL
+    # NOTE: `docker stack deploy` IGNORES security_opt and says so on every
+    # deploy ("Ignoring unsupported options: security_opt"). It is kept here as
+    # the declared intent, but no-new-privileges is NOT in effect — do not read
+    # this block as though it were. cap_drop and read_only ARE applied and are
+    # verified on the running service.
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      # Node wants a writable temp dir even though this service never uses one.
+      # Small, noexec, and gone on restart.
+      - /tmp:rw,noexec,nosuid,size=16m
+
+    # Swarm's default stop grace is 10s. The service's own SIGTERM handler
+    # drains in-flight deliveries and force-exits at 20s, so under the default
+    # it would be SIGKILLed BEFORE its own drain could finish — the drain would
+    # look implemented and never actually run. Nothing is lost either way (the
+    # delivery is durably reserved and the sweeper recovers it), but a
+    # completed drain answers the customer now instead of a lease period later.
+    stop_grace_period: 30s
+
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: --disable-proto=throw
+      PORT: "3000"
+
+      CHATWOOT_BASE_URL: https://isola-chat.saas00.epic.dm
+      # The Gate C runtime (stack `isolart`). The EasyPanel service it replaced
+      # is scaled to 0, not deleted — rollback is pointing this back at
+      # http://isola_isola-runtime:3000 and scaling that service to 1.
+      RUNTIME_BASE_URL: http://isolart_runtime:3000
+
+      # Allowlist, not a default-open egress. ADDITIVE ONLY — the existing
+      # entries are never removed. inbox.epic.dm is the PRODUCTION Chatwoot on
+      # deepseek, named by the inbox 46 binding's chatwootBaseUrl. Without it
+      # every reply, note and assignment for that tenant is blocked inside this
+      # process before it reaches the network.
+      EGRESS_ALLOWLIST: isola-chat.saas00.epic.dm,isola_isola-runtime,isolart_runtime,inbox.epic.dm
+
+      GATEWAY_LEDGER_LEASE_MS: "300000"
+      GATEWAY_LEDGER_RECOVERY_INTERVAL_MS: "60000"
+      GATEWAY_LEDGER_RECOVERY_BATCH: "20"
+      # An unreachable ledger must refuse to boot, never degrade to an
+      # in-memory window that forgets an acknowledged delivery.
+      GATEWAY_LEDGER_REQUIRED: "true"
+
+      # Swarm secrets, resolved by the entrypoint. The VALUES are not here.
+      GATEWAY_LEDGER_URL_FILE: /run/secrets/gateway_ledger_url
+      GATEWAY_ADMIN_TOKEN_FILE: /run/secrets/gateway_admin_token
+      RUNTIME_SECRET_PUBLIC_FILE: /run/secrets/gateway_runtime_secret
+      GATEWAY_BINDINGS_JSON_FILE: /run/secrets/gateway_bindings
+
+    secrets:
+      - source: isola_gw_ledger_url_v1
+        target: gateway_ledger_url
+      - source: isola_gw_admin_token_v1
+        target: gateway_admin_token
+      - source: isola_gw_runtime_secret_v1
+        target: gateway_runtime_secret
+      - source: isola_gw_bindings_v2
+        target: gateway_bindings
+
+    deploy:
+      replicas: 1
+      # GATE C. EasyPanel injects `on-failure` and does not let you change it,
+      # and a clean exit under that policy strands the service forever — this
+      # host has an existing incident on exactly that. `any` restarts on a
+      # graceful shutdown too.
+      restart_policy:
+        condition: any
+        delay: 5s
+      update_config:
+        order: start-first
+        failure_action: rollback
+      rollback_config:
+        order: start-first
+
+    # `restart: any` is RECOVERY, not DETECTION. Alerting is a separate,
+    # still-outstanding piece of work; this healthcheck is what a monitor would
+    # read once one exists.
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+networks:
+  easypanel:
+    external: true
+  easypanel-isola:
+    external: true
+
+secrets:
+  isola_gw_ledger_url_v1:
+    external: true
+  isola_gw_admin_token_v1:
+    external: true
+  isola_gw_runtime_secret_v1:
+    external: true
+  isola_gw_bindings_v2:
+    external: true

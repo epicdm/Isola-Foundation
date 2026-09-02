@@ -61,9 +61,22 @@ ACCEPT_TEST_WEBHOOK_SECRET = "true"
 FLOWISE_URL = "http://206.53.141.41:3100"
 FLOWISE_AGENT_TOOLS_ENABLED = "true"
 VOICE_ROUTING_RING_TIMEOUT_SECONDS = "30"
+STAFF_NOTIFICATION_PHONE_NUMBER_ID = "1029700810228517"
+# Meta approved epic_manager_verification_v1 (id 2931709780496162) on 2026-07-30 —
+# status APPROVED, rejected_reason NONE, one copy on staff WABA 272252189309178.
+# This gate exists so Foundation never sends an unapproved template; Meta's own
+# readback is now the authority that satisfies it. Eight other preconditions on
+# the manager notification remain enforced and fail-closed.
+STAFF_MANAGER_VERIFICATION_TEMPLATE_APPROVED = "true"
+CLAWITH_STRUCTURED_URL = "https://agents.epic.dm/api/isola/bridge/structured/message"
+FOUNDATION_STAFF_CHAT_AGENT_IDS = "a955edf4-a4c7-4669-b7dc-8dd3526716cf"
 
 [userenv.development]
 EMA_OTP_WHATSAPP_PHONE_NUMBER_ID = "1023804347491554"
 
 [nix]
 channel = "stable-25_05"
+packages = ["vim-full"]
+
+[objectStorage]
+defaultBucketID = "replit-objstore-f2339c21-1f5b-439d-8df5-a224e6519de8"

@@ -10,7 +10,12 @@ export async function toggleConvStatus(
   cwConvId:  number,
   status:    string,
   botToken:  string,
-) {
+): Promise<boolean> {
+  // Returns whether the toggle actually landed. It previously returned
+  // `undefined` on EVERY path — success and failure alike — so no caller could
+  // tell. That is the same defect as surfaceHandoff's old `void` return, one
+  // level down, and it is why a handoff could fail silently in three places at
+  // once while Foundation recorded success.
   try {
     const res = await fetch(
       `${baseUrl}/api/v1/accounts/${accountId}/conversations/${cwConvId}/toggle_status`,
@@ -23,11 +28,13 @@ export async function toggleConvStatus(
     );
     if (res.ok) {
       console.log(`[agent-bot] Conv cw#${cwConvId} toggled to ${status}`);
-    } else {
-      console.warn(`[agent-bot] toggle_status failed (${res.status}):`, await res.text().catch(() => ''));
+      return true;
     }
+    console.warn(`[agent-bot] toggle_status failed (${res.status}):`, await res.text().catch(() => ''));
+    return false;
   } catch (e: any) {
     console.warn('[agent-bot] toggle_status error:', e?.message);
+    return false;
   }
 }
 
@@ -106,13 +113,40 @@ async function hasExistingHandoffNote(
   }
 }
 
+/**
+ * What surfacing ACTUALLY achieved. Previously this function returned `void`
+ * and swallowed every failure into a console warning, so the caller advanced
+ * ownership to HUMAN_OWNED whether or not anything reached Chatwoot — see
+ * `defect-handoff-assignment-performed-by-chatwoot-automation-not-foundation-2026-08-13`.
+ *
+ * `surfaced` is the honest answer to "can a person actually see this handoff",
+ * and is the ONLY field a caller should gate a state transition on. The parts
+ * are exposed so a caller can be more specific without re-deriving them.
+ *
+ * NOTE ON WHAT IS NOT HERE: there is no `assigned` field, because Foundation
+ * issues no Chatwoot assignment call anywhere. The team assignment observed in
+ * production is performed by Chatwoot automation rule #3 reacting to the status
+ * reopen below. Do not add an `assigned` field until Foundation actually assigns.
+ */
+export interface HandoffSurfaceResult {
+  /** A person can see this handoff in Chatwoot. Gate transitions on this. */
+  surfaced:        boolean;
+  /** A prior handoff was already surfaced — idempotent no-op, still visible. */
+  alreadySurfaced: boolean;
+  notePosted:      boolean;
+  labelApplied:    boolean;
+  statusOpened:    boolean;
+}
+
 export async function surfaceHandoff(
   baseUrl:   string,
   accountId: string,
   cwConvId:  number,
   botToken:  string,
   noteText:  string = '🤖 Clawith flagged this conversation for human review.',
-): Promise<void> {
+): Promise<HandoffSurfaceResult> {
+  let notePosted   = false;
+  let labelApplied = false;
   let existing: string[] = [];
   try {
     const getRes = await fetch(
@@ -126,7 +160,7 @@ export async function surfaceHandoff(
 
   if (existing.includes(HANDOFF_LABEL)) {
     console.log(`[agent-bot] Handoff already surfaced for conv cw#${cwConvId} — skipping duplicate`);
-    return;
+    return { surfaced: true, alreadySurfaced: true, notePosted: false, labelApplied: false, statusOpened: false };
   }
 
   // The label may be absent because it was never successfully written, not
@@ -134,7 +168,7 @@ export async function surfaceHandoff(
   // posting another one.
   if (await hasExistingHandoffNote(baseUrl, accountId, cwConvId, botToken)) {
     console.log(`[agent-bot] Handoff note already present on conv cw#${cwConvId} — skipping duplicate`);
-    return;
+    return { surfaced: true, alreadySurfaced: true, notePosted: false, labelApplied: false, statusOpened: false };
   }
 
   try {
@@ -153,6 +187,8 @@ export async function surfaceHandoff(
     );
     if (!noteRes.ok) {
       console.warn(`[agent-bot] handoff private note failed (${noteRes.status}):`, await noteRes.text().catch(() => ''));
+    } else {
+      notePosted = true;
     }
   } catch (e: any) {
     console.warn('[agent-bot] handoff private note error:', e?.message);
@@ -179,11 +215,27 @@ export async function surfaceHandoff(
         `the '${HANDOFF_LABEL}' fast-path gate will not engage for this conversation:`,
         await labelRes.text().catch(() => ''),
       );
+    } else {
+      labelApplied = true;
     }
   } catch (e: any) {
     console.warn('[agent-bot] handoff label error:', e?.message);
   }
 
-  await toggleConvStatus(baseUrl, accountId, cwConvId, 'open', botToken);
-  console.log(`[agent-bot] Handoff surfaced for conv cw#${cwConvId}`);
+  const statusOpened = await toggleConvStatus(baseUrl, accountId, cwConvId, 'open', botToken);
+
+  // A handoff is surfaced if ANY of the three landed: the note is what a human
+  // reads, the label is the fast-path gate, and the reopen is what puts it back
+  // in the open queue. All three failing means nothing reached Chatwoot and no
+  // person can see this conversation — the caller must NOT record HUMAN_OWNED.
+  const surfaced = notePosted || labelApplied || statusOpened;
+  if (surfaced) {
+    console.log(`[agent-bot] Handoff surfaced for conv cw#${cwConvId}`);
+  } else {
+    console.error(
+      `[agent-bot] HANDOFF NOT SURFACED for conv cw#${cwConvId} — note, label and status ` +
+      `reopen all failed. No person can see this conversation.`,
+    );
+  }
+  return { surfaced, alreadySurfaced: false, notePosted, labelApplied, statusOpened };
 }

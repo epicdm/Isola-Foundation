@@ -9,6 +9,12 @@ export async function GET(req: NextRequest) {
   if (!ctx?.isAdmin) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 
   const tenants = await prisma.tenant.findMany({
+    // The tenant LIST returned every tenant's plaintext SIP registration
+    // password to any staff admin. Same reasoning as
+    // `app/api/admin/tenants/[id]/route.ts`: the owner-visible surface for this
+    // credential is `/api/voice/line`, not the admin console, and nothing in
+    // the admin UI reads it.
+    omit: { magnus_sip_password: true },
     include: {
       subscription: true,
       wallet: { select: { balance_cache: true, currency: true } },

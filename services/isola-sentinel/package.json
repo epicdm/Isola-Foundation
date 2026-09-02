@@ -1,0 +1,19 @@
+{
+  "name": "isola-sentinel",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tells a human when the estate stops answering. Leads with 'a delivery was accepted and no reply was posted', not 'is the container up'.",
+  "license": "UNLICENSED",
+  "main": "src/sentinel.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/sentinel.js",
+    "once": "node src/sentinel.js --once"
+  },
+  "dependencies": {
+    "nodemailer": "^6.9.16",
+    "pg": "^8.13.1"
+  }
+}

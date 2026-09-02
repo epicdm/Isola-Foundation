@@ -163,12 +163,29 @@ router.get('/login', async (req: Request, res: Response) => {
   const codeVerifier = oidc.randomPKCECodeVerifier();
   const codeChallenge = await oidc.calculatePKCECodeChallenge(codeVerifier);
 
+  // NOTE ON `prompt`, WHICH IS DELIBERATELY ABSENT.
+  //
+  // This used to send `prompt: 'login consent'`, which asks the provider for
+  // two separate things on EVERY arrival here: re-authenticate from scratch
+  // (`login`), and re-confirm the grant (`consent`). Neither is needed when the
+  // reader already has a live Replit session and has already granted this app,
+  // and together they turn an ordinary session expiry into a full
+  // "Isola would like to access your Replit account" authorization screen.
+  //
+  // That is what a reader saw after a republish: their session was genuinely
+  // gone, the redirect here was correct, and they were then made to re-authorise
+  // an app they had been using a minute earlier.
+  //
+  // Omitting the parameter restores the provider's default — reuse an existing
+  // session and grant when they exist, ask only when they do not. Switching
+  // accounts is unaffected and belongs to /auth/logout below, which calls the
+  // real end-session endpoint; forcing it from the login side made every
+  // re-auth pay the cost of a case that is rare.
   const redirectTo = oidc.buildAuthorizationUrl(config, {
     redirect_uri: callbackUrl,
     scope: 'openid email profile offline_access',
     code_challenge: codeChallenge,
     code_challenge_method: 'S256',
-    prompt: 'login consent',
     state,
     nonce,
   });

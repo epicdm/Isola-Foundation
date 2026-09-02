@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { notFound, redirect } from 'next/navigation';
-import { ArrowLeft, BookOpen, Clock, MessageCircle, Phone, Settings2, Wrench } from 'lucide-react';
+import { ArrowLeft, BookOpen, Clock, MessageCircle, MessageSquareText, Phone, Settings2, Wrench } from 'lucide-react';
 import { getSession } from '@/lib/session';
 import { getAgentDetail, getAgentTools, getAgentRuntimePanel } from '@/lib/workspace/tenant-workspace';
 import { WorkspaceAccessDenied } from '@/components/workspace/access-denied';
@@ -46,6 +46,11 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
           <Badge variant={agent.status === 'active' ? 'default' : 'destructive'}>
             {agent.status === 'active' ? 'Active' : 'Paused'}
           </Badge>
+          <Button asChild size="sm" variant="outline">
+            <Link href={`/team/${agentId}/chat`}>
+              <MessageSquareText className="size-3.5" /> Chat
+            </Link>
+          </Button>
           <Button asChild size="sm" variant="outline">
             <Link href="/agent">
               <Settings2 className="size-3.5" /> Settings

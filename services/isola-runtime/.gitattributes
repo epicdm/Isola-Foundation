@@ -1,0 +1,15 @@
+# Shell scripts MUST be stored and checked out with LF.
+#
+# This is not a style preference. `entrypoint.sh` is the container entrypoint,
+# and a CRLF shebang makes the kernel look for an interpreter literally named
+# "/bin/sh\r", which fails as `bad interpreter: no such file or directory` —
+# an error that names the shell and not the line ending, and so reads like a
+# broken image rather than a broken checkout.
+#
+# This was not hypothetical: the first source export of this service to the
+# build host carried `#!/bin/sh\r\n` and would have produced exactly that.
+*.sh text eol=lf
+
+# The migration is applied by piping it into psql over ssh. Stray carriage
+# returns end up inside SQL identifiers and string literals.
+*.sql text eol=lf

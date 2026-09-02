@@ -86,6 +86,17 @@ model Tenant {
   approval_requests   ApprovalRequest[]
   escalation_refs     EscalationRef[]
   notification_outbox NotificationOutbox[]
+  staff_bindings      StaffBinding[]
+  staff_work_actions  StaffWorkAction[]
+
+  conversation_ownership_transitions ConversationOwnershipTransition[]
+  customer_tool_operations           CustomerToolOperation[]
+  channelBindings ChannelBinding[]
+
+  /// Lane-2 events Foundation has accepted and projected into the activity
+  /// feed. Cascades on delete: activity must never outlive the tenant it
+  /// describes, and an orphan row would point at an id that no longer resolves.
+  projected_activity ProjectedActivity[]
 }
 
 // ── Per-tenant voicemail catches (AI missed-call catcher) ────────────────────
@@ -352,11 +363,78 @@ model BffBinding {
 // Per-agent override: set agent_id to pin a binding to a specific Agent (e.g.
 // EMA sales agent vs front-line agent on the same tenant). When null this is
 // the tenant-level fallback binding (current / legacy behaviour).
+// ── Channel binding (Foundation-owned business record) ────────────────────────
+//
+// Foundation records WHAT THE BUSINESS ASKED FOR and WHAT LANE 2 REPORTED BACK.
+// It does not configure Meta, Chatwoot or Clawith, and it never stores a
+// provider credential. Every identifier here is provider-SAFE: an opaque
+// reference Lane 2 chose to expose, never a token, key or secret.
+//
+// The row exists BEFORE provisioning (status 'requested') so the request itself
+// is auditable even if Lane 2 never runs or fails.
+model ChannelBinding {
+  id        String @id @default(cuid())
+  tenant_id String
+
+  /// Free text, written by the business: "customer front desk", "internal staff line".
+  purpose String
+  /// 'whatsapp' | 'telegram' | 'voice' | 'email'
+  requested_type String
+  /// 'customer_facing' | 'internal_private'. Required at request time: this is the
+  /// single fact that governs everything downstream, so it is never inferred.
+  classification String
+
+  /// Business selections a human makes in Foundation BEFORE Lane 2 runs.
+  clawith_agent_ref String?
+  chatwoot_team_ref String?
+  /// JSON text: operating hours, escalation windows. Opaque to this module.
+  operating_policy  String?
+  /// Fail-closed: a channel requires approval unless someone deliberately says otherwise.
+  approval_required Boolean @default(true)
+
+  /// Ownership classification as ACCEPTED (not as requested).
+  accepted_classification String?
+  accepted_at             DateTime?
+  accepted_by             String?
+
+  /// Everything Lane 2 hands back. Provider-safe references only.
+  provisioning_status    String  @default("requested") // requested|provisioning|ready|failed
+  provider_ref           String?
+  inbox_ref              String?
+  agent_ref              String?
+  lane2_contract_version String?
+  lane2_evidence_ref     String?
+
+  /// Status surface shown in the product.
+  readiness        String    @default("not_ready")
+  health           String    @default("unknown")
+  last_verified_at DateTime?
+
+  /// Native deep links supplied by Lane 2. Foundation renders, never constructs.
+  chatwoot_deep_link String?
+  clawith_deep_link  String?
+
+  requested_by String
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+
+  @@unique([tenant_id, purpose, requested_type])
+  @@index([tenant_id])
+  @@index([tenant_id, classification])
+}
+
 model ClawithBinding {
   id                   String  @id @default(cuid())
   tenant_id            String
   agent_id             String? @unique // optional: pin to a specific Agent; null → per-tenant fallback
   clawith_agent_id     String // Clawith's own agent id — the `agent_id` field in the dispatch request body
+  // Clawith-side tenant namespace that owns `clawith_agent_id`. Distinct from
+  // `tenant_id` above (Foundation's own tenant) — the structured bridge's
+  // `tenant_id` wire field is a strict equality gate against THIS value, not
+  // Foundation's. Nullable/additive; existing rows are backfilled explicitly.
+  clawith_tenant_id    String?
   paperclip_agent_id   String
   paperclip_company_id String
 
@@ -399,8 +477,59 @@ model Conversation {
   customer_name            String?
   status                   String    @default("open") // open | resolved
   agent_took_over          Boolean   @default(false)
-  human_handling           Boolean   @default(false) // true when a human agent has replied in Chatwoot
+  // COMPATIBILITY PROJECTION, NO LONGER AUTHORITATIVE (Commit 2).
+  // Derived from `ownership_state` by lib/ownership/state.ts
+  // projectHumanHandling(); written only by the ownership engine
+  // (lib/ownership/transitions.ts). Retained because dashboards, counters
+  // and every non-authoritative ("legacy regime") door still read it, and
+  // because dropping a live boolean in the same commit that replaces it
+  // would make the change irreversible. See lib/ownership/authority.ts for
+  // which doors the state governs and which still route on this flag.
+  human_handling           Boolean   @default(false)
   last_message_at          DateTime?
+
+  // ── Episode-aware conversation ownership (Commit 2) ──────────────────────
+  //
+  // The authoritative answer to "who owns the response right now", replacing
+  // `human_handling` as the sole authority.
+  //
+  // A boolean cannot express an EPISODE, and without an episode a late or
+  // replayed handback for a conversation that has since been escalated again
+  // would silently resume an automated brain into a live human conversation.
+  // It also cannot express HANDING_BACK (reconciling, nobody speaks), and it
+  // cannot distinguish "a human is here" from "Chatwoot's status changed" —
+  // which is why resolution used to hand the microphone straight back to the
+  // AI with no reconciliation and no record.
+  //
+  // Values are the OWNERSHIP_STATES vocabulary already declared in
+  // lib/clawith/contract.ts, so the wire contract and the store speak one
+  // language. Kept as String rather than a Prisma enum deliberately: the
+  // vocabulary is shared with an external contract, and a Postgres enum
+  // makes every future value a locking DDL migration on a live table.
+  ownership_state                   String    @default("AI_OWNED")
+  // Increments once per span of human involvement. Identity for exactly-once
+  // is tenant + conversation + episode.
+  ownership_episode                 Int       @default(0)
+  ownership_changed_at              DateTime?
+  ownership_reason                  String?
+  // Non-secret reference to the operator/agent that caused the transition.
+  ownership_actor_ref               String?
+  ownership_correlation_id          String?
+  // Identity of the escalation / handback operations that own the current
+  // episode — the same values claimed in ConversationOwnershipTransition.
+  ownership_escalation_operation_id String?
+  ownership_handback_operation_id   String?
+
+  /// The `ownership_episode` an automated handover acknowledgement was sent
+  /// for. NULL means none has been sent for any episode on this conversation.
+  ///
+  /// Exactly-once identity is the one the schema already declares authoritative
+  /// — tenant + conversation + episode — so this needs no second mechanism and
+  /// no Chatwoot custom attribute. The send is CLAIMED with a conditional
+  /// UPDATE on this column before the message is posted, so two inbound
+  /// messages arriving together cannot both send one. A duplicate
+  /// acknowledgement is worse than the silence it replaces.
+  handover_ack_episode              Int?
 
   // Authoritative snapshot of the exact Chatwoot inbox/binding this
   // conversation lives in, captured from the live webhook's inbox_id (see
@@ -422,8 +551,11 @@ model Conversation {
   messages         Message[]
   escalation_refs  EscalationRef[]
 
+  ownership_transitions ConversationOwnershipTransition[]
+
   @@unique([tenant_id, chatwoot_conversation_id])
   @@index([tenant_id, status])
+  @@index([tenant_id, ownership_state])
   @@index([tenant_id, last_message_at])
   @@index([chatwoot_binding_id])
 }
@@ -679,17 +811,47 @@ model NotificationOutbox {
   attempt_count   Int       @default(0)
   max_attempts    Int       @default(5)
   next_attempt_at DateTime? // retry backoff; drain picks up when <= now
-  external_ref    String? // provider message id once sent
+  external_ref    String? // provider message id once sent — the Meta wamid; the ONLY join key back from a wa-status callback
   failure_reason  String?
   sent_at         DateTime?
   created_at      DateTime  @default(now())
   updated_at      DateTime  @updatedAt
+
+  // ── Wave 1 (spine/wave1-internal-operations): delivery truth + work correlation ──
+  //
+  // All additive and nullable, and deliberately NOT back-filled. Rows written
+  // before these columns existed have an unknown provider outcome and an
+  // unknown work correlation; inventing either would fabricate history — the
+  // same constraint that keeps OPS-000015/53/54/55 untouched in BFF.
+  //
+  // WHY provider_status IS SEPARATE FROM `state`: `state` is the OUTBOX's own
+  // lifecycle (did we manage to hand this to Meta). provider_status is what
+  // Meta later said actually happened. Collapsing them is exactly the mistake
+  // that let `sent` be read as "the staff member has it" for three weeks —
+  // see FINDINGS-wa-status-join-key-and-guard-blindspot-2026-07-27.
+  // `accepted` = Graph 200 + a wamid, nothing more. Only `delivered` and
+  // `failed` are outcomes.
+  provider_status       String? // accepted | sent | delivered | read | failed
+  provider_error_code   String? // Meta error code, e.g. "131047" (Re-engagement message)
+  provider_error_detail String?
+  delivered_at          DateTime?
+  failed_at             DateTime? // when the failure was ESTABLISHED — not created_at; a
+  // callback can fail a send minutes after the row was written.
+
+  // Odoo-only WorkRef correlation (dec-wave1-workref-odoo-only-2026-07-28).
+  // These are an Odoo model/id and Foundation's own correlation id. There is
+  // deliberately no EpicWorkItem id, no OPS- reference and no BFF linkage here.
+  work_ref_model String? // project.task | mail.activity | helpdesk.ticket
+  work_ref_id    Int?
+  correlation_id String?
 
   tenant Tenant @relation(fields: [tenant_id], references: [id])
 
   @@unique([tenant_id, dedupe_key])
   @@index([state, next_attempt_at])
   @@index([tenant_id, created_at])
+  @@index([external_ref])
+  @@index([correlation_id])
 }
 
 // ── Drizzle-managed auth tables (DO NOT DROP) ────────────────────────────────
@@ -750,12 +912,13 @@ model Identity {
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
-  memberships Membership[]
-  voice_lines VoiceLine[]
-  wallets     Wallet[]
-  wallet_txns WalletTxn[]
-  audit_logs  AuditLog[]
-  users       User[]
+  memberships    Membership[]
+  voice_lines    VoiceLine[]
+  wallets        Wallet[]
+  wallet_txns    WalletTxn[]
+  audit_logs     AuditLog[]
+  users          User[]
+  staff_bindings StaffBinding[]
 }
 
 model Membership {
@@ -800,4 +963,297 @@ model VoiceLine {
 
   @@index([identity_id])
   @@index([tenant_id])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Wave 1 — internal staff operations (spine/wave1-internal-operations)
+//
+// AUTHORITY: dec-bff-freeze-spine-consolidation-execution-2026-07-28 and
+// dec-wave1-workref-odoo-only-2026-07-28.
+//
+// READ THIS BEFORE ADDING A COLUMN HERE. Neither model below is a task. Odoo
+// is the task system of record. StaffBinding answers "who is this person and
+// may they act", StaffWorkAction answers "did we already apply this exact
+// request" — that is all. The moment either grows a title, a due date, a
+// state machine or an assignee-of-record, Foundation has quietly acquired a
+// second task authority, which is the precise thing the consolidation
+// programme exists to remove. There is deliberately no EpicWorkItem id, no
+// `OPS-` reference, no mirror table and no BFF database dependency anywhere
+// in this section.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Who a staff member is, across Foundation, Odoo and their approved channel.
+///
+/// NAMING, DELIBERATELY: `odoo_res_user_id` — NOT `odooUserOrEmployeeId`. The
+/// legacy column's ambiguous name caused three live rows to be seeded with
+/// hr.employee ids in a field consumed as a res.users id, so Phillip's ACK
+/// would have read back against Eric's user and Kimberly's against an inactive
+/// system account (ev-staff-inbound-ack-routing-2026-07-27 §4). The two ids are
+/// separate columns here and the res.users one says so in its name.
+model StaffBinding {
+  id        String @id @default(cuid())
+  tenant_id String
+
+  /// Foundation identity, when the person has one. Nullable: a staff member is
+  /// bound and can be dispatched to before they have ever signed in.
+  identity_id String?
+
+  /// THE join key. project.task.user_ids holds res.users ids, so this is what
+  /// every task read and every assignment check uses.
+  odoo_res_user_id Int
+
+  /// hr.employee id, for roster/HR reads only. Never used as an assignment key.
+  odoo_employee_id Int?
+
+  display_name String
+  work_email   String?
+
+  /// Manager, as a res.users id in the same Odoo. Nullable — not everyone has
+  /// one, and inventing one would be worse than leaving it unset.
+  manager_odoo_res_user_id Int?
+
+  /// Approved communication identities. `wa_id` is Meta's form: E.164 digits,
+  /// no leading '+'. Unique per tenant so one number cannot be two people.
+  wa_id       String?
+  telegram_id String?
+
+  role   String  @default("staff") // staff | manager | owner
+  active Boolean @default(true)
+
+  /// Set when the person has explicitly acknowledged onboarding on their own
+  /// channel. No ACK means not activated — an unverified binding may be read
+  /// but must not be treated as a proven delivery target.
+  verified_at DateTime?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant   Tenant    @relation(fields: [tenant_id], references: [id])
+  identity Identity? @relation(fields: [identity_id], references: [id])
+
+  work_actions StaffWorkAction[]
+
+  @@unique([tenant_id, odoo_res_user_id])
+  @@unique([tenant_id, wa_id])
+  @@index([tenant_id])
+  @@index([wa_id])
+}
+
+/// A staff action that was requested against an authoritative Odoo record, and
+/// whether it was applied. This is an idempotency and audit ledger, not work
+/// state: it records the REQUEST and the Odoo RESULT, and stores nothing that
+/// could be mistaken for the task itself.
+model StaffWorkAction {
+  id               String @id @default(cuid())
+  tenant_id        String
+  staff_binding_id String
+
+  /// Odoo-only WorkRef. `work_ref_model` is constrained by application code to
+  /// project.task | mail.activity | helpdesk.ticket.
+  work_ref_model String
+  work_ref_id    Int
+  correlation_id String
+
+  action      String // ack | update | blocked | done | help | correct
+  note        String?
+  source      String  @default("whatsapp")
+  actor_wa_id String?
+
+  /// Idempotency. Primary discriminator is the provider message id, so a Meta
+  /// webhook retry collapses to one action while two genuinely different
+  /// UPDATEs on the same task both land.
+  idempotency_key String
+
+  /// Null until Odoo has actually accepted the write. A row with applied_at
+  /// null is a request we did NOT complete — it must never be read as done.
+  applied_at     DateTime?
+  odoo_result    Json?
+  failure_reason String?
+
+  created_at DateTime @default(now())
+
+  tenant        Tenant       @relation(fields: [tenant_id], references: [id])
+  staff_binding StaffBinding @relation(fields: [staff_binding_id], references: [id])
+
+  @@unique([tenant_id, idempotency_key])
+  @@index([tenant_id, work_ref_model, work_ref_id])
+  @@index([correlation_id])
+  @@index([staff_binding_id])
+}
+
+/// The conversation-ownership transition ledger — and the exactly-once claim
+/// substrate for every change of response authority.
+///
+/// Two jobs in one table, deliberately:
+///
+///   1. CLAIM. `@@unique([tenant_id, conversation_id, operation_id])` is what
+///      makes escalation, assignment, handoff and handback exactly-once. A
+///      replayed Chatwoot webhook, a retried MCP tool call and a
+///      double-clicked dashboard button all present the same operation id, so
+///      the second attempt loses the insert and performs no side effect. Same
+///      shape as StaffWorkAction's idempotency key — a proven pattern here,
+///      not a new one.
+///
+///   2. AUDIT. Every transition records where the conversation came from,
+///      where it went, which episode it belonged to, why, who caused it and
+///      under which correlation id. Ownership questions after the fact
+///      ("could the AI have replied here?") are answerable from rows rather
+///      than from logs.
+///
+/// This is NOT a second conversation-state platform: the CURRENT state lives
+/// on Conversation and is read from there on every hot path. This table is
+/// the append-only history of how it got there.
+model ConversationOwnershipTransition {
+  id              String @id @default(cuid())
+  tenant_id       String
+  conversation_id String
+
+  /// The episode this transition belongs to. Stale-handback rejection compares
+  /// against Conversation.ownership_episode.
+  episode    Int
+  from_state String
+  to_state   String
+  reason     String
+
+  /// Caller-supplied operation identity. THE claim key. For the governed
+  /// escalate_to_human endpoint this is the scoped ref's own correlation id;
+  /// for a human dashboard reply it is Chatwoot's message id; for a handback
+  /// it is the operation id the authorized caller supplied.
+  operation_id   String
+  operation_kind String
+
+  /// Non-secret reference to the authoritative operator/agent, e.g. `user:<id>`.
+  actor_ref      String?
+  correlation_id String?
+
+  created_at DateTime @default(now())
+
+  tenant       Tenant       @relation(fields: [tenant_id], references: [id])
+  conversation Conversation @relation(fields: [conversation_id], references: [id])
+
+  // Explicit map: Prisma's default name for this compound unique exceeds
+  // Postgres's 63-character identifier limit and would be truncated, drifting
+  // from the hand-written migration.
+  @@unique([tenant_id, conversation_id, operation_id], map: "ConversationOwnershipTransition_tenant_conv_op_key")
+  @@index([conversation_id, episode])
+  @@index([tenant_id, created_at])
+  @@index([correlation_id])
+}
+
+// ── Governed customer-tool operations — the exactly-once ledger ──────────────
+//
+// One row per AUTHORISED tool execution. Every governed customer tool (lead
+// create, lead update, follow-up, business note) claims here BEFORE it touches
+// Odoo, and records its verified readback here after.
+//
+// WHY IT IS FOUNDATION-SIDE AND NOT AN ODOO LOOKUP
+//   The obvious cheaper design is "before creating, search Odoo for one that
+//   looks the same". That is a heuristic, and it breaks in exactly the case
+//   that matters: two near-simultaneous retries of the same turn both search,
+//   both find nothing, and both create. It also cannot survive the record
+//   being completed, archived or unlinked afterwards — an Odoo activity that
+//   has been marked done is gone from the searchable set, so a retry would
+//   cheerfully create a second one. This ledger is durable and independent of
+//   the Odoo records later lifecycle, which is the whole point.
+//
+// WHY THE REQUEST HASH IS NOT DECORATION
+//   `operation_id` alone cannot be trusted for reuse: Clawith supplies an
+//   idempotency HINT, and a model that reuses a hint for genuinely different
+//   arguments must be REFUSED, not silently served the earlier result. Storing
+//   the hash of the authorised arguments is what makes that refusal possible.
+//   Foundation derives the final operation_id itself; the hint is an input to
+//   that derivation, never the identity.
+model CustomerToolOperation {
+  id        String @id @default(cuid())
+  tenant_id String
+
+  /// Foundation-derived, stable across retries of the same authorised turn.
+  /// NEVER the raw hint Clawith supplied.
+  operation_id String
+
+  /// Governed tool name, e.g. `crm.lead.create`.
+  tool_name String
+
+  /// Hash of the AUTHORISED arguments. A second claim on the same
+  /// operation_id with a different hash is a conflict, not a retry.
+  request_hash String
+
+  conversation_id  String
+  correlation_id   String
+  agent_session_id String?
+
+  /// claimed | succeeded | failed
+  state String @default("claimed")
+
+  /// The authoritative Odoo record this operation produced or affected.
+  /// Recorded ONLY after a successful readback — never from a create response
+  /// alone, because an id echoed back is not proof of what was stored.
+  result_model String?
+  result_id    Int?
+
+  /// The verified readback, returned verbatim on a retry so a repeat never
+  /// re-executes and never invents a fresh answer.
+  result Json?
+
+  failure_code   String?
+  failure_detail String?
+
+  claimed_at   DateTime  @default(now())
+  completed_at DateTime?
+  updated_at   DateTime  @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+
+  @@unique([tenant_id, operation_id])
+  @@index([tenant_id, tool_name])
+  @@index([conversation_id])
+  @@index([correlation_id])
+}
+
+// ── Lane-2 projected activity (Foundation's read model) ────────────────────────
+//
+// What `IngestPorts.project` writes and `Lane2ProjectionStore.read` reads; see
+// lib/events/projection-store.ts for the conflict and retention rules.
+//
+// Foundation LEARNS from these rows. It never acts on them: there is no reply,
+// retry or ownership command anywhere on this path. Lane 2 owns transport
+// dedup; the keys below are for THIS read model only.
+model ProjectedActivity {
+  id        String @id @default(cuid())
+  tenant_id String
+
+  /// Lane 2's own identity for the event, and its transport dedup key.
+  /// The tenant is part of BOTH unique keys: an id unique only globally would
+  /// let one tenant's event collide with another tenant's.
+  event_id   String
+  dedupe_key String
+
+  event_type    String
+  source_system String
+  actor_class   String
+
+  /// When it HAPPENED vs when it ARRIVED. Both are kept because a late
+  /// delivery must land in its historical place, not at the top of the feed.
+  occurred_at DateTime
+  received_at DateTime
+
+  channel_binding_id String?
+  agent_ref          String?
+  conversation_ref   String?
+  correlation_id     String?
+
+  related_objects Json @default("{}")
+  payload         Json @default("{}")
+
+  created_at DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+
+  @@unique([tenant_id, event_id])
+  @@unique([tenant_id, dedupe_key])
+  @@index([tenant_id, occurred_at])
+  @@index([tenant_id, event_type])
+  @@index([tenant_id, source_system])
+  @@index([tenant_id, conversation_ref])
+  @@map("projected_activity")
 }

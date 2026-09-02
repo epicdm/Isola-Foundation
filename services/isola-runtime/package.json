@@ -1,0 +1,23 @@
+{
+  "name": "isola-runtime",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Isolated synchronous agent runtime for Isola Paperclip employees. No tools, no shell, no filesystem writes, no MCP, allowlisted egress only.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/server.js",
+    "test": "vitest run"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "~5.9.3",
+    "vitest": "^2.1.9"
+  }
+}

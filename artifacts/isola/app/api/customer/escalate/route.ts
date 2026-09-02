@@ -39,17 +39,24 @@
  * not present them elsewhere as solving that remaining gap.
  *
  * Effects (idempotent — safe to retry with the same still-valid conversation_ref):
- *   1. Conversation.human_handling = true — the ONE authoritative silence
- *      gate (stronger than the existing soft needs_handoff -> surfaceHandoff()
- *      path, which only flags a conversation for review and never silences
- *      the bot). Hand-back is unchanged: conversation_resolved still clears
- *      this flag (handleStatusChanged() in the agent-bot route) — no new
- *      state machine.
- *   2. surfaceHandoff() with an escalation-specific note — reuses the
- *      existing single-fire label/note/status-toggle contract
- *      (lib/chatwoot-handoff.ts). If needs_handoff already surfaced this
- *      conversation (ai-handoff label present), this step is a deliberate
- *      no-op — human_handling is still set either way.
+ *   1. An ownership transition to HUMAN_REQUESTED, claimed EXACTLY ONCE on
+ *      the scoped ref's own correlation id (lib/ownership/transitions.ts).
+ *      This is the authoritative silence gate; `Conversation.human_handling`
+ *      is written as its projection and is no longer the authority.
+ *      Suppression is in force before step 2 runs.
+ *   2. ONLY on the winning claim: surfaceHandoff() with an escalation-specific
+ *      note (lib/chatwoot-handoff.ts), then a transition to HUMAN_OWNED
+ *      recording that assignment and context publication completed. Gating
+ *      the side effects on the claim is what makes a duplicate escalation
+ *      produce one assignment, one private note and at most one handoff
+ *      message — a property of the claim rather than of surfaceHandoff()'s
+ *      own best-effort single-fire heuristics.
+ *
+ * HAND-BACK IS NO LONGER IMPLICIT. Before Commit 2, conversation_resolved
+ * cleared human_handling and the AI silently resumed. It no longer does on a
+ * door where the ownership model is authoritative: only an explicit
+ * authorized handback (POST /api/conversations/[id]/handback) can return
+ * response authority to the brain, and only after reconciliation succeeds.
  *
  * Every response (success or failure) carries a correlation_id for tracing a
  * single tool call end-to-end across these logs and Chatwoot.
@@ -60,6 +67,7 @@ import { prisma } from '@/lib/prisma';
 import { surfaceHandoff } from '@/lib/chatwoot-handoff';
 import { resolveEscalationRef } from '@/lib/escalation-ref';
 import { audit } from '@/lib/audit';
+import { requestHumanOwnership, confirmHumanOwnership } from '@/lib/ownership/transitions';
 
 function ctEq(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
@@ -179,25 +187,113 @@ export async function POST(req: NextRequest) {
   const botToken = process.env.CHATWOOT_AGENTBOT_TOKEN;
   if (!botToken) return fail(500, 'bot_token_not_configured', correlationId);
 
-  const alreadyEscalated = conversation.human_handling === true;
-
-  // 1. Silence gate — set unconditionally; a no-op update if already true.
-  await prisma.conversation.update({
-    where: { id: conversation.id },
-    data:  { human_handling: true },
+  // ── 1. Ownership transition — the authoritative silence gate ─────────────
+  //
+  // The escalation OPERATION identity is the scoped ref's own correlation id.
+  // It is minted once per turn and is stable for the life of that ref, so a
+  // retried MCP tool call presenting the same still-valid conversation_ref
+  // claims the SAME operation — one transition, one episode.
+  //
+  // Written BEFORE the Chatwoot surfacing below. The reverse order leaves a
+  // window in which the bot can answer a conversation already handed to a
+  // person.
+  const transition = await requestHumanOwnership({
+    tenantId:       conversation.tenant_id,
+    conversationId: conversation.id,
+    operationId:    resolved.correlationId,
+    reason:         'clawith_escalate_to_human',
+    actorRef:       'clawith:escalate_to_human',
+    correlationId,
   });
+  if (transition.status === 'unknown_conversation') {
+    return fail(409, 'ownership_unresolved', correlationId);
+  }
+  const alreadyEscalated = transition.status !== 'applied';
 
-  // 2. Surface into Chatwoot for a human — single-fire, reuses the existing contract.
-  const note = summary
-    ? `🙋 Customer requested a human — escalate_to_human invoked.\n\n${summary}`
-    : '🙋 Customer requested a human — escalate_to_human invoked.';
-  await surfaceHandoff(
-    binding.base_url,
-    binding.account_id,
-    conversation.chatwoot_conversation_id,
-    botToken,
-    note,
-  );
+  // RECOVERY PATH. Gating the HUMAN_OWNED confirmation on the surface actually
+  // landing (below) introduced a way to strand a conversation: if the first
+  // escalation's surfacing failed, the conversation sits at HUMAN_REQUESTED,
+  // and `requestHumanOwnership` cannot re-enter it because its `allowedFrom` is
+  // ['AI_OWNED', 'AI_RESUMED']. A retry would be refused, read as
+  // `alreadyEscalated`, and skip surfacing forever — silent, unsurfaced, and
+  // unreachable. So: surface whenever the claim was won OR the conversation is
+  // sitting in HUMAN_REQUESTED with no confirmation.
+  //
+  // Safe to re-run: surfaceHandoff is idempotent (label fast path, then a
+  // note-presence check), and returns alreadySurfaced=true rather than posting
+  // a second note. `transition.state` is documented as the state AFTER the
+  // call, unchanged when not applied, and `episode` is populated on refusal.
+  // Keyed on `ok === false` (REFUSED), not merely "not applied". A replay of
+  // the same operation returns status 'duplicate' with ok=true and must NOT
+  // re-surface — that is the idempotency contract, and re-posting there would
+  // reintroduce the duplicate-note P1. A refusal is different: it means a
+  // DIFFERENT operation is being turned away because the conversation is
+  // already HUMAN_REQUESTED, which is exactly the stranded case. Refs are
+  // minted per turn, so the customer's next message produces a new ref, a
+  // refusal, and therefore a recovery attempt.
+  const needsSurfacing =
+    !alreadyEscalated || (!transition.ok && transition.state === 'HUMAN_REQUESTED');
+
+  // ── 2. Surface into Chatwoot — on the winning claim, or to recover ────────
+  if (needsSurfacing) {
+    const note = summary
+      ? `🙋 Customer requested a human — escalate_to_human invoked.\n\n${summary}`
+      : '🙋 Customer requested a human — escalate_to_human invoked.';
+    const surface = await surfaceHandoff(
+      binding.base_url,
+      binding.account_id,
+      conversation.chatwoot_conversation_id,
+      botToken,
+      note,
+    );
+
+    // Context publication completed → HUMAN_OWNED. Replies stay suppressed
+    // either way (HUMAN_REQUESTED is excluded from AI_REPLY_OWNERSHIP_STATES
+    // too); this records that a person can now actually see the conversation,
+    // which is the precondition a later handback reconciles against.
+    //
+    // GATED on the surface actually landing. Previously this ran
+    // unconditionally because surfaceHandoff returned void and swallowed its
+    // own failures, so Foundation recorded HUMAN_OWNED even when nothing
+    // reached Chatwoot. Same posture as the gateway's `handoff_blocked`:
+    // telling a customer their conversation is with a team member when it is
+    // not is a lie they cannot check.
+    //
+    // The reason no longer says "assignment". Foundation issues NO Chatwoot
+    // assignment call — the team assignment seen in production is Chatwoot
+    // automation rule #3 reacting to the status reopen. Claiming an assignment
+    // we do not perform is what made the ownership audit unfalsifiable.
+    // Historical rows carry `chatwoot_assignment_and_context_published`;
+    // readers must accept both.
+    if (surface.surfaced) {
+      await confirmHumanOwnership({
+        tenantId:       conversation.tenant_id,
+        conversationId: conversation.id,
+        operationId:    `${resolved.correlationId}:assigned`,
+        episode:        transition.episode,
+        reason:         'chatwoot_context_published',
+        actorRef:       'clawith:escalate_to_human',
+        correlationId,
+      });
+    } else {
+      // Fail closed and loud. Ownership stays at HUMAN_REQUESTED: the AI is
+      // still silent, but nothing claims a person is on it.
+      await audit({
+        tenantId:  conversation.tenant_id,
+        actorId:   'clawith:escalate_to_human',
+        action:    'escalate_to_human.surface_failed',
+        entity:    'conversation',
+        entityId:  conversation.id,
+        requestId: correlationId,
+        meta:      {
+          note_posted:   surface.notePosted,
+          label_applied: surface.labelApplied,
+          status_opened: surface.statusOpened,
+          episode:       transition.episode,
+        },
+      });
+    }
+  }
 
   await audit({
     tenantId:  conversation.tenant_id,
@@ -206,7 +302,13 @@ export async function POST(req: NextRequest) {
     entity:    'conversation',
     entityId:  conversation.id,
     requestId: correlationId,
-    meta:      { already_escalated: alreadyEscalated, has_summary: summary !== null },
+    meta:      {
+      already_escalated: alreadyEscalated,
+      has_summary:       summary !== null,
+      ownership_state:   transition.state,
+      ownership_episode: transition.episode,
+      claim:             transition.status,
+    },
   });
 
   // Never return the decoded ownership payload (conversation/tenant/binding/

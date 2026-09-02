@@ -51,7 +51,15 @@ export function Topbar({ isAdmin, showOwnerNav }: TopbarProps) {
         <div className="flex items-center gap-1 lg:gap-2">
           <SidebarTrigger className="-ml-1" />
           <Separator orientation="vertical" className="mx-2 data-[orientation=vertical]:h-4" />
-          <h1 className="text-sm font-semibold">{titleFor(pathname)}</h1>
+          {/* NOT an h1. This is chrome: a small breadcrumb-style label that
+              repeats the sidebar's own nav item, rendered by the layout on every
+              owner route. Pages render their own real page title, so this made
+              two h1 elements on every screen that has one -- on /activity,
+              "Activity & Reports" here and "Recent Work" on the page, with no
+              way for a reader navigating by heading to tell which was the
+              document's title (defect-activity-two-h1). The page owns the h1;
+              this stays as text. */}
+          <div className="text-sm font-semibold">{titleFor(pathname)}</div>
         </div>
 
         <div className="flex items-center gap-2">

@@ -1,0 +1,15 @@
+{
+  "eventId": "evt-003",
+  "version": "lane2.events.ingest@1",
+  "sourceSystem": "lane2",
+  "eventType": "channel.health",
+  "occurredAt": "2026-07-31T12:10:00Z",
+  "companyId": "co-1",
+  "channelBindingId": "cb-1",
+  "actorClass": "system",
+  "payload": {
+    "status": "healthy",
+    "detail": "ok"
+  },
+  "dedupeKey": "health-1"
+}

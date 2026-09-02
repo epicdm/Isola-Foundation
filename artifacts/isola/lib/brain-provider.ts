@@ -39,7 +39,17 @@ import { prisma } from './prisma';
 import { guardReply, SALES_TENANT_IDS, DEFLECTION as GUARD_ERROR_DEFLECTION } from './claim-guard';
 import { detectEscalationIntent } from './escalation-intent';
 import { detectEscalationClaim } from './escalation-claim';
+import { detectProviderFailure } from './provider-failure';
+import { recordClawithFailure } from './clawith/alert';
+import { ClawithFailure } from './clawith/errors';
 import { audit } from './audit';
+import { isAiLoopGatedDoor } from './clawith/gate';
+import type { OwnershipState } from './ownership/state';
+import { invokeClawithGated } from './clawith/invoke';
+import type { ClawithFailureRecord } from './clawith/invoke';
+import type { ClawithToolDefinition } from './clawith/contract';
+import { authorizeCustomerDispatch } from './clawith/customer-exposure-gate';
+import type { CustomerDispatchAuthorization } from './clawith/customer-exposure-gate';
 
 const FLOWISE_TIMEOUT_MS = 20_000;
 // Hermes agent replies in ~10-45s; 50s gives headroom before falling back to
@@ -131,6 +141,48 @@ export interface BrainReplyResult {
   /** Opaque action payload some providers may return alongside the reply.
    * Not acted on by Foundation today — this socket remains text-only I/O. */
   actions?: unknown;
+  /** GATED AI-LOOP ONLY. True when Foundation must send the customer NOTHING
+   *  this turn — a recorded failure or a tool-only turn. Never set while the
+   *  ISOLA_AI_LOOP_ENABLED gate is off, so no existing caller can observe it.
+   *  Callers that ignore it fall back to the pre-existing `if (!reply) return`
+   *  behaviour, which is the same outcome by a weaker route. */
+  suppressCustomerReply?: boolean;
+  /** GATED AI-LOOP ONLY. The classified Clawith failure behind a safe
+   *  unavailability reply or a suppressed turn. Present ONLY when the brain
+   *  genuinely failed — its absence on a `provider:'clawith'` result means
+   *  Clawith actually answered. */
+  clawithFailure?: ClawithFailureRecord;
+}
+
+/** GATED AI-LOOP ONLY. The conversation-identifying context the structured
+ *  contract requires and the legacy text bridge never carried. Optional on
+ *  purpose: every existing caller of generateReply() omits it and is therefore
+ *  bit-for-bit unaffected. */
+export interface GatedLoopContext {
+  chatwootAccountId: string;
+  inboxId: string | null;
+  /** Tenant recorded on the ChatwootBinding that received this message. */
+  bindingTenantId: string;
+  /** Tenant recorded on the local Conversation row. */
+  conversationTenantId: string;
+  conversationId: string;
+  inboundMessageId: string;
+  contactRef: string;
+  businessId: string;
+  knowledgeScopeIds?: string[];
+  /** Tools Foundation will authorise THIS turn. Empty until Commit 3. */
+  allowedTools?: ClawithToolDefinition[];
+  /**
+   * The conversation's AUTHORITATIVE ownership state, read from
+   * Conversation.ownership_state (Commit 2). Required, not defaulted: a
+   * caller that cannot say who owns the conversation must not be able to get
+   * a customer-facing turn by omission. buildClawithRequest() rejects every
+   * non-AI state, so a HUMAN state reaching here fails the request closed
+   * rather than producing a reply into a conversation a person owns.
+   */
+  ownershipState: OwnershipState;
+  timezone?: string;
+  locale?: string;
 }
 
 export interface BrainAgent {
@@ -138,10 +190,17 @@ export interface BrainAgent {
   intelligence_tier: string;
   brain_provider: string;       // 'native' | 'flowise' | 'hermes' | 'clawith'
   flowise_flow_id: string | null;
+  /** Required for the B2 customer exposure gate (an inactive agent is never
+   *  an authorized dispatch target, regardless of classification). */
+  is_active: boolean;
 }
 
 /** Tenant's Clawith identity, resolved from the ClawithBinding table. */
 export interface ClawithBindingInput {
+  /** ClawithBinding.tenant_id — required so the B2 exposure gate can prove
+   *  this binding belongs to the SAME Foundation tenant as `tenantId` below,
+   *  not just that some binding was resolved. */
+  tenant_id: string;
   clawith_agent_id: string;
   paperclip_agent_id: string;
   paperclip_company_id: string;
@@ -186,11 +245,49 @@ export async function generateReply(params: {
    *  the Isola bridge for cross-system tracing. Never used to resolve
    *  ownership; distinct from conversationRef itself. */
   escalationCorrelationId?: string | null;
+  /** GATED AI-LOOP ONLY — see GatedLoopContext. Absent for every existing caller. */
+  gatedLoop?: GatedLoopContext | null;
 }): Promise<BrainReplyResult> {
-  const { agent, system, messages, sessionId, phoneNumberId, senderPhone, tenantId, clawithBinding, odooBinding, conversationRef, escalationCorrelationId } = params;
+  const { agent, system, messages, sessionId, phoneNumberId, senderPhone, tenantId, clawithBinding, odooBinding, conversationRef, escalationCorrelationId, gatedLoop } = params;
   const model = TIER_MODELS[agent.intelligence_tier] ?? TIER_MODELS['standard'];
 
   let result: BrainReplyResult | null = null;
+  /** Set only on the gated inbox-46 path. While true, the native fallback
+   *  below is UNREACHABLE — that is the entire point of §6. */
+  let gatedFailClosed = false;
+
+  // ── B2: Foundation-owned customer exposure gate ──────────────────────────
+  // Decided ONCE, before either Clawith call shape below runs — this makes
+  // generateReply() the single reusable choke point B2 requires for both
+  // live customer paths (the Chatwoot A2 webhook and the direct WhatsApp
+  // webhook), since both funnel every clawith turn through this function.
+  // A denial never throws and never picks a different agent — it only
+  // withholds the clawithBinding this turn would otherwise have used.
+  let clawithDispatch: CustomerDispatchAuthorization = { allowed: true, reason: null };
+  if (agent.brain_provider === 'clawith') {
+    // Called even when clawithBinding is null: the gate's own
+    // 'no_clawith_binding' denial (lib/clawith/customer-exposure-gate.ts)
+    // is what gives THIS failure mode an audit entry too — previously a
+    // missing binding fell straight to the console.warn below with no B4
+    // evidence at all.
+    clawithDispatch = await authorizeCustomerDispatch({
+      foundationTenantId: tenantId,
+      requestedFoundationAgentId: agent.id,
+      agentActive: agent.is_active,
+      clawithBinding: clawithBinding
+        ? { tenant_id: clawithBinding.tenant_id, clawith_agent_id: clawithBinding.clawith_agent_id }
+        : null,
+      correlationId: escalationCorrelationId ?? `corr-${sessionId}`,
+      source: gatedLoop ? 'chatwoot_a2' : 'direct_whatsapp',
+      contactRef: gatedLoop?.contactRef ?? null,
+    });
+    if (!clawithDispatch.allowed) {
+      console.warn(
+        `[brain-provider] customer exposure gate DENIED clawith dispatch (reason=${clawithDispatch.reason}) ` +
+          `tenant=${tenantId} clawith_agent=${clawithBinding?.clawith_agent_id ?? '(none)'}`,
+      );
+    }
+  }
 
   if (agent.brain_provider === 'flowise' && agent.flowise_flow_id) {
     const flowiseResult = await tryFlowise({
@@ -205,26 +302,117 @@ export async function generateReply(params: {
     }
   }
 
+  // ── HERMES IS RETIRED. ────────────────────────────────────────────────────
+  //
+  // `dec-one-clawith-runtime-two-isolated-domains-2026-07-30` makes Clawith the
+  // only agent runtime. A tenant row may still carry `brain_provider='hermes'`
+  // — that is stored data, not a live capability — so the value is honoured by
+  // being REFUSED here rather than by silently reaching a frozen platform.
+  //
+  // Deliberately not deleted-and-forgotten: leaving the branch in place with a
+  // loud log is how an operator learns that a row still names a runtime that no
+  // longer exists. Deleting it would make those tenants silently native with no
+  // signal that anything needed repointing.
   if (!result && agent.brain_provider === 'hermes') {
-    if (!HERMES_ALLOWED_PHONE_NUMBER_IDS.has(phoneNumberId)) {
-      console.warn(
-        `[brain-provider] brain_provider=hermes but phone_number_id ${phoneNumberId} is not on the hermes allowlist — falling back to native`,
-      );
-    } else {
-      const hermesResult = await tryHermes({ messages, sessionId, phoneNumberId, senderPhone });
-      if (hermesResult) {
-        result = { ...hermesResult, model: 'hermes' };
-      } else {
-        console.warn('[brain-provider] Hermes failed — falling back to native for this reply');
-      }
-    }
+    console.warn(
+      `[brain-provider] brain_provider=hermes is RETIRED (one-runtime decision) — phone_number_id ${phoneNumberId} answered natively; repoint this tenant to clawith`,
+    );
   }
 
-  if (!result && agent.brain_provider === 'clawith') {
+  // ── GATED AI-LOOP PATH (default OFF) ──────────────────────────────────────
+  // Reached only when ISOLA_AI_LOOP_ENABLED === 'true' AND this exact
+  // Chatwoot account/inbox door is listed. With the gate off this whole block
+  // is dead code and behaviour below is byte-for-byte what shipped before.
+  //
+  // Inside it there is no `native` branch at all. Between 2026-07-25 00:34Z
+  // and this commit, every inbox-46 message reached the bridge, was rejected
+  // 401, and was answered by native Claude — a working-looking EPIC agent that
+  // was not EPIC's agent. A brain outage has to look like an outage.
+  if (
+    !result &&
+    agent.brain_provider === 'clawith' &&
+    gatedLoop &&
+    isAiLoopGatedDoor(gatedLoop.chatwootAccountId, gatedLoop.inboxId)
+  ) {
+    gatedFailClosed = true;
+
+    if (!clawithDispatch.allowed) {
+      // Exposure denial on the gated path resolves exactly like every other
+      // gated-path failure: suppressed, never a native reply — §6's "no
+      // fourth branch, and in particular no native one" applies here too.
+      return {
+        text: '',
+        tokensUsed: 0,
+        model: 'clawith',
+        provider: 'clawith',
+        needsHandoff: false,
+        suppressCustomerReply: true,
+        clawithFailure: {
+          kind: 'agent_missing',
+          detail: `exposure denied: ${clawithDispatch.reason}`,
+          status: null,
+          correlationId: escalationCorrelationId ?? '',
+          conversationId: gatedLoop.conversationId,
+          inboundMessageId: gatedLoop.inboundMessageId,
+        },
+      };
+    }
+
+    const outcome = await invokeClawithGated({
+      tenantId,
+      bindingTenantId: gatedLoop.bindingTenantId,
+      conversationTenantId: gatedLoop.conversationTenantId,
+      businessId: gatedLoop.businessId,
+      chatwootAccountId: gatedLoop.chatwootAccountId,
+      inboxId: gatedLoop.inboxId ?? '',
+      conversationId: gatedLoop.conversationId,
+      inboundMessageId: gatedLoop.inboundMessageId,
+      contactRef: gatedLoop.contactRef,
+      customerMessage: [...messages].reverse().find((m) => m.role === 'user')?.content ?? '',
+      history: messages,
+      designatedAgentId: clawithBinding?.clawith_agent_id ?? '',
+      knowledgeScopeIds: gatedLoop.knowledgeScopeIds,
+      allowedTools: gatedLoop.allowedTools,
+      // The authoritative episode state, supplied by the caller from
+      // Conversation.ownership_state. buildClawithRequest() refuses any state
+      // that does not permit an AI customer reply.
+      ownershipState: gatedLoop.ownershipState,
+      correlationId: escalationCorrelationId ?? `corr-${sessionId}-${gatedLoop.inboundMessageId}`,
+      locale: gatedLoop.locale,
+      timezone: gatedLoop.timezone,
+    });
+
+    if (outcome.kind === 'suppressed') {
+      return {
+        text: '',
+        tokensUsed: 0,
+        model: 'clawith',
+        provider: 'clawith',
+        needsHandoff: false,
+        suppressCustomerReply: true,
+        clawithFailure: outcome.failure,
+      };
+    }
+
+    result = {
+      text: outcome.text ?? '',
+      tokensUsed: 0,
+      model: 'clawith',
+      provider: 'clawith',
+      needsHandoff: outcome.needsHandoff,
+      ...(outcome.kind === 'safe_unavailable' ? { clawithFailure: outcome.failure } : {}),
+    };
+  }
+
+  if (!result && !gatedFailClosed && agent.brain_provider === 'clawith') {
     if (!clawithBinding) {
       console.warn(
         '[brain-provider] brain_provider=clawith but no ClawithBinding for this tenant — falling back to native',
       );
+    } else if (!clawithDispatch.allowed) {
+      // Already logged and audited above — falls through to native exactly
+      // like the !clawithBinding case: the customer still gets a safe reply,
+      // never the denied (e.g. INTERNAL) agent.
     } else if (
       process.env.ISOLA_LEGACY_CLAWITH_FALLBACK === '1' &&
       !ISOLA_BRIDGE_ALLOWED_PHONE_NUMBER_IDS.has(phoneNumberId)
@@ -267,6 +455,30 @@ export async function generateReply(params: {
   }
 
   if (!result) {
+    // NOT reachable on the gated path: the block above either returns or
+    // assigns `result`. Kept as an explicit typed guard rather than a comment
+    // so that a future edit which adds a path out of that block fails CLOSED
+    // here — silently reaching `chatComplete` below is the exact regression §6
+    // exists to make impossible.
+    if (gatedFailClosed) {
+      console.error('[brain-provider] gated path produced no result — suppressing rather than answering natively');
+      return {
+        text: '',
+        tokensUsed: 0,
+        model: 'clawith',
+        provider: 'clawith',
+        needsHandoff: false,
+        suppressCustomerReply: true,
+        clawithFailure: {
+          kind: 'invalid_response',
+          detail: 'gated Clawith path produced no result',
+          status: null,
+          correlationId: escalationCorrelationId ?? '',
+          conversationId: gatedLoop?.conversationId ?? '',
+          inboundMessageId: gatedLoop?.inboundMessageId ?? '',
+        },
+      };
+    }
     const native = await chatComplete({ model, system, messages, maxTokens: 4096 });
     result = {
       text: native.text,
@@ -299,6 +511,73 @@ export async function generateReply(params: {
   const escalation = detectEscalationIntent(lastUserText, tenantId);
 
   try {
+    // Provider-failure containment runs FIRST, before the claim-guard.
+    // Infrastructure output is not a claim to be checked against a price
+    // register — it is text that must never reach a customer at all. A raw
+    // `HTTP 402: {"error":...}` dump was relayed verbatim to a customer on
+    // 2026-08-13 (Chatwoot conv 233, msg 2784), and the token-quota notice is
+    // the same leak waiting on a cap being set. Both originate in Clawith,
+    // which this programme does not fork (CLAUDE.md law 2), so this chokepoint
+    // is the only place either can be stopped.
+    //
+    // Not scoped to SALES_TENANT_IDS — same reasoning as the escalation-claim
+    // backstop. A leaked provider error is wrong for every tenant.
+    const providerFailure = detectProviderFailure(result.text);
+    if (providerFailure.leaks) {
+      console.warn(
+        `[brain-provider] provider-failure contained (rule=${providerFailure.rule}) for tenant ${tenantId}`,
+      );
+      await audit({
+        tenantId,
+        actorId: `agent:${agent.id}`,
+        action: 'provider_failure.contained',
+        entity: 'conversation',
+        entityId: sessionId,
+        // Rule id only. The failure text is never audited: it is the thing we
+        // are containing, and it carries provider payloads and run identifiers.
+        meta: { rule: providerFailure.rule },
+      });
+
+      // Raise it on the operator alert channel that already exists, rather
+      // than inventing a second one. `provider_error_leaked` is a kind the
+      // taxonomy ALREADY defines — verbatim, "a structurally valid 200
+      // response whose customer-visible text is itself a raw provider/runtime
+      // failure ... the exact leak this taxonomy exists to catch when it
+      // arrives through a 'successful' call". The kind existed and the alert
+      // channel existed; only the detection was missing, which is how this
+      // reached a customer through the gap between two things already built.
+      //
+      // recordClawithFailure is fire-and-forget by contract and flags this
+      // kind P0, so an operator query surfaces it without waiting for a second
+      // occurrence, and the WhatsApp leg fires when a template is approved.
+      // Two audit rows are deliberate and answer different questions:
+      // `provider_failure.contained` is what we STOPPED; `clawith.failure` is
+      // the operator alert with the full diagnostic.
+      if (clawithBinding?.clawith_agent_id) {
+        await recordClawithFailure(
+          new ClawithFailure(
+            'provider_error_leaked',
+            // Rule id only. The failure text itself is never carried into the
+            // alert: it is the thing being contained, and it holds provider
+            // payloads and run identifiers.
+            `contained by rule=${providerFailure.rule}`,
+          ),
+          {
+            tenantId:       tenantId,
+            agentId:        agent.id,
+            clawithAgentId: clawithBinding.clawith_agent_id,
+            surface:        'customer_dispatch',
+            correlationId:  escalationCorrelationId ?? sessionId,
+            actorId:        `agent:${agent.id}`,
+          },
+        ).catch(() => undefined);
+      }
+
+      // DEFLECTION promises a person will follow up, and needsHandoff makes
+      // that promise true — the same pairing the claim-guard path relies on.
+      return { ...result, text: GUARD_ERROR_DEFLECTION, needsHandoff: true };
+    }
+
     const guarded = guardReply(result.text, tenantId);
     if (guarded.blocked) {
       console.warn(`[brain-provider] claim-guard blocked a reply (rule=${guarded.rule}) for tenant ${tenantId}`);
@@ -449,69 +728,36 @@ async function tryFlowise(params: {
  * `actions` is accepted but currently ignored — Hermes is a pure text brain
  * for this socket; Foundation remains the sole WhatsApp I/O surface.
  */
-async function tryHermes(params: {
+async function tryHermes(_params: {
   messages: { role: 'user' | 'assistant'; content: string }[];
   sessionId: string;
   phoneNumberId: string;
   senderPhone: string;
 }): Promise<{ text: string; tokensUsed: number; provider: 'hermes'; needsHandoff?: boolean; actions?: unknown } | null> {
-  const baseUrl = process.env.HERMES_AGENT_URL || DEFAULT_HERMES_AGENT_URL;
-  const internalSecret = process.env.BFF_INTERNAL_SECRET;
-  if (!internalSecret) {
-    console.warn('[brain-provider] BFF_INTERNAL_SECRET not configured — cannot use hermes provider');
-    return null;
-  }
-
-  const lastUserMessage = [...params.messages].reverse().find((m) => m.role === 'user');
-  const message = lastUserMessage?.content ?? '';
-  if (!message) return null;
-
-  try {
-    const res = await fetch(baseUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-internal-secret': internalSecret,
-      },
-      body: JSON.stringify({
-        sender_phone: params.senderPhone,
-        message,
-        session_id: params.sessionId,
-        phone_number_id: params.phoneNumberId,
-      }),
-      signal: AbortSignal.timeout(HERMES_TIMEOUT_MS),
-    });
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      console.error(`[brain-provider] Hermes call failed (${res.status}): ${errText}`);
-      return null;
-    }
-
-    const data: any = await res.json().catch(() => null);
-    const text: string = typeof data?.reply_text === 'string' ? data.reply_text.trim() : '';
-    if (!text) {
-      console.error('[brain-provider] Hermes response had no usable reply_text field');
-      return null;
-    }
-
-    // Hermes doesn't report token usage — cost is $0 to our meter for this reply.
-    // needs_handoff/actions are read opportunistically — Hermes's documented
-    // contract above doesn't list needs_handoff today, but this plumbing was
-    // previously dead even for the already-live `actions` field; capturing
-    // both here means nothing needs to change in this function again if/when
-    // Hermes starts sending either.
-    return {
-      text,
-      tokensUsed: 0,
-      provider: 'hermes',
-      needsHandoff: data?.needs_handoff === true,
-      actions: data?.actions,
-    };
-  } catch (err: any) {
-    console.error('[brain-provider] Hermes request error:', err?.message ?? err);
-    return null;
-  }
+  // ── RETIRED. NO REQUEST LEAVES THIS FUNCTION. ─────────────────────────────
+  //
+  // `dec-one-clawith-runtime-two-isolated-domains-2026-07-30` makes Clawith the
+  // only agent runtime and freezes Hermes. The single call site in
+  // `generateReply` was removed; this body was emptied so the removal is
+  // provable rather than believed — there is no longer any code here that
+  // could reach a Hermes endpoint even if a future edit re-introduced a caller.
+  //
+  // THE RETIRED CONTRACT, for the record:
+  //   POST {HERMES_AGENT_URL || DEFAULT_HERMES_AGENT_URL}
+  //   headers: { 'Content-Type': 'application/json',
+  //              'x-internal-secret': BFF_INTERNAL_SECRET }
+  //   body:    { phone_number_id, sender_phone, session_id, message }
+  //   expects: { reply_text: string, actions?: unknown }
+  //   timeout: HERMES_TIMEOUT_MS
+  //
+  // Kept as prose, not as unreachable code: TypeScript does not narrow types in
+  // unreachable code, so the retained implementation stopped type-checking
+  // (TS2769) the moment it became dead. A block the compiler can no longer
+  // reason about is not documentation, it is rot.
+  console.error(
+    `[brain-provider] tryHermes is retired — no request sent to ${DEFAULT_HERMES_AGENT_URL} (was ${HERMES_TIMEOUT_MS}ms)`,
+  );
+  return null;
 }
 
 // ── Clawith implementation ────────────────────────────────────────────────────

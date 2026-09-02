@@ -10,13 +10,9 @@
  * { user: AuthUser | null }).
  */
 
-export interface AuthUser {
-  id: string;
-  email: string | null;
-  firstName: string | null;
-  lastName: string | null;
-  profileImageUrl: string | null;
-}
+import { probeAuthUser, type AuthProbe, type AuthUser } from './auth-probe';
+
+export type { AuthProbe, AuthUser };
 
 export interface AuthState {
   user: AuthUser | null;
@@ -25,31 +21,30 @@ export interface AuthState {
 }
 
 /**
- * Fetch the current session user from the Express API server.
- * Call this from Server Components or API routes.
+ * The current session user, or null.
+ *
+ * Deliberately still two-valued, so the call sites that only ever wanted a user
+ * keep compiling untouched. But null here now means "not authenticated", for
+ * EITHER reason, and it is no longer the only thing on offer: anywhere a
+ * redirect, a refusal or a 401 follows from the answer, use probeAuth() and act
+ * on the third case rather than guessing which of the two this null was.
  */
 export async function getAuthUser(
   headers: HeadersInit = {},
 ): Promise<AuthUser | null> {
-  try {
-    // Always call Express directly at localhost:8080 for server-to-server auth checks.
-    // In dev and production Express runs in the same process group; the /auth/*
-    // Next.js rewrite only applies to browser-facing requests, not these internal calls.
-    const res = await fetch('http://localhost:8080/auth/user',
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          ...headers,
-        },
-        cache: 'no-store',
-      },
-    );
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data.user ?? null;
-  } catch {
-    return null;
-  }
+  const probe = await probeAuthUser(headers, { fetch });
+  return probe.status === 'authenticated' ? probe.user : null;
+}
+
+/**
+ * The three-valued answer: authenticated, anonymous, or we could not find out.
+ *
+ * Express is always called directly at localhost:8080 for server-to-server auth
+ * checks. In dev and production it runs in the same process group; the /auth/*
+ * Next.js rewrite only applies to browser-facing requests, not to these.
+ */
+export async function probeAuth(headers: HeadersInit = {}): Promise<AuthProbe> {
+  return probeAuthUser(headers, { fetch });
 }
 
 /** Redirect path for login — preserves the returnTo destination. */

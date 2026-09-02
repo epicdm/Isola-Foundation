@@ -19,6 +19,7 @@ import {
   HeartPulse,
   Activity,
   Users,
+  Contact,
   ShieldCheck,
 } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
@@ -61,6 +62,10 @@ const OWNER_NAV: NavGroup = {
     { href: '/dashboard', label: 'Dashboard', icon: LayoutGrid },
     { href: '/team', label: 'AI Team', icon: Users },
     { href: '/inbox', label: 'Inbox', icon: Inbox },
+    // Sits beside Inbox and Activity because it is the same kind of thing: a
+    // way in to daily work. Customer 360 shipped without one and was reachable
+    // only by typing a URL, which is not a shipped feature.
+    { href: '/customers', label: 'Customers', icon: Contact },
     { href: '/activity', label: 'Activity', icon: Activity },
     { href: '/agent', label: 'AI Agent', icon: Bot },
     { href: '/voice', label: 'Voice', icon: Phone },

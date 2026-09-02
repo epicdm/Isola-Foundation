@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://isola.epic.dm/contracts/lane2/v1/error.schema.json",
+  "title": "Foundation error",
+  "description": "Every Foundation rejection uses this shape. `detail` is for operators and may name records; `publicDetail` is what may be shown to a caller and must never distinguish 'does not exist' from 'not yours'.",
+  "type": "object",
+  "required": [
+    "rejection",
+    "detail"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "rejection": {
+      "type": "string",
+      "description": "Stable machine-readable reason. Never reuse a value for a different meaning."
+    },
+    "detail": {
+      "type": "string"
+    },
+    "publicDetail": {
+      "type": "string"
+    },
+    "correlationId": {
+      "type": "string"
+    }
+  }
+}

@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://isola.epic.dm/contracts/lane2/v1/provisioning.channel.result.schema.json",
+  "title": "lane2.provisioning.channel.connect@1 (result)",
+  "description": "What Lane 2 reports back. PROVIDER-SAFE IDENTIFIERS ONLY. Foundation refuses tokens, keys, bearer headers, JWTs and anything longer than 200 characters \u2014 a credential here is a Lane 2 defect and accepting it would make it permanent.",
+  "type": "object",
+  "required": [
+    "channelBindingId",
+    "status",
+    "contractVersion",
+    "correlationId"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "channelBindingId": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "requested",
+        "provisioning",
+        "ready",
+        "failed"
+      ]
+    },
+    "contractVersion": {
+      "const": "lane2.provisioning.channel.connect@1"
+    },
+    "providerRef": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 200
+    },
+    "inboxRef": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 200
+    },
+    "agentRef": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 200
+    },
+    "evidenceRef": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Where Lane 2 recorded proof. A reference, not the proof itself."
+    },
+    "readiness": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "health": {
+      "enum": [
+        "healthy",
+        "degraded",
+        "failed",
+        "unknown",
+        null
+      ]
+    },
+    "chatwootDeepLink": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "clawithDeepLink": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "echoedClassification": {
+      "enum": [
+        "customer_facing",
+        "internal_private",
+        null
+      ]
+    },
+    "failureSummary": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "verifiedAt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "correlationId": {
+      "type": "string"
+    }
+  }
+}

@@ -1,0 +1,162 @@
+# isola-sentinel — hand-deployed Swarm stack.
+#
+#   deploy:  sudo docker stack deploy -c /opt/isola/isola-sentinel-stack.yml isolasentinel
+#   service: isolasentinel_sentinel
+#
+# WHY THIS EXISTS
+# ---------------
+# The customer line died twice — eleven hours, then twenty-four — and both times it
+# was found by someone looking at something else. Every container was up and healthy
+# throughout. So this service does not lead with liveness; it leads with:
+#
+#     A DELIVERY WAS ACCEPTED AND NO REPLY WAS POSTED WITHIN N SECONDS
+#
+# read from `delivery_ledger`, which the gateway already writes on the reply path.
+#
+# It is on `easypanel-isola` to reach the gateway, the runtime and the ledger DB by
+# service name, and it needs egress for SMTP2GO and Paperclip.
+version: "3.8"
+
+services:
+  sentinel:
+    # PINNED TO A LOCAL IMAGE ID — NOT a registry manifest digest. Resolves only on
+    # host03. EXPIRY: a second swarm node, or any need to reproduce off host03, moves
+    # builds to a registry (GHCR) and this becomes a real manifest digest.
+    # was: isola-sentinel:3
+    image: sha256:16f07a254c931b5805a4fe641e4dc65d8bd3e8c54bac65a0d2eaf58a718d9976
+
+    networks:
+      - easypanel-isola
+      # Read `messages` for the outbound-failure signal. Read-only role `sentinel_ro`,
+      # SELECT on that one table — a monitor does not get write credentials.
+      - cw-data
+      # CONNECT probe to cw-egress-proxy. The proxy is the only route Chatwoot has to
+      # Meta, so it is a single point of failure for the customer channel; it does not
+      # go in without its own check.
+      - cw-egress-int
+
+    volumes:
+      # Alert state, so a restart does not re-announce every open alert and a long
+      # outage does not become a mailbox full of identical mail.
+      - isola_sentinel_state:/data
+      # READ-ONLY. The Meta-egress verifier already detects the exposure accurately;
+      # what it lacked was delivery. This adds the delivery, nothing else.
+      - type: bind
+        source: /var/lib/meta-egress/alerts.jsonl
+        target: /egress-alerts.jsonl
+        read_only: true
+
+    environment:
+      NODE_ENV: production
+      SENTINEL_INTERVAL_MS: "60000"
+      # A reply that has not landed in three minutes is a customer sitting in silence.
+      SENTINEL_STUCK_DELIVERY_MS: "180000"
+      SENTINEL_RENOTIFY_MS: "3600000"
+      SENTINEL_STATE_PATH: /data/sentinel-state.json
+
+      # ONLY targets whose healthy response has been observed. A target that can
+      # never pass is worse than no target: it trains the reader to ignore the
+      # mail. isola-portal, fiserv-api and Odoo reach are NOT here yet because
+      # their endpoints were not reachable from this network when verified —
+      # see README.md "Targets not yet covered".
+      SENTINEL_HTTP_TARGETS: "gateway=http://isolagw_gateway:3000/healthz,runtime=http://isolart_runtime:3000/healthz,paperclip=https://isola-ai.saas00.epic.dm/api/health,chatwoot=https://isola-chat.saas00.epic.dm/api"
+
+      # Expected-output-absent for the receivables agent. It fires 11:00 UTC Mon-Fri;
+      # absence of its issue after the grace window is itself the alert.
+      PAPERCLIP_BASE_URL: https://isola-ai.saas00.epic.dm
+      PAPERCLIP_COMPANY_ID: 3ed3869b-463c-4876-8e16-ddc058f06cd9
+      SENTINEL_AR_DUE_UTC_HOUR: "11"
+      SENTINEL_AR_GRACE_MIN: "20"
+
+      # Must be the authenticated sender or SMTP2GO will refuse it.
+      # A TRUE critical with a known owner and a known close condition: delivered,
+      # but at most once a day. Ten minutes of shouting into a log nobody reads is
+      # how this stayed invisible for three days.
+      SENTINEL_EGRESS_ALERTS_PATH: /egress-alerts.jsonl
+      SENTINEL_EGRESS_RENOTIFY_MS: "86400000"
+      SENTINEL_EGRESS_CLOSE_CONDITION: "NO WhatsApp or Facebook channel may be configured on host03 Chatwoot until isola_chat and isola_chatwoot-sidekiq sit on declared networks. The exposure is capability, not path — a configured channel turns it into a path silently, with no new alert, because this alert already fires and is already accepted."
+
+      SENTINEL_ALERT_FROM: bff@epic.dm
+      SENTINEL_ALERT_TO: epiccommunicationsinc@gmail.com
+
+      # OUTBOUND ATTEMPTED AND NEVER DELIVERED — the twin of the stuck-delivery signal.
+      # Chatwoot's handle_error marks a message :failed and returns WITHOUT raising, so
+      # Sidekiq never retries. That path is taken for ANY non-2xx from Meta: expired
+      # token, rejected template, rate limit, flagged number, closed 24h window, proxy
+      # denial, or a cause nobody has thought of. One check catches all of them; a
+      # proxy-specific probe would catch exactly one.
+      SENTINEL_CHATWOOT_URL_FILE: /run/secrets/sentinel_chatwoot_url
+      SENTINEL_FAILED_OUTBOUND_WINDOW_MS: "900000"
+
+      # Can the proxy still reach a host that MUST be allowed? Not "is it up" — that was
+      # true through both of this month's outages. A proxy that answers but refuses
+      # graph.facebook.com is the failure that LOSES messages, because a 403 is a real
+      # HTTP response and Chatwoot treats it as a permanent Meta error, not a transport
+      # fault. Contrast a proxy that is DOWN: that raises, and Sidekiq retries.
+      SENTINEL_EGRESS_PROXY_HOST: cw-egress-proxy
+      SENTINEL_EGRESS_PROXY_PORT: "8888"
+      SENTINEL_EGRESS_PROXY_ALLOWED: "graph.facebook.com,lookaside.fbsbx.com"
+
+      # Over-permissive allowlist drift is invisible to the probe above — adding a host
+      # refuses nothing and fires nothing. It is caught HERE instead: the filter file is
+      # baked into the image, so it cannot change without a new image id.
+      SENTINEL_EXPECTED_IMAGES: '{"cw_cw-egress-proxy":"sha256:dae2b76c85e18d3281b1258402836a6989f082b73a738ef24d00bf6a7fe59eba"}'
+
+      SENTINEL_LEDGER_URL_FILE: /run/secrets/sentinel_ledger_url
+      # SMTP, not the SMTP2GO HTTP API: the stored "api key" on this estate is a
+      # 12-char SMTP password and the HTTP API rejects it outright.
+      SENTINEL_SMTP_HOST: mail.smtp2go.com
+      SENTINEL_SMTP_PORT: "2525"
+      SENTINEL_SMTP_USER: bff@epic.dm
+      SENTINEL_SMTP_PASS_FILE: /run/secrets/smtp_pass
+      PAPERCLIP_BOARD_TOKEN_FILE: /run/secrets/paperclip_board_token
+
+    secrets:
+      # The SAME ledger the gateway writes. Read-only use here.
+      - source: isola_gw_ledger_url_v1
+        target: sentinel_ledger_url
+      - source: isola_smtp_pass_v1
+        target: smtp_pass
+      - source: isola_paperclip_board_token_v1
+        target: paperclip_board_token
+      - source: isola_sentinel_chatwoot_url_v1
+        target: sentinel_chatwoot_url
+
+    cap_drop:
+      - ALL
+
+    deploy:
+      replicas: 1
+      # GATE C. `any` restarts a CLEAN exit — the failure mode that kept
+      # isola-runtime down for two hours. A monitor that does not come back is
+      # worse than no monitor, because its silence reads as health.
+      restart_policy:
+        condition: any
+        delay: 10s
+      update_config:
+        order: start-first
+        failure_action: rollback
+
+networks:
+  easypanel-isola:
+    external: true
+  # Both belong to the `cw` stack; joined here by their real swarm names.
+  cw-data:
+    external: true
+    name: cw_cw-data
+  cw-egress-int:
+    external: true
+    name: cw_cw-egress-int
+
+volumes:
+  isola_sentinel_state:
+
+secrets:
+  isola_gw_ledger_url_v1:
+    external: true
+  isola_smtp_pass_v1:
+    external: true
+  isola_paperclip_board_token_v1:
+    external: true
+  isola_sentinel_chatwoot_url_v1:
+    external: true
