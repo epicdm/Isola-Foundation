@@ -211,7 +211,7 @@ const cases = [
     payload: {
       session_id: SID,
       tool_name: 'Bash',
-      tool_input: { command: 'curl -X POST "' + GRAPH + PNID_3742 + '/subscribed_apps"' },
+      tool_input: { command: 'curl -q -X POST "' + GRAPH + PNID_3742 + '/subscribed_apps"' },
     },
   },
   {
@@ -222,7 +222,7 @@ const cases = [
       session_id: SID,
       tool_name: 'Bash',
       tool_input: {
-        command: 'curl "' + GRAPH + PNID_3742 + '/subscribed_apps" --data "subscribed_fields=messages"',
+        command: 'curl -q "' + GRAPH + PNID_3742 + '/subscribed_apps" --data "subscribed_fields=messages"',
       },
     },
   },
@@ -231,14 +231,14 @@ const cases = [
     // mutation because --data-urlencode was treated as a write indicator, which
     // pushed engineers toward hand-built query strings to prove webhook
     // ownership. -G means GET.
-    name: 'curl -G --data-urlencode metadata read is ALLOWED',
+    name: 'curl -q -G --data-urlencode metadata read is ALLOWED',
     expect: PASS,
     payload: {
       session_id: SID,
       tool_name: 'Bash',
       tool_input: {
         command:
-          'curl -sG --data-urlencode "fields=webhook_configuration" ' +
+          'curl -q -sG --data-urlencode "fields=webhook_configuration" ' +
           '--data-urlencode "access_token=$META_GRAPH_TOKEN" ' + GRAPH + PNID_6737,
       },
     },
@@ -249,7 +249,7 @@ const cases = [
     payload: {
       session_id: SID,
       tool_name: 'Bash',
-      tool_input: { command: 'curl -s "' + GRAPH + WABA + '/subscribed_apps?access_token=$META_GRAPH_TOKEN"' },
+      tool_input: { command: 'curl -q -s "' + GRAPH + WABA + '/subscribed_apps?access_token=$META_GRAPH_TOKEN"' },
     },
   },
   {
@@ -258,7 +258,7 @@ const cases = [
     payload: {
       session_id: SID,
       tool_name: 'Bash',
-      tool_input: { command: 'curl -s "' + GRAPH + WABA + '/phone_numbers?access_token=$META_GRAPH_TOKEN"' },
+      tool_input: { command: 'curl -q -s "' + GRAPH + WABA + '/phone_numbers?access_token=$META_GRAPH_TOKEN"' },
     },
   },
   {
@@ -269,7 +269,7 @@ const cases = [
       tool_name: 'Bash',
       tool_input: {
         command:
-          'curl -sG --data-urlencode "input_token=$SUBJECT_TOKEN" ' +
+          'curl -q -sG --data-urlencode "input_token=$SUBJECT_TOKEN" ' +
           '--data-urlencode "access_token=$APP_TOKEN" ' + GRAPH + 'debug_token',
       },
     },
@@ -283,7 +283,7 @@ const cases = [
       tool_name: 'Bash',
       tool_input: {
         command:
-          'curl -sG -d "grant_type=fb_exchange_token" -d "client_id=$APP_ID" ' +
+          'curl -q -sG -d "grant_type=fb_exchange_token" -d "client_id=$APP_ID" ' +
           '-d "client_secret=$APP_SECRET" -d "fb_exchange_token=$SHORT_TOKEN" ' + GRAPH + 'oauth/access_token',
       },
     },
@@ -295,7 +295,7 @@ const cases = [
     payload: {
       session_id: SID,
       tool_name: 'Bash',
-      tool_input: { command: 'curl -s "' + GRAPH + 'me/accounts?access_token=$META_GRAPH_TOKEN"' },
+      tool_input: { command: 'curl -q -s "' + GRAPH + 'me/accounts?access_token=$META_GRAPH_TOKEN"' },
     },
   },
   {
@@ -309,7 +309,7 @@ const cases = [
     payload: {
       session_id: SID,
       tool_name: 'Bash',
-      tool_input: { command: 'curl -s "' + GRAPH + WABA + '/subscribed_apps?access_token=' + FAKE_TOKEN + '"' },
+      tool_input: { command: 'curl -q -s "' + GRAPH + WABA + '/subscribed_apps?access_token=' + FAKE_TOKEN + '"' },
     },
   },
   {
@@ -319,7 +319,7 @@ const cases = [
     payload: {
       session_id: SID,
       tool_name: 'Bash',
-      tool_input: { command: 'curl -s "' + GRAPH + PNID_3742 + '/request_code?code_method=SMS"' },
+      tool_input: { command: 'curl -q -s "' + GRAPH + PNID_3742 + '/request_code?code_method=SMS"' },
     },
   },
   {
@@ -329,7 +329,7 @@ const cases = [
     payload: {
       session_id: SID,
       tool_name: 'Bash',
-      tool_input: { command: 'curl -s "' + GRAPH + PNID_3742 + '?fields=access_token"' },
+      tool_input: { command: 'curl -q -s "' + GRAPH + PNID_3742 + '?fields=access_token"' },
     },
   },
   {
@@ -339,7 +339,7 @@ const cases = [
     payload: {
       session_id: SID,
       tool_name: 'Bash',
-      tool_input: { command: 'curl -s "' + GRAPH + WABA + '/message_templates"' },
+      tool_input: { command: 'curl -q -s "' + GRAPH + WABA + '/message_templates"' },
     },
   },
   {
@@ -349,7 +349,7 @@ const cases = [
     payload: {
       session_id: SID,
       tool_name: 'Bash',
-      tool_input: { command: 'curl -s "' + GRAPH + PNID_3742 + '?fields=messages"' },
+      tool_input: { command: 'curl -q -s "' + GRAPH + PNID_3742 + '?fields=messages"' },
     },
   },
   {
@@ -358,7 +358,7 @@ const cases = [
     payload: {
       session_id: SID,
       tool_name: 'Bash',
-      tool_input: { command: 'curl -X POST https://example.com/webhook -d "a=1"' },
+      tool_input: { command: 'curl -q -X POST https://example.com/webhook -d "a=1"' },
     },
   },
   {
@@ -373,21 +373,28 @@ const cases = [
       session_id: SID,
       tool_name: 'Bash',
       tool_input: {
-        command: 'curl -X POST "' + GRAPH + PNID_3742 + '/subscribed_apps?bad%ZZ=1&access_token=$META_GRAPH_TOKEN"',
+        command: 'curl -q -X POST "' + GRAPH + PNID_3742 + '/subscribed_apps?bad%ZZ=1&access_token=$META_GRAPH_TOKEN"',
       },
     },
   },
   {
     // Adversarial review 2026-08-05, finding 2 (high).
-    name: 'curl --next second transfer cannot POST behind a leading -G',
+    //
+    // Round 7 (2026-08-12): still blocked, now by an EARLIER and broader rule.
+    // A Meta curl must have exactly one destination, so `--next` is refused
+    // outright whenever the invocation contains a Graph request — before method
+    // classification is reached. The original intent (a second transfer cannot
+    // POST behind a leading -G) is enforced a fortiori: no second transfer is
+    // permitted at all.
+    name: 'curl -q --next second transfer cannot POST behind a leading -G',
     expect: BLOCK,
-    contains: 'meta-asset-mutation',
+    contains: 'unclassifiable-graph-request',
     payload: {
       session_id: SID,
       tool_name: 'Bash',
       tool_input: {
         command:
-          'curl -G "' + GRAPH + WABA + '?fields=name" --next -d "subscribed_fields=messages" "' +
+          'curl -q -G "' + GRAPH + WABA + '?fields=name" --next -d "subscribed_fields=messages" "' +
           GRAPH + PNID_3742 + '/subscribed_apps"',
       },
     },
@@ -526,7 +533,7 @@ const cases = [
       tool_name: 'Bash',
       tool_input: {
         command: t(
-          'curl -s https://portal.saas00.epic.dm/api/mcp -d \'{"method":"tools/call","params":',
+          'curl -q -s https://portal.saas00.epic.dm/api/mcp -d \'{"method":"tools/call","params":',
           '{"name":"execute_query","arguments":{"procedure":"listProjectsAndServices","input":{}}}}\''
         ),
       },
@@ -616,7 +623,7 @@ const cases = [
     payload: {
       session_id: SID,
       tool_name: 'Bash',
-      tool_input: { command: 'curl -s https://portal.saas00.epic.dm/api/rpc/projects/listProjectsAndServices' },
+      tool_input: { command: 'curl -q -s https://portal.saas00.epic.dm/api/rpc/projects/listProjectsAndServices' },
     },
   },
   {
@@ -626,7 +633,7 @@ const cases = [
     payload: {
       session_id: SID,
       tool_name: 'Bash',
-      tool_input: { command: 'curl -s "https://portal.saas00.epic.dm/api/trpc/projects.listProjectsAndServices?batch=1"' },
+      tool_input: { command: 'curl -q -s "https://portal.saas00.epic.dm/api/trpc/projects.listProjectsAndServices?batch=1"' },
     },
   },
   {

