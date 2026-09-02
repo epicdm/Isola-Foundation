@@ -1,15 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { getSessionMock, requireWorkspaceAccessMock, json2CallMock, resolveOdooConfigMock } =
+const { resolveCallerMock, json2CallMock, resolveOdooConfigMock } =
   vi.hoisted(() => ({
-    getSessionMock: vi.fn(),
-    requireWorkspaceAccessMock: vi.fn(),
+    resolveCallerMock: vi.fn(),
     json2CallMock: vi.fn(),
     resolveOdooConfigMock: vi.fn(),
   }))
 
-vi.mock('@/lib/session', () => ({ getSession: getSessionMock }))
-vi.mock('@/lib/workspace/authz', () => ({ requireWorkspaceAccess: requireWorkspaceAccessMock }))
+vi.mock('@/lib/customer-360/route-context', () => ({ resolveCaller: resolveCallerMock }))
 vi.mock('@/lib/engine-bindings', () => ({ resolveOdooConfigForTenant: resolveOdooConfigMock }))
 vi.mock('@/engines/odoo', async (orig) => {
   const actual = await orig<typeof import('@/engines/odoo')>()
@@ -33,35 +31,40 @@ const PARTNER = {
   active: true,
 }
 
-const session = { effectiveTenantId: TENANT, user: { id: 'user-1' } }
-const allow = () => ({
+type Req = import('next/server').NextRequest
+const req = (url: string) => new Request(url) as unknown as Req
+
+/** A caller resolved by either door. `kind` and `actorRole` are what the route reads. */
+const caller = (over: Record<string, unknown> = {}) => ({
   ok: true,
-  authz: { level: 'manager', basis: 'membership', membershipRole: 'admin', canViewAudit: false, canViewConfiguration: false },
+  caller: { tenantId: TENANT, kind: 'session', actorRole: 'manager', userId: 'user-1', ...over },
+})
+const refused = (status: number) => ({
+  ok: false,
+  response: new Response(JSON.stringify({ error: 'no' }), { status }),
 })
 
-const search = (q: string) => GET(new Request(`http://localhost/api/v1/customers/search?q=${encodeURIComponent(q)}`))
+const search = (q: string) => GET(req(`http://localhost/api/v1/customers/search?q=${encodeURIComponent(q)}`))
 
 beforeEach(() => {
-  getSessionMock.mockReset()
-  requireWorkspaceAccessMock.mockReset()
+  resolveCallerMock.mockReset()
   json2CallMock.mockReset()
   resolveOdooConfigMock.mockReset()
   resolveOdooConfigMock.mockResolvedValue({ url: ODOO, apiKey: 'k', db: 'd' })
-  getSessionMock.mockResolvedValue(session)
-  requireWorkspaceAccessMock.mockResolvedValue(allow())
+  resolveCallerMock.mockResolvedValue(caller())
 })
 
 describe('the guard runs before the search does', () => {
-  it('answers 401 with no session and never queries', async () => {
-    getSessionMock.mockResolvedValue(null)
+  it('answers 401 with no credential at either door, and never queries', async () => {
+    resolveCallerMock.mockResolvedValue(refused(401))
     const res = await search('EPIC')
 
     expect(res.status).toBe(401)
     expect(json2CallMock).not.toHaveBeenCalled()
   })
 
-  it('answers 403 without the manager role', async () => {
-    requireWorkspaceAccessMock.mockResolvedValue({ ok: false, status: 403, error: 'nope', authz: {} })
+  it('answers 403 when the caller is refused by the preamble', async () => {
+    resolveCallerMock.mockResolvedValue(refused(403))
     const res = await search('EPIC')
 
     expect(res.status).toBe(403)
@@ -69,8 +72,55 @@ describe('the guard runs before the search does', () => {
   })
 })
 
-describe('the tenant comes from the session', () => {
-  it('searches the instance bound to the SESSION tenant', async () => {
+/* ── the door this route gained, and the floor it must NOT lose ────────────
+ *
+ * The route previously took the cookie door only, so the published
+ * customer-search@1 contract was unreachable by the portal, which calls
+ * Foundation with a per-tenant service token. Adding the door is the fix.
+ * The risk in adding it is the opposite mistake: resolveCaller's cookie path
+ * admits 'staff', while the guard it replaced required 'manager'. A refactor
+ * that quietly widens who can enumerate customers is not a refactor, so the
+ * floor is asserted here in both directions.
+ */
+describe('both doors, and the role floor', () => {
+  it('a SERVICE caller may search — this is the door the contract was published for', async () => {
+    resolveCallerMock.mockResolvedValue(caller({ kind: 'service', actorRole: 'manager', userId: null }))
+    json2CallMock.mockResolvedValue([PARTNER])
+    const body = await (await search('EPIC')).json()
+
+    expect(body.state).toBe('available')
+    expect(resolveOdooConfigMock).toHaveBeenCalledWith(TENANT)
+  })
+
+  it('a STAFF session is refused, exactly as it was before the door was added', async () => {
+    resolveCallerMock.mockResolvedValue(caller({ actorRole: 'staff' }))
+    const res = await search('EPIC')
+
+    expect(res.status).toBe(403)
+    expect(json2CallMock).not.toHaveBeenCalled()
+  })
+
+  it('CONTROL — an owner is allowed, so the 403 above is the floor and not a blanket refusal', async () => {
+    resolveCallerMock.mockResolvedValue(caller({ actorRole: 'owner' }))
+    json2CallMock.mockResolvedValue([PARTNER])
+    const res = await search('EPIC')
+
+    expect(res.status).toBe(200)
+    expect((await res.json()).state).toBe('available')
+  })
+
+  it('the tenant comes from the CALLER, never the request — service door included', async () => {
+    resolveCallerMock.mockResolvedValue(caller({ kind: 'service', tenantId: 'tenant-from-token' }))
+    json2CallMock.mockResolvedValue([PARTNER])
+    await GET(req('http://localhost/api/v1/customers/search?q=EPIC&tenant=tenant-from-query'))
+
+    expect(resolveOdooConfigMock).toHaveBeenCalledWith('tenant-from-token')
+    expect(resolveOdooConfigMock).not.toHaveBeenCalledWith('tenant-from-query')
+  })
+})
+
+describe('the tenant comes from the caller', () => {
+  it('searches the instance bound to the CALLER tenant', async () => {
     json2CallMock.mockResolvedValue([PARTNER])
     await search('EPIC')
 
@@ -79,7 +129,7 @@ describe('the tenant comes from the session', () => {
 
   it('cannot be redirected to another tenant by a query parameter', async () => {
     json2CallMock.mockResolvedValue([PARTNER])
-    await GET(new Request('http://localhost/api/v1/customers/search?q=EPIC&company=someone-else'))
+    await GET(req('http://localhost/api/v1/customers/search?q=EPIC&company=someone-else'))
 
     expect(resolveOdooConfigMock).toHaveBeenCalledWith(TENANT)
     expect(resolveOdooConfigMock).not.toHaveBeenCalledWith('someone-else')
