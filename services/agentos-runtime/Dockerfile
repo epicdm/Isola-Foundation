@@ -65,13 +65,35 @@ USER agentos
 
 # No EXPOSE of a host-facing default beyond documenting the container-internal
 # port; EXPOSE does not publish anything by itself, and Phase B's stack file
-# is the ONLY place that may attach this to the private network.
+# is the ONLY place that may attach this to the private network. This line
+# documents the image's DEFAULT container-internal port; the actual bind
+# follows AGENTOS_PORT through settings.resolve_port, below.
 EXPOSE 8700
 
+# Probes the SAME parser uvicorn binds with, so the two can never disagree.
+#
+# It used to read `os.environ.get('AGENTOS_PORT','8700')` — a third copy of
+# the default, next to settings.py's DEFAULT_PORT and the hardcoded `--port`
+# in the old CMD. With AGENTOS_PORT=9000 the probe watched 9000 while uvicorn
+# bound 8700, and the container reported itself unhealthy while serving
+# perfectly well (def-agentos-dockerfile-hardcodes-host-port-ignoring-
+# settings-2026-08-27).
+#
+# `resolve_port` deliberately needs no credential, so this probe answers
+# "which port" without being able to read the shared secret.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import urllib.request,os,sys; \
-    sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('AGENTOS_PORT','8700')+'/healthz', timeout=3).status==200 else 1)" \
+  CMD python -c "import urllib.request,sys; \
+    from agentos_runtime.settings import resolve_port; \
+    sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:%d/healthz' % resolve_port(), timeout=3).status==200 else 1)" \
   || exit 1
 
-ENTRYPOINT ["python", "-m", "uvicorn", "agentos_runtime.main:app"]
-CMD ["--host", "0.0.0.0", "--port", "8700"]
+# NO `--host`/`--port` HERE, AND NO CMD AT ALL.
+#
+# The bind is not an image literal: `agentos_runtime.__main__` reads
+# AGENTOS_HOST/AGENTOS_PORT through settings.resolve_host/resolve_port, the
+# same parser load_settings() and the healthcheck above use. AGENTOS_HOST is
+# set to 0.0.0.0 in the ENV block above because another container on the
+# private overlay must be able to reach this one; the isolation comes from
+# publishing nothing to a host interface, never from the bind address
+# (CLAUDE.md Law 6 — a filter rule is not containment; structure is).
+ENTRYPOINT ["python", "-m", "agentos_runtime"]

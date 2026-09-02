@@ -27,6 +27,7 @@ Boot sequence, and why the order matters:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 
@@ -36,6 +37,7 @@ from fastapi.responses import JSONResponse
 
 from agentos_runtime.agent import build_agent, make_run_operations_coordinator
 from agentos_runtime.allowlist import evaluate_eligibility
+from agentos_runtime.deadline import resolve_effective_deadline
 from agentos_runtime.logging_utils import configure_logging, log_run_event, logger
 from agentos_runtime.schemas import AgentRunEnvelope, AgentRunResponse, AgentRunUsage
 from agentos_runtime.security import make_verify_shared_secret
@@ -138,10 +140,61 @@ async def agent_run(
         )
         raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail=eligibility.reason)
 
+    # THE EARLIER OF THE TWO DEADLINES, resolved BEFORE any model execution.
+    # Node's deadline used to have nowhere to travel, so this process enforced
+    # only its own — and kept executing (and kept spending provider tokens)
+    # after Node had already given up. See deadline.py for why the wire value
+    # is a remaining duration rather than a timestamp, and why finiteness is
+    # checked before positivity.
+    resolution = resolve_effective_deadline(
+        caller_deadline_ms=envelope.deadlineMs,
+        local_max_s=settings.request_timeout_s,
+    )
+    if resolution.refusal is not None:
+        # REFUSED BEFORE EXECUTION BEGINS. An expired or unusable deadline is
+        # not a reason to start work and abandon it later; it is a reason not
+        # to start. Structured, correlated, and shaped exactly like every other
+        # non-completed outcome this route produces — Node already treats any
+        # status other than "completed" as failed, with no retry.
+        duration_ms = (time.monotonic() - started) * 1000
+        log_run_event(
+            correlation_id=envelope.correlationId,
+            template_id=envelope.templateId,
+            status="refused",
+            duration_ms=duration_ms,
+            detail=resolution.refusal,
+        )
+        return AgentRunResponse(status="error", reason=resolution.refusal)
+
     # `systemPrompt` is the instruction source; `context` stays caller-supplied
     # DATA. They are passed as separate arguments and never concatenated here,
     # so nothing inside the context can be promoted to a system instruction.
-    outcome = await run_operations_coordinator(envelope.context, envelope.systemPrompt)
+    #
+    # `asyncio.wait_for` CANCELS the coroutine it wraps and awaits that
+    # cancellation — it does not merely stop awaiting it. That distinction is
+    # the whole fix: an abandoned coroutine keeps running on the same event
+    # loop and keeps consuming provider tokens for a caller that is gone,
+    # which is indistinguishable from the defect it was meant to close.
+    try:
+        outcome = await asyncio.wait_for(
+            run_operations_coordinator(envelope.context, envelope.systemPrompt),
+            timeout=resolution.effective_s,
+        )
+    except asyncio.TimeoutError:
+        # STRUCTURED, NEVER RETRIED — a retry here would stack a second full
+        # model execution behind a caller that has already given up, and the
+        # reason names WHICH bound applied so a caller-imposed cut-off is
+        # distinguishable in a log from a local-policy one.
+        duration_ms = (time.monotonic() - started) * 1000
+        reason = f"deadline_exceeded_after_{resolution.effective_s}s (bound={resolution.bound})"
+        log_run_event(
+            correlation_id=envelope.correlationId,
+            template_id=envelope.templateId,
+            status="error",
+            duration_ms=duration_ms,
+            detail=reason,
+        )
+        return AgentRunResponse(status="error", reason=reason)
     duration_ms = (time.monotonic() - started) * 1000
 
     if not outcome.completed:

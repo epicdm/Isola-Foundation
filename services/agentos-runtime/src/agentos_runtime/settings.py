@@ -108,6 +108,45 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8700
 
 
+def resolve_host(env: dict[str, str] | None = None) -> str:
+    """THE ONE PLACE the bind address is decided. See `resolve_port`."""
+    e = os.environ if env is None else env
+    return e.get("AGENTOS_HOST") or DEFAULT_HOST
+
+
+def resolve_port(env: dict[str, str] | None = None) -> int:
+    """THE ONE PLACE the bind port is decided — for uvicorn, for the container
+    HEALTHCHECK, and for `load_settings()`.
+
+    Split out of `load_settings()` on 2026-08-27 to close
+    def-agentos-dockerfile-hardcodes-host-port-ignoring-settings-2026-08-27.
+    The Dockerfile's last line was `CMD ["--host","0.0.0.0","--port","8700"]`
+    — a hardcoded bind — while this module read AGENTOS_PORT and the
+    HEALTHCHECK probed `os.environ.get('AGENTOS_PORT','8700')`. Setting
+    AGENTOS_PORT=9000 made the probe watch 9000 while uvicorn bound 8700: a
+    setting accepted by two readers and silently ignored by the one that
+    decides (CLAUDE.md Law 24's corollary — the config states intent, the
+    bound socket states fact).
+
+    Deliberately does NOT require the credentials `load_settings()` requires:
+    the healthcheck must be able to ask "which port" without being able to
+    read the shared secret, and a probe that fails because a secret file moved
+    would report the wrong thing about the socket.
+
+    A non-integer value is REFUSED rather than defaulted, because silently
+    falling back to 8700 would be the same defect in a new place: a value
+    supplied, accepted, and quietly discarded.
+    """
+    e = os.environ if env is None else env
+    raw = e.get("AGENTOS_PORT")
+    if raw is None or raw.strip() == "":
+        return DEFAULT_PORT
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"AGENTOS_PORT={raw!r} is not an integer.") from exc
+
+
 def load_settings(env: dict[str, str] | None = None) -> Settings:
     e = dict(os.environ if env is None else env)
 
@@ -183,11 +222,11 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     if request_timeout_s <= 0:
         raise ConfigError("AGENTOS_REQUEST_TIMEOUT_S must be a positive number.")
 
-    port_raw = e.get("AGENTOS_PORT")
-    try:
-        port = int(port_raw) if port_raw not in (None, "") else DEFAULT_PORT
-    except ValueError as exc:
-        raise ConfigError(f"AGENTOS_PORT={port_raw!r} is not an integer.") from exc
+    # Through the SAME parser the uvicorn bind and the container healthcheck
+    # use — never a second copy of the decision (Law 21: a remediation applied
+    # to one copy while an identical stale copy lives elsewhere is a moved
+    # problem, not a fix).
+    port = resolve_port(e)
 
     return Settings(
         shared_secret=shared_secret,
@@ -197,6 +236,6 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         model_base_url=(e.get("AGENTOS_MODEL_BASE_URL") or DEFAULT_MODEL_BASE_URL).rstrip("/"),
         model_id=e.get("AGENTOS_MODEL_ID") or DEFAULT_MODEL_ID,
         request_timeout_s=request_timeout_s,
-        host=e.get("AGENTOS_HOST") or DEFAULT_HOST,
+        host=resolve_host(e),
         port=port,
     )
