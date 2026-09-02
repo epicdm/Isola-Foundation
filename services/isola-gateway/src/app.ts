@@ -31,7 +31,7 @@ import {
   type Binding,
   type BindingStore,
 } from "./bindings.js";
-import { createChatwootApi, type ChatwootApi } from "./chatwoot.js";
+import { createChatwootApi, type ChatwootApi, type ChatwootTarget } from "./chatwoot.js";
 import { configuredBindings, type GatewayConfig } from "./config.js";
 import {
   bindingIdentity,
@@ -41,8 +41,10 @@ import {
 import { createSafeFetch, type SafeFetch } from "./egress.js";
 import { createFailpoint, DISARMED, type Failpoint } from "./failpoint.js";
 import { idempotencyKey } from "./idempotency.js";
-import type { Ledger, ReserveResult, SqlClient } from "./ledger.js";
-import type { OwnershipGate } from "./ownership.js";
+import { handleManualHandbackWebhook } from "./handback.js";
+import type { Ledger, ReserveResult, SqlClient, SqlExecutor } from "./ledger.js";
+import type { ConversationRef, OwnershipGate } from "./ownership.js";
+import { recordHumanReply } from "./ownership-store.js";
 import { constantTimeEquals } from "./signature.js";
 import { checkSender } from "./allowlist.js";
 import { classifyTurn, recordTurn } from "./turns.js";
@@ -69,6 +71,8 @@ import {
 import { SERVICE_VERSION } from "./version.js";
 import {
   evaluateSuppression,
+  isHumanAgentReply,
+  isManualHandbackSignal,
   parseRouting,
   parseWebhookPayload,
   type NoTextClassification,
@@ -93,6 +97,20 @@ export type Outcome =
    */
   | "binding_not_accepted"
   | "suppressed"
+  /**
+   * Chatwoot's own signed `conversation_status_changed` -> `pending` event —
+   * the explicit human handback gesture, reported directly rather than
+   * discovered by re-fetching the conversation. ACKed immediately; the actual
+   * handback (or the discovery that none was needed) happens asynchronously,
+   * exactly like `accepted` deliveries. See `handback.ts`'s
+   * `handleManualHandbackWebhook`.
+   */
+  | "manual_handback_signal"
+  /**
+   * A human agent wrote in the conversation. The ownership ledger was advanced
+   * to HUMAN_OWNED; nothing was sent and no model was invoked.
+   */
+  | "human_reply"
   /**
    * The event carried no routable account/inbox. Chatwoot sends these
    * routinely and they need no action. 422, not 401: answering 401 made a
@@ -130,7 +148,19 @@ export type Outcome =
   | "ok";
 
 /** Server-side only. The HTTP response never says which half failed. */
-export type RejectionReason = SignatureFailureReason | "no_binding_secret" | "unparseable_body";
+export type RejectionReason =
+  | SignatureFailureReason
+  | "no_binding_secret"
+  | "unparseable_body"
+  /**
+   * A routing identifier arrived in BOTH the flat and nested forms and the two
+   * disagreed. Distinct from `unparseable_body` on purpose: "no identifier" is
+   * a routine, harmless Chatwoot event, whereas "two identifiers that contradict
+   * each other" is a body nobody should be sending and is worth seeing in a log
+   * as its own thing. Collapsing them would hide the second inside the noise of
+   * the first.
+   */
+  | "ambiguous_identifiers";
 
 export type Handler = (req: IncomingMessage, res: ServerResponse) => void;
 
@@ -229,7 +259,32 @@ export type DeliveryDecision =
   | { kind: "not_deduplicable" }
   | { kind: "bad_request" }
   | { kind: "binding_refused"; outcome: Outcome; detail: Record<string, unknown> }
-  | { kind: "suppressed"; reason: SuppressionReason; payload: WebhookPayload };
+  | { kind: "suppressed"; reason: SuppressionReason; payload: WebhookPayload }
+  /**
+   * Chatwoot's own signed status-change event, reporting the explicit human
+   * handback gesture directly. A SEPARATE axis from the reply decision above —
+   * it is decided BEFORE `evaluateSuppression` runs, so a status-changed event
+   * is never misread through the message-reply lens (which would suppress it
+   * as `not_message_created` and silently drop the signal this exists to
+   * carry).
+   */
+  | {
+      kind: "manual_handback_signal";
+      binding: Binding;
+      conversationId: number;
+    }
+  /**
+   * A human agent replied or noted in the conversation. Recorded as ownership,
+   * never answered. `messageId` is Chatwoot's own message id and becomes the
+   * operation id, so one physical human message produces exactly one
+   * transition however many times Chatwoot redelivers it.
+   */
+  | {
+      kind: "human_reply";
+      binding: Binding;
+      conversationId: number;
+      messageId: number;
+    };
 
 export interface DecideArgs {
   raw: Buffer;
@@ -285,6 +340,14 @@ export function decideDelivery(args: DecideArgs): DecideResult {
   const routing = parseRouting(args.raw);
   const at = (decision: DeliveryDecision): DecideResult => ({ decision, routing });
 
+  // Ambiguity is checked BEFORE the missing-identifier case. Both forms present
+  // and disagreeing is a different fault from neither being present, and it is
+  // refused before any secret is selected — verifying a signature against one
+  // tenant's key while the body names another is precisely the confusion this
+  // refusal exists to prevent.
+  if (routing.ambiguous) {
+    return at({ kind: "reject", reason: "ambiguous_identifiers" });
+  }
   if (routing.accountId === null || routing.inboxId === null) {
     return at({ kind: "reject", reason: "unparseable_body" });
   }
@@ -352,6 +415,45 @@ export function decideDelivery(args: DecideArgs): DecideResult {
       return at({ kind: "binding_refused", outcome: "binding_not_found", detail: {} });
   }
 
+  // THE MANUAL HANDBACK SIGNAL, decided BEFORE evaluateSuppression.
+  //
+  // `evaluateSuppression` is built entirely around message_created deliveries
+  // — a `conversation_status_changed` event has no message_type, no sender and
+  // no content, so running it through that predicate first would classify it
+  // as `not_message_created` and drop it silently, which is exactly the
+  // failure this decision exists to prevent. Checked here, after signature
+  // verification and binding resolution (so it is authenticated and routed to
+  // the right tenant) but before any reply-path logic sees it at all.
+  if (isManualHandbackSignal(payload) && payload.conversationDisplayId !== null) {
+    return at({
+      kind: "manual_handback_signal",
+      binding: resolution.binding,
+      conversationId: payload.conversationDisplayId,
+    });
+  }
+
+  // A HUMAN AGENT WROTE IN THE CONVERSATION. Same reasoning as the branch above
+  // and the same reason it has to sit HERE: `evaluateSuppression` classifies an
+  // outgoing message as `message_type_not_incoming` and drops it, so the one
+  // event that proves a person took the conversation was never recorded and the
+  // ledger could not advance past HUMAN_REQUESTED
+  // (`def-gateway-ownership-ledger-human-side-transitions-unwired-2026-08-24`).
+  //
+  // This is NOT a reply path — nothing is sent, no model is invoked. It records
+  // ownership and stops.
+  if (
+    isHumanAgentReply(payload) &&
+    payload.conversationDisplayId !== null &&
+    payload.messageId !== null
+  ) {
+    return at({
+      kind: "human_reply",
+      binding: resolution.binding,
+      conversationId: payload.conversationDisplayId,
+      messageId: payload.messageId,
+    });
+  }
+
   const verdict = evaluateSuppression(payload);
   if (verdict.action === "suppress") {
     return at({ kind: "suppressed", reason: verdict.reason, payload });
@@ -414,6 +516,19 @@ export interface GatewayDeps {
    * without it answers exactly as it did before.
    */
   turnStore?: SqlClient;
+  /**
+   * The SAME underlying executor as `ledger` (server.ts's `createLedger`
+   * actually returns `Ledger & SqlExecutor`), referenced under its OWN narrow
+   * name for the ownership store — exactly the `turnStore` pattern above,
+   * for exactly the same reason: `Ledger`'s own type stays a narrow delivery
+   * contract, and this is the one caller (the webhook-triggered manual
+   * handback path — see `handleManualHandbackWebhook`) that legitimately needs
+   * transactional SQL access to `conversation_ownership`. Absent means a
+   * `manual_handback_signal` webhook is ACKed and logged but not acted on —
+   * the idle-timeout sweeper is unaffected either way, since it holds its own
+   * `exec` directly.
+   */
+  ownershipExec?: SqlExecutor;
   safeFetch?: SafeFetch;
   /** Injected in tests; defaults to the allowlisted signed Magnus client. */
   personalLineSource?: PersonalLineSource;
@@ -667,6 +782,17 @@ export function createGateway(deps: GatewayDeps): Gateway {
           });
           return;
         }
+        // Same 422 family and the same reasoning about leaking nothing: decided
+        // before any secret is consulted, and the caller already knows what it
+        // sent. It keeps its OWN rejectionReason so a contradictory body is
+        // never filed under the routine no-identifier case.
+        if (decision.reason === "ambiguous_identifiers") {
+          finish(422, "unroutable_event", { rejectionReason: decision.reason }, {
+            error:
+              "event carries contradictory account/inbox identifiers and was refused as ambiguous",
+          });
+          return;
+        }
         finish(401, "unauthorized", { rejectionReason: decision.reason }, {
           error: "unauthorized",
         });
@@ -700,6 +826,165 @@ export function createGateway(deps: GatewayDeps): Gateway {
           { suppressionReason: decision.reason },
         );
         return;
+
+      case "human_reply": {
+        // ACK first. Recording ownership is not worth risking Chatwoot's 5s
+        // deadline, and a human reply needs no response from us at all.
+        finish(200, "human_reply", {
+          accountId: decision.binding.chatwootAccountId,
+          inboxId: decision.binding.chatwootInboxId,
+          conversationId: decision.conversationId,
+          tenantId: decision.binding.tenantId,
+        });
+
+        // FAIL CLOSED ON MISSING WIRING, LOUDLY — same reasoning as the
+        // handback branch below. Silence here would recreate the very defect
+        // being fixed: a transition that exists, is correct, and is never
+        // called, with nothing in the logs to say so.
+        if (deps.ownershipExec === undefined) {
+          logger.error({
+            event: "ownership",
+            correlationId,
+            alert: true,
+            alertCode: "ownership_exec_not_configured",
+            accountId: decision.binding.chatwootAccountId,
+            conversationId: decision.conversationId,
+            tenantId: decision.binding.tenantId,
+            outcome: "human_reply_not_recorded",
+            detail:
+              "a signed human-agent reply arrived but GatewayDeps.ownershipExec is not " +
+              "configured; the takeover was acknowledged but the ledger was not advanced",
+          });
+          return;
+        }
+
+        const conversation: ConversationRef = {
+          tenantId: decision.binding.tenantId,
+          chatwootAccountId: decision.binding.chatwootAccountId,
+          chatwootConversationId: decision.conversationId,
+          chatwootInboxId: decision.binding.chatwootInboxId,
+        };
+
+        track(
+          recordHumanReply(deps.ownershipExec, {
+            conversation,
+            // Chatwoot's own message id: one physical human message, one
+            // transition, however many times Chatwoot redelivers it.
+            operationId: `chatwoot:message:${decision.messageId}`,
+            reason: "human_agent_replied_in_chatwoot",
+            actorRef: "chatwoot:dashboard_user",
+          })
+            .then((outcome) => {
+              logger.info({
+                event: "ownership",
+                correlationId,
+                accountId: decision.binding.chatwootAccountId,
+                conversationId: decision.conversationId,
+                tenantId: decision.binding.tenantId,
+                outcome: "human_reply_recorded",
+                transition: outcome.status,
+                ownershipState: outcome.state ?? null,
+                ownershipEpisode: outcome.episode ?? null,
+              });
+            })
+            .catch((err: unknown) => {
+              logger.error({
+                event: "ownership",
+                correlationId,
+                alert: true,
+                alertCode: "human_reply_record_failed",
+                accountId: decision.binding.chatwootAccountId,
+                conversationId: decision.conversationId,
+                tenantId: decision.binding.tenantId,
+                outcome: "human_reply_not_recorded",
+                detail: err instanceof Error ? err.message : "unknown error",
+              });
+            }),
+        );
+        return;
+      }
+
+      case "manual_handback_signal": {
+        // ACK now, exactly like an accepted reply delivery — nothing below
+        // this point may run on Chatwoot's 5s webhook deadline. The actual
+        // handback (or the discovery that none is needed) runs asynchronously.
+        finish(200, "manual_handback_signal", {
+          accountId: decision.binding.chatwootAccountId,
+          inboxId: decision.binding.chatwootInboxId,
+          conversationId: decision.conversationId,
+          tenantId: decision.binding.tenantId,
+        });
+
+        // FAIL CLOSED ON MISSING WIRING, LOUDLY. An unconfigured
+        // `ownershipExec` must never be silently equivalent to "nothing to
+        // hand back" — that is indistinguishable from a healthy no-op in the
+        // logs and would recreate exactly the invisible-failure shape this
+        // fix exists to close.
+        if (deps.ownershipExec === undefined) {
+          logger.error({
+            event: "handback",
+            correlationId,
+            alert: true,
+            alertCode: "ownership_exec_not_configured",
+            accountId: decision.binding.chatwootAccountId,
+            conversationId: decision.conversationId,
+            tenantId: decision.binding.tenantId,
+            outcome: "webhook_handback_not_attempted",
+            detail:
+              "a signed manual-handback webhook arrived but GatewayDeps.ownershipExec is " +
+              "not configured; the signal was acknowledged but nothing was done",
+          });
+          return;
+        }
+
+        const conversation: ConversationRef = {
+          tenantId: decision.binding.tenantId,
+          chatwootAccountId: decision.binding.chatwootAccountId,
+          chatwootConversationId: decision.conversationId,
+          chatwootInboxId: decision.binding.chatwootInboxId,
+          bindingId: bindingIdentity(decision.binding),
+        };
+        const target: ChatwootTarget = {
+          accountId: decision.binding.chatwootAccountId,
+          conversationId: decision.conversationId,
+          accessToken: decision.binding.agentBotAccessToken,
+          ...(decision.binding.chatwootBaseUrl === undefined
+            ? {}
+            : { baseUrl: decision.binding.chatwootBaseUrl }),
+        };
+
+        track(
+          handleManualHandbackWebhook(
+            { exec: deps.ownershipExec, chatwoot, logger, now },
+            { conversation, target, correlationId },
+          )
+            .then((result) => {
+              logger.info({
+                event: "handback",
+                correlationId,
+                accountId: decision.binding.chatwootAccountId,
+                conversationId: decision.conversationId,
+                tenantId: decision.binding.tenantId,
+                outcome: `webhook_${result.outcome}`,
+                detail: result,
+              });
+            })
+            .catch((err: unknown) => {
+              logger.error({
+                event: "handback",
+                correlationId,
+                alert: true,
+                alertCode: "webhook_handback_crashed",
+                accountId: decision.binding.chatwootAccountId,
+                conversationId: decision.conversationId,
+                tenantId: decision.binding.tenantId,
+                outcome: "webhook_handback_crashed",
+                detail: err instanceof Error ? err.name : "unknown",
+              });
+            }),
+        );
+        return;
+      }
 
       case "accept":
         break;
