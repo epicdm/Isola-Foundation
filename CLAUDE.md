@@ -317,9 +317,20 @@ Host **deepseek 66.118.37.12**. These are live checkouts served by running proce
 > **Precedent:** a production build run inside `/opt/bff-v2` on a feature branch overwrote
 > the live `.next` output in place, changed `BUILD_ID`, and traced candidate files into live
 > route manifests. Build in a `git worktree` or an isolated copy — never in the directory a
-> live process serves. Determine the deployed commit from the process's exec cwd, **not**
-> from GitHub's default branch (which is stale for `epicdm/isolav2`; the real trunk is
-> `fix/bffv2-retire-dashboard-reseller-campaigns-broadcast`).
+> live process serves. Determine the deployed commit from the process's exec cwd, and then
+> **ask which branch actually contains it** — never assume from a branch name.
+>
+> **Corrected 2026-09-02.** This block used to say `epicdm/isolav2`'s real trunk was
+> `fix/bffv2-retire-dashboard-reseller-campaigns-broadcast`. It is not, any more. Measured:
+> the deployed commit `80f2c61d` is contained by **`main` only** — `git branch -r --contains
+> 80f2c61d` returns `isolav2/main`, and `main`'s tip is literally *"main: absorb serving line
+> 80f2c61d"*. The old branch still exists (`f9c93b67`) and does **not** contain the deployed
+> commit, which is exactly what made the stale note convincing: the branch is still there, so
+> nothing looks wrong until you check what is in it. Basing a bff-v2 change on it today would
+> fork from behind production.
+>
+> The durable instruction is the first sentence, not the branch name: `git branch -r
+> --contains <deployed-sha>` answers this in one command and cannot go stale.
 
 **Protected numbers** — 3742 (sole public front door) · 9043 (Hermes internal, out of
 scope) · 6737 (Front Desk / Customer Zero) · 9525 (Anansi).
