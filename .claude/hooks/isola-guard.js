@@ -175,6 +175,38 @@ function allow(note) {
  * So: block, and print the safe form. The text was always the useful half.
  */
 
+/**
+ * True when a `container-destroy` hit at matchIndex is an authorized
+ * pgshadow-/scratch- ephemeral teardown (see EPHEMERAL_PGSHADOW_NAME_RE and
+ * EPHEMERAL_SCRATCH_PATH_RE in lib/isola-topology.js for the exact shapes).
+ * See the call site for the design rationale (same-segment scoping, why the
+ * tag may live in a trailing
+ * comment here without reopening the class of bypass that scoping exists to
+ * close).
+ *
+ * The `#` in the AUTHORIZED tag is not a legal docker container-name
+ * character, so once the tag is confirmed present IN THIS SEGMENT, everything
+ * from the first `#` onward is metadata, not another target — stripped before
+ * tokenising, exactly as in the enforce-safety.js sibling of this function.
+ */
+function isAuthorizedEphemeralContainerOp(scanTarget, matchIndex) {
+  const rest = scanTarget.slice(matchIndex);
+  const sep = rest.match(/&&|\|\||;|\||&/);
+  const segment = sep ? rest.slice(0, sep.index) : rest;
+
+  if (!T.EPHEMERAL_AUTHORIZED_TAG_RE.test(segment)) return false;
+
+  const verbTail = segment.replace(/^\S+\s+\S+\s*/, ''); // past "docker <verb>"
+  const targets = verbTail
+    .replace(/#.*$/, '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((t) => !t.startsWith('-'));
+
+  if (targets.length === 0) return false;
+  return targets.every((t) => T.EPHEMERAL_PGSHADOW_NAME_RE.test(t));
+}
+
 let raw = '';
 process.stdin.on('data', (d) => (raw += d));
 process.stdin.on('end', () => {
@@ -409,15 +441,38 @@ function evaluate(inp) {
   // scanTarget, not cmd: a commit message describing a table drop is a ledger
   // entry, not a table drop. Same reason the write-path rules already exempt
   // Port records and task text.
+  //
+  // 2026-09-03 (ruling 1, dec-signup-to-pay-critical-path-and-hook-comment-fix-
+  // 2026-09-03) — NARROW, AUDITABLE EXEMPTION for a container-destroy hit whose
+  // target is an EXACT pgshadow-*/scratch-* ephemeral resource name, tagged
+  // `# AUTHORIZED:<port-entity-id>`. Restore proofs and scratch builds tear
+  // these down by design (CLAUDE.md §2.17), and this was previously judged
+  // exactly like tearing down a real production container.
+  //
+  // SCOPED TO THE SAME SEGMENT AS THE MATCH, not "the tag appears anywhere in
+  // scanTarget" — this file has no general command-segment splitter the way
+  // ~/.claude/hooks/enforce-safety.js does, so the exemption builds its own
+  // narrow one: from the destructive verb's match position to the next
+  // command separator (or end of string). A tag sitting in an earlier or
+  // later segment of the same command line does not count, for the identical
+  // reason enforce-safety.js's own test suite requires it: an exemption
+  // satisfiable by unrelated text elsewhere in the payload is not an
+  // exemption, it is an opt-out anybody can type.
   for (const rule of T.DESTRUCTIVE_RULES) {
-    if (rule.re.test(scanTarget)) {
-      deny(
-        rule.id,
-        rule.why,
-        'if this is genuinely required, get explicit owner authorization first, capture a verified backup/rollback point, ' +
-          'and record the authorization in Port before re-attempting.'
-      );
+    const m = rule.re.exec(scanTarget);
+    if (!m) continue;
+
+    if (rule.id === 'container-destroy' && isAuthorizedEphemeralContainerOp(scanTarget, m.index)) {
+      log('ALLOW-EPHEMERAL-AUTHORIZED rule=container-destroy (pgshadow/scratch resource, exact shape, tagged)');
+      continue;
     }
+
+    deny(
+      rule.id,
+      rule.why,
+      'if this is genuinely required, get explicit owner authorization first, capture a verified backup/rollback point, ' +
+        'and record the authorization in Port before re-attempting.'
+    );
   }
 
   // 3. THE R5A RULE — no builds inside a canonical live checkout.
