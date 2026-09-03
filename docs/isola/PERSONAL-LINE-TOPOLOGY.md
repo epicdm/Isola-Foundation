@@ -156,8 +156,12 @@ into a URL.
 survives restarts, and writes an audit line. Editing `.env` does nothing. Changing the
 committed default is a code change and therefore a PR.
 
-**Live value `[measured 2026-09-02]`:** `https://isola-connect.vercel.app`.
-A decision is pending to move it to `https://app.isola.epic.dm` — see §8.
+**Live value `[measured 2026-09-03 03:2x UTC]`:** `https://app.isola.epic.dm`.
+The move off `isola-connect.vercel.app` **has landed** — this file previously recorded it
+as still pending, and was wrong. Verified in effect, not merely written:
+`runtime-settings.json` mtime `2026-09-02 10:30:12 UTC` vs `bff-v2-web` start
+`2026-09-03 03:25:43 UTC` (restart #73) — the process started *after* the write, so §5.2's
+per-process cache holds the new value.
 
 ---
 
@@ -228,6 +232,25 @@ Changing it moves **all** of them at once. The payment return URL is the one tha
 care: if the provider validates or allowlists return domains, a change breaks payment
 returns.
 
+### 5.6 `isola-app.saas00.epic.dm` is NOT the customer PWA
+
+There is an older Isola app served from host03/EasyPanel at `isola-app.saas00.epic.dm`. It
+looks right — it answers 200, its `<title>` is *Isola*, and it serves a valid 402-byte
+`/manifest.json`. **It is not what a customer opens.** The customer is redirected to
+`ISOLA_SIGNIN_URL` (§3.1), which is `app.isola.epic.dm` on Vercel.
+
+The two differ in ways that change conclusions: `saas00` serves the manifest at
+`/manifest.json` while Vercel serves `/manifest.webmanifest` (860 bytes), and on `saas00`
+**`/sw.js` is the SPA catch-all** — byte-length-identical (2901) to a deliberately bogus
+route, so it is HTML, not a worker. On `app.isola.epic.dm` `/sw.js` is a real 781-byte
+worker that registers, activates and controls scope `/`. `[measured 2026-09-03]`
+
+This already cost a launch blocker: UAT finding **B6/D7** — *"no service worker, therefore
+the PWA is not installable"* — was measured against `saas00` and carried into
+`dec-launch-verdict-the-plumbing-landed-the-product-did-not-2026-08-30` as an ads-on
+blocker. See `ev-b6-was-measured-on-the-wrong-host-live-pwa-does-have-a-service-worker-2026-09-02`.
+**Always name the host you measured, and check it against §3.1 first.**
+
 ---
 
 ## 6. Deploy paths
@@ -283,9 +306,10 @@ vercel domains inspect app.isola.epic.dm --scope epiccommunicationsinc-1396s-pro
   now framable by any origin — on a surface showing the customer's number, balance and call
   history. Fix is a `headers` entry in `vercel.json`; **not applied**, because it is a
   security change to a live customer surface and belongs in its own reviewed PR.
-- **`ISOLA_SIGNIN_URL` → `app.isola.epic.dm`** — pending. Customers currently receive
-  `*.vercel.app` links over WhatsApp, which reads as phishing. Blocked on the payment
-  return-URL question in §5.5.
+- ~~**`ISOLA_SIGNIN_URL` → `app.isola.epic.dm`**~~ — **DONE.** Landed by
+  2026-09-02 10:30 UTC and confirmed live `[measured 2026-09-03]`; see §3.1. The payment
+  return-URL question in §5.5 moved with it and has **not** been separately re-verified —
+  if a top-up return breaks, that is the first place to look.
 - **`staging.isola.epic.dm`** — held by an unidentified project that is serving a live
   Next.js app. Must be released from that project (dashboard) before it can be bound to
   `isola-connect`'s `staging` branch. The branch exists and is pushed.
