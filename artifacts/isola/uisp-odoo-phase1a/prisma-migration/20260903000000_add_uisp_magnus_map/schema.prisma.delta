@@ -1,0 +1,35 @@
+// Paired schema delta for 20260903000000_add_uisp_magnus_map.
+//
+// Append to bff-v2 prisma/schema.prisma when this lane next gets a deploy
+// window (same "prepared, not applied to the live checkout" arrangement as
+// 20260902160000_add_uisp_odoo_map used). The table itself is already live -
+// created directly against the production database per CLAUDE.md's migration
+// law (a CREATE TABLE against a table that did not yet exist is a zero-row
+// target, not a `prisma db push`) - only the Prisma model registration is
+// still pending.
+//
+// The CHECK constraints in migration.sql are deliberately NOT expressible
+// here; Prisma has no datamodel syntax for them. `prisma migrate dev` will
+// therefore not reproduce them from this model alone - same arrangement
+// UispOdooMap already uses in this schema.
+
+model UispMagnusMap {
+  magnusDidId    String   @id @map("magnus_did_id")
+  magnusDid      String   @map("magnus_did")
+  magnusUserId   String   @map("magnus_user_id")
+  magnusUsername String?  @map("magnus_username")
+  uispClientId   Int?     @map("uisp_client_id")
+  odooPartnerId  Int?     @map("odoo_partner_id")
+  liteAccountId  String?  @map("lite_account_id")
+  bucket         String
+  matchedBy      String   @map("matched_by")
+  confidence     String
+  matchedAt      DateTime @default(now()) @map("matched_at")
+  notes          String?
+
+  @@index([uispClientId])
+  @@index([odooPartnerId])
+  @@index([liteAccountId])
+  @@index([bucket])
+  @@map("uisp_magnus_map")
+}
