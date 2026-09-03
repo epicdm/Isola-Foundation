@@ -175,8 +175,31 @@ function normalizePhone(raw: string): string {
 /**
  * findCustomerByPhone — res.partner lookup by phone, via search_read over
  * json2Call. Tries (in order): 10-digit input as +1XXXXXXXXXX, bare
- * +digits, then a last-10-digit `ilike` fallback. Returns null if the
- * number is too short (<7 digits) or no match is found.
+ * +digits, a last-10-digit `phone_sanitized ilike` fallback, and finally a
+ * raw-`phone` fallback for numbers `phone_sanitized` never populates for.
+ * Returns null if the number is too short (<7 digits) or no match is found.
+ *
+ * THE RAW-PHONE FALLBACK, WHY IT EXISTS (def-odoo-phone-sanitized-false-
+ * for-767818-range). Odoo computes `phone_sanitized` from `phone`, and for
+ * the entire 767-818 exchange (Dominica) that computation returns the
+ * BOOLEAN `false`, not a phone string -- confirmed live, not assumed. Both
+ * stages above filter on `phone_sanitized`, so for every customer in that
+ * exchange they search a field that is never a phone string, and always
+ * return nothing regardless of whether the customer exists. This third
+ * stage searches the raw `phone` field instead, so those customers become
+ * resolvable at all.
+ *
+ * REFUSE-ON-AMBIGUITY, UNCHANGED. This fallback must not weaken the rule
+ * it inherits: `ilike` on the raw field cannot itself prove a match, since
+ * `phone` is free-text and may carry separators an unformatted digit
+ * pattern cannot reliably substring-match position-for-position. So the
+ * ilike search only gathers CANDIDATES (on the last 4 digits, a substring
+ * essentially every real formatting style leaves contiguous); each
+ * candidate's own `phone` is then normalized and compared in full against
+ * the target's last 10 digits. Exactly one strict match resolves; zero
+ * means genuinely not found; MORE than one is refused, not guessed --
+ * the same shape as the phone_sanitized stages' own ambiguity refusal,
+ * applied honestly to a field this function does not otherwise trust.
  */
 export async function findCustomerByPhone(config: OdooConfig, phone: string): Promise<OdooCustomer | null> {
   const digits = normalizePhone(phone)
@@ -202,7 +225,19 @@ export async function findCustomerByPhone(config: OdooConfig, phone: string): Pr
     fields: CUSTOMER_FIELDS,
     limit: 1,
   }).catch(() => [])) as OdooCustomer[]
-  return byIlike && byIlike.length > 0 ? byIlike[0] : null
+  if (byIlike && byIlike.length > 0) return byIlike[0]
+
+  const last4 = last10.slice(-4)
+  const rawCandidates = (await json2Call(config, 'res.partner', 'search_read', {
+    domain: [['phone', 'ilike', last4]],
+    fields: CUSTOMER_FIELDS,
+    limit: 20,
+  }).catch(() => [])) as OdooCustomer[]
+
+  const strictMatches = (rawCandidates ?? []).filter(
+    (row) => row.phone && normalizePhone(row.phone).endsWith(last10),
+  )
+  return strictMatches.length === 1 ? strictMatches[0] : null
 }
 
 // ── Marketing / CRM funnel (P6 — EMA landing page) ──────────────────────────

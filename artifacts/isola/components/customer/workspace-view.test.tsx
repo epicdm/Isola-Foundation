@@ -85,10 +85,12 @@ function props(over: Partial<WorkspaceViewProps> = {}): WorkspaceViewProps {
     status: 'ready',
     context: response(),
     errorDetail: null,
+    selectedTab: 'sales',
     selectedAction: null,
     actionValues: {},
     actionOutcome: null,
     actionPending: false,
+    onSelectTab: noop,
     onSelectAction: noop,
     onChangeField: noop,
     onRun: noop,
@@ -417,6 +419,67 @@ describe('the workspace screen', () => {
     for (const name of CONTEXT_SECTION_NAMES) {
       expect(html).toContain(`data-section="${name}"`)
     }
+  })
+
+  it('renders all twelve sections REGARDLESS of which tab is selected -- a tab hides visually, it never removes markup', () => {
+    for (const tab of ['sales', 'billing', 'tickets', 'openWork', 'activity', 'services'] as const) {
+      const html = render(<CustomerWorkspaceView {...props({ selectedTab: tab })} />)
+      for (const name of CONTEXT_SECTION_NAMES) {
+        expect(html).toContain(`data-section="${name}"`)
+      }
+    }
+  })
+
+  it('marks exactly one tab panel visible (not aria-hidden) at a time, matching selectedTab', () => {
+    const html = render(<CustomerWorkspaceView {...props({ selectedTab: 'billing' })} />)
+    // Attributes are checked independently rather than as one combined
+    // string, since JSX prop order (not test-author assumption) governs
+    // the exact serialized attribute order.
+    const panel = (tab: string) => {
+      const start = html.indexOf(`data-tab-panel="${tab}"`)
+      // Each panel <div ...> opens with role="tabpanel" aria-hidden={...}
+      // data-tab-panel={...} -- slice back far enough to capture aria-hidden.
+      return html.slice(Math.max(0, start - 40), start + 40)
+    }
+    expect(panel('billing')).toContain('aria-hidden="false"')
+    expect(panel('sales')).toContain('aria-hidden="true"')
+    expect(panel('tickets')).toContain('aria-hidden="true"')
+    expect(panel('openWork')).toContain('aria-hidden="true"')
+    expect(panel('activity')).toContain('aria-hidden="true"')
+    expect(panel('services')).toContain('aria-hidden="true"')
+  })
+
+  it('renders all six tabs with aria-selected marking only the active one', () => {
+    const html = render(<CustomerWorkspaceView {...props({ selectedTab: 'activity' })} />)
+    for (const tab of ['sales', 'billing', 'tickets', 'openWork', 'activity', 'services']) {
+      expect(html).toContain(`data-tab="${tab}"`)
+    }
+    const button = (tab: string) => {
+      const start = html.indexOf(`data-tab="${tab}"`)
+      return html.slice(Math.max(0, start - 40), start + 10)
+    }
+    expect(button('activity')).toContain('aria-selected="true"')
+    expect(button('sales')).toContain('aria-selected="false"')
+  })
+
+  it('keeps the customer identity section OUTSIDE every tab panel -- always visible, never gated', () => {
+    const html = render(<CustomerWorkspaceView {...props({ selectedTab: 'billing' })} />)
+    // The customer SectionCard must appear before the first tab panel in
+    // document order, i.e. outside the tabbed body entirely.
+    const customerIndex = html.indexOf('data-section="customer"')
+    const firstTabPanelIndex = html.indexOf('data-tab-panel=')
+    expect(customerIndex).toBeGreaterThan(-1)
+    expect(firstTabPanelIndex).toBeGreaterThan(-1)
+    expect(customerIndex).toBeLessThan(firstTabPanelIndex)
+  })
+
+  it('places the two native surfaces inside the Tickets tab panel, not floating outside any tab', () => {
+    const html = render(<CustomerWorkspaceView {...props({ selectedTab: 'tickets' })} />)
+    const ticketsOpen = html.indexOf('data-tab-panel="tickets"')
+    const ticketsClose = html.indexOf('data-tab-panel="openWork"') // next panel in TAB_ORDER
+    const ticketsSection = html.slice(ticketsOpen, ticketsClose)
+    expect(ticketsSection).toContain('data-native-surface="chatwoot"')
+    expect(ticketsSection).toContain('data-native-surface="clawith"')
   })
 
   it('states once, at the top, that the picture is incomplete and names what is missing', () => {

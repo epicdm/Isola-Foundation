@@ -1,0 +1,106 @@
+/*
+ * Lumen tokens for the Customer 360 workspace, scoped to THIS component only.
+ *
+ * "Lumen tokens" here means the app's own already-shipped design system --
+ * the CSS custom properties defined once in app/globals.css (--sidebar,
+ * --card, --muted-foreground, --primary, --border, --radius-*) and already
+ * used by the real shadcn shell (AppSidebar/Topbar) both mount points sit
+ * inside. Nothing here is a new palette: every value below is `var(--x)`,
+ * so a theme-preset switch (EPIC/tangerine/soft-pop/brutalist) or a
+ * light/dark toggle repaints this component exactly like the rest of the
+ * app, with zero separate maintenance.
+ *
+ * SCOPE NOTE, stated rather than silently assumed: the design reference
+ * named in Port (dec-c360-milestone1-walk-data-pass-design-gap-2026-08-30,
+ * "the isola-lumen 'Customers' design, Marisol Vega reference") is a
+ * screenshot the owner shared directly in a separate session -- it is not
+ * committed to this repo and was not accessible here. What IS committed
+ * and ratified is the STRUCTURE (identity bar -> tab row -> body,
+ * dec-c360-convergence-spec-approved-panel-map-2026-08-30) and the actual
+ * token system this file consumes. This module implements that structure
+ * faithfully with real tokens; it does not claim to pixel-match a
+ * screenshot it could not read. The richer reference details (dark rail,
+ * AI insights, live-conversations rail) are that same Port record's own
+ * "some is DEMO FIXTURE... not real customer" caveat, and AI insights is
+ * separately ruled DROPPED (no Foundation data source) -- neither is
+ * built here.
+ */
+
+.identityBar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 1rem 1.25rem;
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  border: 1px solid var(--border);
+}
+
+.identityBarTitle {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--card-foreground);
+}
+
+.identityBarMeta {
+  font-size: 0.875rem;
+  color: var(--muted-foreground);
+}
+
+.tabRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0;
+}
+
+.tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 0.625rem 0.875rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--muted-foreground);
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  min-height: 44px;
+}
+
+.tab:hover {
+  color: var(--foreground);
+}
+
+.tabActive {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+}
+
+/* Every panel's sections stay in the markup at all times -- required for
+ * the existing purity contract (workspace-view.test.tsx asserts all
+ * twelve `data-section` values are present, unconditionally, on every
+ * render). Only VISUAL display is gated by the active tab, so hiding a
+ * panel never removes the honesty guarantees (forbidden/empty/unavailable
+ * wording) the underlying SectionCard already carries -- a hidden tab is
+ * still a real, fully-rendered card, just not the one currently on screen.
+ */
+.tabPanel {
+  display: none;
+}
+
+.tabPanelActive {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+}
+
+@media (min-width: 1024px) {
+  .tabPanelActive {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.body {
+  padding-top: 1rem;
+}
