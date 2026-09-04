@@ -142,6 +142,7 @@ export const PARTNER_FIELDS = [
   'is_company',
   'parent_id',
   'active',
+  'create_date',
 ] as const
 
 export interface CustomerRecord {
@@ -154,6 +155,7 @@ export interface CustomerRecord {
   isCompany: boolean
   companyName: string | null
   active: boolean
+  customerSince: string | null
 }
 
 export async function readCustomer(
@@ -178,6 +180,7 @@ export async function readCustomer(
     isCompany: r.is_company !== false,
     companyName: nameOf(r.parent_id),
     active: r.active !== false,
+    customerSince: str(r.create_date),
   }))
 }
 
@@ -308,6 +311,201 @@ export async function readIssues(
   }))
 }
 
+/**
+ * sale.order. The order-side twin of readOpportunities: only fields already
+ * safe to show a workbench (no internal margin/costing fields), scoped to
+ * `partner_id = customerId` exactly, same as every other reader here.
+ */
+export const ORDER_FIELDS = [
+  'id',
+  'name',
+  'state',
+  'amount_total',
+  'date_order',
+  'commitment_date',
+  'invoice_status',
+] as const
+
+const ORDER_STATE_LABEL: Readonly<Record<string, string>> = {
+  draft: 'Quotation',
+  sent: 'Quotation sent',
+  sale: 'Confirmed',
+  done: 'Delivered',
+  cancel: 'Cancelled',
+}
+
+export interface OrderRecord {
+  id: number
+  name: string | null
+  /** Raw sale.order.state (draft|sent|sale|done|cancel) — what
+   *  lib/customer-workspace/record-stage.ts's orderStageIndex() needs.
+   *  Never shown to a reader directly; see stateLabel. */
+  state: string | null
+  /** The customer-facing label (Quotation/Confirmed/Delivered/Cancelled) —
+   *  what a row or header actually displays. */
+  stateLabel: string | null
+  amountTotal: number | null
+  orderedAt: string | null
+  deliveryDate: string | null
+  invoiceStatus: string | null
+}
+
+export async function readOrders(
+  call: OdooCaller,
+  customerId: number,
+  limit: number,
+): Promise<OrderRecord[]> {
+  const result = await call('sale.order', 'search_read', {
+    domain: [['partner_id', '=', customerId]],
+    fields: [...ORDER_FIELDS],
+    order: 'date_order desc',
+    limit: clampLimit(limit),
+  })
+  return rows(result).map((r) => {
+    const rawState = str(r.state)
+    return {
+      id: Number(r.id),
+      name: str(r.name),
+      state: rawState,
+      stateLabel: rawState ? (ORDER_STATE_LABEL[rawState] ?? rawState) : null,
+      amountTotal: typeof r.amount_total === 'number' ? r.amount_total : null,
+      orderedAt: str(r.date_order),
+      deliveryDate: str(r.commitment_date),
+      invoiceStatus: str(r.invoice_status),
+    }
+  })
+}
+
+/**
+ * account.move, restricted to customer invoices (`move_type = 'out_invoice'`)
+ * so a vendor bill on the same partner record never surfaces here — this
+ * section is what THIS customer owes EPIC, never the reverse.
+ */
+export const INVOICE_FIELDS = [
+  'id',
+  'name',
+  'state',
+  'payment_state',
+  'amount_total',
+  'amount_residual',
+  'invoice_date',
+  'invoice_date_due',
+] as const
+
+const PAYMENT_STATE_LABEL: Readonly<Record<string, string>> = {
+  not_paid: 'Open',
+  in_payment: 'In payment',
+  paid: 'Paid',
+  partial: 'Partially paid',
+  reversed: 'Reversed',
+  invoicing_legacy: 'Legacy',
+}
+
+export interface InvoiceRecord {
+  id: number
+  name: string | null
+  state: string | null
+  paymentState: string | null
+  amountTotal: number | null
+  amountResidual: number | null
+  invoiceDate: string | null
+  dueDate: string | null
+}
+
+export async function readInvoices(
+  call: OdooCaller,
+  customerId: number,
+  limit: number,
+): Promise<InvoiceRecord[]> {
+  const result = await call('account.move', 'search_read', {
+    domain: [
+      ['partner_id', '=', customerId],
+      ['move_type', '=', 'out_invoice'],
+      ['state', '!=', 'draft'],
+    ],
+    fields: [...INVOICE_FIELDS],
+    order: 'invoice_date desc',
+    limit: clampLimit(limit),
+  })
+  return rows(result).map((r) => ({
+    id: Number(r.id),
+    name: str(r.name),
+    state: str(r.state),
+    paymentState: str(r.payment_state) ? (PAYMENT_STATE_LABEL[String(r.payment_state)] ?? str(r.payment_state)) : null,
+    amountTotal: typeof r.amount_total === 'number' ? r.amount_total : null,
+    amountResidual: typeof r.amount_residual === 'number' ? r.amount_residual : null,
+    invoiceDate: str(r.invoice_date),
+    dueDate: str(r.invoice_date_due),
+  }))
+}
+
+/**
+ * sale.order.line, for the in-app order detail sheet's "Line items" sub-tab.
+ * Scoped to `order_id = orderId` exactly — a caller supplies which order,
+ * nothing else. Excludes section/note display lines (`display_type` set),
+ * which carry no product/price and would render as empty rows.
+ */
+export const ORDER_LINE_FIELDS = ['id', 'name', 'product_uom_qty', 'price_unit', 'price_subtotal', 'display_type'] as const
+
+export interface OrderLineRecord {
+  id: number
+  name: string | null
+  quantity: number | null
+  unitPrice: number | null
+  subtotal: number | null
+}
+
+export async function readOrderLines(call: OdooCaller, orderId: number): Promise<OrderLineRecord[]> {
+  const result = await call('sale.order.line', 'search_read', {
+    domain: [['order_id', '=', orderId]],
+    fields: [...ORDER_LINE_FIELDS],
+    limit: MAX_SECTION_ROWS,
+  })
+  return rows(result)
+    .filter((r) => !r.display_type)
+    .map((r) => ({
+      id: Number(r.id),
+      name: str(r.name),
+      quantity: typeof r.product_uom_qty === 'number' ? r.product_uom_qty : null,
+      unitPrice: typeof r.price_unit === 'number' ? r.price_unit : null,
+      subtotal: typeof r.price_subtotal === 'number' ? r.price_subtotal : null,
+    }))
+}
+
+/**
+ * account.move.line, for the in-app invoice detail sheet's "Lines" sub-tab.
+ * Same exclusion of section/note display lines as readOrderLines, plus the
+ * "exclude_from_invoice_tab" flag Odoo sets on tax/rounding lines that
+ * accounting logic needs but a customer-facing line-item view should not
+ * show as if they were purchased items.
+ */
+export const INVOICE_LINE_FIELDS = ['id', 'name', 'quantity', 'price_unit', 'price_subtotal', 'display_type', 'exclude_from_invoice_tab'] as const
+
+export interface InvoiceLineRecord {
+  id: number
+  name: string | null
+  quantity: number | null
+  unitPrice: number | null
+  subtotal: number | null
+}
+
+export async function readInvoiceLines(call: OdooCaller, invoiceId: number): Promise<InvoiceLineRecord[]> {
+  const result = await call('account.move.line', 'search_read', {
+    domain: [['move_id', '=', invoiceId]],
+    fields: [...INVOICE_LINE_FIELDS],
+    limit: MAX_SECTION_ROWS,
+  })
+  return rows(result)
+    .filter((r) => !r.display_type && !r.exclude_from_invoice_tab)
+    .map((r) => ({
+      id: Number(r.id),
+      name: str(r.name),
+      quantity: typeof r.quantity === 'number' ? r.quantity : null,
+      unitPrice: typeof r.price_unit === 'number' ? r.price_unit : null,
+      subtotal: typeof r.price_subtotal === 'number' ? r.price_subtotal : null,
+    }))
+}
+
 /* ── deep links ─────────────────────────────────────────────────────────────*/
 
 /**
@@ -360,9 +558,38 @@ export const UNIDENTIFIED_SECTIONS: readonly BundleSection[] = [
   'services',
   'devices',
   'pbx',
-  'invoices',
   'notes',
 ]
+
+/**
+ * Calls (dec-c360-design-defines-the-target-find-the-data-2026-09-04): the
+ * Lumen reference's "Calls" tab is Magnus CDR data. Magnus lives on
+ * voice00/deepseek's own infra, called today only from bff-v2
+ * (app/lib/magnus.ts::getMagnusUserCallsEnriched, already built and proven
+ * this same week for CDR-side minute metering) -- Foundation itself has no
+ * server-to-server path to it, and a customer's magnusUserId is only known
+ * for the subset with a Personal Line subscription (LiteAccount), not for a
+ * plain Odoo customer. To close this: expose a small bff-v2 read endpoint
+ * (e.g. GET /api/internal/customer-360/calls?magnusUserId=) and add a
+ * Foundation-side reader that calls it server-to-server, keyed off this
+ * partner's magnusUserId if one is on file (LiteAccount.odooPartnerId).
+ */
+export const CALLS_NOT_CONNECTED_REASON =
+  'calls are not connected: Magnus CDR data lives on bff-v2, not Foundation, and no server-to-server read path exists yet'
+
+/**
+ * Files (dec-c360-design-defines-the-target-find-the-data-2026-09-04): the
+ * reference's "Files" tab is documents attached to the customer record --
+ * ir.attachment in Odoo, keyed on res_model='res.partner' AND
+ * res_id=customerId (plus, per-invoice/order attachments if the owner wants
+ * those included too). No reader for ir.attachment exists anywhere in this
+ * repo yet. To close this: one search_read against ir.attachment with those
+ * two domain terms, fields id/name/mimetype/file_size/create_date, and the
+ * existing odooDeepLink() pattern for a link -- the same shape as every
+ * other reader in this file, no new pattern required.
+ */
+export const FILES_NOT_CONNECTED_REASON =
+  'files are not connected: no ir.attachment reader exists yet for this customer record'
 
 export function notConnectedAdapter(section: BundleSection, reason: string): BundleAdapter {
   return {
@@ -432,10 +659,14 @@ export function buildCustomerAdapters(deps: CustomerAdapterDeps): readonly Bundl
       readOpportunities(deps.call, id, limit),
     ),
     reading('issues', 'odoo:helpdesk.ticket', (id, limit) => readIssues(deps.call, id, limit)),
+    reading('orders', 'odoo:sale.order', (id, limit) => readOrders(deps.call, id, limit)),
+    reading('invoices', 'odoo:account.move', (id, limit) => readInvoices(deps.call, id, limit)),
 
     // Proven-unsafe rather than merely unbuilt. Same shape as the five below so
     // the UI treats it identically, with its own reason.
     notConnectedAdapter('tasks', TASKS_NOT_PROVEN_REASON),
+    notConnectedAdapter('calls', CALLS_NOT_CONNECTED_REASON),
+    notConnectedAdapter('files', FILES_NOT_CONNECTED_REASON),
 
     ...UNIDENTIFIED_SECTIONS.map((section) =>
       notConnectedAdapter(section, `${section} is not connected: no authoritative source is configured`),

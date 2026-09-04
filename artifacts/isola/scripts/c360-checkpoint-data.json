@@ -1,0 +1,118 @@
+{
+  "yvonne-armour": {
+    "partnerId": 163,
+    "partner": [
+      {
+        "id": 163,
+        "name": "Patricia Yvonne Armour",
+        "email": "yvonne.armour07@gmail.com",
+        "phone": "+17672951770",
+        "city": "Spring Field",
+        "street": "L’Imprévue Estate",
+        "is_company": false,
+        "parent_id": false,
+        "active": true,
+        "create_date": "2026-02-14 04:25:36"
+      }
+    ],
+    "orders": [
+      {
+        "id": 607,
+        "name": "S00670",
+        "state": "draft",
+        "amount_total": 4272.6,
+        "date_order": "2026-07-10 15:21:20",
+        "commitment_date": false,
+        "invoice_status": "no"
+      }
+    ],
+    "invoices": [],
+    "opportunities": [],
+    "issues": [
+      {
+        "id": 9209,
+        "name": "Patricia Yvonne Armour - Quote for Laptop",
+        "stage_id": [
+          2,
+          "In Progress"
+        ],
+        "priority": "0",
+        "user_id": [
+          8,
+          "Hakeem Dalrymple"
+        ],
+        "create_date": "2026-07-10 15:19:27",
+        "write_date": "2026-07-10 15:54:53"
+      },
+      {
+        "id": 1466,
+        "name": "Re: New request re WiFi service & Invoice near due date",
+        "stage_id": [
+          4,
+          "Solved"
+        ],
+        "priority": "0",
+        "user_id": false,
+        "create_date": "2026-02-25 11:03:33",
+        "write_date": "2026-02-25 11:03:33"
+      },
+      {
+        "id": 1269,
+        "name": "Re: Update to Cheque Payment Details",
+        "stage_id": [
+          4,
+          "Solved"
+        ],
+        "priority": "0",
+        "user_id": false,
+        "create_date": "2026-02-25 11:02:54",
+        "write_date": "2026-02-25 11:02:54"
+      },
+      {
+        "id": 828,
+        "name": "Re: New invoice",
+        "stage_id": [
+          4,
+          "Solved"
+        ],
+        "priority": "0",
+        "user_id": false,
+        "create_date": "2026-02-25 11:01:21",
+        "write_date": "2026-02-25 11:01:21"
+      },
+      {
+        "id": 778,
+        "name": "Re: New invoice",
+        "stage_id": [
+          4,
+          "Solved"
+        ],
+        "priority": "0",
+        "user_id": false,
+        "create_date": "2026-02-25 11:01:11",
+        "write_date": "2026-02-25 11:01:11"
+      }
+    ]
+  },
+  "partner-2945": {
+    "partnerId": 2945,
+    "partner": [
+      {
+        "id": 2945,
+        "name": "+17678189796",
+        "email": false,
+        "phone": "+17678189796",
+        "city": false,
+        "street": false,
+        "is_company": false,
+        "parent_id": false,
+        "active": true,
+        "create_date": "2026-09-02 11:11:22"
+      }
+    ],
+    "orders": [],
+    "invoices": [],
+    "opportunities": [],
+    "issues": []
+  }
+}
