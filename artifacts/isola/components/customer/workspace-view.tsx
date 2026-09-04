@@ -47,6 +47,7 @@ import {
   type ActionLifecycleState,
   type SectionState,
 } from '@/lib/customer-workspace/contract'
+import styles from './workspace-view.module.css'
 
 /* ── the outcome as the actions route sends it ─────────────────────────────*/
 
@@ -69,15 +70,68 @@ export interface ActionOutcomeView {
   approvalRef: string | null
 }
 
+/**
+ * The tab row, per dec-c360-convergence-spec-approved-panel-map-2026-08-30's
+ * ratified panel scope: Sales (the reference's two drifting sales tabs
+ * converged into one), Billing, Tickets (Chatwoot conversations -- one
+ * panel, doubling as the reference's "Tickets" tab), Open work (Odoo
+ * tasks/issues, kept DISTINCT from Tickets per that ruling), Activity
+ * (recent governed actions + activity log + notes), and Services (the
+ * UISP/Magnus/PBX-sourced sections -- a real, telecom-specific grouping
+ * for this company's own customer base, not invented). Deals/Files/Calls
+ * are DEFERRED per the same ruling and have no tab here; AI insights is
+ * DROPPED (no Foundation data source) and is not built at all.
+ *
+ * `customer` has no tab of its own -- it powers the identity bar instead,
+ * and its own SectionCard renders there, always visible, never gated by a
+ * tab (see CustomerWorkspaceView below).
+ */
+export type WorkspaceTabName = 'sales' | 'billing' | 'tickets' | 'openWork' | 'activity' | 'services'
+
+export const TAB_LABEL: Readonly<Record<WorkspaceTabName, string>> = {
+  sales: 'Sales',
+  billing: 'Billing',
+  tickets: 'Tickets',
+  openWork: 'Open work',
+  activity: 'Activity',
+  services: 'Services',
+}
+
+export const TAB_ORDER: readonly WorkspaceTabName[] = [
+  'sales',
+  'billing',
+  'tickets',
+  'openWork',
+  'activity',
+  'services',
+]
+
+/** Every section EXCEPT `customer` (which lives in the identity bar) maps to exactly one tab. */
+const SECTION_TAB: Readonly<Record<Exclude<ContextSectionName, 'customer'>, WorkspaceTabName>> = {
+  contacts: 'sales',
+  opportunities: 'sales',
+  invoices: 'billing',
+  issues: 'openWork',
+  tasks: 'openWork',
+  recentActions: 'activity',
+  activity: 'activity',
+  notes: 'activity',
+  services: 'services',
+  devices: 'services',
+  pbx: 'services',
+}
+
 export interface WorkspaceViewProps {
   customerId: string
   status: 'loading' | 'ready' | 'not_found' | 'forbidden' | 'error'
   context: CustomerContextResponse | null
   errorDetail?: string | null
+  selectedTab: WorkspaceTabName
   selectedAction: string | null
   actionValues: Record<string, string>
   actionOutcome: ActionOutcomeView | null
   actionPending: boolean
+  onSelectTab: (tab: WorkspaceTabName) => void
   onSelectAction: (actionType: string | null) => void
   onChangeField: (name: string, value: string) => void
   onRun: () => void
@@ -632,12 +686,12 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
 
   return (
     <div id="customer-workspace" className="flex flex-col gap-6">
-      {/* ── header ─────────────────────────────────────────────────────── */}
-      <header className="flex flex-col gap-1">
-        <h2 id="customer-workspace-title" className="text-xl font-semibold">
+      {/* ── identity bar ───────────────────────────────────────────────── */}
+      <header id="customer-workspace-identity-bar" className={styles.identityBar}>
+        <h2 id="customer-workspace-title" className={styles.identityBarTitle}>
           {customerLabel}
         </h2>
-        <p className="text-sm text-muted-foreground">
+        <p className={styles.identityBarMeta}>
           {customerRecord && str(customerRecord.companyName)
             ? `Part of ${str(customerRecord.companyName)}`
             : customerRecord && customerRecord.isCompany === true
@@ -649,10 +703,14 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
               : ' · Active in the system of record'
             : ''}
         </p>
-        <p className="text-xs text-muted-foreground">
+        <p className={styles.identityBarMeta}>
           Read at {context.provenance.generatedAt}
         </p>
       </header>
+
+      {/* The identity section card itself stays always visible, next to the
+          bar it powers -- never gated by a tab, since it IS the identity. */}
+      <SectionCard section={customerSection} />
 
       {/* An incomplete picture is stated ONCE, at the top, and names what is
           missing. A reader should not have to audit twelve cards to find out. */}
@@ -664,25 +722,52 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
         </div>
       ) : null}
 
-      {/* ── sections ───────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {RENDER_ORDER.map((name) => (
-          <SectionCard key={name} section={context.sections[name]} />
+      {/* ── tab row ────────────────────────────────────────────────────── */}
+      <div role="tablist" aria-label="Customer sections" className={styles.tabRow}>
+        {TAB_ORDER.map((tab) => (
+          <button
+            key={tab}
+            type="button"
+            role="tab"
+            aria-selected={props.selectedTab === tab}
+            data-tab={tab}
+            className={props.selectedTab === tab ? `${styles.tab} ${styles.tabActive}` : styles.tab}
+            onClick={() => props.onSelectTab(tab)}
+          >
+            {TAB_LABEL[tab]}
+          </button>
         ))}
       </div>
 
-      {/* ── read-only native surfaces ──────────────────────────────────── */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <NativeSurface
-          name="Conversations"
-          system="chatwoot"
-          reason="No authoritative conversation reference for this customer is available, so nothing is shown."
-        />
-        <NativeSurface
-          name="Assistant"
-          system="clawith"
-          reason="No authoritative agent binding for this customer is available, so nothing is shown."
-        />
+      {/* ── body: every tab's sections stay in the markup at all times ──── */}
+      <div className={styles.body}>
+        {TAB_ORDER.map((tab) => (
+          <div
+            key={tab}
+            role="tabpanel"
+            aria-hidden={props.selectedTab !== tab}
+            data-tab-panel={tab}
+            className={props.selectedTab === tab ? styles.tabPanelActive : styles.tabPanel}
+          >
+            {RENDER_ORDER.filter((name) => name !== 'customer' && SECTION_TAB[name] === tab).map((name) => (
+              <SectionCard key={name} section={context.sections[name]} />
+            ))}
+            {tab === 'tickets' ? (
+              <>
+                <NativeSurface
+                  name="Conversations"
+                  system="chatwoot"
+                  reason="No authoritative conversation reference for this customer is available, so nothing is shown."
+                />
+                <NativeSurface
+                  name="Assistant"
+                  system="clawith"
+                  reason="No authoritative agent binding for this customer is available, so nothing is shown."
+                />
+              </>
+            ) : null}
+          </div>
+        ))}
       </div>
 
       {/* ── the governed action workbench ──────────────────────────────── */}

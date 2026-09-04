@@ -25,7 +25,7 @@ import { useCallback, useEffect, useState } from 'react'
 
 import type { CustomerContextResponse } from '@/lib/context/customer-context'
 
-import { CustomerWorkspaceView, type ActionOutcomeView } from './workspace-view'
+import { CustomerWorkspaceView, type ActionOutcomeView, type WorkspaceTabName } from './workspace-view'
 
 type Status = 'loading' | 'ready' | 'not_found' | 'forbidden' | 'error'
 
@@ -40,6 +40,7 @@ export function CustomerWorkspace({ customerId }: { customerId: string }) {
   const [context, setContext] = useState<CustomerContextResponse | null>(null)
   const [errorDetail, setErrorDetail] = useState<string | null>(null)
 
+  const [selectedTab, setSelectedTab] = useState<WorkspaceTabName>('sales')
   const [selectedAction, setSelectedAction] = useState<string | null>(null)
   const [actionValues, setActionValues] = useState<Record<string, string>>({})
   const [attemptKey, setAttemptKey] = useState<string>(newKey)
@@ -154,10 +155,12 @@ export function CustomerWorkspace({ customerId }: { customerId: string }) {
       status={status}
       context={context}
       errorDetail={errorDetail}
+      selectedTab={selectedTab}
       selectedAction={selectedAction}
       actionValues={actionValues}
       actionOutcome={actionOutcome}
       actionPending={actionPending}
+      onSelectTab={setSelectedTab}
       onSelectAction={onSelectAction}
       onChangeField={onChangeField}
       onRun={onRun}
