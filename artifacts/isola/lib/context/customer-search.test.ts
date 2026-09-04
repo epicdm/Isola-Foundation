@@ -133,7 +133,20 @@ describe('the search read', () => {
     expect(row.name).toBe('EPIC Communications Inc')
     expect(row.link).toBe(`${ODOO}/odoo/res.partner/42`)
     expect(Object.keys(row).sort()).toEqual(
-      ['active', 'city', 'companyName', 'email', 'id', 'isCompany', 'link', 'name', 'phone', 'street', 'link']
+      [
+        'active',
+        'city',
+        'companyName',
+        'customerSince',
+        'email',
+        'id',
+        'isCompany',
+        'link',
+        'name',
+        'phone',
+        'street',
+        'link',
+      ]
         .filter((v, i, a) => a.indexOf(v) === i)
         .sort(),
     )

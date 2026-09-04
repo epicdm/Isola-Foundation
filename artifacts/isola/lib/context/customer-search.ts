@@ -165,6 +165,7 @@ export async function searchCustomers(
       isCompany: r.is_company !== false,
       companyName: nameOf(r.parent_id),
       active: r.active !== false,
+      customerSince: str(r.create_date),
       link: odooDeepLink(odooBaseUrl, 'res.partner', Number.isInteger(id) ? id : null),
     }
   })
