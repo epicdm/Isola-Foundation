@@ -17,6 +17,7 @@ const result = (over: Partial<CustomerSearchResult> = {}): CustomerSearchResult 
   isCompany: true,
   companyName: null,
   active: true,
+  customerSince: '2026-01-15',
   link: 'https://tenant.odoo.com/odoo/res.partner/42',
   ...over,
 })

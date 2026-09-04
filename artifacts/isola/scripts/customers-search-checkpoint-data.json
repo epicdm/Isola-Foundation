@@ -1,0 +1,11 @@
+{
+  "_provenance": "Real Odoo data, epic-communications-inc.odoo.com, fetched via SSH to deepseek (bff-v2's odoo-client.ts), 2026-09-04, for the portal Customers-list checkpoint screenshot. Query: res.partner search_read name ilike 'Armour' (limit 6) + name ilike 'NTRC' (limit 3), same fields customer-search.ts requests.",
+  "results": [
+    {"id": 735, "name": "Jenner Armour", "email": "canefieldheights@yahoo.com", "phone": "+1 767-295-2853", "city": false, "street": false, "is_company": false, "parent_id": false, "active": true, "create_date": "2026-02-23 17:40:54"},
+    {"id": 167, "name": "Joanne Armour", "email": "jmmarmour@gmail.com", "phone": "276-1116", "city": "Canefield", "street": false, "is_company": false, "parent_id": false, "active": true, "create_date": "2026-02-14 04:25:36"},
+    {"id": 163, "name": "Patricia Yvonne Armour", "email": "yvonne.armour07@gmail.com", "phone": "+17672951770", "city": "Spring Field", "street": "L’Imprévue Estate", "is_company": false, "parent_id": false, "active": true, "create_date": "2026-02-14 04:25:36"},
+    {"id": 1513, "name": "NTRC - Dominica", "email": false, "phone": false, "city": false, "street": false, "is_company": false, "parent_id": false, "active": true, "create_date": "2026-02-23 17:46:07"},
+    {"id": 835, "name": "NTRC - NATIONAL TELECOMMUNICATIONS REGULATORY COMMISSION", "email": "secretariat@ntrc.dm", "phone": "+1 767-276-0627", "city": "Roseau", "street": "20 Cork Street", "is_company": false, "parent_id": false, "active": true, "create_date": "2026-02-23 17:41:34"},
+    {"id": 2835, "name": "arichards@ntrc.dm", "email": "arichards@ntrc.dm", "phone": false, "city": false, "street": false, "is_company": false, "parent_id": false, "active": true, "create_date": "2026-08-10 15:18:01"}
+  ]
+}

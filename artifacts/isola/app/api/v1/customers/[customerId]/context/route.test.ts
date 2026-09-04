@@ -135,23 +135,29 @@ describe('a customer that exists', () => {
     const body = await res.json()
 
     expect(res.status).toBe(200)
+    // 15, not the historical 12 — orders/calls/files joined the promised
+    // section set in dec-c360-design-defines-the-target-find-the-data-2026-09-04.
+    // invoices left the "no source" list the same pass (account.move adapter).
     expect(Object.keys(body.sections).sort()).toEqual(
       [
         'activity',
+        'calls',
         'contacts',
         'customer',
         'devices',
+        'files',
         'invoices',
         'issues',
         'notes',
         'opportunities',
+        'orders',
         'pbx',
         'recentActions',
         'services',
         'tasks',
       ].sort(),
     )
-    for (const name of ['services', 'devices', 'pbx', 'invoices', 'notes']) {
+    for (const name of ['services', 'devices', 'pbx', 'notes', 'calls', 'files']) {
       expect(body.sections[name].state).toBe('unavailable')
       expect(body.sections[name].records).toEqual([])
     }
