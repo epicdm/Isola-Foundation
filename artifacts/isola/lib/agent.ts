@@ -302,14 +302,22 @@ export async function handleInboundWhatsApp(params: {
   // turn of a conversation, when conversation.chatwoot_conversation_id was still
   // null in memory but mirrorInbound has since created and persisted the conv id.
   if (effectiveCwConvId !== null && tenant.chatwoot_bindings[0]) {
-    const cwConfig = getChatwootConfig(tenant.chatwoot_bindings[0]);
-    await addMessage(
-      cwConfig,
-      effectiveCwConvId,
-      reply,
-      'outgoing',
-      { source_id: 'isola-bot' }, // loop-prevention: Chatwoot webhook will echo this back; skip it
-    ).catch((e: Error) => console.warn('[agent] Chatwoot outgoing mirror failed:', e.message));
+    // getChatwootConfig can throw ChatwootCredentialRefError (a credential
+    // reference naming an unset env var) — folded into the same try/catch as
+    // the send itself so a resolution failure degrades the mirror, not the
+    // whole reply, exactly like every other Chatwoot-mirror failure here.
+    try {
+      const cwConfig = getChatwootConfig(tenant.chatwoot_bindings[0]);
+      await addMessage(
+        cwConfig,
+        effectiveCwConvId,
+        reply,
+        'outgoing',
+        { source_id: 'isola-bot' }, // loop-prevention: Chatwoot webhook will echo this back; skip it
+      );
+    } catch (e: any) {
+      console.warn('[agent] Chatwoot outgoing mirror failed:', e?.message);
+    }
   }
 
   // ── 14. Meter tokens ──────────────────────────────────────────────────────
@@ -418,13 +426,17 @@ async function mirrorInbound(
   // which has its own inbox-specific resolution; this fallback is Wave-A only.
   const chatwootBinding = tenant.chatwoot_bindings[0] ?? null;
   if (!chatwootBinding) return null;
-  const cwConfig = getChatwootConfig(chatwootBinding);
 
   // Tracked outside try/catch so it can be returned to the caller even if
   // addMessage fails — the conv id is still valid for the AI-reply mirror.
   let effectiveConvId: number | null = existingChatwootConvId;
 
   try {
+    // Inside the try deliberately: getChatwootConfig can throw
+    // ChatwootCredentialRefError (a credential reference naming an unset env
+    // var) — this must degrade the mirror for this turn, never abort the
+    // caller, which runs this before the customer's WhatsApp reply is sent.
+    const cwConfig = getChatwootConfig(chatwootBinding);
     const chatwootContactId = await upsertContact(cwConfig, customerPhone);
 
     if (!effectiveConvId && chatwootBinding.inbox_id) {

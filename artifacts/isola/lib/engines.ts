@@ -130,6 +130,48 @@ export function getWhatsAppConfig(): WhatsAppConfig {
 
 // ── Chatwoot ──────────────────────────────────────────────────────────────────
 // Per-tenant: config comes from the ChatwootBinding DB record.
+//
+// ChatwootBinding.token holds either a literal secret (legacy rows, still
+// supported) or a CREDENTIAL REFERENCE of the form `env:VAR_NAME` — the row
+// names which env var to read at use time instead of carrying the value
+// itself. This is deliberately per-row, not a mode-wide rule: a platform-wide
+// "mode === 'mirror' means use CHATWOOT_SERVICE_TOKEN" would hand EPIC's own
+// service token to any OTHER tenant's blank mirror binding (a real one
+// already exists for a different Chatwoot account entirely). Each row
+// choosing its own reference keeps resolution tenant-sourced, the same
+// property connector.ts's callEngine('chatwoot', ...) already documents as
+// load-bearing for this engine.
+
+const CREDENTIAL_REF_PREFIX = 'env:';
+
+/** Thrown by resolveChatwootToken — message carries only the env var NAME,
+ *  never a value (set or unset). Callers that touch Chatwoot as a side
+ *  effect (never the primary customer-facing action) must catch this next
+ *  to their existing Chatwoot-call try/catch, not let it propagate. */
+export class ChatwootCredentialRefError extends Error {
+  constructor(public readonly varName: string) {
+    super(`Chatwoot credential reference "${CREDENTIAL_REF_PREFIX}${varName}" is not set in the environment`);
+    this.name = 'ChatwootCredentialRefError';
+  }
+}
+
+/**
+ * Resolves a ChatwootBinding.token value. A literal value passes through
+ * unchanged (today's behaviour, untouched). A `env:VAR_NAME` reference reads
+ * that env var and returns it — and if the var is unset or empty, THROWS
+ * rather than falling back to the literal string or to an empty token: a
+ * silently-empty credential would let a caller "succeed" in making an
+ * unauthenticated Chatwoot call, which is a worse failure than a loud one.
+ */
+export function resolveChatwootToken(stored: string): string {
+  if (!stored.startsWith(CREDENTIAL_REF_PREFIX)) return stored;
+  const varName = stored.slice(CREDENTIAL_REF_PREFIX.length);
+  const value = process.env[varName];
+  if (!value) {
+    throw new ChatwootCredentialRefError(varName);
+  }
+  return value;
+}
 
 export function getChatwootConfig(binding: {
   base_url: string;
@@ -139,7 +181,7 @@ export function getChatwootConfig(binding: {
   return {
     baseUrl: binding.base_url,
     accountId: binding.account_id,
-    token: binding.token,
+    token: resolveChatwootToken(binding.token),
   };
 }
 
