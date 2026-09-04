@@ -25,7 +25,28 @@ import { useCallback, useEffect, useState } from 'react'
 
 import type { CustomerContextResponse } from '@/lib/context/customer-context'
 
-import { CustomerWorkspaceView, type ActionOutcomeView, type WorkspaceTabName } from './workspace-view'
+import {
+  CustomerWorkspaceView,
+  customerLabelFor,
+  detailKindFor,
+  draftMessageFor,
+  findSelectedRecord,
+  type ActionOutcomeView,
+  type WorkspaceTabName,
+  type SelectedRecord,
+  type RecordLineItem,
+  type RecordLinesStatus,
+  type ConversationResolutionView,
+} from './workspace-view'
+
+/** Which two tabs actually have a line-item sub-tab worth fetching. Tickets
+ *  have no lines endpoint — their sheet's other sub-tabs are honest gaps
+ *  until a message-log source exists (see design study §6). */
+function linesEndpointFor(customerId: string, tab: WorkspaceTabName, recordId: number): string | null {
+  if (tab === 'orders') return `/api/v1/customers/${encodeURIComponent(customerId)}/orders/${recordId}/lines`
+  if (tab === 'invoices') return `/api/v1/customers/${encodeURIComponent(customerId)}/invoices/${recordId}/lines`
+  return null
+}
 
 type Status = 'loading' | 'ready' | 'not_found' | 'forbidden' | 'error'
 
@@ -40,12 +61,38 @@ export function CustomerWorkspace({ customerId }: { customerId: string }) {
   const [context, setContext] = useState<CustomerContextResponse | null>(null)
   const [errorDetail, setErrorDetail] = useState<string | null>(null)
 
-  const [selectedTab, setSelectedTab] = useState<WorkspaceTabName>('sales')
+  const [selectedTab, setSelectedTab] = useState<WorkspaceTabName>('overview')
   const [selectedAction, setSelectedAction] = useState<string | null>(null)
   const [actionValues, setActionValues] = useState<Record<string, string>>({})
   const [attemptKey, setAttemptKey] = useState<string>(newKey)
   const [actionOutcome, setActionOutcome] = useState<ActionOutcomeView | null>(null)
   const [actionPending, setActionPending] = useState(false)
+
+  // Step A — the in-app record detail sheet (dec-c360-design-defines-the-
+  // target-find-the-data-2026-09-04's ruling: click a row, stay in the app).
+  const [selectedRecord, setSelectedRecord] = useState<SelectedRecord | null>(null)
+  const [selectedRecordSubTab, setSelectedRecordSubTab] = useState('Overview')
+  const [recordLines, setRecordLines] = useState<readonly RecordLineItem[] | null>(null)
+  const [recordLinesStatus, setRecordLinesStatus] = useState<RecordLinesStatus>('idle')
+
+  // Step B — the message composer. Resolution is fetched once per customer
+  // and reused across every record's composer open (the phone doesn't
+  // change), never refetched just because a different record was selected.
+  const [messageComposerOpen, setMessageComposerOpen] = useState(false)
+  const [messageDraftText, setMessageDraftText] = useState('')
+  const [conversationResolution, setConversationResolution] = useState<ConversationResolutionView>({
+    status: 'idle',
+    chatwootDeepLink: null,
+    chatwootConversationId: null,
+  })
+
+  // Step D — which invoice aging buckets are expanded past their first few rows.
+  const [expandedInvoiceBuckets, setExpandedInvoiceBuckets] = useState<string[]>([])
+  const onToggleInvoiceBucket = useCallback((bucket: string) => {
+    setExpandedInvoiceBuckets((current) =>
+      current.includes(bucket) ? current.filter((b) => b !== bucket) : [...current, bucket],
+    )
+  }, [])
 
   const load = useCallback(async () => {
     setStatus('loading')
@@ -149,6 +196,88 @@ export function CustomerWorkspace({ customerId }: { customerId: string }) {
     }
   }, [selectedAction, actionPending, customerId, actionValues, attemptKey, load])
 
+  const onSelectRecord = useCallback(
+    (tab: WorkspaceTabName, id: number) => {
+      setSelectedRecord({ tab, id })
+      setSelectedRecordSubTab('Overview')
+      setRecordLines(null)
+
+      const endpoint = linesEndpointFor(customerId, tab, id)
+      if (!endpoint) {
+        // Tickets: no lines endpoint exists. 'idle' — not a failed fetch,
+        // just nothing to fetch; the sheet's other sub-tabs are their own
+        // honest gaps until a real source exists for them.
+        setRecordLinesStatus('idle')
+        return
+      }
+
+      setRecordLinesStatus('loading')
+      void (async () => {
+        try {
+          const res = await fetch(endpoint, { cache: 'no-store' })
+          if (!res.ok) {
+            setRecordLinesStatus('unavailable')
+            return
+          }
+          const body = (await res.json()) as { lines: RecordLineItem[] }
+          setRecordLines(body.lines)
+          setRecordLinesStatus('available')
+        } catch {
+          setRecordLinesStatus('unavailable')
+        }
+      })()
+    },
+    [customerId],
+  )
+
+  const onBackFromRecord = useCallback(() => {
+    setSelectedRecord(null)
+    setSelectedRecordSubTab('Overview')
+    setRecordLines(null)
+    setRecordLinesStatus('idle')
+  }, [])
+
+  const onOpenMessageComposer = useCallback(() => {
+    setMessageComposerOpen(true)
+    if (context) {
+      const record = findSelectedRecord(context, selectedRecord)
+      const kind = selectedRecord ? detailKindFor(selectedRecord.tab) : null
+      setMessageDraftText(draftMessageFor(customerLabelFor(context), kind, record))
+    }
+
+    setConversationResolution((current) => {
+      if (current.status !== 'idle') return current
+      void (async () => {
+        try {
+          const res = await fetch(`/api/v1/customers/${encodeURIComponent(customerId)}/conversation`, {
+            cache: 'no-store',
+          })
+          if (!res.ok) {
+            setConversationResolution({ status: 'error', chatwootDeepLink: null, chatwootConversationId: null })
+            return
+          }
+          const body = (await res.json()) as {
+            found: boolean
+            chatwootDeepLink: string | null
+            chatwootConversationId: number | null
+          }
+          setConversationResolution({
+            status: body.found ? 'found' : 'not_found',
+            chatwootDeepLink: body.chatwootDeepLink,
+            chatwootConversationId: body.chatwootConversationId,
+          })
+        } catch {
+          setConversationResolution({ status: 'error', chatwootDeepLink: null, chatwootConversationId: null })
+        }
+      })()
+      return { status: 'loading', chatwootDeepLink: null, chatwootConversationId: null }
+    })
+  }, [context, selectedRecord, customerId])
+
+  const onCloseMessageComposer = useCallback(() => {
+    setMessageComposerOpen(false)
+  }, [])
+
   return (
     <CustomerWorkspaceView
       customerId={customerId}
@@ -160,11 +289,26 @@ export function CustomerWorkspace({ customerId }: { customerId: string }) {
       actionValues={actionValues}
       actionOutcome={actionOutcome}
       actionPending={actionPending}
+      selectedRecord={selectedRecord}
+      selectedRecordSubTab={selectedRecordSubTab}
+      recordLines={recordLines}
+      recordLinesStatus={recordLinesStatus}
       onSelectTab={setSelectedTab}
       onSelectAction={onSelectAction}
       onChangeField={onChangeField}
       onRun={onRun}
       onRetryContext={() => void load()}
+      onSelectRecord={onSelectRecord}
+      onBackFromRecord={onBackFromRecord}
+      onSelectRecordSubTab={setSelectedRecordSubTab}
+      messageComposerOpen={messageComposerOpen}
+      messageDraftText={messageDraftText}
+      conversationResolution={conversationResolution}
+      onOpenMessageComposer={onOpenMessageComposer}
+      onCloseMessageComposer={onCloseMessageComposer}
+      onChangeMessageDraft={setMessageDraftText}
+      expandedInvoiceBuckets={expandedInvoiceBuckets}
+      onToggleInvoiceBucket={onToggleInvoiceBucket}
     />
   )
 }

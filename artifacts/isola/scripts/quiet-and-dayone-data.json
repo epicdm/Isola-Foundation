@@ -1,0 +1,25 @@
+{
+  "_provenance": "Real Odoo data, epic-communications-inc.odoo.com, fetched via SSH to deepseek (bff-v2's odoo-client.ts, sequential calls with delay), 2026-09-04. Gregory Royer (partner 2898) and the day-one signup (partner 2945) were both found by a live query for Step C/D's fixture needs, documented in the render script that consumes this file.",
+  "gregoryRoyer": {
+    "partner": [
+      { "id": 2898, "name": "Gregory Royer", "email": false, "phone": false, "city": false, "street": false, "is_company": false, "parent_id": false, "active": true, "create_date": "2026-08-24 13:35:15" }
+    ],
+    "orders": [
+      { "id": 617, "name": "S00680", "state": "sale", "amount_total": 10, "date_order": "2026-08-28 19:17:42", "commitment_date": false, "invoice_status": "invoiced" }
+    ],
+    "invoices": [
+      { "id": 410, "name": "INV/2026/00043", "state": "posted", "payment_state": "in_payment", "amount_total": 10, "amount_residual": 0, "invoice_date": "2026-08-28", "invoice_date_due": "2026-08-28" }
+    ],
+    "opportunities": [],
+    "issues": []
+  },
+  "dayOneSignup": {
+    "partner": [
+      { "id": 2945, "name": "+17678189796", "email": false, "phone": "+17678189796", "city": false, "street": false, "is_company": false, "parent_id": false, "active": true, "create_date": "2026-09-02 11:11:22" }
+    ],
+    "orders": [],
+    "invoices": [],
+    "opportunities": [],
+    "issues": []
+  }
+}

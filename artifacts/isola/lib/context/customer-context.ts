@@ -52,7 +52,10 @@ export const CONTEXT_SECTION_NAMES = [
   'services',
   'devices',
   'pbx',
+  'orders',
   'invoices',
+  'calls',
+  'files',
   'notes',
 ] as const
 export type ContextSectionName = (typeof CONTEXT_SECTION_NAMES)[number]
@@ -67,6 +70,8 @@ export const SECTION_ODOO_MODEL: Readonly<Partial<Record<ContextSectionName, str
   opportunities: 'crm.lead',
   issues: 'helpdesk.ticket',
   tasks: 'project.task',
+  orders: 'sale.order',
+  invoices: 'account.move',
 }
 
 /**

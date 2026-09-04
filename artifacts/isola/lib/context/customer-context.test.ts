@@ -105,7 +105,9 @@ describe('every expected section is present in every response', () => {
 
     for (const response of [good, bad]) {
       expect(Object.keys(response.sections).sort()).toEqual([...CONTEXT_SECTION_NAMES].sort())
-      expect(response.provenance.sectionCount).toBe(12)
+      // 15, not the historical 12 — orders/calls/files joined the promised
+      // section set in dec-c360-design-defines-the-target-find-the-data-2026-09-04.
+      expect(response.provenance.sectionCount).toBe(15)
     }
   })
 
@@ -118,9 +120,11 @@ describe('every expected section is present in every response', () => {
 
   it('names every section that could not be answered', async () => {
     const response = await assemble(caller())
-    // The five with no source, plus tasks, which is refused for its own reason.
+    // The four unidentified sections, plus tasks (refused for its own
+    // reason) and calls/files (real, named gaps added the same pass
+    // invoices got a real adapter — invoices is NOT in this list any more).
     expect(response.provenance.degraded).toEqual(
-      expect.arrayContaining(['services', 'devices', 'pbx', 'invoices', 'notes', 'tasks']),
+      expect.arrayContaining(['services', 'devices', 'pbx', 'notes', 'tasks', 'calls', 'files']),
     )
     expect(contextIsIncomplete(response)).toBe(true)
   })
@@ -129,7 +133,7 @@ describe('every expected section is present in every response', () => {
 /* ── unidentified is not empty ─────────────────────────────────────────────*/
 
 describe('a section with no source says so', () => {
-  it.each(['services', 'devices', 'pbx', 'invoices', 'notes'] as ContextSectionName[])(
+  it.each(['services', 'devices', 'pbx', 'notes', 'calls', 'files'] as ContextSectionName[])(
     '%s is unavailable, not empty, and carries no records',
     async (name) => {
       const response = await assemble(caller())

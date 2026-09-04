@@ -234,7 +234,7 @@ describe('the bundle — every expected section is present, and states do not bl
     expect(result.degraded).not.toContain('customer')
   })
 
-  it('the five unidentified sections are unavailable, individually, and never empty', async () => {
+  it('the four unidentified sections are unavailable, individually, and never empty', async () => {
     const { call } = recorder(() => [PARTNER_ROW])
     const result = await bundle(call)
 
@@ -247,7 +247,10 @@ describe('the bundle — every expected section is present, and states do not bl
       // Says only that it is not connected. No stack, no speculation.
       expect(reason, section).not.toMatch(/at .*\(|Error:|undefined|null/)
     }
-    expect(UNIDENTIFIED_SECTIONS).toEqual(['services', 'devices', 'pbx', 'invoices', 'notes'])
+    // 'invoices' left this list once it got a real account.move adapter
+    // (Step A of dec-c360-design-defines-the-target-find-the-data-2026-09-04)
+    // — pinning the CURRENT set, not the historical one.
+    expect(UNIDENTIFIED_SECTIONS).toEqual(['services', 'devices', 'pbx', 'notes'])
   })
 
   it('tasks are unavailable and the reason names the missing relationship', async () => {

@@ -1,106 +1,707 @@
 /*
- * Lumen tokens for the Customer 360 workspace, scoped to THIS component only.
+ * Customer 360 record view — visual tokens matching the ratified design
+ * target (dec-c360-design-defines-the-target-find-the-data-2026-09-04):
+ * `Lumen Unified Workspace (standalone)1a.html` -> Records -> Customers ->
+ * a customer record, inspected live 2026-09-04 (Marisol Vega fixture).
  *
- * "Lumen tokens" here means the app's own already-shipped design system --
- * the CSS custom properties defined once in app/globals.css (--sidebar,
- * --card, --muted-foreground, --primary, --border, --radius-*) and already
- * used by the real shadcn shell (AppSidebar/Topbar) both mount points sit
- * inside. Nothing here is a new palette: every value below is `var(--x)`,
- * so a theme-preset switch (EPIC/tangerine/soft-pop/brutalist) or a
- * light/dark toggle repaints this component exactly like the rest of the
- * app, with zero separate maintenance.
- *
- * SCOPE NOTE, stated rather than silently assumed: the design reference
- * named in Port (dec-c360-milestone1-walk-data-pass-design-gap-2026-08-30,
- * "the isola-lumen 'Customers' design, Marisol Vega reference") is a
- * screenshot the owner shared directly in a separate session -- it is not
- * committed to this repo and was not accessible here. What IS committed
- * and ratified is the STRUCTURE (identity bar -> tab row -> body,
- * dec-c360-convergence-spec-approved-panel-map-2026-08-30) and the actual
- * token system this file consumes. This module implements that structure
- * faithfully with real tokens; it does not claim to pixel-match a
- * screenshot it could not read. The richer reference details (dark rail,
- * AI insights, live-conversations rail) are that same Port record's own
- * "some is DEMO FIXTURE... not real customer" caveat, and AI insights is
- * separately ruled DROPPED (no Foundation data source) -- neither is
- * built here.
+ * These are a deliberate NEW token set for this component, not the app's
+ * existing green EPIC theme (app/globals.css --primary is a leafy green;
+ * the Lumen reference's accent is a deep plum/magenta). The owner's
+ * instruction is explicit that tokens are part of what this pass matches,
+ * so this supersedes the 2026-08-30 "reuse the app's own tokens" approach
+ * for this component specifically. Scoped entirely under #customer-workspace
+ * so nothing here leaks into the rest of the app.
  */
+
+.root {
+  --c360-bg: #f3f1f6;
+  --c360-card: #ffffff;
+  --c360-card-foreground: #1f1a24;
+  --c360-border: #e6e2ec;
+  --c360-muted: #6b6574;
+  --c360-primary: #5a2a63;
+  --c360-primary-foreground: #ffffff;
+  --c360-primary-soft: #efe3f0;
+  --c360-owed-bg: #f7941e;
+  --c360-owed-foreground: #3a2400;
+  --c360-success: #22a55e;
+  --c360-radius-lg: 14px;
+  --c360-radius-md: 10px;
+  --c360-radius-sm: 6px;
+  --c360-gap-notice-bg: #fbf6e8;
+  --c360-gap-notice-border: #e9dfb8;
+  --c360-danger-bg: #c94a3f;
+  --c360-danger-foreground: #ffffff;
+
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  background: var(--c360-bg);
+  padding: 1rem;
+  border-radius: var(--c360-radius-lg);
+  color: var(--c360-card-foreground);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+}
+
+/* ── identity bar ─────────────────────────────────────────────────────── */
 
 .identityBar {
   display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
   padding: 1rem 1.25rem;
-  border-radius: var(--radius-lg);
-  background: var(--card);
-  border: 1px solid var(--border);
+  border-radius: var(--c360-radius-lg);
+  background: var(--c360-card);
+  border: 1px solid var(--c360-border);
+}
+
+.identityLeft {
+  display: flex;
+  align-items: center;
+  gap: 0.875rem;
+}
+
+.avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  background: var(--c360-primary);
+  color: var(--c360-primary-foreground);
+  font-weight: 700;
+  font-size: 0.95rem;
+  flex-shrink: 0;
 }
 
 .identityBarTitle {
-  font-size: 1.25rem;
-  font-weight: 600;
-  color: var(--card-foreground);
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--c360-card-foreground);
+  margin: 0;
 }
 
 .identityBarMeta {
-  font-size: 0.875rem;
-  color: var(--muted-foreground);
+  font-size: 0.8125rem;
+  color: var(--c360-muted);
+  margin: 0.125rem 0 0;
 }
+
+.identityRight {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.identityRightButtons {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* ── the urgent card (Step C): one card, top right, computed from real
+   state, never rendered when there is nothing true to say ── */
+.urgentCard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  border-radius: var(--c360-radius-md);
+  padding: 0.5rem 0.75rem;
+  max-width: min(320px, 100%);
+  text-align: right;
+}
+
+.urgentCardLabel {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  opacity: 0.85;
+}
+
+.urgentCardText {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.urgentCardOwed {
+  background: var(--c360-owed-bg);
+  color: var(--c360-owed-foreground);
+}
+
+.urgentCardAtRisk {
+  background: var(--c360-danger-bg);
+  color: var(--c360-danger-foreground);
+}
+
+.urgentCardAction {
+  background: var(--c360-primary);
+  color: var(--c360-primary-foreground);
+}
+
+.urgentCardOpportunity {
+  background: var(--c360-success);
+  color: var(--c360-primary-foreground);
+}
+
+.urgentCardDayOne {
+  background: var(--c360-primary-soft);
+  color: var(--c360-primary);
+}
+
+.primaryButton {
+  appearance: none;
+  border: none;
+  border-radius: var(--c360-radius-md);
+  background: var(--c360-primary);
+  color: var(--c360-primary-foreground);
+  padding: 0.5rem 0.875rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 36px;
+}
+
+.primaryButton:disabled,
+.secondaryButton:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.secondaryButton {
+  appearance: none;
+  border: 1px solid var(--c360-border);
+  border-radius: var(--c360-radius-md);
+  background: var(--c360-card);
+  color: var(--c360-card-foreground);
+  padding: 0.5rem 0.875rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 36px;
+}
+
+.incompleteBanner {
+  border-radius: var(--c360-radius-md);
+  border: 1px solid var(--c360-gap-notice-border);
+  background: var(--c360-gap-notice-bg);
+  padding: 0.625rem 0.875rem;
+  font-size: 0.8125rem;
+}
+
+/* ── tab row ──────────────────────────────────────────────────────────── */
 
 .tabRow {
   display: flex;
   flex-wrap: wrap;
   gap: 0.25rem;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 0;
+  background: var(--c360-card);
+  border: 1px solid var(--c360-border);
+  border-radius: var(--c360-radius-lg);
+  padding: 0.375rem;
 }
 
 .tab {
   appearance: none;
   border: none;
   background: transparent;
-  padding: 0.625rem 0.875rem;
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: var(--muted-foreground);
-  border-bottom: 2px solid transparent;
+  border-radius: var(--c360-radius-sm);
+  padding: 0.5rem 0.875rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--c360-muted);
   cursor: pointer;
-  min-height: 44px;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
 }
 
 .tab:hover {
-  color: var(--foreground);
+  color: var(--c360-card-foreground);
 }
 
 .tabActive {
-  color: var(--primary);
-  border-bottom-color: var(--primary);
+  color: var(--c360-primary);
+  background: var(--c360-primary-soft);
 }
 
-/* Every panel's sections stay in the markup at all times -- required for
- * the existing purity contract (workspace-view.test.tsx asserts all
- * twelve `data-section` values are present, unconditionally, on every
- * render). Only VISUAL display is gated by the active tab, so hiding a
- * panel never removes the honesty guarantees (forbidden/empty/unavailable
- * wording) the underlying SectionCard already carries -- a hidden tab is
- * still a real, fully-rendered card, just not the one currently on screen.
- */
+.tabCount {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--c360-border);
+  color: var(--c360-muted);
+  font-size: 0.6875rem;
+  font-weight: 700;
+}
+
+.tabActive .tabCount {
+  background: var(--c360-primary);
+  color: var(--c360-primary-foreground);
+}
+
+/* ── body / panels ────────────────────────────────────────────────────── */
+
+.body {
+  display: flex;
+  flex-direction: column;
+}
+
 .tabPanel {
   display: none;
 }
 
 .tabPanelActive {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* ── generic card ─────────────────────────────────────────────────────── */
+
+.card {
+  background: var(--c360-card);
+  border: 1px solid var(--c360-border);
+  border-radius: var(--c360-radius-lg);
+  padding: 1rem 1.125rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.cardHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.cardTitle {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  margin: 0;
+}
+
+.mutedText {
+  font-size: 0.8125rem;
+  color: var(--c360-muted);
+  margin: 0;
+}
+
+.mutedTextSmall {
+  font-size: 0.75rem;
+  color: var(--c360-muted);
+  margin: 0;
+}
+
+.provenanceText {
+  font-size: 0.6875rem;
+  color: var(--c360-muted);
+  margin: 0.25rem 0 0;
+}
+
+.bigNumber {
+  font-size: 1.375rem;
+  font-weight: 700;
+  margin: 0;
+}
+
+/* ── gap notice (honest, named, undeleted panels) ────────────────────── */
+
+.gapNotice {
+  background: var(--c360-gap-notice-bg);
+  border: 1px dashed var(--c360-gap-notice-border);
+  border-radius: var(--c360-radius-md);
+  padding: 0.75rem 0.875rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.gapHeadline {
+  font-size: 0.8125rem;
+  font-weight: 700;
+  margin: 0;
+}
+
+/* ── overview grid ────────────────────────────────────────────────────── */
+
+.overviewGrid {
   display: grid;
   grid-template-columns: 1fr;
   gap: 1rem;
 }
 
-@media (min-width: 1024px) {
-  .tabPanelActive {
-    grid-template-columns: 1fr 1fr;
+@media (min-width: 900px) {
+  .overviewGrid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .nextBestAction {
+    grid-column: 1 / -1;
   }
 }
 
-.body {
-  padding-top: 1rem;
+.overviewColumn {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.nextBestAction {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  background: var(--c360-primary);
+  color: var(--c360-primary-foreground);
+  border-radius: var(--c360-radius-lg);
+  padding: 1rem 1.25rem;
+}
+
+.nbaLabel {
+  display: block;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.85;
+}
+
+.nbaText {
+  margin: 0.25rem 0 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.owedCard {
+  background: var(--c360-owed-bg);
+  color: var(--c360-owed-foreground);
+  border-radius: var(--c360-radius-lg);
+  padding: 1rem 1.125rem;
+}
+
+.owedAmount {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin: 0;
+}
+
+.owedMeta {
+  font-size: 0.75rem;
+  margin: 0.25rem 0 0;
+  opacity: 0.85;
+}
+
+/* ── stat rows (Account card) ─────────────────────────────────────────── */
+
+.statRows {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+}
+
+.statRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--c360-border);
+  font-size: 0.8125rem;
+}
+
+.statRow:last-child {
+  border-bottom: none;
+}
+
+.statRow dt {
+  color: var(--c360-muted);
+}
+
+.statRow dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+/* ── list rows (Deals / Orders / Invoices / Tickets / Timeline) ────────── */
+
+.listRows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.listRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.625rem 0;
+  border-bottom: 1px solid var(--c360-border);
+}
+
+.listRow:last-child {
+  border-bottom: none;
+}
+
+.listRowMain {
+  min-width: 0;
+}
+
+.listRowTitle {
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.listRowTitle a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.listRowMeta {
+  font-size: 0.75rem;
+  color: var(--c360-muted);
+  margin-top: 0.125rem;
+}
+
+.statusPill {
+  flex-shrink: 0;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  padding: 0.25rem 0.5rem;
+  border-radius: 999px;
+  background: var(--c360-primary-soft);
+  color: var(--c360-primary);
+  white-space: nowrap;
+}
+
+.listRowTitleButton {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+}
+
+.listRowTitleButton:hover {
+  text-decoration-color: currentColor;
+}
+
+/* ── record detail sheet (Step A: in-app drill-down) ────────────────────── */
+
+.sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 0.875rem;
+  background: var(--c360-card);
+  border: 1px solid var(--c360-border);
+  border-radius: var(--c360-radius-lg);
+  padding: 1rem 1.125rem;
+}
+
+.sheetBreadcrumb {
+  font-size: 0.75rem;
+  color: var(--c360-muted);
+}
+
+.sheetHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.sheetTitle {
+  font-size: 1.0625rem;
+  font-weight: 700;
+  margin: 0;
+}
+
+.sheetHeaderActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.stageTracker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  border-top: 1px solid var(--c360-border);
+  border-bottom: 1px solid var(--c360-border);
+  padding: 0.75rem 0;
+}
+
+.stageTrackerCancelled {
+  font-size: 0.8125rem;
+  color: var(--c360-muted);
+  border-top: 1px solid var(--c360-border);
+  border-bottom: 1px solid var(--c360-border);
+  padding: 0.75rem 0;
+}
+
+.stageDone,
+.stageCurrent,
+.stageUpcoming {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.25rem 0.75rem 0.25rem 0;
+  white-space: nowrap;
+}
+
+.stageDone {
+  color: var(--c360-primary);
+}
+
+.stageCurrent {
+  color: var(--c360-card-foreground);
+}
+
+.stageUpcoming {
+  color: var(--c360-muted);
+}
+
+.stageMarker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  font-size: 0.625rem;
+  flex-shrink: 0;
+}
+
+.stageDone .stageMarker {
+  background: var(--c360-primary);
+  color: var(--c360-primary-foreground);
+}
+
+.stageCurrent .stageMarker {
+  background: var(--c360-primary-soft);
+  color: var(--c360-primary);
+  border: 1.5px solid var(--c360-primary);
+}
+
+.stageUpcoming .stageMarker {
+  background: var(--c360-border);
+  color: var(--c360-muted);
+}
+
+.sheetSubTabRow {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.sheetSubTab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 0.375rem 0;
+  margin-right: 1rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--c360-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.sheetSubTabActive {
+  color: var(--c360-primary);
+  border-bottom-color: var(--c360-primary);
+}
+
+.sheetBody {
+  min-height: 80px;
+}
+
+.sheetFieldGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin: 0;
+}
+
+.sheetField dt {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c360-muted);
+}
+
+.sheetField dd {
+  margin: 0.125rem 0 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.lineTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+
+.lineTable th {
+  text-align: left;
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c360-muted);
+  padding: 0.375rem 0.5rem 0.375rem 0;
+  border-bottom: 1px solid var(--c360-border);
+}
+
+.lineTable td {
+  padding: 0.5rem 0.5rem 0.5rem 0;
+  border-bottom: 1px solid var(--c360-border);
+}
+
+.sheetActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem;
+}
+
+.secondaryLink {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--c360-muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* ── narrow width (Step D): the width this component actually runs at when
+   embedded as a Chatwoot dashboard-app sidebar panel, not just a phone
+   screen — Chatwoot's own sidebar panels are ~300-400px. Everything above
+   already wraps; this collapses the one remaining fixed 2-column grid. ── */
+@media (max-width: 480px) {
+  .sheetFieldGrid {
+    grid-template-columns: 1fr;
+  }
 }

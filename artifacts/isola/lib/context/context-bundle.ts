@@ -33,6 +33,8 @@ export const BUNDLE_SECTIONS = [
   'notes',
   'recentActions',
   'recentCommunication',
+  'calls',
+  'files',
 ] as const
 export type BundleSection = (typeof BUNDLE_SECTIONS)[number]
 
