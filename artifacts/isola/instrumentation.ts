@@ -43,6 +43,14 @@ import {
   EPIC_FB_LINKED_WA_NUMBER_ID,
   EPIC_WABA_ID,
 } from '@/lib/epic-seed-data';
+import {
+  EPIC_OWNER_TENANT_ID,
+  EPIC_OWNER_AGENT_NAME,
+  EPIC_CHATWOOT_BASE_URL,
+  EPIC_CHATWOOT_ACCOUNT_ID,
+  EPIC_CHATWOOT_SERVICE_TOKEN_REF,
+  EPIC_CHATWOOT_DOORS,
+} from '@/lib/epic-owner-chatwoot-seed-data';
 import { audit } from '@/lib/audit';
 import {
   decideChatwootBindingSeed,
@@ -72,6 +80,11 @@ export async function register() {
   // inbox ids are configured. Runs after seedEmaSalesAgent so the Tenant
   // row exists (FK requirement for ChatwootBinding).
   await seedEmaSalesChatwootBinding(prisma);
+
+  // EPIC's own mirror bindings (6737/3742/0001) — migrates inbox 7 off its
+  // literal token onto the env:CHATWOOT_SERVICE_TOKEN reference and creates
+  // 8 and 12 the same way. See lib/epic-owner-chatwoot-seed-data.ts.
+  await seedEpicOwnerChatwootBindings(prisma);
 
   // One-time production flips — run after seeding so the relevant Agent row
   // is guaranteed to exist. Both are idempotent (no-op once already
@@ -650,6 +663,36 @@ async function seedEmaSalesChatwootBinding(prisma: any) {
     mode:       'a2',
     token,
   });
+}
+
+/**
+ * EPIC's own Chatwoot mirror bindings (mode='mirror') for inboxes 7, 8, 12
+ * on account 2 — see lib/epic-owner-chatwoot-seed-data.ts for the full
+ * provenance (which inbox is which number, why mirror mode is provably safe
+ * here, and why the token is a credential reference rather than a literal).
+ *
+ * Runs through the same governed writer as every other ChatwootBinding
+ * write in this file: refuses on a retired tenant, a NULL/unresolvable
+ * agent pointer, or a door another ACTIVE registration owns; writes nothing
+ * when the registration already matches. Inbox 7 already has a live
+ * registration whose token is a literal secret — including it here is what
+ * migrates that row onto the reference (a normal `update` decision, diffing
+ * `token` and, if it was null, `agent_id`), not a special case.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function seedEpicOwnerChatwootBindings(prisma: any) {
+  for (const door of EPIC_CHATWOOT_DOORS) {
+    await applyChatwootBindingSeed(prisma, {
+      label: door.label,
+      tenantId: EPIC_OWNER_TENANT_ID,
+      agentName: EPIC_OWNER_AGENT_NAME,
+      baseUrl: EPIC_CHATWOOT_BASE_URL,
+      accountId: EPIC_CHATWOOT_ACCOUNT_ID,
+      inboxId: door.inboxId,
+      mode: 'mirror',
+      token: EPIC_CHATWOOT_SERVICE_TOKEN_REF,
+    });
+  }
 }
 
 /**
