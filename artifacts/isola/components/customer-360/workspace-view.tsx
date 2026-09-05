@@ -66,7 +66,7 @@ export type WorkspaceTab = 'overview' | 'sales' | 'billing' | 'support';
 
 /** One object opened inside the customer. Null when the customer is the view. */
 export type NestedTarget = {
-  kind: 'quotation' | 'order' | 'invoice';
+  kind: 'quotation' | 'order' | 'invoice' | 'ticket';
   id: number;
   reference: string;
 };
@@ -115,10 +115,22 @@ export interface WorkspaceViewProps {
   onSendConfirm: (body: string, fingerprint: string) => void;
   onSendClose: () => void;
 
-  /** The prepare-reply dialog. Local text editing only — no network. */
+  /**
+   * The prepare-reply dialog. Local text editing only — no network.
+   *
+   * `onReplyOpen` takes an OPTIONAL prefill: the identity bar's generic
+   * Message button opens it with none (falls back to the recommended
+   * action's own suggestedReply, unchanged behaviour); a record's Message
+   * button (NestedObject) supplies one naming that record — "About invoice
+   * INV-2231: " — the design's quickMessage pattern, carried through rather
+   * than reinvented as a second composer.
+   */
   replyOpen: boolean;
-  onReplyOpen: () => void;
+  onReplyOpen: (prefillText?: string) => void;
   onReplyClose: () => void;
+  /** The prefill the container is currently holding, if any. Read only while
+   *  replyOpen — the container clears it on close. */
+  replyPrefill?: string;
 
   /**
    * Where the message would be posted, for display only. The view never
@@ -303,15 +315,26 @@ export function RecommendedActionCard({ snapshot, onPrepareReply }: {
   );
 }
 
-/** Review, edit and copy a suggested reply. Local text only — no network. */
-export function ReplyReview({ snapshot, onClose }: {
+/**
+ * Review, edit and copy a message. Local text only — no network.
+ *
+ * TWO ORIGINS, ONE DIALOG. `initialText` set means a record's Message
+ * button opened this with a contextual prefill ("About invoice X: ") — the
+ * design's quickMessage pattern. `initialText` absent falls back to the one
+ * evidence-gated recommendation this snapshot may carry, unchanged from
+ * before this dialog took a second origin. Neither present means nothing to
+ * show — the same "withholding is honest" rule `recommendedAction` itself
+ * already follows.
+ */
+export function ReplyReview({ snapshot, initialText, onClose }: {
   snapshot: Customer360Snapshot;
+  initialText?: string;
   onClose: () => void;
 }) {
   const action = snapshot.recommendedAction;
-  const [draft, setDraft] = useState(action?.suggestedReply ?? '');
+  const [draft, setDraft] = useState(initialText ?? action?.suggestedReply ?? '');
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
-  if (!action) return null;
+  if (initialText === undefined && !action) return null;
 
   return (
     <div className={styles.overlay} role="dialog" aria-modal="true" aria-label="Review suggested reply">
@@ -319,8 +342,14 @@ export function ReplyReview({ snapshot, onClose }: {
         <h2>Review before you use this</h2>
         <dl className={styles.reviewFacts}>
           <div><dt>Customer</dt><dd>{snapshot.customer.name}</dd></div>
-          <div><dt>Quotation</dt><dd>{action.document.reference} · {action.document.state ?? 'state unavailable'}</dd></div>
-          <div><dt>Amount</dt><dd>{formatMoney(action.document.total, action.document.currency)}</dd></div>
+          {/* The document facts are specific to the ONE evidence-backed
+              recommendation. A record-triggered message names its own
+              record inside the prefilled text itself, so nothing invented
+              is needed here when there is no `action` to describe. */}
+          {action && <>
+            <div><dt>Quotation</dt><dd>{action.document.reference} · {action.document.state ?? 'state unavailable'}</dd></div>
+            <div><dt>Amount</dt><dd>{formatMoney(action.document.total, action.document.currency)}</dd></div>
+          </>}
         </dl>
 
         <label className={styles.replyLabel} htmlFor="c360-reply-draft">Proposed reply — edit freely</label>
@@ -436,6 +465,19 @@ function SendReview({ doc, phase, destinationLabel, onConfirm, onClose }: {
   </div>;
 }
 
+/**
+ * The design's quickMessage prefill, by kind. Quotation and order share the
+ * same "About order" wording the reference itself uses (it does not
+ * distinguish them for messaging purposes either).
+ */
+function messagePrefillFor(target: NestedTarget): string {
+  if (target.kind === 'invoice') return `About invoice ${target.reference}: `;
+  if (target.kind === 'ticket') return 'Update on your ticket: ';
+  return `About order ${target.reference}: `;
+}
+
+type NestedSubTab = 'overview' | 'lines' | 'payments' | 'diagnosis' | 'resolution';
+
 function NestedObject({ target, phase, onBack, onMessage }: {
   target: NestedTarget;
   phase: NestedPhase;
@@ -446,12 +488,14 @@ function NestedObject({ target, phase, onBack, onMessage }: {
    * kind of action the design's `quickMessage` names: reach for the phone
    * without leaving the record. It opens the same prepare-reply dialog the
    * identity bar's Message button does — real and wired, not fabricated —
-   * rather than inventing a second composer.
+   * rather than inventing a second composer. The prefill names the record,
+   * matching the design's pattern exactly.
    */
-  onMessage: () => void;
+  onMessage: (prefillText?: string) => void;
 }) {
-  const [sub, setSub] = useState<'overview' | 'lines' | 'payments'>('overview');
+  const [sub, setSub] = useState<NestedSubTab>('overview');
   const isInvoice = target.kind === 'invoice';
+  const isTicket = target.kind === 'ticket';
 
   return <section className={styles.card}>
     {/* Breadcrumb: you never left the customer — this opened inside it. */}
@@ -473,22 +517,31 @@ function NestedObject({ target, phase, onBack, onMessage }: {
             {phase.detail.dueDate && <><span>·</span><span>due {phase.detail.dueDate}</span></>}
           </p>
         </div>
-        <span className={`${styles.rowAmount} ${styles.tnum}`}>
+        {/* A ticket has no amount — Odoo's own field, never a placeholder
+            "$0.00" that would read as a real figure. */}
+        {!isTicket && <span className={`${styles.rowAmount} ${styles.tnum}`}>
           {formatMoney(phase.detail.total, phase.detail.currency)}
-        </span>
+        </span>}
         {/* MESSAGE IS THE PRIMARY VERB. Odoo is the escape hatch, not the
             default path — leaving the record to look something up is the
             failure mode this in-app pattern exists to close. */}
-        <button type="button" className={styles.primaryBtnWa} onClick={onMessage}>Message</button>
+        <button type="button" className={styles.primaryBtnWa} onClick={() => onMessage(messagePrefillFor(target))}>Message</button>
         {phase.detail.odooLink
           ? <a className={styles.secondaryBtn} href={phase.detail.odooLink} target="_blank" rel="noopener noreferrer" title="Escape hatch — leaves this record">Open in Odoo</a>
           : <button type="button" className={styles.secondaryBtn} disabled title="No verified deep link for this record">Open in Odoo</button>}
       </div>
 
+      {/* No ribbon for a ticket — see readTicketObject's own note: an
+          honest ribbon needs this instance's real, team-scoped
+          helpdesk.stage sequence, unverified, so none is drawn. The real
+          stage NAME still travels, as a fact below, not a fabricated step. */}
       <StageRail stages={phase.detail.stages} />
 
       <nav className={styles.subTabs} aria-label={`${phase.detail.reference} sections`}>
-        {([['overview', 'Overview'], ['lines', 'Lines'], ...(isInvoice ? [['payments', 'Payments'] as const] : [])] as const).map(([id, lbl]) => (
+        {(isTicket
+          ? [['overview', 'Overview'], ['diagnosis', 'Diagnosis'], ['resolution', 'Resolution']] as const
+          : [['overview', 'Overview'], ['lines', 'Lines'], ...(isInvoice ? [['payments', 'Payments'] as const] : [])] as const
+        ).map(([id, lbl]) => (
           <button
             key={id}
             type="button"
@@ -499,11 +552,34 @@ function NestedObject({ target, phase, onBack, onMessage }: {
         ))}
       </nav>
 
-      {sub === 'overview' && <dl className={styles.reviewFacts}>
+      {sub === 'overview' && isTicket && <dl className={styles.reviewFacts}>
+        <div><dt>Stage</dt><dd>{phase.detail.state ?? 'unavailable'}</dd></div>
+        <div><dt>Priority</dt><dd>{phase.detail.priority ?? 'unavailable'}</dd></div>
+        <div><dt>Assigned to</dt><dd>{phase.detail.assignee ?? 'Unassigned'}</dd></div>
+        <div><dt>Opened</dt><dd>{phase.detail.date ?? '—'}</dd></div>
+      </dl>}
+
+      {sub === 'overview' && !isTicket && <dl className={styles.reviewFacts}>
         <div><dt>State</dt><dd>{phase.detail.state ?? 'unavailable'}</dd></div>
         {isInvoice && <div><dt>Payment</dt><dd>{phase.detail.paymentState ?? 'unavailable'}</dd></div>}
         <div><dt>Dated</dt><dd>{phase.detail.date ?? '—'}</dd></div>
         <div><dt>Total</dt><dd className={styles.tnum}>{formatMoney(phase.detail.total, phase.detail.currency)}</dd></div>
+      </dl>}
+
+      {/* No automated diagnosis exists — this reads exactly one real field
+          (priority) and says so plainly, rather than showing an AI verdict
+          this workspace cannot actually produce. */}
+      {sub === 'diagnosis' && <div className={styles.unavailable}>
+        <strong>No automated diagnosis is available.</strong>
+        This shows the ticket's own recorded priority ({phase.detail.priority ?? 'unavailable'}) — Isola does not run
+        fault diagnosis on helpdesk tickets today.
+      </div>}
+
+      {/* Same honesty: "resolution" here is the record's own last-updated
+          fact, not a resolution narrative nobody wrote. */}
+      {sub === 'resolution' && <dl className={styles.reviewFacts}>
+        <div><dt>Current stage</dt><dd>{phase.detail.state ?? 'unavailable'}</dd></div>
+        <div><dt>Last updated</dt><dd>{phase.detail.updatedAt ?? 'unavailable'}</dd></div>
       </dl>}
 
       {sub === 'lines' && (phase.detail.lines.length
@@ -733,7 +809,7 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
   const {
     snapshot, tab, onTabChange, nested, onOpenObject, onCloseObject,
     outcomeFor, send, onSendOpen, onSendConfirm, onSendClose,
-    replyOpen, onReplyOpen, onReplyClose, destinationLabel, domain,
+    replyOpen, onReplyOpen, onReplyClose, replyPrefill, destinationLabel, domain,
     onBackToCustomers,
   } = props;
 
@@ -805,7 +881,7 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
         >
           Call
         </button>
-        <button type="button" className={`${styles.iconBtn} ${styles.iconBtnWa}`} onClick={onReplyOpen}>
+        <button type="button" className={`${styles.iconBtn} ${styles.iconBtnWa}`} onClick={() => onReplyOpen()}>
           Message
         </button>
       </div>
@@ -818,7 +894,7 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
       </div>
     </header>
 
-    {replyOpen && <ReplyReview snapshot={snapshot} onClose={onReplyClose} />}
+    {replyOpen && <ReplyReview snapshot={snapshot} initialText={replyPrefill} onClose={onReplyClose} />}
     {send && <SendReview
       doc={send.doc}
       phase={send.phase}
@@ -905,14 +981,23 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
         </div>
         {!snapshot.openLoopsAvailable
           ? <div className={styles.unavailable}>
-              <strong>Odoo did not answer for opportunities or tasks.</strong>
+              <strong>Odoo did not answer for opportunities, tasks or tickets.</strong>
               This is not a statement that there is none. Open the customer in Odoo before
               assuming there is no open work.
             </div>
           : loops.length
             ? loops.map((loop) => <article className={styles.row} key={`${loop.kind}-${loop.id}`}>
                 <div className={styles.rowBody}>
-                  <div className={styles.rowRef}>{loop.title}</div>
+                  {/* A ticket opens IN PLACE, same pattern as an order or
+                      invoice row. Opportunities and tasks stay link-only —
+                      unchanged, out of scope for this pass. */}
+                  {loop.kind === 'ticket'
+                    ? <button
+                        type="button"
+                        className={styles.rowOpen}
+                        onClick={() => onOpenObject({ kind: 'ticket', id: loop.id, reference: loop.title })}
+                      >{loop.title}</button>
+                    : <div className={styles.rowRef}>{loop.title}</div>}
                   <p className={styles.rowMeta}>
                     <span className={styles.state}>{loop.kind}</span>
                     <span>{loop.state ?? 'State unavailable'}</span>
@@ -928,7 +1013,7 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
               </article>)
             : <div className={styles.empty}>
                 <p className={styles.emptyTitle}>Nothing open</p>
-                <p>Odoo answered, and this customer has no open opportunities or tasks.</p>
+                <p>Odoo answered, and this customer has no open opportunities, tasks or tickets.</p>
               </div>}
       </section>}
     </div>

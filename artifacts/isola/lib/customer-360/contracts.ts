@@ -36,7 +36,7 @@ export interface Customer360Balance {
 export interface Customer360Loop {
   id: number;
   title: string;
-  kind: 'opportunity' | 'task';
+  kind: 'opportunity' | 'task' | 'ticket';
   state: string | null;
   due: string | null;
   value?: number | null;
@@ -222,7 +222,7 @@ export interface Customer360Stage {
  * be asserting something about money it never established.
  */
 export interface Customer360ObjectDetail {
-  kind: 'quotation' | 'order' | 'invoice';
+  kind: 'quotation' | 'order' | 'invoice' | 'ticket';
   id: number;
   reference: string;
   state: string | null;
@@ -237,6 +237,14 @@ export interface Customer360ObjectDetail {
   linesAvailability: DetailAvailability;
   payments: Customer360ObjectPayment[];
   paymentsAvailability: DetailAvailability;
+  /**
+   * Ticket-only, real `helpdesk.ticket` fields. Undefined for every other
+   * kind — never populated with an invented value for a kind that has no
+   * such field.
+   */
+  priority?: string | null;
+  assignee?: string | null;
+  updatedAt?: string | null;
 }
 
 export type Customer360ObjectResponse =

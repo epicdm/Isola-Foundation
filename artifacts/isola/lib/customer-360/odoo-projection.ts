@@ -162,7 +162,7 @@ async function projectPartner(
 ): Promise<Customer360Snapshot> {
   const partnerId = partner.id;
 
-  const [sales, invoices, opportunitiesRaw, tasksRaw] = await Promise.all([
+  const [sales, invoices, opportunitiesRaw, tasksRaw, ticketsRaw] = await Promise.all([
     json2Call(config, 'sale.order', 'search_read', {
       domain: [['partner_id', '=', partnerId]],
       fields: ['id', 'name', 'state', 'amount_total', 'currency_id', 'date_order'],
@@ -187,14 +187,25 @@ async function projectPartner(
       order: 'date_deadline asc',
       limit: 8,
     }, 12000).catch(() => TOLERATED_FAILURE) as Promise<Record<string, unknown>[] | typeof TOLERATED_FAILURE>,
+    // helpdesk.ticket -- confirmed installed and readable on this instance
+    // (measured live 2026-09-05: state 'available' via /api/v1/customers/
+    // 163/context). Tolerated the same as opportunities/tasks: a 404 on a
+    // DIFFERENT Odoo instance must not crash this read.
+    json2Call(config, 'helpdesk.ticket', 'search_read', {
+      domain: [['partner_id', '=', partnerId]],
+      fields: ['id', 'name', 'stage_id', 'priority', 'user_id', 'create_date', 'write_date'],
+      order: 'write_date desc',
+      limit: 8,
+    }, 12000).catch(() => TOLERATED_FAILURE) as Promise<Record<string, unknown>[] | typeof TOLERATED_FAILURE>,
   ]);
 
   // A tolerated failure is reported, never rendered as an empty result. The
   // same distinction the customer lookup already makes between "no match" and
   // "could not ask".
-  const openLoopsAvailable = opportunitiesRaw !== TOLERATED_FAILURE && tasksRaw !== TOLERATED_FAILURE;
+  const openLoopsAvailable = opportunitiesRaw !== TOLERATED_FAILURE && tasksRaw !== TOLERATED_FAILURE && ticketsRaw !== TOLERATED_FAILURE;
   const opportunities = opportunitiesRaw === TOLERATED_FAILURE ? [] : opportunitiesRaw;
   const tasks = tasksRaw === TOLERATED_FAILURE ? [] : tasksRaw;
+  const tickets = ticketsRaw === TOLERATED_FAILURE ? [] : ticketsRaw;
 
   const documents: Customer360Document[] = [
     ...sales.map((row) => ({
@@ -239,6 +250,17 @@ async function projectPartner(
       state: displayName(row.stage_id),
       due: text(row.date_deadline),
       odooLink: safeOdooLink(config.url, 'project.task', Number(row.id)),
+    })),
+    ...tickets.map((row) => ({
+      id: Number(row.id),
+      title: String(row.name ?? ''),
+      kind: 'ticket' as const,
+      // The real helpdesk.stage NAME this instance actually uses -- never
+      // the reference design's fixed New/Diagnosing/In progress/Resolved
+      // vocabulary, which this Odoo's own stage names may not match.
+      state: displayName(row.stage_id),
+      due: null,
+      odooLink: safeOdooLink(config.url, 'helpdesk.ticket', Number(row.id)),
     })),
   ];
 
@@ -388,10 +410,13 @@ function invoiceStages(state: string | null, paymentState: string | null): Custo
 export async function readCustomer360Object(
   config: OdooConfig,
   partnerId: number,
-  kind: 'quotation' | 'order' | 'invoice',
+  kind: 'quotation' | 'order' | 'invoice' | 'ticket',
   recordId: number,
 ): Promise<Customer360ObjectDetail | null> {
   if (!Number.isInteger(recordId) || recordId <= 0) return null;
+  // helpdesk.ticket has no lines, payments, amount or currency -- a
+  // genuinely different shape, not a branch of the sale/invoice read.
+  if (kind === 'ticket') return readTicketObject(config, partnerId, recordId);
   const isInvoice = kind === 'invoice';
   const model = isInvoice ? 'account.move' : 'sale.order';
 
@@ -467,6 +492,56 @@ export async function readCustomer360Object(
       reference: text(p.name),
     })),
     paymentsAvailability: payments.availability,
+  };
+}
+
+/**
+ * ONE helpdesk.ticket, partner-pinned the same way the sale/invoice read is.
+ *
+ * NO STAGE RIBBON, DELIBERATELY. A ribbon needs the real ORDERED sequence of
+ * this Odoo's helpdesk.stage records, and helpdesk stages are commonly
+ * scoped per TEAM (`team_ids` on helpdesk.stage) -- fetching all stages
+ * unfiltered risks showing steps from a team this ticket does not belong
+ * to, which would be a wrong ribbon dressed as a real one. That schema has
+ * not been verified live on this instance. Until it is, `stages: []` (the
+ * honest "nothing to draw" this component already renders as no ribbon at
+ * all) and the REAL stage name travels as a plain fact instead -- never the
+ * reference design's fixed New/Diagnosing/In progress/Resolved words, which
+ * this instance's own stages are not confirmed to use.
+ */
+async function readTicketObject(
+  config: OdooConfig,
+  partnerId: number,
+  recordId: number,
+): Promise<Customer360ObjectDetail | null> {
+  const head = await json2Call(config, 'helpdesk.ticket', 'search_read', {
+    domain: [['id', '=', recordId], ['partner_id', '=', partnerId]],
+    fields: ['id', 'name', 'stage_id', 'priority', 'user_id', 'create_date', 'write_date'],
+    limit: 1,
+  }, 12000) as Record<string, unknown>[];
+
+  const row = head[0];
+  if (!row) return null;
+
+  return {
+    kind: 'ticket',
+    id: recordId,
+    reference: String(row.name ?? ''),
+    state: displayName(row.stage_id),
+    paymentState: null,
+    total: null,
+    currency: null,
+    date: text(row.create_date),
+    dueDate: null,
+    odooLink: safeOdooLink(config.url, 'helpdesk.ticket', recordId),
+    stages: [],
+    lines: [],
+    linesAvailability: 'not-supported',
+    payments: [],
+    paymentsAvailability: 'not-supported',
+    priority: text(row.priority),
+    assignee: displayName(row.user_id),
+    updatedAt: text(row.write_date),
   };
 }
 

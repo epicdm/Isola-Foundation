@@ -75,6 +75,10 @@ export function Customer360App() {
   const [phase, setPhase] = useState<Phase>({ kind: 'waiting' });
   const [tab, setTab] = useState<WorkspaceTab>('overview');
   const [replyOpen, setReplyOpen] = useState(false);
+  /** Set only when a record's Message button supplied one; cleared on close
+   *  so a later no-prefill open (the identity bar's own Message button)
+   *  never inherits a stale record's text. */
+  const [replyPrefill, setReplyPrefill] = useState<string | undefined>(undefined);
   const [sent, setSent] = useState<Record<string, SendOutcome>>({});
   /*
     ALL OF THIS STATE LIVES BESIDE `phase`, NOT BELOW IT.
@@ -211,8 +215,9 @@ export function Customer360App() {
     onSendConfirm={confirmSend}
     onSendClose={() => setSendDoc(null)}
     replyOpen={replyOpen}
-    onReplyOpen={() => setReplyOpen(true)}
-    onReplyClose={() => setReplyOpen(false)}
+    replyPrefill={replyPrefill}
+    onReplyOpen={(prefillText) => { setReplyPrefill(prefillText); setReplyOpen(true); }}
+    onReplyClose={() => { setReplyOpen(false); setReplyPrefill(undefined); }}
     destinationLabel={`conversation #${hint.conversationDisplayIdHint}`}
   />;
 }

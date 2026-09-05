@@ -33,7 +33,7 @@ import type { Customer360ObjectResponse } from '@/lib/customer-360/contracts'
 
 export const revalidate = 0
 
-const OBJECT_KINDS = ['quotation', 'order', 'invoice'] as const
+const OBJECT_KINDS = ['quotation', 'order', 'invoice', 'ticket'] as const
 type ObjectKind = (typeof OBJECT_KINDS)[number]
 
 function isObjectKind(value: unknown): value is ObjectKind {
@@ -85,9 +85,12 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    // Ownership, proven against the customer's own documents. One wording for
-    // "not yours" and "does not exist" — see the header.
-    const owned = snapshot.documents.some((d) => d.id === objectId && d.kind === objectKind)
+    // Ownership, proven against the customer's own snapshot. One wording for
+    // "not yours" and "does not exist" — see the header. Tickets live in
+    // `openLoops`, not `documents` — a different array, same proof.
+    const owned = objectKind === 'ticket'
+      ? snapshot.openLoops.some((l) => l.id === objectId && l.kind === 'ticket')
+      : snapshot.documents.some((d) => d.id === objectId && d.kind === objectKind)
     if (!owned) {
       return NextResponse.json<Customer360ObjectResponse>({
         state: 'not-found',
