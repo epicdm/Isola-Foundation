@@ -64,6 +64,14 @@
   --ai-500: #5B68FF;
   --ai-600: #4450E6;
 
+  /* ---- WhatsApp/channel green. Copied from epicdm/isola-portal's
+         packages/webapp/src/styles.css --wa-500/--wa-600, byte-for-byte —
+         never re-derived. Reserved for the WhatsApp channel specifically,
+         same discipline as the AI accent above. ---- */
+  --wa-500: #25D366;
+  --wa-600: #1FAE5A;
+  --wa-ink: #06351F;
+
   /* ---- shape & depth ---- */
   --r-xs: 7px;
   --r-sm: 10px;
@@ -110,6 +118,9 @@
     --danger-ink: #FFB3BC;
     --ai-50: #1E2140;
     --ai-600: #8E97FF;
+    --wa-500: #25D366;
+    --wa-600: #1FAE5A;
+    --wa-ink: #06351F;
     --sh-1: 0 1px 2px rgba(0, 0, 0, .4);
     --sh-2: 0 2px 10px rgba(0, 0, 0, .45);
     --sh-3: 0 12px 34px rgba(0, 0, 0, .5);
@@ -127,18 +138,47 @@
    list of prices is ragged and genuinely harder to compare. */
 .tnum { font-variant-numeric: tabular-nums; }
 
-/* ---- identity bar ------------------------------------------------------
-   Copied from the design's `.identitybar*`. Name, who they are, how to
-   reach them — and the balance, which is the one number an operator wants
-   before they say anything. */
+/* ---- identity bar -------------------------------------------------------
+   CHROME, NOT A PANEL. Measured against the reference: avatar, name, company
+   line, tags, a back-link, Call/Message actions and the balance sit on a
+   tinted band, not white-on-white — that tint is what makes this read as a
+   record view rather than a floating card. Name, who they are, how to reach
+   them, and the balance, which is the one number an operator wants before
+   they say anything. */
 .identityBar {
   display: flex;
   align-items: center;
   gap: 11px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--border-strong);
-  background: var(--surface-2);
+  background: linear-gradient(180deg, var(--brand-50) 0%, var(--surface-2) 100%);
   flex-wrap: wrap;
+}
+.backLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+  padding: 0;
+  flex: none;
+}
+.backLink:hover { color: var(--brand-600); }
+.avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: var(--r-pill);
+  background: var(--brand-500);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+  font-weight: 750;
+  flex: none;
+  letter-spacing: -.02em;
 }
 .identityBody { min-width: 0; flex: 1; }
 .identityTitle {
@@ -151,6 +191,15 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.companyLine {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--brand-600);
+  margin: 1px 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .identityMeta {
   font-size: 12px;
   color: var(--text-muted);
@@ -159,6 +208,7 @@
   flex-wrap: wrap;
   margin: 2px 0 0;
 }
+.identityTags { display: flex; flex-wrap: wrap; gap: 6px; margin: 5px 0 0; }
 .verifiedChip {
   display: inline-flex;
   align-items: center;
@@ -172,6 +222,28 @@
   font-weight: 700;
   flex: none;
 }
+.identityActions { display: flex; gap: 8px; flex: none; }
+.iconBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 13px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.iconBtn:disabled { opacity: .5; cursor: not-allowed; }
+.iconBtnPrimary { background: var(--brand-500); color: #fff; border-color: transparent; }
+.iconBtnPrimary:hover { background: var(--brand-600); }
+/* Message is a WhatsApp action specifically — its own channel colour, never
+   the brand accent, so it reads as "this goes out on WhatsApp" at a glance. */
+.iconBtnWa { background: var(--wa-500); color: var(--wa-ink); border-color: transparent; }
+.iconBtnWa:hover { background: var(--wa-600); }
 .balanceBlock { text-align: right; flex: none; }
 .balanceLabel {
   font-size: 10px;
@@ -432,6 +504,10 @@
 .primaryBtn { background: var(--brand-500); color: #fff; box-shadow: var(--sh-1); border: 0; }
 .primaryBtn:hover { background: var(--brand-600); }
 .primaryBtn:disabled { opacity: .55; cursor: not-allowed; }
+/* Same shape as .primaryBtn, WhatsApp's own colour — a WhatsApp action reads
+   as one at a glance, never dressed in the brand accent. */
+.primaryBtnWa { background: var(--wa-500); color: var(--wa-ink); box-shadow: var(--sh-1); border: 0; }
+.primaryBtnWa:hover { background: var(--wa-600); }
 .secondaryBtn {
   background: var(--surface);
   border: 1px solid var(--border-strong);

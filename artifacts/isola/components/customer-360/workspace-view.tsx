@@ -128,6 +128,14 @@ export interface WorkspaceViewProps {
 
   domain?: WorkspaceDomain;
   onNavigate?: (target: NavTarget) => void;
+
+  /**
+   * Rendered only when the container has somewhere real to send it. The
+   * Chatwoot container has no customer list to return to; the portal
+   * container does. A dead-end back-link is worse than none — same
+   * reasoning `sendability`/`can.why` already apply to buttons.
+   */
+  onBackToCustomers?: () => void;
 }
 
 function label(domain: WorkspaceDomain | undefined, id: string): string {
@@ -155,6 +163,15 @@ export function formatMoney(
     // An unrecognised ISO code must not throw the whole panel away.
     return `${amount.toLocaleString('en-DM')} ${currency}`;
   }
+}
+
+/** Up to two initials, from real name words — never a placeholder glyph. */
+function initials(name: string): string {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return '?';
+  const first = words[0]?.[0] ?? '';
+  const last = words.length > 1 ? (words[words.length - 1]?.[0] ?? '') : '';
+  return (first + last).toUpperCase();
 }
 
 /** Balances are never combined; each currency is its own line. */
@@ -419,10 +436,19 @@ function SendReview({ doc, phase, destinationLabel, onConfirm, onClose }: {
   </div>;
 }
 
-function NestedObject({ target, phase, onBack }: {
+function NestedObject({ target, phase, onBack, onMessage }: {
   target: NestedTarget;
   phase: NestedPhase;
   onBack: () => void;
+  /**
+   * Real Odoo write paths this workspace can act on (Send to customer,
+   * governed content) are separate flows, already wired. This is the OTHER
+   * kind of action the design's `quickMessage` names: reach for the phone
+   * without leaving the record. It opens the same prepare-reply dialog the
+   * identity bar's Message button does — real and wired, not fabricated —
+   * rather than inventing a second composer.
+   */
+  onMessage: () => void;
 }) {
   const [sub, setSub] = useState<'overview' | 'lines' | 'payments'>('overview');
   const isInvoice = target.kind === 'invoice';
@@ -450,8 +476,12 @@ function NestedObject({ target, phase, onBack }: {
         <span className={`${styles.rowAmount} ${styles.tnum}`}>
           {formatMoney(phase.detail.total, phase.detail.currency)}
         </span>
+        {/* MESSAGE IS THE PRIMARY VERB. Odoo is the escape hatch, not the
+            default path — leaving the record to look something up is the
+            failure mode this in-app pattern exists to close. */}
+        <button type="button" className={styles.primaryBtnWa} onClick={onMessage}>Message</button>
         {phase.detail.odooLink
-          ? <a className={styles.secondaryBtn} href={phase.detail.odooLink} target="_blank" rel="noopener noreferrer">Open in Odoo</a>
+          ? <a className={styles.secondaryBtn} href={phase.detail.odooLink} target="_blank" rel="noopener noreferrer" title="Escape hatch — leaves this record">Open in Odoo</a>
           : <button type="button" className={styles.secondaryBtn} disabled title="No verified deep link for this record">Open in Odoo</button>}
       </div>
 
@@ -704,6 +734,7 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
     snapshot, tab, onTabChange, nested, onOpenObject, onCloseObject,
     outcomeFor, send, onSendOpen, onSendConfirm, onSendClose,
     replyOpen, onReplyOpen, onReplyClose, destinationLabel, domain,
+    onBackToCustomers,
   } = props;
 
   /**
@@ -742,15 +773,42 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
 
   return <main className={styles.shell}>
     <header className={styles.identityBar}>
+      {onBackToCustomers && (
+        <button type="button" className={styles.backLink} onClick={onBackToCustomers}>
+          <span aria-hidden="true">←</span> Customers
+        </button>
+      )}
+      <span className={styles.avatar} aria-hidden="true">{initials(snapshot.customer.name)}</span>
       <div className={styles.identityBody}>
         <h1 className={styles.identityTitle}>{snapshot.customer.name}</h1>
+        {snapshot.customer.companyName && (
+          <p className={styles.companyLine}>{snapshot.customer.companyName}</p>
+        )}
         <p className={styles.identityMeta}>
           <span>{snapshot.customer.phone ?? 'No phone'}</span>
           <span>·</span>
           <span>{snapshot.customer.email ?? 'No email'}</span>
         </p>
+        {snapshot.customer.tags.length > 0 && (
+          <p className={styles.identityTags}>
+            {snapshot.customer.tags.map((t) => <span key={t} className={styles.tagChip}>{t}</span>)}
+          </p>
+        )}
       </div>
       <span className={styles.verifiedChip}>Verified Odoo customer</span>
+      <div className={styles.identityActions}>
+        <button
+          type="button"
+          className={styles.iconBtn}
+          disabled
+          title="Voice calling is not connected in this workspace yet"
+        >
+          Call
+        </button>
+        <button type="button" className={`${styles.iconBtn} ${styles.iconBtnWa}`} onClick={onReplyOpen}>
+          Message
+        </button>
+      </div>
       <div className={styles.balanceBlock}>
         <span className={styles.balanceLabel}>Balance due</span>
         <strong className={`${styles.balanceValue} ${styles.tnum}`}>{formatBalances(snapshot.balances)}</strong>
@@ -792,7 +850,7 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
         the tab row and the dialogs all stay mounted above it — the customer is
         still the container; an order or invoice simply opened inside it.
       */}
-      {nested && <NestedObject target={nested.target} phase={nested.phase} onBack={onCloseObject} />}
+      {nested && <NestedObject target={nested.target} phase={nested.phase} onBack={onCloseObject} onMessage={onReplyOpen} />}
 
       {!nested && tab === 'overview' && <div className={styles.recordGrid}>
         <div className={styles.railCol}>
