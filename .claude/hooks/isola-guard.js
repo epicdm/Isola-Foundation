@@ -342,6 +342,41 @@ function evaluate(inp) {
       );
     }
 
+    // Ad hoc fixture teardown/reset — ONE GOVERNED DOMAIN, per
+    // dec-c360-ops-procedure-registry-2026-09-05. This exact shape (a direct
+    // litePlanSubscription write, or a direct sipPasswordHash assignment) was
+    // hand-rolled three separate times in one session before being
+    // registered as scripts/ops/fixture-reset.ts and
+    // scripts/ops/fixture-credential-swap-smoke-test.ts. Exempt: the
+    // registered scripts themselves (so they can still be authored/edited),
+    // and real application source under app/ (this rule governs throwaway
+    // ops scripts, not product code — a different lane's job, a different
+    // review path).
+    const normTarget = T.normalizePath(target);
+    const isRegisteredOpsScript = /(^|[\\/])scripts[\\/]ops[\\/]/.test(normTarget);
+    const isApplicationSource = /(^|[\\/])app[\\/](lib|api)[\\/]/.test(normTarget);
+    // A test file containing the shape as a STRING FIXTURE is describing it
+    // for a proof step, not performing it — same "describing is not
+    // performing" principle this file's header already states for prose and
+    // task text. Caught the hard way: this exact rule refused its own
+    // selftest.js addition on first attempt, which is the accurate refusal
+    // and the reason for this exemption, not a reason to weaken the rule.
+    const isTestFile = /\.test\.[jt]sx?$|(^|[\\/])selftest\.js$/.test(normTarget);
+    if (content && T.AD_HOC_FIXTURE_TEARDOWN_RE.test(content) && !isRegisteredOpsScript && !isApplicationSource && !isTestFile) {
+      deny(
+        'ad-hoc-fixture-teardown',
+        'This file directly manipulates litePlanSubscription state or sipPasswordHash — ' +
+          'the exact fixture-teardown/credential-swap shape that has been hand-rolled three ' +
+          'separate times this session (fixture_purchase.ts, fixture_purchase2.ts, ' +
+          'fixture_purchase3.ts) before being registered as a procedure.',
+        'call scripts/ops/fixture-reset.ts (state teardown) and/or ' +
+          'scripts/ops/fixture-credential-swap-smoke-test.ts (temporary auth for a live HTTP ' +
+          'call) instead of writing a new ad hoc script — see scripts/ops/INDEX.md. If the ' +
+          'registered procedure genuinely does not cover this case, say so and extend it there, ' +
+          'not in a one-off file.'
+      );
+    }
+
     if (content && !T.isProseFile(target) && T.LEGACY_REFERENCE_RE.test(content)) {
       ask(
         'legacy-v183-reference',
