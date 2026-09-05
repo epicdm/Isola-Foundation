@@ -175,6 +175,58 @@ const cases = [
     },
   },
 
+  // --- AD HOC FIXTURE TEARDOWN (ONE GOVERNED DOMAIN) ----------------------
+  {
+    name: 'ad hoc litePlanSubscription write outside scripts/ops/ is BLOCKED',
+    expect: BLOCK,
+    contains: 'ad-hoc-fixture-teardown',
+    payload: {
+      session_id: SID,
+      tool_name: 'Write',
+      tool_input: {
+        file_path: '_fixturepurchase4.ts',
+        content: 'await prisma.litePlanSubscription.updateMany({ where: { liteAccountId: acct.id, state: "active" }, data: { state: "expired" } });',
+      },
+    },
+  },
+  {
+    name: 'ad hoc sipPasswordHash assignment outside scripts/ops/ is BLOCKED',
+    expect: BLOCK,
+    contains: 'ad-hoc-fixture-teardown',
+    payload: {
+      session_id: SID,
+      tool_name: 'Write',
+      tool_input: {
+        file_path: '_checkfixture.ts',
+        content: 'await prisma.liteAccount.update({ where: { id: acct.id }, data: { sipPasswordHash: testHash } });',
+      },
+    },
+  },
+  {
+    name: 'the SAME shape inside scripts/ops/ (the registered procedure itself) is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Write',
+      tool_input: {
+        file_path: 'scripts/ops/fixture-reset.ts',
+        content: 'await prisma.litePlanSubscription.updateMany({ where: { liteAccountId: acct.id, state: "active" }, data: { state: "expired" } });',
+      },
+    },
+  },
+  {
+    name: 'the SAME shape inside real application source (app/lib) is ALLOWED — this rule governs ops scripts, not product code',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Write',
+      tool_input: {
+        file_path: 'app/lib/lite-plan-lifecycle.ts',
+        content: 'await prisma.litePlanSubscription.update({ where: { id }, data: { state: "expired" } });',
+      },
+    },
+  },
+
   // --- SCHEMA / DB --------------------------------------------------------
   {
     name: 'prohibited schema push is BLOCKED',
