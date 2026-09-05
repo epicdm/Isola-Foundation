@@ -126,11 +126,13 @@ export async function POST(req: NextRequest) {
     select: {
       id: true,
       customer_phone: true,
+      // BOTH roles, unfiltered — the merged timeline needs the customer's
+      // and the operator's/AI's own messages alike. `currentRequest` below
+      // is derived from this same set rather than a second query.
       messages: {
-        where: { role: 'user' },
         orderBy: { created_at: 'desc' },
-        take: 1,
-        select: { content: true },
+        take: 20,
+        select: { role: true, content: true, created_at: true },
       },
     },
   });
@@ -143,10 +145,20 @@ export async function POST(req: NextRequest) {
 
   try {
     const config = await resolveOdooConfigForTenant(ctx.effectiveTenantId);
-    const snapshot = await readCustomer360(config, conversation.customer_phone, {
-      displayId: hint.conversationDisplayIdHint,
-      currentRequest: conversation.messages[0]?.content ?? null,
-    });
+    const latestUserMessage = conversation.messages.find((m) => m.role === 'user');
+    const snapshot = await readCustomer360(
+      config,
+      conversation.customer_phone,
+      {
+        displayId: hint.conversationDisplayIdHint,
+        currentRequest: latestUserMessage?.content ?? null,
+      },
+      conversation.messages.map((m) => ({
+        role: m.role,
+        content: m.content,
+        createdAt: m.created_at.toISOString(),
+      })),
+    );
     if (!snapshot) {
       return NextResponse.json<Customer360Response>({
         state: 'not-found',

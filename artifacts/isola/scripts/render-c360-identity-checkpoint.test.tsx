@@ -54,6 +54,10 @@ const armour: Customer360Snapshot = {
   },
   balances: [],
   lifetimeValue: [],
+  followUps: [],
+  followUpsAvailable: true,
+  timeline: [],
+  timelineCallsNote: 'Calls are not shown: Magnus CDR data lives on bff-v2, not Foundation, and no server-to-server read path exists yet.',
   documents: [
     {
       id: 607,

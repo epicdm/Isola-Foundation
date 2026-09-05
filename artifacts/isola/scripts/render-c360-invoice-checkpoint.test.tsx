@@ -54,6 +54,10 @@ const ntrc: Customer360Snapshot = {
   },
   balances: [{ currency: 'XCD', amount: 539930.97 }],
   lifetimeValue: [{ currency: 'XCD', amount: 336130 }],
+  followUps: [],
+  followUpsAvailable: true,
+  timeline: [],
+  timelineCallsNote: 'Calls are not shown: Magnus CDR data lives on bff-v2, not Foundation, and no server-to-server read path exists yet.',
   documents: [
     {
       id: 412,

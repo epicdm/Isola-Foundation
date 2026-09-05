@@ -34,9 +34,11 @@
 import { useState } from 'react';
 
 import type {
+  Customer360FollowUp,
   Customer360ObjectDetail,
   Customer360Snapshot,
   Customer360Stage,
+  Customer360TimelineEntry,
   DetailAvailability,
 } from '@/lib/customer-360/contracts';
 import { sendBadgeText, type SendOutcome } from '@/lib/customer-360/send-badge';
@@ -148,6 +150,16 @@ export interface WorkspaceViewProps {
    * reasoning `sendability`/`can.why` already apply to buttons.
    */
   onBackToCustomers?: () => void;
+
+  /**
+   * "Create follow-up task" — a real mail.activity write, not a toast. The
+   * view supplies no note text or due date: the container computes
+   * "Follow up — {name}" / tomorrow's real date, matching the design's own
+   * one-click pattern, and the view only reports whether a write is
+   * in flight so the button can't be double-clicked into two rows.
+   */
+  onCreateFollowUp?: () => void;
+  creatingFollowUp?: boolean;
 }
 
 function label(domain: WorkspaceDomain | undefined, id: string): string {
@@ -756,6 +768,90 @@ function InlineConversationPanel({ destinationLabel }: { destinationLabel: strin
   </section>;
 }
 
+/** Real mail.activity rows. "Add" writes one for real (onCreate), matching
+ *  the design's own one-click pattern — no free-form dialog, tomorrow's
+ *  real date, computed by the container so this view stays pure. */
+function FollowUpsPanel({ snapshot, onCreate, creating }: {
+  snapshot: Customer360Snapshot;
+  onCreate?: () => void;
+  creating: boolean;
+}) {
+  const rows = snapshot.followUps;
+  return <section className={styles.card}>
+    <div className={styles.sectionHead}>
+      <div>
+        <span className={styles.eyebrow}>Follow-ups</span>
+        <h2>{rows.length ? `${rows.length} open` : 'Nothing open'}</h2>
+      </div>
+      {onCreate && <button type="button" className={styles.tileLink} onClick={onCreate} disabled={creating}>
+        {creating ? 'Adding…' : '+ Add'}
+      </button>}
+    </div>
+    {!snapshot.followUpsAvailable
+      ? <div className={styles.unavailable}>
+          <strong>Odoo did not answer for follow-ups.</strong>
+          This is not a statement that there is none.
+        </div>
+      : rows.length
+        ? <div className={styles.cardPad}>
+            {rows.map((f: Customer360FollowUp) => <div className={styles.followUpRow} key={f.id}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className={styles.followUpSummary}>{f.summary}</div>
+                {f.assignee && <div className={styles.followUpMeta}>{f.assignee}</div>}
+              </div>
+              <span className={`${styles.followUpDue} ${f.dueLabel === 'Today' ? styles.followUpDueToday : ''}`}>
+                {f.dueLabel}
+              </span>
+            </div>)}
+          </div>
+        : <div className={styles.empty}><p>No open follow-ups for this customer.</p></div>}
+  </section>;
+}
+
+const TIMELINE_ICON: Record<Customer360TimelineEntry['kind'], string> = {
+  message: styles.timelineIconMessage,
+  order: styles.timelineIconOrder,
+  invoice: styles.timelineIconInvoice,
+};
+const TIMELINE_GLYPH: Record<Customer360TimelineEntry['kind'], string> = {
+  message: '💬',
+  order: '📦',
+  invoice: '$',
+};
+
+/** Messages, orders and invoices already read for this snapshot, merged
+ *  into one chronological stream — no second Odoo/Chatwoot call. Calls are
+ *  named as absent, never faked as a call that did not happen. */
+function TimelineSection({ snapshot }: { snapshot: Customer360Snapshot }) {
+  return <section className={styles.card}>
+    <div className={styles.sectionHead}>
+      <div><span className={styles.eyebrow}>History</span><h2>Timeline</h2></div>
+    </div>
+    <div className={styles.unavailable} style={{ margin: '0 18px 12px' }}>
+      {snapshot.timelineCallsNote}
+    </div>
+    {snapshot.timeline.length
+      ? <div className={styles.cardPad}>
+          {snapshot.timeline.map((e) => <div className={styles.timelineRow} key={e.id}>
+            <span className={`${styles.timelineIcon} ${TIMELINE_ICON[e.kind]}`} aria-hidden="true">{TIMELINE_GLYPH[e.kind]}</span>
+            <div className={styles.timelineBody}>
+              <div className={styles.timelineHead}>
+                <span className={styles.timelineTitle}>
+                  {e.kind === 'message' ? (e.from === 'customer' ? 'Customer message' : 'Reply') : e.reference}
+                </span>
+                <span className={styles.timelineDate}>{e.date.slice(0, 10)}</span>
+              </div>
+              {e.kind === 'message' && <p className={styles.timelineText}>{e.text}</p>}
+              {e.kind !== 'message' && <p className={styles.timelineText}>
+                {e.status ?? 'State unavailable'}{e.total != null ? ` · ${formatMoney(e.total, e.currency ?? null)}` : ''}
+              </p>}
+            </div>
+          </div>)}
+        </div>
+      : <div className={styles.empty}><p>No messages, orders or invoices to show yet.</p></div>}
+  </section>;
+}
+
 function DocumentList({ title, note, empty, items, outcomeFor, onSend, onOpen }: {
   title: string;
   note: string;
@@ -810,7 +906,7 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
     snapshot, tab, onTabChange, nested, onOpenObject, onCloseObject,
     outcomeFor, send, onSendOpen, onSendConfirm, onSendClose,
     replyOpen, onReplyOpen, onReplyClose, replyPrefill, destinationLabel, domain,
-    onBackToCustomers,
+    onBackToCustomers, onCreateFollowUp, creatingFollowUp,
   } = props;
 
   /**
@@ -935,9 +1031,10 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
             title="AI insights"
             reason="Derived figures (trend, risk score) need a computation this workspace does not have yet. None are fabricated here."
           />
-          <NotBuiltPanel
-            title="Follow-ups"
-            reason="mail.activity on this partner has no reader yet — real Odoo, not a new store, once built."
+          <FollowUpsPanel
+            snapshot={snapshot}
+            onCreate={onCreateFollowUp}
+            creating={creatingFollowUp ?? false}
           />
         </div>
 
@@ -960,6 +1057,10 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
           <OwedCard snapshot={snapshot} />
           <InlineConversationPanel destinationLabel={destinationLabel} />
         </div>
+      </div>}
+
+      {!nested && tab === 'overview' && <div className={styles.timelineSection}>
+        <TimelineSection snapshot={snapshot} />
       </div>}
 
       {!nested && tab === 'sales' && <DocumentList

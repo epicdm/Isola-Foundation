@@ -1,15 +1,27 @@
 import { json2Call, type OdooConfig, type OdooCustomer } from '@/engines/odoo';
 import { odooDeepLink } from '@/lib/context/customer-sources';
+import { createOdooRecordSystem } from '@/lib/governed/executors/odoo-record-system';
 import type {
   Customer360Balance,
   Customer360Document,
+  Customer360FollowUp,
   Customer360Loop,
   Customer360ObjectDetail,
   Customer360RecommendedAction,
   Customer360Snapshot,
   Customer360Stage,
+  Customer360TimelineEntry,
   DetailAvailability,
 } from './contracts';
+
+/** One message from this partner's conversation mirror — passed in by the
+ *  route, which owns the Prisma access this module deliberately does not
+ *  have. Empty when there is no known conversation (the customerId door). */
+export interface ConversationMessage {
+  role: string;
+  content: string;
+  createdAt: string;
+}
 
 function text(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value : null;
@@ -125,10 +137,11 @@ export async function readCustomer360(
   config: OdooConfig,
   phone: string,
   conversation: Customer360Snapshot['conversation'],
+  messages: ConversationMessage[] = [],
 ): Promise<Customer360Snapshot | null> {
   const partner = await findCustomerStrict(config, phone);
   if (!partner) return null;
-  return projectPartner(config, partner, conversation);
+  return projectPartner(config, partner, conversation, messages);
 }
 
 /**
@@ -148,10 +161,11 @@ export async function readCustomer360ById(
   config: OdooConfig,
   partnerId: number,
   conversation: Customer360Snapshot['conversation'],
+  messages: ConversationMessage[] = [],
 ): Promise<Customer360Snapshot | null> {
   const partner = await findCustomerById(config, partnerId);
   if (!partner) return null;
-  return projectPartner(config, partner, conversation);
+  return projectPartner(config, partner, conversation, messages);
 }
 
 /** Everything below the partner resolution, shared by both doors. */
@@ -159,10 +173,11 @@ async function projectPartner(
   config: OdooConfig,
   partner: OdooCustomer,
   conversation: Customer360Snapshot['conversation'],
+  messages: ConversationMessage[],
 ): Promise<Customer360Snapshot> {
   const partnerId = partner.id;
 
-  const [sales, invoices, opportunitiesRaw, tasksRaw, ticketsRaw] = await Promise.all([
+  const [sales, invoices, opportunitiesRaw, tasksRaw, ticketsRaw, followUpsRaw] = await Promise.all([
     json2Call(config, 'sale.order', 'search_read', {
       domain: [['partner_id', '=', partnerId]],
       fields: ['id', 'name', 'state', 'amount_total', 'currency_id', 'date_order'],
@@ -197,6 +212,16 @@ async function projectPartner(
       order: 'write_date desc',
       limit: 8,
     }, 12000).catch(() => TOLERATED_FAILURE) as Promise<Record<string, unknown>[] | typeof TOLERATED_FAILURE>,
+    // mail.activity -- Follow-ups. Real Odoo, not a new store (the same
+    // ruling lib/context/customer-sources.ts already recorded when it
+    // considered and rejected inventing one). res_model/res_id is the
+    // generic polymorphic link every mail.activity carries.
+    json2Call(config, 'mail.activity', 'search_read', {
+      domain: [['res_model', '=', 'res.partner'], ['res_id', '=', partnerId]],
+      fields: ['id', 'summary', 'date_deadline', 'user_id'],
+      order: 'date_deadline asc',
+      limit: 12,
+    }, 12000).catch(() => TOLERATED_FAILURE) as Promise<Record<string, unknown>[] | typeof TOLERATED_FAILURE>,
   ]);
 
   // A tolerated failure is reported, never rendered as an empty result. The
@@ -206,6 +231,8 @@ async function projectPartner(
   const opportunities = opportunitiesRaw === TOLERATED_FAILURE ? [] : opportunitiesRaw;
   const tasks = tasksRaw === TOLERATED_FAILURE ? [] : tasksRaw;
   const tickets = ticketsRaw === TOLERATED_FAILURE ? [] : ticketsRaw;
+  const followUpsAvailable = followUpsRaw !== TOLERATED_FAILURE;
+  const followUpRows = followUpsRaw === TOLERATED_FAILURE ? [] : followUpsRaw;
 
   const documents: Customer360Document[] = [
     ...sales.map((row) => ({
@@ -302,8 +329,47 @@ async function projectPartner(
     ? rawTags.map((t) => displayName(Array.isArray(t) ? t : [t])).filter((t): t is string => !!t)
     : [];
 
+  const now = new Date();
+  const followUps: Customer360FollowUp[] = followUpRows.map((row) => ({
+    id: Number(row.id),
+    summary: String(row.summary ?? ''),
+    dueDate: text(row.date_deadline),
+    dueLabel: dueDateLabel(text(row.date_deadline), now),
+    assignee: displayName(row.user_id),
+  }));
+
+  const timeline: Customer360TimelineEntry[] = [
+    ...messages.map((m): Customer360TimelineEntry => ({
+      kind: 'message',
+      id: `msg-${m.createdAt}-${m.content.slice(0, 12)}`,
+      date: m.createdAt,
+      from: m.role === 'user' ? 'customer' : 'operator',
+      text: m.content,
+    })),
+    ...sales.map((row): Customer360TimelineEntry => ({
+      kind: 'order',
+      id: `order-${row.id}`,
+      date: String(row.date_order ?? ''),
+      reference: String(row.name ?? ''),
+      total: number(row.amount_total),
+      currency: currencyCode(row.currency_id),
+      status: text(row.state),
+    })),
+    ...invoices.map((row): Customer360TimelineEntry => ({
+      kind: 'invoice',
+      id: `invoice-${row.id}`,
+      date: String(row.invoice_date ?? ''),
+      reference: String(row.name ?? ''),
+      total: number(row.amount_total),
+      currency: currencyCode(row.currency_id),
+      status: text(row.state),
+    })),
+  ]
+    .filter((e) => e.date)
+    .sort((a, b) => b.date.localeCompare(a.date));
+
   return {
-    verifiedAt: new Date().toISOString(),
+    verifiedAt: now.toISOString(),
     freshness: 'fresh',
     conversation,
     customer: {
@@ -327,6 +393,71 @@ async function projectPartner(
     openLoops,
     openLoopsAvailable,
     recommendedAction: recommendedAction(documents, partner.name),
+    followUps,
+    followUpsAvailable,
+    timeline,
+    timelineCallsNote: CALLS_NOT_CONNECTED_NOTE,
+  };
+}
+
+/** Real Magnus CDR data lives on bff-v2, not Foundation, and no
+ *  server-to-server read path exists yet -- same fact
+ *  lib/context/customer-sources.ts's CALLS_NOT_CONNECTED_REASON already
+ *  documents for the sibling lineage. Named so the timeline can say why
+ *  calls are absent, not just that they are. */
+export const CALLS_NOT_CONNECTED_NOTE =
+  'Calls are not shown: Magnus CDR data lives on bff-v2, not Foundation, and no server-to-server read path exists yet.';
+
+/** "Today" / "Tomorrow" only when the real date matches — never a vague
+ *  "soon". `now` is passed in so this is computed at the same instant as
+ *  the rest of the snapshot, not re-evaluated at render time. */
+function dueDateLabel(dateStr: string | null, now: Date): string {
+  if (!dateStr) return 'No due date';
+  const due = new Date(dateStr);
+  if (Number.isNaN(due.getTime())) return dateStr;
+  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const diffDays = Math.round((startOfDay(due) - startOfDay(now)) / 86_400_000);
+  if (diffDays === 0) return 'Today';
+  if (diffDays === 1) return 'Tomorrow';
+  return dateStr.slice(0, 10);
+}
+
+/**
+ * Writes a real `mail.activity` on this partner via the ALREADY-BUILT,
+ * ALREADY-TESTED governed executor (lib/governed/executors/odoo-record-
+ * system.ts) rather than a second copy of its activityVals logic. This IS
+ * "Create follow-up task" landing a real row, not a toast -- the design's
+ * own distinction (dec-c360-... 2026-09-05).
+ */
+export async function createCustomerFollowUp(
+  config: OdooConfig,
+  partnerId: number,
+  note: string,
+  dueDate: string,
+): Promise<Customer360FollowUp> {
+  const rec = createOdooRecordSystem({ resolveConfig: async () => config });
+  // companyId is part of RecordSystem's generic interface (other
+  // implementations may use it); the Odoo implementation's scheduleFollowup
+  // never reads it -- confirmed by reading odoo-record-system.ts directly,
+  // not assumed.
+  const { externalId } = await rec.scheduleFollowup({
+    companyId: 'n/a',
+    objectType: 'res.partner',
+    objectId: String(partnerId),
+    note,
+    dueDate,
+  });
+  const readback = await rec.readFollowup(externalId);
+  if (!readback) {
+    throw new Error('the follow-up was created but could not be read back; not shown as confirmed');
+  }
+  const now = new Date();
+  return {
+    id: Number(externalId),
+    summary: String(readback.summary ?? note),
+    dueDate,
+    dueLabel: dueDateLabel(dueDate, now),
+    assignee: null,
   };
 }
 

@@ -419,6 +419,62 @@
 }
 .notBuilt strong { display: block; color: var(--text-muted); font-size: 13px; margin-bottom: 3px; }
 
+/* ---- follow-ups: a real mail.activity list ------------------------------ */
+.followUpRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  border-top: 1px solid var(--border);
+}
+.followUpRow:first-child { border-top: none; padding-top: 0; }
+.followUpSummary { flex: 1; min-width: 0; font-size: 12.8px; font-weight: 600; }
+.followUpMeta { font-size: 11px; color: var(--text-subtle); margin-top: 1px; }
+.followUpDue {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 9px;
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  flex: none;
+}
+.followUpDueToday { background: var(--warn-bg); color: var(--warn-ink); }
+
+/* ---- merged timeline: full width, below the three columns -------------- */
+.timelineSection { margin-top: 14px; }
+.timelineRow {
+  display: flex;
+  gap: 11px;
+  padding: 11px 0;
+  border-top: 1px solid var(--border);
+}
+.timelineRow:first-child { border-top: none; padding-top: 0; }
+.timelineIcon {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-sm);
+  background: var(--surface-3);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 800;
+  flex: none;
+}
+.timelineIconMessage { background: var(--wa-500); color: var(--wa-ink); }
+.timelineIconOrder { background: var(--brand-50); color: var(--brand-600); }
+.timelineIconInvoice { background: var(--warn-bg); color: var(--warn-ink); }
+.timelineBody { flex: 1; min-width: 0; }
+.timelineHead { display: flex; justify-content: space-between; gap: 10px; }
+.timelineTitle { font-size: 13px; font-weight: 650; }
+.timelineDate { font-size: 11px; color: var(--text-subtle); flex: none; }
+.timelineText { font-size: 12.5px; color: var(--text-muted); margin-top: 2px; }
+
 @media (max-width: 900px) {
   .recordGrid { grid-template-columns: 1fr; }
 }

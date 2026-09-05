@@ -127,6 +127,52 @@ export interface Customer360Snapshot {
    * answer, not a missing feature.
    */
   recommendedAction: Customer360RecommendedAction | null;
+  /** Real `mail.activity` records on this partner. Tolerated failure, same
+   *  shape as openLoopsAvailable — see followUpsAvailable. */
+  followUps: Customer360FollowUp[];
+  followUpsAvailable: boolean;
+  /**
+   * Messages, orders and invoices already read for this snapshot, merged
+   * into one chronological stream — no second Odoo/Chatwoot call. Calls are
+   * DELIBERATELY absent: Magnus CDR data lives on bff-v2, not Foundation,
+   * and no server-to-server read path exists yet (same fact
+   * lib/context/customer-sources.ts's CALLS_NOT_CONNECTED_REASON already
+   * documents for the sibling lineage) — omitted, never faked as a call
+   * that did not happen.
+   */
+  timeline: Customer360TimelineEntry[];
+  /** Named so the surface can say WHY calls are missing, not just that they
+   *  are — the same honesty this file's other "not connected" reasons use. */
+  timelineCallsNote: string;
+}
+
+/** One `mail.activity` on the partner — a real Odoo follow-up, not a
+ *  second store. */
+export interface Customer360FollowUp {
+  id: number;
+  summary: string;
+  dueDate: string | null;
+  /** "Today" / "Tomorrow" when the real date matches, else the ISO date
+   *  itself — never a vague "soon". Computed once, server-side, at the
+   *  same moment `verifiedAt` is set. */
+  dueLabel: string;
+  assignee: string | null;
+}
+
+/** One entry in the merged timeline. `kind` decides which optional fields
+ *  are populated — a message never carries `total`, an invoice never
+ *  carries `text`. */
+export interface Customer360TimelineEntry {
+  kind: 'message' | 'order' | 'invoice';
+  id: string;
+  date: string;
+  /** Who sent it, for a message only: the customer, or Isola/the operator. */
+  from?: 'customer' | 'operator';
+  text?: string;
+  reference?: string;
+  total?: number | null;
+  currency?: string | null;
+  status?: string | null;
 }
 
 export interface Customer360RecommendedAction {

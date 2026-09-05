@@ -92,6 +92,45 @@ export function Customer360App() {
   const [sendDoc, setSendDoc] = useState<Document | null>(null);
   const [sendPhase, setSendPhase] = useState<SendPhase>({ kind: 'previewing' });
   const inFlight = useRef(false);
+  const [creatingFollowUp, setCreatingFollowUp] = useState(false);
+
+  /**
+   * Writes a REAL mail.activity via the create-followup route, then merges
+   * the READBACK-PROVEN row the route returns straight into the held
+   * snapshot — no full re-fetch, and nothing added to the list until Odoo
+   * has confirmed it exists. Tomorrow's real date and the design's own
+   * "Follow up — {name}" wording are computed HERE, not in the pure view.
+   */
+  const createFollowUp = useCallback(() => {
+    if (phase.kind !== 'ready' || creatingFollowUp) return;
+    const { snapshot } = phase;
+    setCreatingFollowUp(true);
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const dueDate = tomorrow.toISOString().slice(0, 10);
+    fetch('/api/isola-360/actions/create-followup', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        customerId: snapshot.customer.id,
+        note: `Follow up — ${snapshot.customer.name}`,
+        dueDate,
+      }),
+    })
+      .then(async (response) => response.json())
+      .then((result) => {
+        if (result?.ok && result.followUp) {
+          setPhase((p) => p.kind === 'ready'
+            ? { ...p, snapshot: { ...p.snapshot, followUps: [...p.snapshot.followUps, result.followUp] } }
+            : p);
+        }
+        // A refusal is silently absorbed here rather than replacing the
+        // whole page with an error: the customer is still fully usable,
+        // only the one write did not happen. The button re-enables so the
+        // operator can try again.
+      })
+      .finally(() => setCreatingFollowUp(false));
+  }, [phase, creatingFollowUp]);
 
   useEffect(() => {
     const listener = (event: MessageEvent) => {
@@ -218,6 +257,8 @@ export function Customer360App() {
     replyPrefill={replyPrefill}
     onReplyOpen={(prefillText) => { setReplyPrefill(prefillText); setReplyOpen(true); }}
     onReplyClose={() => { setReplyOpen(false); setReplyPrefill(undefined); }}
+    onCreateFollowUp={createFollowUp}
+    creatingFollowUp={creatingFollowUp}
     destinationLabel={`conversation #${hint.conversationDisplayIdHint}`}
   />;
 }
