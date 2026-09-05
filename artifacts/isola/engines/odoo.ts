@@ -164,6 +164,10 @@ export interface OdooCustomer {
   street: string | null
   city: string | null
   is_company: boolean
+  /** Present only for callers that requested it in their own field list. */
+  parent_id?: unknown
+  create_date?: string | null
+  category_id?: unknown
 }
 
 const CUSTOMER_FIELDS = ['id', 'name', 'email', 'phone', 'phone_sanitized', 'street', 'city', 'is_company']

@@ -298,6 +298,59 @@
   color: var(--text-subtle);
 }
 
+/* ---- the record page: three columns, full conversation width ----------
+   Measured live 2026-09-04: this panel renders as a CENTER TAB beside
+   Messages, not a Chatwoot sidebar — roughly 1080-1100px, not ~380px. Built
+   for that width. Below 900px it stacks to one column; nothing here assumes
+   the narrow sidebar shape a prior pass wrongly optimised for. */
+.recordGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1.25fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+.railCol { display: flex; flex-direction: column; gap: 14px; }
+
+/* ---- account summary: label/value pairs, real Odoo fields only --------- */
+.summaryList { display: flex; flex-direction: column; }
+.summaryRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+  border-top: 1px solid var(--border);
+}
+.summaryRow:first-child { border-top: none; padding-top: 0; }
+.summaryKey { font-size: 12px; color: var(--text-subtle); flex: none; }
+.summaryValue { font-size: 13px; font-weight: 650; text-align: right; }
+.tagRow { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.tagChip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 9px;
+  border-radius: var(--r-pill);
+  background: var(--brand-50);
+  color: var(--brand-600);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* ---- a card that has not been wired to a real source yet. Same honest-
+   state vocabulary as .unavailable, so "not yet built" never looks like a
+   silent failure or a fabricated empty result. ---- */
+.notBuilt {
+  padding: 18px;
+  color: var(--text-subtle);
+  font-size: 12.5px;
+  text-align: center;
+}
+.notBuilt strong { display: block; color: var(--text-muted); font-size: 13px; margin-bottom: 3px; }
+
+@media (max-width: 900px) {
+  .recordGrid { grid-template-columns: 1fr; }
+}
+
 /* ---- summary tiles ---- */
 .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .tile { padding: 15px 16px; }

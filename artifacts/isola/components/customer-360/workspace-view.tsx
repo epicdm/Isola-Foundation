@@ -163,6 +163,13 @@ function formatBalances(balances: Customer360Snapshot['balances']): string {
   return balances.map((b) => formatMoney(b.amount, b.currency)).join(' + ');
 }
 
+/** Same shape as formatBalances, generalised to any per-currency figure —
+ *  lifetime value reuses it rather than growing its own formatter. */
+function formatPerCurrency(rows: Customer360Snapshot['balances'], empty: string): string {
+  if (!rows.length) return empty;
+  return rows.map((r) => formatMoney(r.amount, r.currency)).join(' + ');
+}
+
 /**
  * A document is offerable for sending only when the server could actually
  * compose a message for it: a sendable kind, a verified total and a verified
@@ -497,6 +504,152 @@ function NestedObject({ target, phase, onBack }: {
   </section>;
 }
 
+/**
+ * "Suggested next actions" — the left column's top card. Reuses
+ * `RecommendedActionCard` rather than duplicating its evidence-gated logic;
+ * an honest empty card renders when Odoo produced no recommendation, so the
+ * column never collapses to nothing without saying why.
+ */
+function SuggestedNextActionsPanel({ snapshot, onPrepareReply }: {
+  snapshot: Customer360Snapshot;
+  onPrepareReply: () => void;
+}) {
+  if (!snapshot.recommendedAction) {
+    return <section className={styles.card}>
+      <div className={styles.sectionHead}>
+        <div><span className={styles.eyebrow}>Suggested next actions</span></div>
+      </div>
+      <div className={styles.empty}><p>No document currently warrants a recommendation.</p></div>
+    </section>;
+  }
+  return <div className={styles.card}>
+    <RecommendedActionCard snapshot={snapshot} onPrepareReply={onPrepareReply} />
+  </div>;
+}
+
+/**
+ * A panel with no real source yet. NOT Odoo, and not fabricated — the reason
+ * names exactly what would need to exist for this to become real, matching
+ * the wording convention `notConnectedAdapter` already uses elsewhere in this
+ * workspace's other data path.
+ */
+function NotBuiltPanel({ title, reason }: { title: string; reason: string }) {
+  return <section className={styles.card}>
+    <div className={styles.sectionHead}>
+      <div><span className={styles.eyebrow}>{title}</span></div>
+    </div>
+    <div className={styles.notBuilt}>
+      <strong>Not connected yet</strong>
+      {reason}
+    </div>
+  </section>;
+}
+
+/** Real Odoo fields only. A field this customer's record does not have shows
+ *  an honest placeholder, never a blank cell that reads as a loading state. */
+function AccountSummaryPanel({ snapshot }: { snapshot: Customer360Snapshot }) {
+  const c = snapshot.customer;
+  const since = c.customerSince
+    ? new Date(c.customerSince).toLocaleDateString('en-DM', { year: 'numeric', month: 'short', day: 'numeric' })
+    : null;
+  return <section className={styles.card}>
+    <div className={styles.sectionHead}>
+      <div><span className={styles.eyebrow}>Account</span><h2>Account summary</h2></div>
+    </div>
+    <div className={`${styles.cardPad} ${styles.summaryList}`}>
+      <div className={styles.summaryRow}>
+        <span className={styles.summaryKey}>Company</span>
+        <span className={styles.summaryValue}>{c.companyName ?? (c.isCompany ? c.name : '—')}</span>
+      </div>
+      <div className={styles.summaryRow}>
+        <span className={styles.summaryKey}>Phone</span>
+        <span className={styles.summaryValue}>{c.phone ?? 'No phone'}</span>
+      </div>
+      <div className={styles.summaryRow}>
+        <span className={styles.summaryKey}>Email</span>
+        <span className={styles.summaryValue}>{c.email ?? 'No email'}</span>
+      </div>
+      <div className={styles.summaryRow}>
+        <span className={styles.summaryKey}>Customer since</span>
+        <span className={styles.summaryValue}>{since ?? 'Unavailable'}</span>
+      </div>
+      <div className={styles.summaryRow}>
+        <span className={styles.summaryKey}>Lifetime value</span>
+        <span className={`${styles.summaryValue} ${styles.tnum}`}>
+          {formatPerCurrency(snapshot.lifetimeValue, 'No posted invoices')}
+        </span>
+      </div>
+      {c.tags.length > 0 && <div className={styles.summaryRow}>
+        <span className={styles.summaryKey}>Tags</span>
+        <span className={styles.tagRow}>{c.tags.map((t) => <span key={t} className={styles.tagChip}>{t}</span>)}</span>
+      </div>}
+    </div>
+  </section>;
+}
+
+/** crm.lead, filtered to the opportunity kind already read into openLoops —
+ *  no second Odoo call. Empty and unavailable are never conflated: see
+ *  openLoopsAvailable's own docstring in contracts.ts. */
+function OpenDealPanel({ snapshot }: { snapshot: Customer360Snapshot }) {
+  const deal = snapshot.openLoops.find((l) => l.kind === 'opportunity') ?? null;
+  return <section className={styles.card}>
+    <div className={styles.sectionHead}>
+      <div><span className={styles.eyebrow}>Pipeline</span><h2>Open deal</h2></div>
+    </div>
+    {!snapshot.openLoopsAvailable
+      ? <div className={styles.unavailable}>
+          <strong>Odoo did not answer for opportunities.</strong>
+          This is not a statement that there is none.
+        </div>
+      : !deal
+        ? <div className={styles.empty}>
+            <p className={styles.emptyTitle}>No open deal</p>
+            <p>Odoo answered, and this customer has no open opportunity.</p>
+          </div>
+        : <div className={styles.cardPad}>
+            <p className={styles.rowRef}>{deal.title}</p>
+            <p className={styles.rowMeta}>
+              <span className={styles.state}>{deal.state ?? 'Stage unavailable'}</span>
+              {deal.value != null && <span className={styles.tnum}>{formatMoney(deal.value, null)}</span>}
+              {deal.due && <span>Due {deal.due}</span>}
+            </p>
+            {deal.odooLink
+              ? <a className={styles.secondaryBtn} href={deal.odooLink} target="_blank" rel="noopener noreferrer">Open in Odoo</a>
+              : <button type="button" className={styles.secondaryBtn} disabled title="No verified deep link for this record">Open in Odoo</button>}
+          </div>}
+  </section>;
+}
+
+/** The right rail's own owed figure — the identity bar carries a compact
+ *  version too; this is the detail card the reference gives it its own
+ *  space for. Same balances, never recomputed. */
+function OwedCard({ snapshot }: { snapshot: Customer360Snapshot }) {
+  return <section className={`${styles.card} ${styles.cardPad}`}>
+    <span className={styles.eyebrow}>Owed</span>
+    <strong className={`${styles.tileValue} ${styles.tnum}`} style={{ display: 'block', marginTop: 6 }}>
+      {formatBalances(snapshot.balances)}
+    </strong>
+    {snapshot.balances.length > 1 && <p className={styles.tileNote}>Separate currencies — not combined</p>}
+  </section>;
+}
+
+/** The reference's right rail ends in an inline thread + compose box. That is
+ *  a real, separate build (message history plus a send path already proven
+ *  in the Messages tab) — not something to fake here. Honest placeholder,
+ *  same vocabulary as NotBuiltPanel, naming exactly what exists today. */
+function InlineConversationPanel({ destinationLabel }: { destinationLabel: string | null }) {
+  return <section className={styles.card}>
+    <div className={styles.sectionHead}>
+      <div><span className={styles.eyebrow}>Conversation</span><h2>WhatsApp thread</h2></div>
+    </div>
+    <div className={styles.notBuilt}>
+      <strong>Not wired inline yet</strong>
+      The message thread{destinationLabel ? ` for ${destinationLabel}` : ''} is not rendered in this panel. Use the
+      Messages tab beside this one to read and reply until this is built.
+    </div>
+  </section>;
+}
+
 function DocumentList({ title, note, empty, items, outcomeFor, onSend, onOpen }: {
   title: string;
   note: string;
@@ -607,14 +760,6 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
       </div>
     </header>
 
-    {/*
-      ONE recommendation surface, server-derived and evidence-gated. The
-      browser-side "Suggested next step" that used to sit beside it is gone: it
-      emitted a sentence unconditionally and its overdue test read an absent
-      residual as "not overdue", which is an unanswered read rendered as a fact
-      about money. Silence is the honest answer when nothing warrants one.
-    */}
-    <RecommendedActionCard snapshot={snapshot} onPrepareReply={onReplyOpen} />
     {replyOpen && <ReplyReview snapshot={snapshot} onClose={onReplyClose} />}
     {send && <SendReview
       doc={send.doc}
@@ -649,32 +794,39 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
       */}
       {nested && <NestedObject target={nested.target} phase={nested.phase} onBack={onCloseObject} />}
 
-      {!nested && tab === 'overview' && <section className={styles.grid}>
-        <article className={`${styles.card} ${styles.tile}`}>
-          <span className={styles.eyebrow}>{label(domain, 'sales')}</span>
-          <strong className={`${styles.tileValue} ${styles.tnum}`}>{salesDocs.length}</strong>
-          <p className={styles.tileNote}>{salesDocs.length === 1 ? 'quotation or order' : 'quotations and orders'}</p>
-          <button type="button" className={styles.tileLink} onClick={() => onTabChange('sales')}>Review sales →</button>
-        </article>
-        <article className={`${styles.card} ${styles.tile}`}>
-          <span className={styles.eyebrow}>{label(domain, 'billing')}</span>
-          <strong className={`${styles.tileValue} ${styles.tnum}`}>{invoiceDocs.length}</strong>
-          <p className={styles.tileNote}>{invoiceDocs.length === 1 ? 'invoice' : 'invoices'} · Odoo remains the record</p>
-          <button type="button" className={styles.tileLink} onClick={() => onTabChange('billing')}>Review billing →</button>
-        </article>
-        <article className={`${styles.card} ${styles.tile}`}>
-          <span className={styles.eyebrow}>Open work</span>
-          <strong className={`${styles.tileValue} ${snapshot.openLoopsAvailable ? styles.tnum : ''}`}>
-            {snapshot.openLoopsAvailable ? loops.length : 'Unavailable'}
-          </strong>
-          <p className={styles.tileNote}>
-            {snapshot.openLoopsAvailable
-              ? (loops[0]?.title ?? 'Nothing open in Odoo')
-              : 'Odoo did not answer. This is not a statement that none exist.'}
-          </p>
-          <button type="button" className={styles.tileLink} onClick={() => onTabChange('support')}>Review open work →</button>
-        </article>
-      </section>}
+      {!nested && tab === 'overview' && <div className={styles.recordGrid}>
+        <div className={styles.railCol}>
+          <SuggestedNextActionsPanel snapshot={snapshot} onPrepareReply={onReplyOpen} />
+          <NotBuiltPanel
+            title="AI insights"
+            reason="Derived figures (trend, risk score) need a computation this workspace does not have yet. None are fabricated here."
+          />
+          <NotBuiltPanel
+            title="Follow-ups"
+            reason="mail.activity on this partner has no reader yet — real Odoo, not a new store, once built."
+          />
+        </div>
+
+        <div className={styles.railCol}>
+          <AccountSummaryPanel snapshot={snapshot} />
+          <OpenDealPanel snapshot={snapshot} />
+          <section className={styles.card}>
+            <div className={styles.sectionHead}>
+              <div><span className={styles.eyebrow}>{label(domain, 'sales')}</span><h2>Orders</h2></div>
+            </div>
+            <div className={styles.cardPad}>
+              <strong className={`${styles.tileValue} ${styles.tnum}`}>{salesDocs.length}</strong>
+              <p className={styles.tileNote}>{salesDocs.length === 1 ? 'quotation or order' : 'quotations and orders'}</p>
+              <button type="button" className={styles.tileLink} onClick={() => onTabChange('sales')}>Review sales →</button>
+            </div>
+          </section>
+        </div>
+
+        <div className={styles.railCol}>
+          <OwedCard snapshot={snapshot} />
+          <InlineConversationPanel destinationLabel={destinationLabel} />
+        </div>
+      </div>}
 
       {!nested && tab === 'sales' && <DocumentList
         title="Quotations and orders"

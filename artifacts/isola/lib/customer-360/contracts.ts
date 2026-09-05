@@ -81,6 +81,15 @@ export interface Customer360Snapshot {
      * mangle "Ng" and personalise "Atlas Trading".
      */
     isCompany: boolean;
+    /** `res.partner.parent_id`'s name — the organisation this contact sits
+     *  under. Null for a company record itself, or a contact with no parent. */
+    companyName: string | null;
+    /** `res.partner.create_date`. When this record was first created in Odoo —
+     *  the closest honest answer to "customer since" this ledger can give. */
+    customerSince: string | null;
+    /** `res.partner.category_id` names (e.g. Wholesale, VIP). Empty, never
+     *  fabricated, when Odoo holds none. */
+    tags: string[];
   };
   /**
    * Outstanding residual PER CURRENCY, on posted invoices only.
@@ -91,6 +100,14 @@ export interface Customer360Snapshot {
    * more than one entry means the operator must read them separately.
    */
   balances: Customer360Balance[];
+  /**
+   * Sum of `amount_total` on this partner's POSTED customer invoices, per
+   * currency — never combined across currencies, same reasoning as
+   * `balances`. This is a fact about invoices already read for this
+   * snapshot, not a second Odoo call: draft invoices are excluded because an
+   * unconfirmed document is not revenue.
+   */
+  lifetimeValue: Customer360Balance[];
   documents: Customer360Document[];
   openLoops: Customer360Loop[];
   /**

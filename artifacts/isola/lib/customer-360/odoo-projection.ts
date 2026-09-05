@@ -64,7 +64,7 @@ function displayName(value: unknown): string | null {
   return null;
 }
 
-const CUSTOMER_FIELDS = ['id', 'name', 'email', 'phone', 'phone_sanitized', 'street', 'city', 'is_company'];
+const CUSTOMER_FIELDS = ['id', 'name', 'email', 'phone', 'phone_sanitized', 'street', 'city', 'is_company', 'parent_id', 'create_date', 'category_id'];
 
 /**
  * Sentinel for a read this projection is willing to lose but not willing to
@@ -260,6 +260,26 @@ async function projectPartner(
     .map(([currency, amount]) => ({ currency, amount }))
     .sort((a, b) => b.amount - a.amount);
 
+  // LIFETIME VALUE: the total of POSTED invoices, never draft ones — an
+  // unconfirmed document is not revenue. Grouped by currency for the same
+  // reason `balances` is: this ledger has no FX rate and must not invent one.
+  const lifetimeByCurrency = new Map<string, number>();
+  for (const row of invoices) {
+    if (row.state !== 'posted') continue;
+    const total = number(row.amount_total) ?? 0;
+    if (total === 0) continue;
+    const code = currencyCode(row.currency_id) ?? 'UNKNOWN';
+    lifetimeByCurrency.set(code, (lifetimeByCurrency.get(code) ?? 0) + total);
+  }
+  const lifetimeValue: Customer360Balance[] = [...lifetimeByCurrency.entries()]
+    .map(([currency, amount]) => ({ currency, amount }))
+    .sort((a, b) => b.amount - a.amount);
+
+  const rawTags = (partner as unknown as { category_id?: unknown }).category_id;
+  const tags = Array.isArray(rawTags)
+    ? rawTags.map((t) => displayName(Array.isArray(t) ? t : [t])).filter((t): t is string => !!t)
+    : [];
+
   return {
     verifiedAt: new Date().toISOString(),
     freshness: 'fresh',
@@ -275,8 +295,12 @@ async function projectPartner(
       // trivial and the cost of "Hi EPIC," to a company is a message that
       // reads as machine-generated.
       isCompany: partner.is_company !== false,
+      companyName: displayName((partner as unknown as { parent_id?: unknown }).parent_id),
+      customerSince: text((partner as unknown as { create_date?: unknown }).create_date),
+      tags,
     },
     balances,
+    lifetimeValue,
     documents,
     openLoops,
     openLoopsAvailable,
