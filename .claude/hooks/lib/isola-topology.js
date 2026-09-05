@@ -237,6 +237,27 @@ const DESTRUCTIVE_RULES = [
 ];
 
 /**
+ * ONE GOVERNED DOMAIN, per dec-c360-ops-procedure-registry-2026-09-05: the
+ * fixture number/subscription teardown-and-reset shape, reinvented three
+ * separate ways in one session (fixture_purchase.ts, fixture_purchase2.ts,
+ * fixture_purchase3.ts — each hand-rolling its own expire-then-swap-
+ * credential-then-restore sequence). The registered procedure is
+ * scripts/ops/fixture-reset.ts (state teardown) and
+ * scripts/ops/fixture-credential-swap-smoke-test.ts (temporary auth for a
+ * live HTTP call) — see scripts/ops/INDEX.md.
+ *
+ * The signature is INTENTIONALLY narrow: the two literal shapes that showed
+ * up in every ad hoc reinvention (a direct Prisma litePlanSubscription
+ * write, or a direct sipPasswordHash assignment) — not a broad ban on the
+ * words "fixture" or "reset", which would catch legitimate prose and the
+ * registered scripts' own source. Exemptions (registered-script location,
+ * real application source under app/) are applied at the call site in
+ * isola-guard.js, matching this file's existing separation of "facts about
+ * a shape" (here) from "what to do about it" (there).
+ */
+const AD_HOC_FIXTURE_TEARDOWN_RE = /\blitePlanSubscription\s*\.\s*(updateMany|update|create)\s*\(|\bsipPasswordHash\s*[:=]/;
+
+/**
  * Protected production assets that must never be reconfigured as a side effect
  * of engineering work. Matched only inside execution and write payloads, and
  * only alongside a mutating verb (see isola-guard.js).
@@ -708,6 +729,7 @@ module.exports = {
   BUILD_COMMAND_RE,
   RESTART_COMMAND_RE,
   DESTRUCTIVE_RULES,
+  AD_HOC_FIXTURE_TEARDOWN_RE,
   PROTECTED_NUMBERS,
   META_HOST_RE,
   LEGACY_REFERENCE_RE,
