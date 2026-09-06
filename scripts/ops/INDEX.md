@@ -49,6 +49,25 @@ procedure touches) instead of writing a one-off when:
   (`AD_HOC_FIXTURE_TEARDOWN_RE` in `.claude/hooks/lib/isola-topology.js`), or
 - a future lane will predictably need to do this again.
 
+## Standing rules for applying a fix
+
+**Never apply a fix by copying a whole file over another. Edit in place, against
+the file that is actually loaded.** Learned 2026-09-06: the same file existed in
+two checkouts at different versions; the fix was made in one and `Copy-Item`-ed
+to the other. The copy was byte-perfect and hash-verified — and wrong, because
+the destination was NEWER, so the copy silently deleted a function it had gained
+and broke three tests. A whole-file copy carries the source's *absences* as well
+as its contents, and hash-verifying it proves only that the copy succeeded. If
+two copies of a file must exist at all, that is its own defect (rule 2.3, one
+source never a sync) — fix the duplication rather than getting better at syncing
+it.
+
+**Verify your own writes.** Read back what you wrote, from the place that will
+be read. A successful write is not a stored write, and a successful copy is not
+a correct copy.
+
+## Adding a new procedure (continued)
+
 A registered procedure must: take arguments rather than hardcoding a target,
 refuse to run against anything off an explicit fixture/target allowlist where
 the substrate is customer-facing, and end with an independent re-read that

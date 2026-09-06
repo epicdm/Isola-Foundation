@@ -22,6 +22,25 @@
  * USE THIS INSTEAD OF Get-Content/Set-Content, Out-File, `>` redirection, or
  * any shell pipeline, whenever the target is a repository source file.
  *
+ * NEVER APPLY A FIX BY COPYING A WHOLE FILE OVER ANOTHER. Edit in place,
+ * against the file that is actually loaded.
+ *
+ * Learned 2026-09-06, while fixing the guard this procedure had tripped. The
+ * same file existed in two checkouts at DIFFERENT versions. The fix was made
+ * in one and applied to the other with `Copy-Item` -- byte-identical copy,
+ * hash-verified, and completely wrong: the destination was NEWER, and the copy
+ * silently deleted a function it had gained (`extractNarrativeText`), breaking
+ * three exemption tests. Hash-verifying the copy proved only that the copy
+ * succeeded; it said nothing about which direction was correct.
+ *
+ * A whole-file copy carries the SOURCE's absences as well as its contents, and
+ * absences are invisible in a diff you never look at. This tool's `check` will
+ * not save you here either -- the encoding was perfect. The selftest caught
+ * it, which is the argument for having one.
+ *
+ * If two copies of a file must exist, that is its own defect (rule 2.3, one
+ * source never a sync) -- fix the duplication, do not get better at syncing it.
+ *
  * COMMANDS
  *   check      Scan files for mojibake. Read-only. Exit 1 if any found.
  *                node scripts/ops/safe-file-edit.mjs check <file...>
