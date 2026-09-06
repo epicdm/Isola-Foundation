@@ -116,6 +116,18 @@ const RESTART_COMMAND_RE = new RegExp(
 );
 
 /**
+ * A SQL client actually being invoked. This is what turns a bare SQL keyword
+ * from a word into an operation.
+ *
+ * Deliberately a list of INVOCATIONS, not the word "sql". An earlier draft of
+ * this fix included `\bsql\b`, which would have matched the phrase
+ * "destructive-SQL verb" in the very commit message the fix exists to unblock —
+ * re-creating the defect one layer down.
+ */
+const SQL_CLIENT =
+  '(?:psql|mysql|mariadb|sqlite3|sqlcmd|cockroach\\s+sql|prisma\\s+db\\s+execute|\\.sql\\b)';
+
+/**
  * Destructive shapes. Structure-based, never bare substrings, so prose that
  * merely mentions these words does not trip them. Evaluated ONLY against
  * execution tools (see TOOL_CLASSES) — never against task text, Port records,
@@ -128,9 +140,41 @@ const DESTRUCTIVE_RULES = [
     why: 'Destructive SQL (object removal). Use a reviewed migration through the validated path.',
   },
   {
+    // The canonical DDL form. The TABLE keyword IS the SQL context, so this
+    // needs nothing else around it and is refused wherever it executes.
     id: 'sql-wipe-table',
-    re: new RegExp('\\b' + VERB.wipe + '\\s+(table\\s+)?["a-z0-9_.]', 'i'),
+    re: new RegExp('\\b' + VERB.wipe + '\\s+table\\s+(only\\s+)?["a-z0-9_.]', 'i'),
     why: 'Destructive SQL (whole-table wipe).',
+  },
+  {
+    /**
+     * Postgres also accepts the keyword with no TABLE, e.g. `<verb> mytable`.
+     * That form is one ordinary English word away from prose, so on its own it
+     * is NOT evidence of an operation — it needs a SQL client in the same
+     * command before it counts.
+     *
+     * WHY THIS SPLIT EXISTS. The single combined rule made `table` optional and
+     * therefore matched the verb followed by ANY identifier character. On
+     * 2026-09-06 it refused three legitimate documents in one session: a shell
+     * line whose only offence was the echo "<verb> a clean file" — the real
+     * file operation on that same line did not match at all — and then the
+     * commit message DOCUMENTING that refusal, twice over, since the message
+     * had to describe the very pattern it tripped. A registry that cannot
+     * describe the operations it governs has stopped being a registry.
+     *
+     * Same defect class as
+     * def-enforce-safety-guard-binds-to-vocabulary-not-operations-2026-08-19:
+     * a guard bound to VOCABULARY rather than to an OPERATION produces the
+     * feeling of protection while the operations it exists to stop go
+     * unexamined. Authorized by the owner 2026-09-06.
+     */
+    id: 'sql-wipe-table-bare',
+    re: new RegExp(
+      '(?=[\\s\\S]*' + SQL_CLIENT + ')' +
+        '(?=[\\s\\S]*\\b' + VERB.wipe + '\\s+(only\\s+)?["a-z0-9_.])',
+      'i'
+    ),
+    why: 'Destructive SQL (whole-table wipe) issued through a SQL client.',
   },
   {
     id: 'sql-unscoped-row-purge',
@@ -680,6 +724,24 @@ function extractNarrativeText(cmd) {
     if (here) {
       const bodyStart = here.index + here[0].indexOf(here[3], here[0].indexOf('\n'));
       spans.push([bodyStart, bodyStart + here[3].length]);
+    }
+
+    /**
+     * PowerShell here-string: git commit -m @'...'@  (or @"..."@).
+     *
+     * PowerShell is the PRIMARY shell on this machine, and this is its
+     * documented multi-line form — the bash heredoc above does not exist here.
+     * Added 2026-09-06 alongside the sql-wipe-table split, because the two
+     * defects fired together: a commit message written the only way this shell
+     * supports was scanned as if it were a command, since the exemption
+     * understood only the other shell's syntax. The closing delimiter must sit
+     * at the start of its own line, exactly as PowerShell requires.
+     */
+    const psHere = /@(['"])\r?\n([\s\S]*?)\r?\n\1@/g;
+    let ph;
+    while ((ph = psHere.exec(s))) {
+      const start = ph.index + ph[0].indexOf(ph[2], 2);
+      spans.push([start, start + ph[2].length]);
     }
 
     // -m / --message with a quoted body. ALL of them: git accepts repeated -m.

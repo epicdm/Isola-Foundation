@@ -647,6 +647,89 @@ const cases = [
       tool_input: { command: 'git commit -m "ledger: records a ' + t('DR', 'OP TABLE') + ' performed under owner authorization"' },
     },
   },
+  // ── sql-wipe-table: vocabulary vs operation (fixed 2026-09-06) ──────────
+  //
+  // The rule made the TABLE keyword optional, so it matched the wipe verb
+  // followed by any identifier character. It refused three legitimate documents
+  // in one session, including the commit message documenting its own refusal.
+  // Both directions are pinned here: the real operation must still be blocked,
+  // and prose must not be. Neither half is evidence alone — a rule that blocks
+  // everything passes the first, a deleted rule passes the second.
+  {
+    name: 'REAL whole-table wipe (canonical DDL form) is BLOCKED',
+    expect: BLOCK,
+    contains: 'sql-wipe-table',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'psql -c "' + t('TRUN', 'CATE TABLE') + ' lite_plan_subscriptions;"' },
+    },
+  },
+  {
+    name: 'REAL whole-table wipe WITHOUT the TABLE keyword, through a SQL client, is BLOCKED',
+    expect: BLOCK,
+    contains: 'sql-wipe-table-bare',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'psql -d isola -c "' + t('trun', 'cate') + ' lite_accounts;"' },
+    },
+  },
+  {
+    // The exact shell line refused on 2026-09-06. Its only offence was the
+    // echo; the real file operation on the same line never matched the rule.
+    name: 'an ECHO containing the wipe verb, with no SQL client, is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: 'echo "=== A. ' + t('trun', 'cate') + ' a clean file with 3 em-dashes ===" && node tool.mjs keep-lines --file=x.ts --keep=3',
+      },
+    },
+  },
+  {
+    // The second refusal: the commit message DOCUMENTING the first one, written
+    // as a PowerShell here-string because that is this machine's primary shell.
+    // Two defects fired together — the over-broad rule, and a narrative
+    // exemption that understood only bash heredocs.
+    name: 'a PowerShell here-string commit message describing the wipe verb is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'PowerShell',
+      tool_input: {
+        command: "git commit -m @'\nops(encoding): register a safe file-edit procedure\n\nThe command is keep-lines, not " +
+          t('trun', 'cate') + ", because that word is a destructive-SQL verb\nin the guard and naming it so would trip the estate's own rule.\n'@",
+      },
+    },
+  },
+  {
+    // CONTROL for the two ALLOWED cases above: the exemption is about CONTEXT,
+    // not about the word being harmless. Put a real SQL client on the same line
+    // and the identical verb is refused again.
+    name: 'CONTROL: the same wipe verb WITH a SQL client on the line is BLOCKED again',
+    expect: BLOCK,
+    contains: 'sql-wipe-table-bare',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'echo "cleaning up" && psql -d isola -c "' + t('trun', 'cate') + ' lite_accounts;"' },
+    },
+  },
+  {
+    // CONTROL: the PowerShell here-string exemption covers the MESSAGE ONLY.
+    name: 'CONTROL: a real wipe CHAINED after a here-string commit is still BLOCKED',
+    expect: BLOCK,
+    contains: 'sql-wipe-table',
+    payload: {
+      session_id: SID,
+      tool_name: 'PowerShell',
+      tool_input: {
+        command: "git commit -m @'\nharmless note\n'@ ; psql -c \"" + t('TRUN', 'CATE TABLE') + ' lite_accounts;"',
+      },
+    },
+  },
   {
     // CONTROL 1: the exemption must cover the MESSAGE ONLY. A real operation
     // chained after it is still a real operation.
