@@ -728,54 +728,74 @@ function extractNarrativeText(cmd) {
 
   if (isCommitLike) {
     /**
-     * Heredoc: git commit -F - <<'EOF' ... EOF   (quoted or bare delimiter)
-     *
-     * BOUND TO `-F -` IMMEDIATELY BEFORE THE OPERATOR. An earlier version
-     * matched any heredoc anywhere in the command once `git commit` appeared
-     * — so `git commit -m "safe"; x=$(cat <<'EOF'\nTRUNCATE TABLE...\nEOF\n);
-     * psql -c "$x"` had its destructive payload masked out of the scan target
-     * because a heredoc happened to exist on the same line, unrelated to the
-     * commit message. Same defect class, same fix shape, as the PowerShell
-     * here-string case just below — found by review 2026-09-06.
+     * SCOPE every commit-related match to the actual git-commit COMMAND
+     * SEGMENT, not the whole string. Review found 2026-09-06 (second pass):
+     * binding `-F -` to "immediately before the heredoc operator" was still
+     * not binding it to GIT -- `git commit -m "safe"; psql -F - <<'EOF' ...
+     * TRUNCATE... EOF` has a perfectly real `-F -` belonging to psql, not
+     * git, and the earlier fix happily masked it anyway. A segment is
+     * `git commit`/`git tag` up to the next unescaped command separator
+     * (`;`, newline, `&&`, `||`) or end of string -- everything below
+     * searches ONLY inside that slice, then offsets spans back into `s`.
      */
-    const here = /-F\s+-\s*<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\2\b/.exec(s);
+    const gitStart = /\bgit\s+(commit|tag)\b/.exec(s).index;
+    const afterGit = s.slice(gitStart);
+    const sep = /;|\n|&&|\|\|/.exec(afterGit);
+    const segEnd = gitStart + (sep ? sep.index : afterGit.length);
+    const segment = s.slice(gitStart, segEnd);
+
+    /**
+     * Heredoc: git commit -F - <<'EOF' ... EOF   (quoted or bare delimiter)
+     * Scoped to `segment` (see above) so a heredoc belonging to a DIFFERENT
+     * command chained after `git commit` is never mistaken for the message.
+     */
+    const here = /-F\s+-\s*<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\2\b/.exec(segment);
     if (here) {
-      const bodyStart = here.index + here[0].indexOf(here[3], here[0].indexOf('\n'));
+      const bodyStart = gitStart + here.index + here[0].indexOf(here[3], here[0].indexOf('\n'));
       spans.push([bodyStart, bodyStart + here[3].length]);
     }
 
     /**
      * PowerShell here-string: git commit -m @'...'@  (or @"..."@).
+     * Scoped to `segment` for the same reason as the heredoc above.
      *
-     * PowerShell is the PRIMARY shell on this machine, and this is its
-     * documented multi-line form — the bash heredoc above does not exist here.
-     * Added 2026-09-06 alongside the sql-wipe-table split, because the two
-     * defects fired together: a commit message written the only way this shell
-     * supports was scanned as if it were a command, since the exemption
-     * understood only the other shell's syntax. The closing delimiter must sit
-     * at the start of its own line, exactly as PowerShell requires.
-     *
-     * BOUND TO `-m`/`--message` IMMEDIATELY BEFORE THE `@'`/`@"` OPENER.
-     * Review found 2026-09-06: the original matched ANY here-string anywhere
-     * in the command once `git commit` appeared, so
-     * `git commit -m "safe"; $q=@'\nTRUNCATE TABLE...\n'@; psql -c $q` had its
-     * destructive payload masked out even though it was never the commit
-     * message — a here-string assigned to an unrelated variable and executed
-     * afterward.
+     * SINGLE- vs DOUBLE-QUOTED MATTERS. Review found 2026-09-06 (second
+     * pass): PowerShell expands `$(...)` subexpressions INSIDE a
+     * double-quoted here-string (@"..."@) before git ever runs -- so
+     * `git commit -m @"\n$(psql -c "TRUNCATE TABLE...")\n"@` actually
+     * EXECUTES the psql call; masking the whole block hides real,
+     * already-executed destructive SQL from the scanner, not prose. Only a
+     * single-quoted here-string (@'...'@, no expansion, ever) is safe to
+     * mask in full. A double-quoted one is masked ONLY if it contains no
+     * `$(` -- if it does, it is left fully visible, favoring a rare false
+     * refusal over hiding a live payload.
      */
     const psHere = /(?:-m|--message)[=\s]+@(['"])\r?\n([\s\S]*?)\r?\n\1@/g;
     let ph;
-    while ((ph = psHere.exec(s))) {
-      const start = ph.index + ph[0].indexOf(ph[2], 2);
-      spans.push([start, start + ph[2].length]);
+    while ((ph = psHere.exec(segment))) {
+      const quote = ph[1];
+      const body = ph[2];
+      if (quote === '"' && /\$\(/.test(body)) continue; // leave the subexpression visible
+      const start = gitStart + ph.index + ph[0].indexOf(body, 2);
+      spans.push([start, start + body.length]);
     }
 
-    // -m / --message with a quoted body. ALL of them: git accepts repeated -m.
-    for (const re of [/-m\s+"((?:[^"\\]|\\.)*)"/g, /-m\s+'((?:[^'\\]|\\.)*)'/g,
-                      /--message[=\s]+"((?:[^"\\]|\\.)*)"/g, /--message[=\s]+'((?:[^'\\]|\\.)*)'/g]) {
+    // -m / --message with a quoted body. ALL of them: git accepts repeated
+    // -m. Scoped to `segment`. Double-quoted forms carry the SAME `$(...)`
+    // expansion risk as the here-string above (both PowerShell and bash
+    // expand subexpressions inside double quotes, never single quotes) --
+    // same guard applied here.
+    const MSG_PATTERNS = [
+      { re: /-m\s+"((?:[^"\\]|\\.)*)"/g, expandable: true },
+      { re: /-m\s+'((?:[^'\\]|\\.)*)'/g, expandable: false },
+      { re: /--message[=\s]+"((?:[^"\\]|\\.)*)"/g, expandable: true },
+      { re: /--message[=\s]+'((?:[^'\\]|\\.)*)'/g, expandable: false },
+    ];
+    for (const { re, expandable } of MSG_PATTERNS) {
       let m;
-      while ((m = re.exec(s))) {
-        const start = m.index + m[0].indexOf(m[1]);
+      while ((m = re.exec(segment))) {
+        if (expandable && /\$\(/.test(m[1])) continue; // leave the subexpression visible
+        const start = gitStart + m.index + m[0].indexOf(m[1]);
         spans.push([start, start + m[1].length]);
       }
     }

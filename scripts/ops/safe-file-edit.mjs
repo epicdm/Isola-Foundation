@@ -288,16 +288,37 @@ function cmdSelfScan() {
 
 function cmdKeepLines(args) {
   const file = args.file;
-  const keep = Number(args.keep);
-  if (!file || !Number.isInteger(keep) || keep < 0) {
-    console.error('FAIL: keep-lines needs --file=<path> --keep=<N>');
+  /**
+   * Review found 2026-09-06 (second pass): `parseArgs` stores bare `--keep`
+   * (no value) as the BOOLEAN `true`, and `--keep=` (empty value) as `''`.
+   * `Number(true)` is 1 and `Number('')` is 0 -- both pass the old
+   * `Number.isInteger(keep) && keep >= 0` check, so a genuinely missing
+   * argument silently shortened the target to 1 (or 0) lines instead of
+   * printing this usage error. Require an actual digits-only string first.
+   */
+  const keepRaw = args.keep;
+  if (!file || typeof keepRaw !== 'string' || !/^\d+$/.test(keepRaw)) {
+    console.error('FAIL: keep-lines needs --file=<path> --keep=<N> (N must be a non-negative integer)');
     process.exit(1);
   }
+  const keep = Number(keepRaw);
 
   const before = readUtf8(file);
   const beforeLines = before.split('\n');
-  if (keep > beforeLines.length) {
-    console.error(`FAIL: --keep=${keep} exceeds the file's ${beforeLines.length} lines`);
+  /**
+   * Review found 2026-09-06 (second pass): a file ending in '\n' splits into
+   * one extra trailing '' element (e.g. "alpha\nbeta\n".split('\n') ->
+   * ["alpha","beta",""]), so this bounds check accepted --keep values one
+   * past the file's real line count and reported a clean shorten while
+   * actually preserving/adding a blank line. Excluded here; `beforeLines`
+   * itself is untouched since slicing it for the retained content is
+   * correct either way.
+   */
+  const realLineCount = beforeLines.length > 0 && beforeLines[beforeLines.length - 1] === ''
+    ? beforeLines.length - 1
+    : beforeLines.length;
+  if (keep > realLineCount) {
+    console.error(`FAIL: --keep=${keep} exceeds the file's ${realLineCount} lines`);
     process.exit(1);
   }
 

@@ -763,6 +763,69 @@ const cases = [
     },
   },
   {
+    // Second-pass review, 2026-09-06: `-F -` belonging to a DIFFERENT
+    // command chained after `git commit` was still being masked as commit
+    // prose, because the fix bound to "-F - immediately before a heredoc"
+    // but not to "-F - as part of THIS git invocation". Segment-scoping
+    // fixes it: psql's own -F - sits outside the git-commit segment.
+    name: 'a heredoc bound to -F - on a DIFFERENT chained command is not exempted -- still BLOCKED',
+    expect: BLOCK,
+    contains: 'sql-wipe-table',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: 'git commit -m "safe"; psql -F - <<\'EOF\'\n' + t('TRUN', 'CATE TABLE') + ' lite_accounts;\nEOF',
+      },
+    },
+  },
+  {
+    // Second-pass review, 2026-09-06: PowerShell expands `$(...)`
+    // subexpressions inside a DOUBLE-quoted here-string before git ever
+    // runs, so masking the whole block hid a payload that already executed.
+    // Only single-quoted here-strings (no expansion, ever) are safe to mask
+    // in full.
+    name: 'a DOUBLE-quoted here-string with a live $(...) subexpression is not exempted -- still BLOCKED',
+    expect: BLOCK,
+    contains: 'sql-wipe-table',
+    payload: {
+      session_id: SID,
+      tool_name: 'PowerShell',
+      tool_input: {
+        command: 'git commit -m @"\n$(psql -c "' + t('TRUN', 'CATE TABLE') + ' lite_accounts;")\n"@',
+      },
+    },
+  },
+  {
+    // Same expansion risk, plain double-quoted -m "..." (not a here-string
+    // at all) -- both PowerShell and bash expand $(...) inside double
+    // quotes, never single quotes.
+    name: 'a plain double-quoted -m with a live $(...) subexpression is not exempted -- still BLOCKED',
+    expect: BLOCK,
+    contains: 'sql-wipe-table',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: 'git commit -m "safe $(psql -c \'' + t('TRUN', 'CATE TABLE') + " lite_accounts;')\"",
+      },
+    },
+  },
+  {
+    // CONTROL: the SAME single-quoted forms remain fully exempted --
+    // this is what proves the fix is about expansion risk, not about
+    // punishing every -m that mentions the word.
+    name: 'CONTROL: single-quoted -m and here-string, no $(...), still ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'PowerShell',
+      tool_input: {
+        command: "git commit -m 'the command is keep-lines, not " + t('trun', 'cate') + "'",
+      },
+    },
+  },
+  {
     // CONTROL 1: the exemption must cover the MESSAGE ONLY. A real operation
     // chained after it is still a real operation.
     name: 'a real secret dump CHAINED after a commit is still BLOCKED',
