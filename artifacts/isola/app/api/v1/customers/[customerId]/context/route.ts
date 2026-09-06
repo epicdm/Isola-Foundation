@@ -39,6 +39,7 @@ import { loadCustomerActivity } from '@/lib/context/customer-activity'
 import { buildCustomerAdapters, odooCallerFor, parseCustomerId } from '@/lib/context/customer-sources'
 import { recentActionsAdapter, prismaRecentActionsStore } from '@/lib/context/recent-actions'
 import { ACTIONS_BY_ROLE, type Role } from '@/lib/context/resolve-context'
+import { bearerFrom, resolveServiceCaller, serviceAuthEnvFrom } from '@/lib/customer-360/service-auth'
 import { resolveOdooConfigForTenant } from '@/lib/engine-bindings'
 import { getSession } from '@/lib/session'
 import { requireWorkspaceAccess, type WorkspaceAuthz } from '@/lib/workspace/authz'
@@ -58,21 +59,32 @@ function contextRole(authz: WorkspaceAuthz): Role {
  */
 const NOT_FOUND = { error: 'not found, or not available to you' }
 
-export async function GET(req: Request, { params }: Params) {
-  // 1 ── AUTHENTICATION, before anything is parsed.
-  const ctx = await getSession()
-  if (!ctx || !ctx.effectiveTenantId) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
+/** Same header and refusal shape as `lib/customer-360/route-context.ts`'s
+ *  `refuseOnTenantMismatch` — not imported from there to avoid pulling in
+ *  that module's own session-resolution path, which this route already has
+ *  its own (differently-scoped, `requireWorkspaceAccess`-gated) version of.
+ *  The service door's tenant is never taken from this header; it exists only
+ *  to REFUSE a caller that is confused about whose data it asked for. */
+const TENANT_ASSERTION_HEADER = 'x-isola-tenant-id'
+function refuseOnTenantMismatch(req: Request, resolvedTenantId: string): NextResponse | null {
+  const asserted = (req.headers.get(TENANT_ASSERTION_HEADER) ?? '').trim()
+  if (!asserted || asserted === resolvedTenantId) return null
+  return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+}
 
-  const guard = await requireWorkspaceAccess(ctx, 'manager')
-  if (!guard.ok) return NextResponse.json({ error: guard.error }, { status: guard.status })
-
-  // 2 ── THE TENANT, from the session. It decides which Odoo is read.
-  const tenantId = ctx.effectiveTenantId
-  const role = contextRole(guard.authz)
-
-  const { customerId } = await params
+/**
+ * The body shared by both doors below: everything from "the tenant and role
+ * are now known" onward. Neither door may skip any of these steps, so this is
+ * a function, not a copy-pasted block — the exact discipline
+ * `lib/customer-360/route-context.ts` was extracted for on the sibling route.
+ */
+async function respondForCustomer(
+  req: Request,
+  customerId: string,
+  tenantId: string,
+  role: Role,
+  canViewAudit: boolean,
+) {
   // Refused before it can reach a domain. An id is not trusted input just
   // because it arrived in a path segment rather than in a query string.
   if (parseCustomerId(customerId) === null) {
@@ -132,7 +144,7 @@ export async function GET(req: Request, { params }: Params) {
   // 5 ── The activity slice, through the existing feed.
   const activity = await loadCustomerActivity(customerId, {
     tenantId,
-    canViewAudit: guard.authz.canViewAudit,
+    canViewAudit,
     now,
   })
 
@@ -149,4 +161,52 @@ export async function GET(req: Request, { params }: Params) {
   })
 
   return NextResponse.json(body, { status: 200 })
+}
+
+export async function GET(req: Request, { params }: Params) {
+  const { customerId } = await params
+
+  // SERVICE DOOR — added so the Lumen portal (a service-token caller, never a
+  // browser session) can mount this same sections-shaped context the Chatwoot
+  // cockpit already reads, instead of the older, poorer `/api/isola-360/context`
+  // snapshot it was proxying before. Reuses the EXACT service-auth validation
+  // that door already used (`lib/customer-360/service-auth.ts`) — no new auth
+  // code, per Contract 2.3 (one source, never a sync).
+  //
+  // Tried FIRST, and a bearer that is PRESENTED and REJECTED refuses outright
+  // rather than falling through to the cookie door below — the same precedence
+  // `lib/customer-360/route-context.ts`'s `resolveCaller` documents, so a stale
+  // service token can never silently retry as a different principal.
+  const authorization = req.headers.get('authorization')
+  if (authorization) {
+    const service = resolveServiceCaller(authorization, serviceAuthEnvFrom(process.env))
+    if (!service.ok) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+    const refusal = refuseOnTenantMismatch(req, service.tenantId)
+    if (refusal) return refusal
+    // A machine gets the middle role, same as every other service caller on
+    // this surface — owner powers belong to a person. Audit trail is likewise
+    // person-only: a service proxy has no human to attribute it to.
+    return respondForCustomer(req, customerId, service.tenantId, 'manager', false)
+  }
+  if (bearerFrom(authorization)) {
+    // Unreachable given the `if (authorization)` guard above, kept for the
+    // same reason the sibling route keeps it: a bearer was OFFERED and
+    // REJECTED must never fall through to try another door.
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  // EXISTING SESSION PATH — UNCHANGED. Every operator request that reaches
+  // this route today keeps exactly the same authentication, authorization and
+  // response shape it always had.
+  const ctx = await getSession()
+  if (!ctx || !ctx.effectiveTenantId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  const guard = await requireWorkspaceAccess(ctx, 'manager')
+  if (!guard.ok) return NextResponse.json({ error: guard.error }, { status: guard.status })
+
+  return respondForCustomer(req, customerId, ctx.effectiveTenantId, contextRole(guard.authz), guard.authz.canViewAudit)
 }
