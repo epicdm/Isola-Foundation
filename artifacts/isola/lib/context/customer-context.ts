@@ -34,6 +34,7 @@ import {
 
 import type { ContextBundle, SectionResult } from './context-bundle'
 import { odooDeepLink } from './customer-sources'
+import type { PersonalLineEnvelope } from './personal-line-source'
 
 export const CUSTOMER_CONTEXT_VERSION = 'customer-context@1' as const
 
@@ -114,6 +115,16 @@ export interface CustomerContextResponse {
   customerId: string
   role: string
   sections: Record<ContextSectionName, ContextSectionEnvelope>
+  /**
+   * The Personal Line half of the workspace. Not a `sections` entry — see
+   * `personal-line-source.ts`'s header for why a single phone-keyed object
+   * doesn't fit the Odoo record-list envelope shape the other sections use.
+   * A business customer with no Personal Line subscription still gets this
+   * field, carrying `data.state === 'not-a-personal-line-customer'` — never
+   * an absent key, for the same "absent must never look like empty" reason
+   * every other section here already follows.
+   */
+  personalLine: PersonalLineEnvelope
   availableActions: readonly AvailableAction[]
   provenance: {
     generatedAt: string
@@ -207,6 +218,8 @@ export interface AssembleInput {
    * `partial`: real rows, incomplete picture.
    */
   activityMissing?: readonly string[]
+  /** The Personal Line half, already fetched — see personal-line-source.ts. */
+  personalLine: PersonalLineEnvelope
   odooBaseUrl: string | null
   permittedActions: readonly string[]
   now: Date
@@ -249,6 +262,7 @@ export function assembleCustomerContext(input: AssembleInput): CustomerContextRe
     customerId: input.customerId,
     role: input.role,
     sections,
+    personalLine: input.personalLine,
     availableActions: availableActionsFor(input.role, input.permittedActions).map((a) => ({
       actionType: a.actionType,
       label: a.label,

@@ -37,6 +37,7 @@ import { buildContextBundle } from '@/lib/context/context-bundle'
 import { assembleCustomerContext } from '@/lib/context/customer-context'
 import { loadCustomerActivity } from '@/lib/context/customer-activity'
 import { buildCustomerAdapters, odooCallerFor, parseCustomerId } from '@/lib/context/customer-sources'
+import { readPersonalLineContext } from '@/lib/context/personal-line-source'
 import { recentActionsAdapter, prismaRecentActionsStore } from '@/lib/context/recent-actions'
 import { ACTIONS_BY_ROLE, type Role } from '@/lib/context/resolve-context'
 import { bearerFrom, resolveServiceCaller, serviceAuthEnvFrom } from '@/lib/customer-360/service-auth'
@@ -148,6 +149,18 @@ async function respondForCustomer(
     now,
   })
 
+  // 6 ── The Personal Line half, keyed on this SAME customer's own Odoo
+  // phone — never a caller-supplied number. A customer whose Odoo record has
+  // no phone, or who simply has no Personal Line subscription, both get a
+  // named state (`no-phone-on-file` / `not-a-personal-line-customer`) from
+  // readPersonalLineContext itself — this route never needs to tell those
+  // apart.
+  const customerPhone =
+    customer?.status === 'ok' && Array.isArray(customer.data)
+      ? ((customer.data[0] as { phone?: unknown } | undefined)?.phone as string | null | undefined) ?? null
+      : null
+  const personalLine = await readPersonalLineContext(customerPhone)
+
   const body = assembleCustomerContext({
     correlationId,
     customerId,
@@ -155,6 +168,7 @@ async function respondForCustomer(
     bundle,
     activity: activity.result,
     activityMissing: activity.missing,
+    personalLine,
     odooBaseUrl,
     permittedActions: ACTIONS_BY_ROLE[role] ?? [],
     now: now(),

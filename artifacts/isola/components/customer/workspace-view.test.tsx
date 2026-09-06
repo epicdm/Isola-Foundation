@@ -60,6 +60,7 @@ function response(over: Partial<CustomerContextResponse> = {}): CustomerContextR
     customerId: '42',
     role: 'manager',
     sections,
+    personalLine: { fetchedAt: '2026-08-01T12:00:00.000Z', data: { state: 'not-a-personal-line-customer' } },
     availableActions: GOVERNED_ACTION_CATALOGUE.map((a) => ({
       actionType: a.actionType,
       label: a.label,

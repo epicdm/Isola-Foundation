@@ -379,6 +379,140 @@ export async function startCallback(
   };
 }
 
+// ── Lite context (Customer 360 support panel) ───────────────────────────────
+//
+// GET /api/internal/lite/context?phone= — dec-CC-DISPATCH-app-support-phase-B-
+// line-context-panel-2026-09-02. Composed entirely from existing bff-v2 reads
+// (Magnus + the LiteAccount/LitePlanSubscription tables) — no new business
+// logic on the bff-v2 side, and this client function adds none either: it is
+// a straight relay of the wire shape proven live on bff-v2-staging 2026-09-06
+// (known-good/ambiguous-refuse/no-cred/bad-cred/not-found, all differentiated).
+//
+// AMBIGUITY IS A REFUSAL, NOT A PICK. Unlike mirrorAccount/getTopupOptions
+// above (keyed by a consumer's own SIP credentials, so there is only ever one
+// account to find), this is keyed by a PHONE NUMBER on a SUPPORT AGENT'S
+// screen — more than one LiteAccount sharing that number means bff-v2 itself
+// refuses to guess (`{ found: true, ambiguous: true, count }`), and this
+// client passes that refusal straight through rather than resolving it.
+
+export interface LitePlanSummary {
+  planId: string;
+  expiresAt: string; // ISO 8601
+  state: string; // e.g. 'active' | 'grace' | 'renewal_due' | 'expired' | 'cancelled'
+  autoRenew: boolean;
+}
+
+export interface LiteRecentCallItem {
+  kind: 'call';
+  at: string; // ISO 8601
+  label: string; // e.g. "Missed · +1767..."
+}
+
+export type LiteLineStatus = 'active' | 'blocked' | 'unknown' | 'not_provisioned';
+export type LiteRoutingMode = 'app' | 'app_then_cell' | 'cell' | 'unknown';
+
+export type LiteContextResult =
+  | { ok: true; found: false }
+  | { ok: true; found: true; ambiguous: true; count: number }
+  | {
+      ok: true;
+      found: true;
+      ambiguous: false;
+      did: string | null;
+      status: LiteLineStatus;
+      balanceEc: number | null;
+      routingMode: LiteRoutingMode;
+      signupAt: string;
+      plan: LitePlanSummary | null;
+      recent: readonly LiteRecentCallItem[];
+      recentActivityUnavailable: boolean;
+    }
+  | { ok: false; error: string };
+
+/**
+ * Server-to-server only — `phone` is never accepted from a browser request
+ * without going through this same tenant/session-gated route handler layer
+ * every other engines/* caller already requires (see the file header CAUTION).
+ */
+export async function getLiteContext(config: BffConfig, phone: string): Promise<LiteContextResult> {
+  if (!config.baseUrl || !config.internalSecret) {
+    return { ok: false, error: 'BFF not configured (BFF_BASE_URL / BFF_INTERNAL_SECRET missing).' };
+  }
+
+  const url = new URL(`${config.baseUrl.replace(/\/+$/, '')}/api/internal/lite/context`);
+  url.searchParams.set('phone', phone);
+
+  let res: Response;
+  try {
+    res = await fetch(url.toString(), {
+      method: 'GET',
+      headers: { 'x-internal-secret': config.internalSecret },
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : 'network error';
+    console.error('[bff] lite/context network error:', detail);
+    return { ok: false, error: `BFF unreachable: ${detail}` };
+  }
+
+  const body = await readJson(res);
+  if (!res.ok) {
+    const msg = typeof body.error === 'string' ? body.error : `BFF returned HTTP ${res.status}`;
+    console.error('[bff] lite/context rejected:', res.status, msg);
+    return { ok: false, error: msg };
+  }
+
+  if (body.found !== true) {
+    return { ok: true, found: false };
+  }
+  if (body.ambiguous === true) {
+    return { ok: true, found: true, ambiguous: true, count: typeof body.count === 'number' ? body.count : 0 };
+  }
+
+  const rawPlan = body.plan as Record<string, unknown> | null | undefined;
+  const plan: LitePlanSummary | null =
+    rawPlan && typeof rawPlan === 'object'
+      ? {
+          planId: String(rawPlan.planId ?? ''),
+          expiresAt: String(rawPlan.expiresAt ?? ''),
+          state: String(rawPlan.state ?? ''),
+          autoRenew: rawPlan.autoRenew === true,
+        }
+      : null;
+
+  const recent: LiteRecentCallItem[] = Array.isArray(body.recent)
+    ? (body.recent as Record<string, unknown>[])
+        .filter((c) => c && typeof c === 'object')
+        .map((c) => ({
+          kind: 'call',
+          at: String(c.at ?? ''),
+          label: String(c.label ?? ''),
+        }))
+    : [];
+
+  return {
+    ok: true,
+    found: true,
+    ambiguous: false,
+    did: typeof body.did === 'string' ? body.did : null,
+    status: (['active', 'blocked', 'unknown', 'not_provisioned'] as const).includes(
+      body.status as LiteLineStatus,
+    )
+      ? (body.status as LiteLineStatus)
+      : 'unknown',
+    balanceEc: typeof body.balanceEc === 'number' ? body.balanceEc : null,
+    routingMode: (['app', 'app_then_cell', 'cell', 'unknown'] as const).includes(
+      body.routingMode as LiteRoutingMode,
+    )
+      ? (body.routingMode as LiteRoutingMode)
+      : 'unknown',
+    signupAt: String(body.signupAt ?? ''),
+    plan,
+    recent,
+    recentActivityUnavailable: body.recentActivityUnavailable === true,
+  };
+}
+
 /**
  * Opens the BFF's SSE call-state stream and returns the raw Response for
  * the caller to pipe through as-is. Deliberately does NOT parse/buffer the

@@ -56,6 +56,7 @@ interface Opts {
   baseUrl?: string | null
   activity?: Parameters<typeof assembleCustomerContext>[0]['activity']
   activityMissing?: readonly string[]
+  personalLine?: Parameters<typeof assembleCustomerContext>[0]['personalLine']
 }
 
 async function bundleWith(call: OdooCaller, opts: Opts = {}): Promise<ContextBundle> {
@@ -90,6 +91,10 @@ async function assemble(call: OdooCaller, opts: Opts = {}) {
         provenance: { source: 'activity@1', fetchedAt: NOW, stale: false },
       },
     activityMissing: opts.activityMissing,
+    personalLine: opts.personalLine ?? {
+      fetchedAt: NOW.toISOString(),
+      data: { state: 'not-a-personal-line-customer' },
+    },
     odooBaseUrl: baseUrlOf(opts),
     permittedActions: ACTIONS_BY_ROLE[role as 'manager'] ?? [],
     now: NOW,

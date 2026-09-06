@@ -190,6 +190,10 @@ function buildContext(customerId: number, fetched: any): CustomerContextResponse
     customerId: String(customerId),
     role: 'manager',
     sections,
+    personalLine: {
+      fetchedAt: new Date().toISOString(),
+      data: { state: 'not-connected', reason: 'not fetched by this checkpoint script' },
+    },
     availableActions: [],
     provenance: {
       generatedAt: new Date().toISOString(),

@@ -1154,6 +1154,113 @@ function OwedCard({ context }: { context: CustomerContextResponse }) {
   )
 }
 
+/**
+ * dec-CC-DISPATCH-app-support-phase-B-line-context-panel-2026-09-02: the
+ * Personal Line half of the same shared workspace this file already renders
+ * for an Odoo business customer. `personalLine.data.state` decides the
+ * whole card — a plain business customer (`not-a-personal-line-customer`)
+ * renders nothing here, the same way OpenDealCard/ChatCard already omit
+ * content that doesn't apply, rather than a permanent "gap" notice for a
+ * product this customer never had. A REAL failure (`unavailable` /
+ * `not-connected`) still gets the GapCard treatment every other honest gap
+ * on this screen uses — that is a source that broke, not an axis that
+ * doesn't apply.
+ */
+function PersonalLineCard({ context }: { context: CustomerContextResponse }) {
+  const line = context.personalLine.data
+
+  if (line.state === 'not-a-personal-line-customer') return null
+
+  if (line.state === 'no-phone-on-file') {
+    return (
+      <div className={`${styles.card} ${styles.gapNotice}`} data-gap="personal-line-no-phone">
+        <p className={styles.gapHeadline}>Personal Line — could not check.</p>
+        <p className={styles.mutedText}>This customer&rsquo;s Odoo record has no phone on file to look up.</p>
+      </div>
+    )
+  }
+
+  if (line.state === 'not-connected' || line.state === 'unavailable') {
+    return (
+      <GapCard
+        title="Personal Line"
+        reason={line.reason}
+        whatItNeeds="bff-v2's /api/internal/lite/context, reachable and configured (BFF_BASE_URL / BFF_INTERNAL_SECRET)."
+      />
+    )
+  }
+
+  if (line.state === 'ambiguous') {
+    return (
+      <div className={`${styles.card} ${styles.gapNotice}`} data-gap="personal-line-ambiguous">
+        <p className={styles.gapHeadline}>Personal Line — more than one match.</p>
+        <p className={styles.mutedText}>
+          {line.count} Personal Line accounts share this phone number. Refusing to guess which one this is —
+          resolve the duplicate before showing line data here.
+        </p>
+      </div>
+    )
+  }
+
+  // line.state === 'found'
+  const statusLabel =
+    line.status === 'active'
+      ? 'Active'
+      : line.status === 'blocked'
+        ? 'Blocked'
+        : line.status === 'not_provisioned'
+          ? 'Not provisioned'
+          : 'Unknown'
+  const planLabel = line.plan
+    ? `${line.plan.planId} · ${line.plan.state}${line.plan.autoRenew ? ' · auto-renew' : ''} · expires ${shortDate(line.plan.expiresAt)}`
+    : 'No active plan on record'
+
+  return (
+    <div className={styles.card} data-personal-line="true">
+      <div className={styles.cardHeader}>
+        <h3 className={styles.cardTitle}>Personal Line</h3>
+        <span className={styles.statusPill}>{statusLabel}</span>
+      </div>
+      <dl className={styles.statRows}>
+        <div className={styles.statRow}>
+          <dt>Number</dt>
+          <dd>{line.did ?? '—'}</dd>
+        </div>
+        <div className={styles.statRow}>
+          <dt>Wallet balance</dt>
+          <dd>{money(line.balanceEc)}</dd>
+        </div>
+        <div className={styles.statRow}>
+          <dt>Plan</dt>
+          <dd>{planLabel}</dd>
+        </div>
+        <div className={styles.statRow}>
+          <dt>Routing</dt>
+          <dd>{line.routingMode}</dd>
+        </div>
+        <div className={styles.statRow}>
+          <dt>Signed up</dt>
+          <dd>{shortDate(line.signupAt)}</dd>
+        </div>
+      </dl>
+      {line.recentActivityUnavailable ? (
+        <p className={styles.mutedText}>Recent calls could not be read — this is an outage, not a quiet line.</p>
+      ) : line.recent.length === 0 ? (
+        <p className={styles.mutedTextSmall}>No recent calls on record.</p>
+      ) : (
+        <ul className={styles.statRows}>
+          {line.recent.map((c, i) => (
+            <li key={`${c.at}-${i}`} className={styles.statRow}>
+              <dt>{shortDate(c.at)}</dt>
+              <dd>{c.label}</dd>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 function GapCard({ title, reason, whatItNeeds }: { title: string; reason: string; whatItNeeds: string }) {
   return (
     <div className={`${styles.card} ${styles.gapNotice}`} data-gap={title}>
@@ -1170,8 +1277,10 @@ function GapCard({ title, reason, whatItNeeds }: { title: string; reason: string
 /** Step D: the day-one layout. "Empty is a layout, not an absence" — when
  *  Odoo's commercial panels are genuinely empty, lead with what the
  *  customer DOES have (line, customer-since) rather than a grid of empty
- *  cards. Plan/wallet is a real, named gap (bff-v2/Personal Line data, not
- *  Odoo) — never fabricated to fill the space. */
+ *  cards. Plan/wallet used to be a permanent named gap here; it is now a
+ *  real read (see PersonalLineCard) — a day-one customer who is ALSO a
+ *  Personal Line subscriber sees their real line data in the same place a
+ *  fabricated placeholder used to sit. */
 function DayOneCard({ context }: { context: CustomerContextResponse }) {
   const customer = context.sections.customer.records[0] as Record<string, unknown> | undefined
   return (
@@ -1187,11 +1296,7 @@ function DayOneCard({ context }: { context: CustomerContextResponse }) {
           <dd>{customer && str(customer.customerSince) ? shortDate(str(customer.customerSince)) : '—'}</dd>
         </div>
       </dl>
-      <GapCard
-        title="Plan & wallet"
-        reason="Personal Line plan/trial and wallet balance are bff-v2 data, not Odoo — no per-partner link to a Magnus/Personal Line account exists in this context yet."
-        whatItNeeds="A phone-keyed read against bff-v2's Personal Line provisioning store, the same direction as the Calls gap."
-      />
+      <PersonalLineCard context={context} />
     </div>
   )
 }
@@ -1290,6 +1395,7 @@ function OverviewTab({
           <>
             <AccountCard context={context} />
             <OpenDealCard context={context} />
+            <PersonalLineCard context={context} />
           </>
         )}
       </div>
