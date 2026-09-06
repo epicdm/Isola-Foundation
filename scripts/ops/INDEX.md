@@ -49,6 +49,35 @@ procedure touches) instead of writing a one-off when:
   (`AD_HOC_FIXTURE_TEARDOWN_RE` in `.claude/hooks/lib/isola-topology.js`), or
 - a future lane will predictably need to do this again.
 
+## The Claude-plugin hook mirror is DELETED. Do not recreate it.
+
+`tools/claude-plugins/isola-engineering/hooks/` was a second copy of
+`.claude/hooks/` — its own `isola-guard.js`, `isola-topology.js` and friends,
+wired as a real `PreToolUse` hook via `hooks.json`. It was deleted on trunk in
+`f7b5bd8` (PR #125), *"delete the unused Claude-plugin mirror instead of syncing
+it"*, and the reasoning is recorded here because otherwise someone reconstitutes
+it in six months and it will look like an improvement.
+
+Why it had to go: by the time it was removed it was **three whole rule sets
+behind** the canonical hooks — missing the network-destroy rules, the
+secret/config/volume-destroy rules and the narrative-text exemption — while
+still presenting as a security guard. **A guard that looks like protection and
+is not is worse than no guard**, because it is trusted. Nothing installed it, so
+nothing had noticed.
+
+"Have the plugin import the canonical file" is not available: a distributable
+plugin resolves under `CLAUDE_PLUGIN_ROOT` and cannot reach the repository's
+`.claude/`. So if a plugin ever needs these hooks again, **it must be GENERATED
+at release time from the canonical `.claude/hooks/`, with a drift check that
+FAILS THE BUILD when the two differ.** A copy kept in sync by discipline is a
+copy that will drift; rule 2.3 — one source, never a sync.
+
+**Merge hazard, still live.** Any unmerged branch based on a commit before
+`f7b5bd8` still contains the mirror, and any such branch that *modified* it will
+produce a modify/delete conflict on merge. Resolving that conflict by keeping
+the file silently resurrects ~4,300 lines of stale guard. Resolve it by taking
+the deletion.
+
 ## Standing rules for applying a fix
 
 **Never apply a fix by copying a whole file over another. Edit in place, against
