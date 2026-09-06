@@ -22,6 +22,7 @@ other.
 |---|---|---|
 | [`chatwoot-token-verify.ps1`](./chatwoot-token-verify.ps1) (+ [`chatwoot-token-verify-remote.sh`](./chatwoot-token-verify-remote.sh) companion) | Confirming `CHATWOOT_SERVICE_TOKEN` actually resolved on a live Foundation/C360 container | Was checked ad hoc, three different ways, across the PR #121/#122 promotion (boot-log grep, one-off DB query, one-off curl) — none of the three alone is proof; the token can be present in one layer and dead in another. |
 | [`ancestry-check.ps1`](./ancestry-check.ps1) | Verifying a commit is a real ancestor of a target branch, from a machine with real `gh`/git history (host03 and deepseek have neither) | The deploy guard below requires this check's verdict be computed off-host and embedded as a Docker label before a build is trusted. Written once here so both the C360 and bff-v2 deploy guards call the same logic instead of two hand-rolled `gh api compare` calls. PowerShell, not bash — measured 2026-09-05 that WSL/Git-Bash calling `gh.exe` via interop hangs indefinitely on this machine, while the same `gh api` call runs natively from PowerShell in under a second; see the script's own header. |
+| [`safe-file-edit.mjs`](./safe-file-edit.mjs) | Shortening or rewriting a repository source file on Windows without destroying its UTF-8 encoding, and proving afterwards that it didn't | `Get-Content \| Set-Content -Encoding utf8` silently rewrote 11 em-dashes into mojibake in `lite-provision.ts` (2026-09-06). The trap was already in a memory note and was walked into anyway — **a note that does not stop the action is not a control**. Use `keep-lines --file=<p> --keep=<N>` instead of any shell pipeline, and `check <file...>` before every commit that touched a non-ASCII file. Its proof step is byte-identity of the retained region, not just a signature scan, so it catches corruption shapes nobody has catalogued. Run `self-scan` after ANY edit to it: the detector's first version passed a genuinely corrupted control as clean because its positive control was hand-written in the one corruption shape it already knew — `self-scan` now generates both the ISO-8859-1 and CP1252 shapes mechanically and also asserts legitimate accented prose is *not* flagged. |
 | [`c360-remote-build.sh`](./c360-remote-build.sh) + [`c360-deploy.sh`](./c360-deploy.sh) | Building and deploying the Customer 360 UAT stack on host03, with an ancestry-verified guard | `dec-c360-deploy-ancestry-guard-2026-09-05`'s two-file guard (GUARD A: build-id-match against last-recorded state; GUARD B: refuses an image whose `isola.ancestry-verified` label is missing or not `YES`) existed only as loose per-build files on host03 with SHA hand-substituted at the top each time and no canonical copy anywhere — registered here 2026-09-05, parameterized to take the commit sha as an argument instead. Deploy this file's content to host03 (it must run there — see the script's own header) rather than hand-editing a fresh copy per build. |
 
 ## Registered in `epicdm/isolav2` (bff-v2, Lite fixtures)
@@ -47,6 +48,86 @@ procedure touches) instead of writing a one-off when:
 - the operation reads or mutates a governed-domain shape
   (`AD_HOC_FIXTURE_TEARDOWN_RE` in `.claude/hooks/lib/isola-topology.js`), or
 - a future lane will predictably need to do this again.
+
+## The Claude-plugin hook mirror is DELETED. Do not recreate it.
+
+`tools/claude-plugins/isola-engineering/hooks/` was a second copy of
+`.claude/hooks/` — its own `isola-guard.js`, `isola-topology.js` and friends,
+wired as a real `PreToolUse` hook via `hooks.json`. It was deleted on trunk in
+`f7b5bd8` (PR #125), *"delete the unused Claude-plugin mirror instead of syncing
+it"*, and the reasoning is recorded here because otherwise someone reconstitutes
+it in six months and it will look like an improvement.
+
+Why it had to go: by the time it was removed it was **three whole rule sets
+behind** the canonical hooks — missing the network-destroy rules, the
+secret/config/volume-destroy rules and the narrative-text exemption — while
+still presenting as a security guard. **A guard that looks like protection and
+is not is worse than no guard**, because it is trusted. Nothing installed it, so
+nothing had noticed.
+
+"Have the plugin import the canonical file" is not available: a distributable
+plugin resolves under `CLAUDE_PLUGIN_ROOT` and cannot reach the repository's
+`.claude/`. So if a plugin ever needs these hooks again, **it must be GENERATED
+at release time from the canonical `.claude/hooks/`, with a drift check that
+FAILS THE BUILD when the two differ.** A copy kept in sync by discipline is a
+copy that will drift; rule 2.3 — one source, never a sync.
+
+**Merge hazard, still live.** Any unmerged branch based on a commit before
+`f7b5bd8` still contains the mirror, and any such branch that *modified* it will
+produce a modify/delete conflict on merge. Resolving that conflict by keeping
+the file silently resurrects ~4,300 lines of stale guard. Resolve it by taking
+the deletion.
+
+## Standing rules for applying a fix
+
+**MEASURE TRUNK, NOT THE SHARED CHECKOUT.** Before asserting anything about a
+file's state — that it exists, that it is stale, that it contains a rule, that
+it is a duplicate — read it from `origin/main`, never from the working tree:
+
+```
+git fetch origin
+git ls-tree -r --name-only origin/main -- <path>     # does it exist on trunk?
+git show origin/main:<path>                          # what does trunk actually say?
+git log --oneline --diff-filter=D origin/main -- <path>   # was it already deleted?
+```
+
+The shared working checkout is routinely sitting on a feature branch cut from an
+older `main`, so it answers a different question than the one you asked. This
+produced **three wrong answers in a single session on 2026-09-06**: a hook file
+reported as stale when trunk's was newer, a plugin mirror reported as a live
+duplicate when trunk had already deleted it, and a fix applied by copying the
+older file over the newer one. Each was caught late and by luck. The correct
+answer was one `git ls-tree origin/main` away every time.
+
+Corollary, and it is the same rule pointed at a different substrate: **verify
+the instrument before believing a green result.** A typecheck that reported
+"clean" had not run at all — the worktree had no `node_modules`, so the binary
+never resolved and the grep for errors found nothing. Every typecheck now plants
+a deliberate error first and asserts the checker reports it. A zero from an
+instrument you have not proved can see a positive is not a measurement.
+
+Corollary, earned the same day: **never write a commit message with
+`Out-File -Encoding utf8`.** PowerShell 5.1 prepends a BOM, and it lands in the
+commit subject line. Use a real UTF-8 writer, or `git commit -F` on a file
+written by one.
+
+
+**Never apply a fix by copying a whole file over another. Edit in place, against
+the file that is actually loaded.** Learned 2026-09-06: the same file existed in
+two checkouts at different versions; the fix was made in one and `Copy-Item`-ed
+to the other. The copy was byte-perfect and hash-verified — and wrong, because
+the destination was NEWER, so the copy silently deleted a function it had gained
+and broke three tests. A whole-file copy carries the source's *absences* as well
+as its contents, and hash-verifying it proves only that the copy succeeded. If
+two copies of a file must exist at all, that is its own defect (rule 2.3, one
+source never a sync) — fix the duplication rather than getting better at syncing
+it.
+
+**Verify your own writes.** Read back what you wrote, from the place that will
+be read. A successful write is not a stored write, and a successful copy is not
+a correct copy.
+
+## Adding a new procedure (continued)
 
 A registered procedure must: take arguments rather than hardcoding a target,
 refuse to run against anything off an explicit fixture/target allowlist where

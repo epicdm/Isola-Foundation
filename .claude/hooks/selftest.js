@@ -647,6 +647,184 @@ const cases = [
       tool_input: { command: 'git commit -m "ledger: records a ' + t('DR', 'OP TABLE') + ' performed under owner authorization"' },
     },
   },
+  // ── sql-wipe-table: vocabulary vs operation (fixed 2026-09-06) ──────────
+  //
+  // The rule made the TABLE keyword optional, so it matched the wipe verb
+  // followed by any identifier character. It refused three legitimate documents
+  // in one session, including the commit message documenting its own refusal.
+  // Both directions are pinned here: the real operation must still be blocked,
+  // and prose must not be. Neither half is evidence alone — a rule that blocks
+  // everything passes the first, a deleted rule passes the second.
+  {
+    name: 'REAL whole-table wipe (canonical DDL form) is BLOCKED',
+    expect: BLOCK,
+    contains: 'sql-wipe-table',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'psql -c "' + t('TRUN', 'CATE TABLE') + ' lite_plan_subscriptions;"' },
+    },
+  },
+  {
+    name: 'REAL whole-table wipe WITHOUT the TABLE keyword, through a SQL client, is BLOCKED',
+    expect: BLOCK,
+    contains: 'sql-wipe-table-bare',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'psql -d isola -c "' + t('trun', 'cate') + ' lite_accounts;"' },
+    },
+  },
+  {
+    // The exact shell line refused on 2026-09-06. Its only offence was the
+    // echo; the real file operation on the same line never matched the rule.
+    name: 'an ECHO containing the wipe verb, with no SQL client, is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: 'echo "=== A. ' + t('trun', 'cate') + ' a clean file with 3 em-dashes ===" && node tool.mjs keep-lines --file=x.ts --keep=3',
+      },
+    },
+  },
+  {
+    // The second refusal: the commit message DOCUMENTING the first one, written
+    // as a PowerShell here-string because that is this machine's primary shell.
+    // Two defects fired together — the over-broad rule, and a narrative
+    // exemption that understood only bash heredocs.
+    name: 'a PowerShell here-string commit message describing the wipe verb is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'PowerShell',
+      tool_input: {
+        command: "git commit -m @'\nops(encoding): register a safe file-edit procedure\n\nThe command is keep-lines, not " +
+          t('trun', 'cate') + ", because that word is a destructive-SQL verb\nin the guard and naming it so would trip the estate's own rule.\n'@",
+      },
+    },
+  },
+  {
+    // CONTROL for the two ALLOWED cases above: the exemption is about CONTEXT,
+    // not about the word being harmless. Put a real SQL client on the same line
+    // and the identical verb is refused again.
+    name: 'CONTROL: the same wipe verb WITH a SQL client on the line is BLOCKED again',
+    expect: BLOCK,
+    contains: 'sql-wipe-table-bare',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'echo "cleaning up" && psql -d isola -c "' + t('trun', 'cate') + ' lite_accounts;"' },
+    },
+  },
+  {
+    // CONTROL: the PowerShell here-string exemption covers the MESSAGE ONLY.
+    name: 'CONTROL: a real wipe CHAINED after a here-string commit is still BLOCKED',
+    expect: BLOCK,
+    contains: 'sql-wipe-table',
+    payload: {
+      session_id: SID,
+      tool_name: 'PowerShell',
+      tool_input: {
+        command: "git commit -m @'\nharmless note\n'@ ; psql -c \"" + t('TRUN', 'CATE TABLE') + ' lite_accounts;"',
+      },
+    },
+  },
+  {
+    // Review found 2026-09-06: the PowerShell here-string exemption matched
+    // ANY here-string in the command once `git commit` appeared, not just
+    // the one bound to -m. The exact reported exploit -- a here-string
+    // assigned to an unrelated variable, never the commit message, then
+    // executed via that variable.
+    name: 'a here-string NOT bound to -m is not exempted -- destructive payload in $q is still BLOCKED',
+    expect: BLOCK,
+    contains: 'sql-wipe-table',
+    payload: {
+      session_id: SID,
+      tool_name: 'PowerShell',
+      tool_input: {
+        command: "git commit -m \"safe\"; $q=@'\n" + t('TRUN', 'CATE TABLE') + " lite_accounts;\n'@; psql -c $q",
+      },
+    },
+  },
+  {
+    // Same defect class, bash side: a heredoc unrelated to `git commit -F -`
+    // (e.g. feeding a variable that is later executed) must not be exempted
+    // just because `git commit` appears somewhere on the line.
+    name: 'a bash heredoc NOT bound to -F - is not exempted -- destructive payload is still BLOCKED',
+    expect: BLOCK,
+    contains: 'sql-wipe-table',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: 'git commit -m "safe"; x=$(cat <<\'EOF\'\n' + t('TRUN', 'CATE TABLE') + ' lite_accounts;\nEOF\n); psql -c "$x"',
+      },
+    },
+  },
+  {
+    // Second-pass review, 2026-09-06: `-F -` belonging to a DIFFERENT
+    // command chained after `git commit` was still being masked as commit
+    // prose, because the fix bound to "-F - immediately before a heredoc"
+    // but not to "-F - as part of THIS git invocation". Segment-scoping
+    // fixes it: psql's own -F - sits outside the git-commit segment.
+    name: 'a heredoc bound to -F - on a DIFFERENT chained command is not exempted -- still BLOCKED',
+    expect: BLOCK,
+    contains: 'sql-wipe-table',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: 'git commit -m "safe"; psql -F - <<\'EOF\'\n' + t('TRUN', 'CATE TABLE') + ' lite_accounts;\nEOF',
+      },
+    },
+  },
+  {
+    // Second-pass review, 2026-09-06: PowerShell expands `$(...)`
+    // subexpressions inside a DOUBLE-quoted here-string before git ever
+    // runs, so masking the whole block hid a payload that already executed.
+    // Only single-quoted here-strings (no expansion, ever) are safe to mask
+    // in full.
+    name: 'a DOUBLE-quoted here-string with a live $(...) subexpression is not exempted -- still BLOCKED',
+    expect: BLOCK,
+    contains: 'sql-wipe-table',
+    payload: {
+      session_id: SID,
+      tool_name: 'PowerShell',
+      tool_input: {
+        command: 'git commit -m @"\n$(psql -c "' + t('TRUN', 'CATE TABLE') + ' lite_accounts;")\n"@',
+      },
+    },
+  },
+  {
+    // Same expansion risk, plain double-quoted -m "..." (not a here-string
+    // at all) -- both PowerShell and bash expand $(...) inside double
+    // quotes, never single quotes.
+    name: 'a plain double-quoted -m with a live $(...) subexpression is not exempted -- still BLOCKED',
+    expect: BLOCK,
+    contains: 'sql-wipe-table',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: 'git commit -m "safe $(psql -c \'' + t('TRUN', 'CATE TABLE') + " lite_accounts;')\"",
+      },
+    },
+  },
+  {
+    // CONTROL: the SAME single-quoted forms remain fully exempted --
+    // this is what proves the fix is about expansion risk, not about
+    // punishing every -m that mentions the word.
+    name: 'CONTROL: single-quoted -m and here-string, no $(...), still ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'PowerShell',
+      tool_input: {
+        command: "git commit -m 'the command is keep-lines, not " + t('trun', 'cate') + "'",
+      },
+    },
+  },
   {
     // CONTROL 1: the exemption must cover the MESSAGE ONLY. A real operation
     // chained after it is still a real operation.

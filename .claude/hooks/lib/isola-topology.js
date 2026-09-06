@@ -116,6 +116,26 @@ const RESTART_COMMAND_RE = new RegExp(
 );
 
 /**
+ * A SQL client actually being invoked. This is what turns a bare SQL keyword
+ * from a word into an operation.
+ *
+ * Deliberately a list of INVOCATIONS, not the word "sql". An earlier draft of
+ * this fix included `\bsql\b`, which would have matched the phrase
+ * "destructive-SQL verb" in the very commit message the fix exists to unblock —
+ * re-creating the defect one layer down.
+ *
+ * REMOVED, 2026-09-06 review: the bare `\.sql\b` alternative treated any
+ * MENTION of a .sql filename as a client invocation, so `git diff
+ * migration.sql && echo "truncate a clean file"` was blocked even though no
+ * SQL ever executes — the same vocabulary-not-operation false positive this
+ * change exists to remove. Every real client invocation (psql -f, sqlite3
+ * file.sql, sqlcmd -i, etc.) already matches via its own named alternative;
+ * dropping the bare extension loses no real coverage.
+ */
+const SQL_CLIENT =
+  '(?:psql|mysql|mariadb|sqlite3|sqlcmd|cockroach\\s+sql|prisma\\s+db\\s+execute)';
+
+/**
  * Destructive shapes. Structure-based, never bare substrings, so prose that
  * merely mentions these words does not trip them. Evaluated ONLY against
  * execution tools (see TOOL_CLASSES) — never against task text, Port records,
@@ -128,9 +148,41 @@ const DESTRUCTIVE_RULES = [
     why: 'Destructive SQL (object removal). Use a reviewed migration through the validated path.',
   },
   {
+    // The canonical DDL form. The TABLE keyword IS the SQL context, so this
+    // needs nothing else around it and is refused wherever it executes.
     id: 'sql-wipe-table',
-    re: new RegExp('\\b' + VERB.wipe + '\\s+(table\\s+)?["a-z0-9_.]', 'i'),
+    re: new RegExp('\\b' + VERB.wipe + '\\s+table\\s+(only\\s+)?["a-z0-9_.]', 'i'),
     why: 'Destructive SQL (whole-table wipe).',
+  },
+  {
+    /**
+     * Postgres also accepts the keyword with no TABLE, e.g. `<verb> mytable`.
+     * That form is one ordinary English word away from prose, so on its own it
+     * is NOT evidence of an operation — it needs a SQL client in the same
+     * command before it counts.
+     *
+     * WHY THIS SPLIT EXISTS. The single combined rule made `table` optional and
+     * therefore matched the verb followed by ANY identifier character. On
+     * 2026-09-06 it refused three legitimate documents in one session: a shell
+     * line whose only offence was the echo "<verb> a clean file" — the real
+     * file operation on that same line did not match at all — and then the
+     * commit message DOCUMENTING that refusal, twice over, since the message
+     * had to describe the very pattern it tripped. A registry that cannot
+     * describe the operations it governs has stopped being a registry.
+     *
+     * Same defect class as
+     * def-enforce-safety-guard-binds-to-vocabulary-not-operations-2026-08-19:
+     * a guard bound to VOCABULARY rather than to an OPERATION produces the
+     * feeling of protection while the operations it exists to stop go
+     * unexamined. Authorized by the owner 2026-09-06.
+     */
+    id: 'sql-wipe-table-bare',
+    re: new RegExp(
+      '(?=[\\s\\S]*' + SQL_CLIENT + ')' +
+        '(?=[\\s\\S]*\\b' + VERB.wipe + '\\s+(only\\s+)?["a-z0-9_.])',
+      'i'
+    ),
+    why: 'Destructive SQL (whole-table wipe) issued through a SQL client.',
   },
   {
     id: 'sql-unscoped-row-purge',
@@ -675,19 +727,75 @@ function extractNarrativeText(cmd) {
   const spans = [];
 
   if (isCommitLike) {
-    // Heredoc: git commit -F - <<'EOF' ... EOF   (quoted or bare delimiter)
-    const here = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\2\b/.exec(s);
+    /**
+     * SCOPE every commit-related match to the actual git-commit COMMAND
+     * SEGMENT, not the whole string. Review found 2026-09-06 (second pass):
+     * binding `-F -` to "immediately before the heredoc operator" was still
+     * not binding it to GIT -- `git commit -m "safe"; psql -F - <<'EOF' ...
+     * TRUNCATE... EOF` has a perfectly real `-F -` belonging to psql, not
+     * git, and the earlier fix happily masked it anyway. A segment is
+     * `git commit`/`git tag` up to the next unescaped command separator
+     * (`;`, newline, `&&`, `||`) or end of string -- everything below
+     * searches ONLY inside that slice, then offsets spans back into `s`.
+     */
+    const gitStart = /\bgit\s+(commit|tag)\b/.exec(s).index;
+    const afterGit = s.slice(gitStart);
+    const sep = /;|\n|&&|\|\|/.exec(afterGit);
+    const segEnd = gitStart + (sep ? sep.index : afterGit.length);
+    const segment = s.slice(gitStart, segEnd);
+
+    /**
+     * Heredoc: git commit -F - <<'EOF' ... EOF   (quoted or bare delimiter)
+     * Scoped to `segment` (see above) so a heredoc belonging to a DIFFERENT
+     * command chained after `git commit` is never mistaken for the message.
+     */
+    const here = /-F\s+-\s*<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\2\b/.exec(segment);
     if (here) {
-      const bodyStart = here.index + here[0].indexOf(here[3], here[0].indexOf('\n'));
+      const bodyStart = gitStart + here.index + here[0].indexOf(here[3], here[0].indexOf('\n'));
       spans.push([bodyStart, bodyStart + here[3].length]);
     }
 
-    // -m / --message with a quoted body. ALL of them: git accepts repeated -m.
-    for (const re of [/-m\s+"((?:[^"\\]|\\.)*)"/g, /-m\s+'((?:[^'\\]|\\.)*)'/g,
-                      /--message[=\s]+"((?:[^"\\]|\\.)*)"/g, /--message[=\s]+'((?:[^'\\]|\\.)*)'/g]) {
+    /**
+     * PowerShell here-string: git commit -m @'...'@  (or @"..."@).
+     * Scoped to `segment` for the same reason as the heredoc above.
+     *
+     * SINGLE- vs DOUBLE-QUOTED MATTERS. Review found 2026-09-06 (second
+     * pass): PowerShell expands `$(...)` subexpressions INSIDE a
+     * double-quoted here-string (@"..."@) before git ever runs -- so
+     * `git commit -m @"\n$(psql -c "TRUNCATE TABLE...")\n"@` actually
+     * EXECUTES the psql call; masking the whole block hides real,
+     * already-executed destructive SQL from the scanner, not prose. Only a
+     * single-quoted here-string (@'...'@, no expansion, ever) is safe to
+     * mask in full. A double-quoted one is masked ONLY if it contains no
+     * `$(` -- if it does, it is left fully visible, favoring a rare false
+     * refusal over hiding a live payload.
+     */
+    const psHere = /(?:-m|--message)[=\s]+@(['"])\r?\n([\s\S]*?)\r?\n\1@/g;
+    let ph;
+    while ((ph = psHere.exec(segment))) {
+      const quote = ph[1];
+      const body = ph[2];
+      if (quote === '"' && /\$\(/.test(body)) continue; // leave the subexpression visible
+      const start = gitStart + ph.index + ph[0].indexOf(body, 2);
+      spans.push([start, start + body.length]);
+    }
+
+    // -m / --message with a quoted body. ALL of them: git accepts repeated
+    // -m. Scoped to `segment`. Double-quoted forms carry the SAME `$(...)`
+    // expansion risk as the here-string above (both PowerShell and bash
+    // expand subexpressions inside double quotes, never single quotes) --
+    // same guard applied here.
+    const MSG_PATTERNS = [
+      { re: /-m\s+"((?:[^"\\]|\\.)*)"/g, expandable: true },
+      { re: /-m\s+'((?:[^'\\]|\\.)*)'/g, expandable: false },
+      { re: /--message[=\s]+"((?:[^"\\]|\\.)*)"/g, expandable: true },
+      { re: /--message[=\s]+'((?:[^'\\]|\\.)*)'/g, expandable: false },
+    ];
+    for (const { re, expandable } of MSG_PATTERNS) {
       let m;
-      while ((m = re.exec(s))) {
-        const start = m.index + m[0].indexOf(m[1]);
+      while ((m = re.exec(segment))) {
+        if (expandable && /\$\(/.test(m[1])) continue; // leave the subexpression visible
+        const start = gitStart + m.index + m[0].indexOf(m[1]);
         spans.push([start, start + m[1].length]);
       }
     }
