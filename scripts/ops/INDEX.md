@@ -80,6 +80,38 @@ the deletion.
 
 ## Standing rules for applying a fix
 
+**MEASURE TRUNK, NOT THE SHARED CHECKOUT.** Before asserting anything about a
+file's state — that it exists, that it is stale, that it contains a rule, that
+it is a duplicate — read it from `origin/main`, never from the working tree:
+
+```
+git fetch origin
+git ls-tree -r --name-only origin/main -- <path>     # does it exist on trunk?
+git show origin/main:<path>                          # what does trunk actually say?
+git log --oneline --diff-filter=D origin/main -- <path>   # was it already deleted?
+```
+
+The shared working checkout is routinely sitting on a feature branch cut from an
+older `main`, so it answers a different question than the one you asked. This
+produced **three wrong answers in a single session on 2026-09-06**: a hook file
+reported as stale when trunk's was newer, a plugin mirror reported as a live
+duplicate when trunk had already deleted it, and a fix applied by copying the
+older file over the newer one. Each was caught late and by luck. The correct
+answer was one `git ls-tree origin/main` away every time.
+
+Corollary, and it is the same rule pointed at a different substrate: **verify
+the instrument before believing a green result.** A typecheck that reported
+"clean" had not run at all — the worktree had no `node_modules`, so the binary
+never resolved and the grep for errors found nothing. Every typecheck now plants
+a deliberate error first and asserts the checker reports it. A zero from an
+instrument you have not proved can see a positive is not a measurement.
+
+Corollary, earned the same day: **never write a commit message with
+`Out-File -Encoding utf8`.** PowerShell 5.1 prepends a BOM, and it lands in the
+commit subject line. Use a real UTF-8 writer, or `git commit -F` on a file
+written by one.
+
+
 **Never apply a fix by copying a whole file over another. Edit in place, against
 the file that is actually loaded.** Learned 2026-09-06: the same file existed in
 two checkouts at different versions; the fix was made in one and `Copy-Item`-ed
