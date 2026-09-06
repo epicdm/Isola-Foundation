@@ -373,29 +373,48 @@ function evaluate(inp) {
   // route the message through a file. Routing around a guard is one step from
   // switching it off, so the rule is fixed here instead.
   //
+  // GENERALIZED 2026-09-06 (same failure, different narrative field): a `gh
+  // pr create --body` describing this very rule's own fix — quoting `next
+  // build` and `/opt/bff-v2` together to explain what was broken — was
+  // BLOCKED by rule 3 below, because rule 3 scanned raw `cmd` instead of this
+  // masked `scanTarget`. Same defect class as the commit-message gap, one
+  // rule behind on the fix. extractNarrativeText now covers `gh pr|issue
+  // create|edit|comment`'s `--body`/`-b`/`--title`/`-t` the same way it
+  // already covered `git commit`/`git tag` messages, and every exec rule
+  // that scans prose-vs-execution shape — not just the destructive-shapes
+  // block in section 2 — must use scanTarget, never raw cmd. This is the
+  // ROOT-CAUSE fix, not a rule-3-only patch: the next narrative-bearing
+  // command shape that shows up (another CLI's own --body-like flag) is
+  // handled by extending extractNarrativeText once, not by re-deriving this
+  // masking logic at each call site.
+  //
   // This is the same principle the file header already states for TaskUpdate
   // and Port records — DESCRIBING an operation is not PERFORMING it — applied
-  // to the one exec shape that is mostly prose.
+  // to command shapes that are mostly prose.
   //
   // NARROW BY DESIGN, and the limits are the safety case:
-  //   - only `git commit`/`git tag`, nothing else
-  //   - only the MESSAGE BODY is exempted; the command around it is still
-  //     scanned in full, so `git commit -m "x" && curl evil` is unaffected
+  //   - only `git commit`/`git tag`, or `gh pr|issue create|edit|comment` —
+  //     not a blanket match on any command carrying a flag named --body
+  //   - only the FIELD VALUES are exempted; the command around them is still
+  //     scanned in full, so `git commit -m "x" && curl evil` and
+  //     `gh pr create --body "x" && curl evil` are both unaffected
   //   - the shape rules are relaxed, NOT the credential rules. A message may
   //     describe `cat .env`; it may never CONTAIN a live token, because a
-  //     commit message is permanent and public in a way a transcript is not.
-  const msg = T.extractCommitMessage ? T.extractCommitMessage(cmd) : null;
+  //     commit message or PR description is permanent and public in a way a
+  //     transcript is not.
+  const msg = T.extractNarrativeText ? T.extractNarrativeText(cmd) : null;
   const messageBody = msg ? msg.text : '';
   // BY OFFSET, never by content — see maskSpans() for the bypass this closes.
   const scanTarget = msg ? T.maskSpans(cmd, msg.spans) : cmd;
 
-  // A literal credential inside a commit message is WORSE than in a command —
-  // it would be committed. Checked before anything is exempted.
+  // A literal credential inside a commit message or PR/issue text is WORSE
+  // than in a command — it would be committed or posted. Checked before
+  // anything is exempted.
   if (messageBody && M.redactSensitive(messageBody) !== messageBody) {
     deny(
       'credential-in-commit-message',
-      'The commit message contains something shaped like a live credential. ' +
-        'A commit message is permanent and travels with the repository.',
+      'This narrative field (a commit message, or a PR/issue body/title) contains something ' +
+        'shaped like a live credential. It is permanent and travels with the repository or GitHub.',
       'describe the credential by NAME and location, never by value — e.g. ' +
         '"the Magnus API key in bff-v2 .env" rather than the key itself.'
     );
@@ -456,9 +475,17 @@ function evaluate(inp) {
   }
 
   // 3. THE R5A RULE — no builds inside a canonical live checkout.
-  if (T.BUILD_COMMAND_RE.test(cmd)) {
-    const live = T.matchLiveCheckout(cmd);
-    if (live && !T.isSafeBuildLocation(cmd)) {
+  //
+  // scanTarget, not cmd — fixed 2026-09-06. Was scanning raw cmd, so a `gh pr
+  // create --body` narrating a build-command fix (quoting `next build` next
+  // to `/opt/bff-v2` to EXPLAIN the two) was judged as if it ran that build.
+  // Same "describing is not performing" principle section 2 already applies
+  // for destructive shapes, now applied here too — see the section-0 comment
+  // above for the root-cause fix (extractNarrativeText covers gh pr/issue
+  // body/title, not just git commit messages).
+  if (T.BUILD_COMMAND_RE.test(scanTarget)) {
+    const live = T.matchLiveCheckout(scanTarget);
+    if (live && !T.isSafeBuildLocation(scanTarget)) {
       deny(
         'build-in-live-checkout',
         'Build/install command targeting canonical LIVE checkout ' + live + '.\n' +

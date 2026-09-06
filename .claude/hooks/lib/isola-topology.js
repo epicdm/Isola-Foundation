@@ -643,37 +643,70 @@ function isProseFile(p) {
 }
 
 /**
- * extractCommitMessage — return the MESSAGE BODY of a `git commit`/`git tag`,
- * or '' when the command is not one.
+ * extractNarrativeText — return the NARRATIVE FIELDS of a command that is
+ * mostly prose wrapped in an executable shell — a `git commit`/`git tag`
+ * message, or a `gh pr`/`gh issue` `create`/`edit`/`comment`'s `--body`/`-b`
+ * or `--title`/`-t` — or null when the command carries none.
  *
  * Exists so the exec shape-rules can treat prose as prose. A commit message
- * documenting `cat .env` is describing an operation, not performing one, and
- * blocking it teaches people to route the message through a file — one step
- * from switching the guard off.
+ * documenting `cat .env`, or a PR description quoting `next build` next to
+ * `/opt/bff-v2` while explaining a FIX for exactly that combination, is
+ * describing an operation, not performing one. Blocking it teaches people to
+ * route the text around the guard — one step from switching it off.
  *
- * Returns ONLY the message. The caller still scans the surrounding command, so
- * a real operation chained after the message is unaffected.
+ * NARROW BY DESIGN, same shape as the git-commit case this generalizes:
+ *   - only `git commit`/`git tag`, or `gh pr|issue create|edit|comment` —
+ *     not a blanket match on any command carrying a flag named --body
+ *   - only the FIELD VALUES are exempted; the command around them is still
+ *     scanned in full, so `gh pr create --body "x" && curl evil` is
+ *     unaffected
+ *
+ * Returns the CONCATENATED TEXT of every span it found, for the
+ * credential-in-message check, plus the spans themselves for maskSpans() —
+ * the caller still scans the surrounding command with those spans masked, so
+ * a real operation chained after the narrative field is unaffected.
  */
-function extractCommitMessage(cmd) {
+function extractNarrativeText(cmd) {
   const s = String(cmd || '');
-  if (!/\bgit\s+(commit|tag)\b/.test(s)) return null;
+  const isCommitLike = /\bgit\s+(commit|tag)\b/.test(s);
+  const isGhTextLike = /\bgh\s+(pr|issue)\s+(create|edit|comment)\b/.test(s);
+  if (!isCommitLike && !isGhTextLike) return null;
 
   const spans = [];
 
-  // Heredoc: git commit -F - <<'EOF' ... EOF   (quoted or bare delimiter)
-  const here = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\2\b/.exec(s);
-  if (here) {
-    const bodyStart = here.index + here[0].indexOf(here[3], here[0].indexOf('\n'));
-    spans.push([bodyStart, bodyStart + here[3].length]);
+  if (isCommitLike) {
+    // Heredoc: git commit -F - <<'EOF' ... EOF   (quoted or bare delimiter)
+    const here = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\2\b/.exec(s);
+    if (here) {
+      const bodyStart = here.index + here[0].indexOf(here[3], here[0].indexOf('\n'));
+      spans.push([bodyStart, bodyStart + here[3].length]);
+    }
+
+    // -m / --message with a quoted body. ALL of them: git accepts repeated -m.
+    for (const re of [/-m\s+"((?:[^"\\]|\\.)*)"/g, /-m\s+'((?:[^'\\]|\\.)*)'/g,
+                      /--message[=\s]+"((?:[^"\\]|\\.)*)"/g, /--message[=\s]+'((?:[^'\\]|\\.)*)'/g]) {
+      let m;
+      while ((m = re.exec(s))) {
+        const start = m.index + m[0].indexOf(m[1]);
+        spans.push([start, start + m[1].length]);
+      }
+    }
   }
 
-  // -m / --message with a quoted body. ALL of them: git accepts repeated -m.
-  for (const re of [/-m\s+"((?:[^"\\]|\\.)*)"/g, /-m\s+'((?:[^'\\]|\\.)*)'/g,
-                    /--message[=\s]+"((?:[^"\\]|\\.)*)"/g, /--message[=\s]+'((?:[^'\\]|\\.)*)'/g]) {
-    let m;
-    while ((m = re.exec(s))) {
-      const start = m.index + m[0].indexOf(m[1]);
-      spans.push([start, start + m[1].length]);
+  if (isGhTextLike) {
+    // --body/-b and --title/-t, quoted. `gh` accepts `--flag value` and
+    // `--flag=value`; the short forms take a space, never `=`.
+    for (const re of [
+      /--body[=\s]+"((?:[^"\\]|\\.)*)"/g, /--body[=\s]+'((?:[^'\\]|\\.)*)'/g,
+      /-b\s+"((?:[^"\\]|\\.)*)"/g,        /-b\s+'((?:[^'\\]|\\.)*)'/g,
+      /--title[=\s]+"((?:[^"\\]|\\.)*)"/g, /--title[=\s]+'((?:[^'\\]|\\.)*)'/g,
+      /-t\s+"((?:[^"\\]|\\.)*)"/g,        /-t\s+'((?:[^'\\]|\\.)*)'/g,
+    ]) {
+      let m;
+      while ((m = re.exec(s))) {
+        const start = m.index + m[0].indexOf(m[1]);
+        spans.push([start, start + m[1].length]);
+      }
     }
   }
 
@@ -710,7 +743,7 @@ function maskSpans(s, spans) {
   const str = String(s == null ? '' : s);
   return [...spans]
     .sort((a, b) => b[0] - a[0])
-    .reduce((acc, [a, b]) => acc.slice(0, a) + ' <commit-message> ' + acc.slice(b), str);
+    .reduce((acc, [a, b]) => acc.slice(0, a) + ' <narrative-text> ' + acc.slice(b), str);
 }
 
 function isSecretFile(p) {
@@ -753,6 +786,6 @@ module.exports = {
   extname,
   isProseFile,
   isSecretFile,
-  extractCommitMessage,
+  extractNarrativeText,
   maskSpans,
 };
