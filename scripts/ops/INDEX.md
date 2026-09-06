@@ -111,6 +111,46 @@ Corollary, earned the same day: **never write a commit message with
 commit subject line. Use a real UTF-8 writer, or `git commit -F` on a file
 written by one.
 
+**A UNIT IS PART OF A VALUE. Read a money field in its own units before calling
+it wrong.** Measured 2026-09-06: three rows were read out of the portal's
+dj-stripe store and reported as a P1 money-correctness defect —
+`Isola Personal Line $1,296.00 usd`, `Visitor Pass $926.00`, `Annual
+$12,963.00` — against a ratified ladder of EC$5/15/35/55. It read as two errors
+stacked: cents-stored-as-dollars, and a currency mislabelled `usd` when it
+should be XCD.
+
+**Both were wrong, and the reporter had introduced both.** Stripe's
+`unit_amount` is denominated in **cents**, so those integers are US$12.96,
+US$9.26 and US$129.63 — and the source field is literally named `usd_cents`
+(`apps/isola_provisioning/personal_line_stripe_catalog.py`:
+`usd_cents=1296,  # US$12.96 -- ratified figure, not recomputed here.`). USD is
+the ratified design, not a mislabel: XCD is hard-pegged at 2.70, Stripe charges
+USD, and US$12.96 × 2.70 = **EC$35.00**, the owner's ladder exactly.
+
+The value of this entry is what nearly happened next. The report was escalated
+to a P1 with a quarantine, and the quarantine carried one clause — *"do not
+correct them without the owner ruling on the real ladder; a wrong correction is
+as bad as the wrong value."* **That clause is the only thing that prevented a
+×100 "correction" pricing the Personal Line at 13 US cents.**
+
+Provenance was one `git show` away the whole time: the commit production runs is
+titled *"feat(isola-provisioning): Stripe payment wiring for Personal Line (test
+mode)"*, and its message states the three figures in both currencies.
+
+So the rule is not "don't flag" — flagging an anomaly beside a ratified figure
+was right. The rule is:
+- **read the field's own units first** (the schema, the field name, the
+  producer's own docs — Stripe, Odoo, Magnus and Reloadly all use minor units in
+  at least one place);
+- **check provenance before severity** — `git log`/`git show` on the file that
+  writes the row costs seconds and answers "who wrote this and why";
+- and when a value looks wrong by a factor of exactly 100, **suspect the reader
+  before the writer.**
+
+Same family as the busybox grep and the ghost-id probe: the instrument was
+wrong, and it was the instrument nobody thought to check because it was
+arithmetic.
+
 
 **Never apply a fix by copying a whole file over another. Edit in place, against
 the file that is actually loaded.** Learned 2026-09-06: the same file existed in
