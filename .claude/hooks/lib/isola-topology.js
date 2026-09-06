@@ -123,9 +123,17 @@ const RESTART_COMMAND_RE = new RegExp(
  * this fix included `\bsql\b`, which would have matched the phrase
  * "destructive-SQL verb" in the very commit message the fix exists to unblock —
  * re-creating the defect one layer down.
+ *
+ * REMOVED, 2026-09-06 review: the bare `\.sql\b` alternative treated any
+ * MENTION of a .sql filename as a client invocation, so `git diff
+ * migration.sql && echo "truncate a clean file"` was blocked even though no
+ * SQL ever executes — the same vocabulary-not-operation false positive this
+ * change exists to remove. Every real client invocation (psql -f, sqlite3
+ * file.sql, sqlcmd -i, etc.) already matches via its own named alternative;
+ * dropping the bare extension loses no real coverage.
  */
 const SQL_CLIENT =
-  '(?:psql|mysql|mariadb|sqlite3|sqlcmd|cockroach\\s+sql|prisma\\s+db\\s+execute|\\.sql\\b)';
+  '(?:psql|mysql|mariadb|sqlite3|sqlcmd|cockroach\\s+sql|prisma\\s+db\\s+execute)';
 
 /**
  * Destructive shapes. Structure-based, never bare substrings, so prose that
@@ -719,8 +727,18 @@ function extractNarrativeText(cmd) {
   const spans = [];
 
   if (isCommitLike) {
-    // Heredoc: git commit -F - <<'EOF' ... EOF   (quoted or bare delimiter)
-    const here = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\2\b/.exec(s);
+    /**
+     * Heredoc: git commit -F - <<'EOF' ... EOF   (quoted or bare delimiter)
+     *
+     * BOUND TO `-F -` IMMEDIATELY BEFORE THE OPERATOR. An earlier version
+     * matched any heredoc anywhere in the command once `git commit` appeared
+     * — so `git commit -m "safe"; x=$(cat <<'EOF'\nTRUNCATE TABLE...\nEOF\n);
+     * psql -c "$x"` had its destructive payload masked out of the scan target
+     * because a heredoc happened to exist on the same line, unrelated to the
+     * commit message. Same defect class, same fix shape, as the PowerShell
+     * here-string case just below — found by review 2026-09-06.
+     */
+    const here = /-F\s+-\s*<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\2\b/.exec(s);
     if (here) {
       const bodyStart = here.index + here[0].indexOf(here[3], here[0].indexOf('\n'));
       spans.push([bodyStart, bodyStart + here[3].length]);
@@ -736,8 +754,16 @@ function extractNarrativeText(cmd) {
      * supports was scanned as if it were a command, since the exemption
      * understood only the other shell's syntax. The closing delimiter must sit
      * at the start of its own line, exactly as PowerShell requires.
+     *
+     * BOUND TO `-m`/`--message` IMMEDIATELY BEFORE THE `@'`/`@"` OPENER.
+     * Review found 2026-09-06: the original matched ANY here-string anywhere
+     * in the command once `git commit` appeared, so
+     * `git commit -m "safe"; $q=@'\nTRUNCATE TABLE...\n'@; psql -c $q` had its
+     * destructive payload masked out even though it was never the commit
+     * message — a here-string assigned to an unrelated variable and executed
+     * afterward.
      */
-    const psHere = /@(['"])\r?\n([\s\S]*?)\r?\n\1@/g;
+    const psHere = /(?:-m|--message)[=\s]+@(['"])\r?\n([\s\S]*?)\r?\n\1@/g;
     let ph;
     while ((ph = psHere.exec(s))) {
       const start = ph.index + ph[0].indexOf(ph[2], 2);

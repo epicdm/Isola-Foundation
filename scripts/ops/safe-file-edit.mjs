@@ -76,6 +76,7 @@
  * only catches the ones we already know about.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 /**
  * CP1252 maps bytes 0x80-0x9F to punctuation; ISO-8859-1 maps them to the C1
@@ -98,8 +99,17 @@ const CP1252_HIGH = [
 const TRAIL = new Set(CP1252_HIGH);
 for (let cp = 0x80; cp <= 0xbf; cp++) TRAIL.add(cp); // ISO-8859-1 path
 
-/** UTF-8 lead bytes (2-byte C2..DF, 3-byte E0..EF) seen as single characters. */
-const isLead = (cp) => cp >= 0xc2 && cp <= 0xef;
+/**
+ * UTF-8 lead bytes (2-byte C2..DF, 3-byte E0..EF, 4-byte F0..F4) seen as
+ * single characters.
+ *
+ * Review found 2026-09-06: this stopped at 0xEF, so corruption of any
+ * 4-byte character -- emoji being the common real-world case -- was
+ * invisible. Decoding an emoji's F0 9F .. .. bytes as Latin-1 produces
+ * U+00F0 followed by continuation-shaped characters, none of which the old
+ * range would even look at as a lead byte.
+ */
+const isLead = (cp) => cp >= 0xc2 && cp <= 0xf4;
 
 /**
  * A mojibake hit is a UTF-8 lead byte rendered as a character, immediately
@@ -200,7 +210,15 @@ const asCp1252 = (b) => (b >= 0x80 && b <= 0x9f ? CP1252_HIGH[b - 0x80] : b);
  * detector that flags nothing. Neither alone is evidence.
  */
 function cmdSelfScan() {
-  const selfPath = new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
+  /**
+   * `fileURLToPath`, not a hand-rolled `.pathname` strip. Review found
+   * 2026-09-06: `.pathname` leaves percent-escapes in place, so a repo path
+   * containing a space or other URL-escaped character (plausible on the
+   * Windows checkouts this tool targets) reads a nonexistent
+   * "space%20dir/safe-file-edit.mjs" and self-scan crashes with ENOENT.
+   * `fileURLToPath` is the platform-aware, already-decoding conversion.
+   */
+  const selfPath = fileURLToPath(import.meta.url);
   let failed = 0;
 
   const selfHits = findMojibake(readUtf8(selfPath));
@@ -226,6 +244,25 @@ function cmdSelfScan() {
       failed++;
     } else {
       console.log(`OK: ${label} corruption detected (${hits[0].count}x ${hits[0].name}).`);
+    }
+  }
+
+  /**
+   * FOUR-BYTE CONTROL. Review found 2026-09-06: the lead-byte range stopped
+   * at 0xEF, so corruption of any 4-byte character -- emoji being the common
+   * real case -- was invisible; `check` would certify a file with corrupted
+   * emoji as clean. Emoji corrupt via the same single-byte decoders as any
+   * other non-ASCII text, so one control (Latin-1) stands for both, matching
+   * the pattern above.
+   */
+  {
+    const emojiSample = 'status ' + String.fromCodePoint(0x1f600) + ' done';
+    const hits = findMojibake(corrupt(emojiSample, asLatin1));
+    if (hits.length === 0) {
+      console.error('FAIL: 4-byte (emoji) corruption NOT detected -- the detector is blind to it.');
+      failed++;
+    } else {
+      console.log(`OK: 4-byte (emoji) corruption detected (${hits[0].count}x ${hits[0].name}).`);
     }
   }
 
@@ -274,7 +311,29 @@ function cmdKeepLines(args) {
     process.exit(1);
   }
 
-  const retained = beforeLines.slice(0, keep).join('\n').replace(/\s*$/, '');
+  /**
+   * Normalized ONCE, then used for BOTH the write and the expected-bytes
+   * comparison below -- and NEVER whitespace-stripped, only EOL-normalized.
+   *
+   * Review found 2026-09-06, two defects in this one line:
+   * (1) The CRLF-checkout case (the expected shape on Windows) split lines on
+   *     '\n' alone, leaving a trailing '\r' embedded in each retained line;
+   *     writeUtf8's own CRLF->LF pass then stripped it from the FILE, but the
+   *     identity check compared the file against this un-normalized value,
+   *     which still carried the '\r' -- so a perfectly correct write reported
+   *     FAIL, and by then the file was already shortened.
+   * (2) `.replace(/\s*$/, '')` removed trailing blank lines / trailing spaces
+   *     from THIS value before it became the "expected" baseline, so if the
+   *     write itself dropped that same content the comparison could never
+   *     catch it -- e.g. keeping 3 lines of "alpha  \n\n\nbeta" silently
+   *     became "alpha\n" and still reported byte identity, because the thing
+   *     being compared against had already lost the same trailing content.
+   * Fixed by keeping the retained prefix EXACTLY as sliced (only CRLF
+   * normalization applied) and stripping only the ONE trailing newline this
+   * function itself appends when reading it back -- never an open-ended
+   * whitespace strip, which is what hid (2).
+   */
+  const retained = beforeLines.slice(0, keep).join('\n').replace(/\r\n/g, '\n');
   writeUtf8(file, retained + '\n');
 
   // ---- PROOF: independent re-read ----
@@ -288,7 +347,7 @@ function cmdKeepLines(args) {
   }
 
   const expected = Buffer.from(retained, 'utf8');
-  const actual = Buffer.from(after.replace(/\s*$/, ''), 'utf8');
+  const actual = Buffer.from(after.endsWith('\n') ? after.slice(0, -1) : after, 'utf8');
   if (!expected.equals(actual)) {
     console.error('FAIL: retained region is not byte-identical to the original.');
     console.error(`    expected ${expected.length} bytes, got ${actual.length}`);

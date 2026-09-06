@@ -731,6 +731,38 @@ const cases = [
     },
   },
   {
+    // Review found 2026-09-06: the PowerShell here-string exemption matched
+    // ANY here-string in the command once `git commit` appeared, not just
+    // the one bound to -m. The exact reported exploit -- a here-string
+    // assigned to an unrelated variable, never the commit message, then
+    // executed via that variable.
+    name: 'a here-string NOT bound to -m is not exempted -- destructive payload in $q is still BLOCKED',
+    expect: BLOCK,
+    contains: 'sql-wipe-table',
+    payload: {
+      session_id: SID,
+      tool_name: 'PowerShell',
+      tool_input: {
+        command: "git commit -m \"safe\"; $q=@'\n" + t('TRUN', 'CATE TABLE') + " lite_accounts;\n'@; psql -c $q",
+      },
+    },
+  },
+  {
+    // Same defect class, bash side: a heredoc unrelated to `git commit -F -`
+    // (e.g. feeding a variable that is later executed) must not be exempted
+    // just because `git commit` appears somewhere on the line.
+    name: 'a bash heredoc NOT bound to -F - is not exempted -- destructive payload is still BLOCKED',
+    expect: BLOCK,
+    contains: 'sql-wipe-table',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: 'git commit -m "safe"; x=$(cat <<\'EOF\'\n' + t('TRUN', 'CATE TABLE') + ' lite_accounts;\nEOF\n); psql -c "$x"',
+      },
+    },
+  },
+  {
     // CONTROL 1: the exemption must cover the MESSAGE ONLY. A real operation
     // chained after it is still a real operation.
     name: 'a real secret dump CHAINED after a commit is still BLOCKED',
