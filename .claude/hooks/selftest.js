@@ -90,6 +90,68 @@ const cases = [
     },
   },
 
+  // 2026-09-06 — real incident: a `gh pr create --body` narrating a fix for
+  // THIS exact rule (quoting `npm run build` and `/opt/bff-v2` together to
+  // EXPLAIN the two) was blocked as if it ran that build. extractNarrativeText
+  // now covers gh pr/issue create/edit/comment's --body/-b/--title/-t the same
+  // way it already covered git commit/tag messages, and rule 3 scans the
+  // masked scanTarget, never raw cmd.
+  {
+    name: 'a PR body narrating a build-in-live-checkout fix is ALLOWED (describing, not performing)',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command:
+          'gh pr create --repo epicdm/isolav2 --title "fix build" --body "Fixes cd /opt/bff-v2 && npm run build failing in worktrees"',
+      },
+    },
+  },
+  {
+    name: 'a PR body narrating the SAME shape via -b/-t short flags is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: 'gh issue create -t "cd /opt/bff-v2 && npm run build breaks" -b "same shape, short flags"',
+      },
+    },
+  },
+  {
+    name: 'a REAL build chained around a gh pr create --body still BLOCKS (the mask does not swallow it)',
+    expect: BLOCK,
+    contains: 'build-in-live-checkout',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: 'gh pr create --body "unrelated text" && ssh deepseek "cd /opt/bff-v2 && npm run build"',
+      },
+    },
+  },
+  {
+    name: 'a LITERAL credential inside a gh pr --body is BLOCKED (narrative fields still respect credential rules)',
+    expect: BLOCK,
+    contains: 'credential-in-commit-message',
+    notContains: FAKE_TOKEN,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: `gh pr create --body "the token is ${FAKE_TOKEN}"` },
+    },
+  },
+  {
+    name: 'an ordinary gh pr create with no build/live-checkout text is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'gh pr create --repo epicdm/isolav2 --title "fix(wallet): x" --body "small copy fix"' },
+    },
+  },
+
   // --- SECRETS ------------------------------------------------------------
   {
     name: 'Read of a .env file is BLOCKED',
