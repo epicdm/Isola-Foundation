@@ -204,6 +204,26 @@ export async function addMessage(
 }
 
 /**
+ * List every message in a conversation. Read-only, best-effort — returns []
+ * on any transport failure rather than throwing, because every caller of
+ * this so far is a soft check (e.g. "has this already been posted?"), never
+ * a governed-send readback — `findMessage` below is that, and stays
+ * separate and unchanged.
+ */
+export async function listMessages(
+  config: ChatwootConfig,
+  chatwootConversationId: number,
+): Promise<Record<string, unknown>[]> {
+  const res = await fetch(
+    `${base(config)}/conversations/${chatwootConversationId}/messages`,
+    { headers: headers(config), signal: AbortSignal.timeout(10000) },
+  )
+  if (!res.ok) return []
+  const data = await res.json().catch(() => null)
+  return Array.isArray(data?.payload) ? (data.payload as Record<string, unknown>[]) : []
+}
+
+/**
  * Read ONE message back from a conversation, by id.
  *
  * This is the authoritative readback for a governed send: the only evidence
