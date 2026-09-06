@@ -151,6 +151,54 @@ Same family as the busybox grep and the ghost-id probe: the instrument was
 wrong, and it was the instrument nobody thought to check because it was
 arithmetic.
 
+**WHEN ABSENCE AND A NEGATIVE VALUE SHARE A FALSY CHECK, ABSENCE GETS RENDERED
+AS THE NEGATIVE. Test `=== false`, never `!x`, for any field that carries a
+judgement.** Measured 2026-09-06 while porting the Lumen design pack's customer
+workspace. `Contact.healthy` had no source on this estate, so it arrived as
+`null`. Every branch in the screen read `!ct.healthy` or `ct.healthy ? … : …`:
+
+```js
+const n = !ct.healthy ? { t: "At risk after a recent issue — a goodwill
+                              gesture keeps them.", c: "Make it right" } : …
+return <div className={"nba" + (!ct.healthy ? " nba-danger" : …)}>
+```
+
+`null` is falsy, so **every customer with no health data was ACCUSED OF BEING AT
+RISK — in danger styling, with a "Make it right" call to action.** The same
+falsy read drove a red dot on the avatar and an "AI insight" reading *"At risk —
+sentiment dropped after a late delivery."* Nothing was broken; nothing logged;
+the screen simply asserted something defamatory about real named customers
+because a field was missing.
+
+This is the general shape, and it is not a React problem:
+
+- `!x` cannot distinguish **absent** from **false**, and `x ? a : b` sends
+  `null`, `0`, `""` and `NaN` down the `b` branch.
+- Whichever branch is the *negative* one therefore becomes the **default for
+  missing data** — and negative branches are exactly where the alarming copy,
+  the red styling and the escalation live.
+- So the failure is always in the dangerous direction. A missing field never
+  quietly renders "healthy"; it renders "at risk".
+
+The rule, in three parts:
+
+1. **For any field that carries a judgement — health, risk, status, approval,
+   verification, eligibility — make it nullable and test `=== false` /
+   `=== true` explicitly.** `!x` is only safe on a field that genuinely cannot
+   be absent.
+2. **Absence renders as absence** — `—`, or the element is not rendered at all.
+   Not a grey third state and not a hedged sentence: both still assert that the
+   judgement applies and we merely could not decide.
+3. **An empty collection is not a checked collection.** `invoices: []` from an
+   unwired source rendering "Open invoices: 0" is a positive claim that we
+   looked. Carry an explicit "is this source wired" flag beside the data; a real
+   zero and an absent source must not render the same.
+
+Sibling of §2.12 (*fail closed, because the dangerous failure is fluent, not
+loud*) and of the pay-page defect that told a paying customer their link never
+existed. Same shape each time: **the system did not fail, it confidently said
+the wrong thing, and the wrongness pointed at a real person.**
+
 
 **Never apply a fix by copying a whole file over another. Edit in place, against
 the file that is actually loaded.** Learned 2026-09-06: the same file existed in
