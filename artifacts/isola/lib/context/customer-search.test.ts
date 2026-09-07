@@ -173,3 +173,68 @@ describe('the search read', () => {
     expect(rows).toHaveLength(0)
   })
 })
+
+describe('a Dominican phone number is not an account id', () => {
+  /*
+    Measured on PRODUCTION 2026-09-07, which is why these are exact strings and
+    not invented ones: `767`, `7674490001` and `1767449` all came back
+    `term=partner_id, count=0`, while `+17674490001` came back `term=phone`.
+    The owner types a local number the way anyone in Dominica writes it, and
+    the console told him he had no such customer.
+
+    Note what the control below establishes: this was NEVER about 767.
+    `5551234567` was misclassified identically. Any all-digit input was read as
+    an account id; 767 only guarantees it hits every Dominican customer.
+  */
+  const digitsOnly = ['7674490001', '1767449', '17678183742']
+
+  it('treats a long bare number as EITHER an id or a phone, never only an id', () => {
+    for (const q of digitsOnly) {
+      expect(parseSearchTerm(q)).toEqual({ kind: 'partner_id_or_phone', value: q })
+    }
+  })
+
+  it('CONTROL — the bug was never 767-specific', () => {
+    // A non-Dominican number of the same shape must take the same path. If
+    // this ever diverges, someone has special-cased a country instead of
+    // fixing the classification.
+    expect(parseSearchTerm('5551234567')).toEqual({ kind: 'partner_id_or_phone', value: '5551234567' })
+  })
+
+  it('asks BOTH questions in one domain, so either kind of number answers', () => {
+    const domain = buildSearchDomain({ kind: 'partner_id_or_phone', value: '7674490001' })
+    // Odoo prefix notation: '|' applies to the next two leaves.
+    expect(domain[0]).toBe('|')
+    expect(domain).toContainEqual(['id', '=', 7674490001])
+    expect(domain).toContainEqual(['phone', 'ilike', '7674490001'])
+  })
+
+  it('a SHORT bare integer is still just an account id', () => {
+    // The positive control for the rule above: below the phone threshold there
+    // is no phone reading to disambiguate, so nothing changes. Without this,
+    // "everything numeric became partner_id_or_phone" would also pass.
+    expect(parseSearchTerm('42')).toEqual({ kind: 'partner_id', value: '42' })
+  })
+
+  it('a formatted phone is still unambiguously a phone', () => {
+    expect(parseSearchTerm('+1 767-449-0001')).toEqual({ kind: 'phone', value: '17674490001' })
+  })
+
+  it('an email and a name are untouched by any of this', () => {
+    expect(parseSearchTerm('info@epic.dm')).toEqual({ kind: 'email', value: 'info@epic.dm' })
+    expect(parseSearchTerm('EPIC')).toEqual({ kind: 'name', value: 'EPIC' })
+  })
+})
+
+describe('a term too short is a term that was not asked, and must say so', () => {
+  it('still refuses to search below the minimum', () => {
+    expect(parseSearchTerm('e')).toBeNull()
+  })
+
+  it('CONTROL — one more character and it does search', () => {
+    // Without this, "parseSearchTerm returns null" would pass against a
+    // function that refuses everything, and the minimum would be unmeasurable.
+    expect(parseSearchTerm('ep')).toEqual({ kind: 'name', value: 'ep' })
+    expect(MIN_SEARCH_LENGTH).toBe(2)
+  })
+})

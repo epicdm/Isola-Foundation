@@ -44,6 +44,13 @@ export const MAX_SEARCH_RESULTS = 25
 export const MIN_SEARCH_LENGTH = 2
 
 /**
+ * Enough digits to be a telephone number rather than a house number inside a
+ * company name. Named because two separate branches below depend on the same
+ * threshold, and they must not drift apart.
+ */
+export const MIN_PHONE_DIGITS = 6
+
+/**
  * The fields a term can be matched against. Every one of them is a field the
  * partner reader already returns, so the search cannot find a customer on
  * evidence the result is not allowed to show.
@@ -55,7 +62,7 @@ export const MIN_SEARCH_LENGTH = 2
 export const SEARCHABLE_FIELDS = ['id', 'name', 'email', 'phone'] as const
 export type SearchableField = (typeof SEARCHABLE_FIELDS)[number]
 
-export type SearchTermKind = 'partner_id' | 'email' | 'phone' | 'name'
+export type SearchTermKind = 'partner_id' | 'email' | 'phone' | 'name' | 'partner_id_or_phone'
 
 export interface SearchTerm {
   kind: SearchTermKind
@@ -78,18 +85,45 @@ export function parseSearchTerm(raw: unknown): SearchTerm | null {
   const s = typeof raw === 'string' ? raw.trim() : ''
   if (s.length < MIN_SEARCH_LENGTH) return null
 
-  // A bare positive integer is a partner id. Same shape the context route
-  // accepts, so a search result can always be opened.
-  if (parseCustomerId(s) !== null) return { kind: 'partner_id', value: s }
-
   if (s.includes('@') && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s)) {
     return { kind: 'email', value: s.toLowerCase() }
   }
 
+  const d = digits(s)
+  const looksNumeric = /^[\d\s+()\-.]+$/.test(s)
+  const isBareInteger = parseCustomerId(s) !== null
+
+  /*
+    A BARE INTEGER IS AMBIGUOUS HERE, AND GUESSING COST US THE OWNER'S OWN
+    CUSTOMERS.
+
+    This used to classify every bare positive integer as a partner id, before
+    the phone branch below could ever be reached. In Dominica that is not an
+    edge case: every local number starts 767, so `7674490001` was looked up as
+    Odoo partner id 7,674,490,001 — which does not exist — and the screen
+    reported no match. Measured on production 2026-09-07: `767`, `7674490001`
+    and `1767449` all came back `term=partner_id, count=0`, while
+    `+17674490001` correctly came back `term=phone`. The defect was never
+    about 767; ANY all-digit input was read as an account id, and 767 merely
+    guarantees it hits every Dominican customer.
+
+    The fix is not to reorder the guess — that would simply lose partner-id
+    search for anything long. It is to STOP GUESSING when the input genuinely
+    could be either, and ask both questions in one query. `partner_id_or_phone`
+    ORs the two domains, so a reader who types digits gets an answer whichever
+    kind of number it was.
+
+    Short bare integers stay a plain partner id: below the phone threshold
+    there is no phone reading to be had, so there is nothing to disambiguate.
+  */
+  if (isBareInteger && d.length >= MIN_PHONE_DIGITS) {
+    return { kind: 'partner_id_or_phone', value: d }
+  }
+  if (isBareInteger) return { kind: 'partner_id', value: s }
+
   // Phone only when it is unambiguously one: mostly digits, enough of them to
   // be a number rather than a house number in a company name.
-  const d = digits(s)
-  if (d.length >= 6 && /^[\d\s+()\-.]+$/.test(s)) return { kind: 'phone', value: d }
+  if (d.length >= MIN_PHONE_DIGITS && looksNumeric) return { kind: 'phone', value: d }
 
   return { kind: 'name', value: s }
 }
@@ -103,6 +137,12 @@ export function buildSearchDomain(term: SearchTerm): unknown[] {
   switch (term.kind) {
     case 'partner_id':
       return [['id', '=', Number(term.value)]]
+    case 'partner_id_or_phone':
+      // Odoo domains are prefix notation: '|' applies to the NEXT TWO leaves.
+      // Asking both questions is the point -- see parseSearchTerm. The phone
+      // leaf uses the same normalised digits as the 'phone' case below, so the
+      // two paths cannot answer differently for the same number.
+      return ['|', ['id', '=', Number(term.value)], ['phone', 'ilike', term.value]]
     case 'email':
       return [['email', '=ilike', term.value]]
     case 'phone':

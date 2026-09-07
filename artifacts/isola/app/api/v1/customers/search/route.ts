@@ -19,7 +19,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 
 import { odooCallerFor } from '@/lib/context/customer-sources'
-import { parseSearchTerm, searchCustomers, MAX_SEARCH_RESULTS } from '@/lib/context/customer-search'
+import {
+  parseSearchTerm,
+  searchCustomers,
+  MAX_SEARCH_RESULTS,
+  MIN_SEARCH_LENGTH,
+} from '@/lib/context/customer-search'
 import { classifyOdooFailure } from '@/lib/context/odoo-failure'
 import { resolveCaller } from '@/lib/customer-360/route-context'
 import { resolveOdooConfigForTenant } from '@/lib/engine-bindings'
@@ -66,9 +71,31 @@ export async function GET(req: NextRequest) {
   const raw = new URL(req.url).searchParams.get('q')
   const term = parseSearchTerm(raw)
   if (!term) {
-    // Not an error and not an empty result — no question was asked.
+    /*
+      Not an error and not an empty result — no question was asked. But the
+      caller has no way to tell those two apart from the payload alone, and
+      that ambiguity is a defect the owner hit on production 2026-09-07: he
+      typed one letter, the search silently did not run, and the screen fell
+      back to its pre-search prompt with nothing said. Same family as
+      "/records rendered state:empty as 'you have no customers'".
+
+      So say WHICH of the two it is. A caller that typed something and got
+      nothing back deserves to know its term was too short, and a caller that
+      typed nothing gets the honest null.
+    */
+    const typed = typeof raw === 'string' ? raw.trim() : ''
     return NextResponse.json(
-      { version: 'customer-search@1', state: 'empty', term: null, count: 0, results: [], reason: null },
+      {
+        version: 'customer-search@1',
+        state: 'empty',
+        term: null,
+        count: 0,
+        results: [],
+        reason:
+          typed.length > 0
+            ? `A search needs at least ${MIN_SEARCH_LENGTH} characters. Nothing was looked up.`
+            : null,
+      },
       { status: 200 },
     )
   }
