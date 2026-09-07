@@ -609,3 +609,52 @@ two hypotheses were formed and discarded before the real command was run. One of
 **Do this before hypothesising, not after.** And when the re-run touches production, check
 what it is allowed to overwrite first — here it could only rewrite a tag whose image was
 already pinned under a second name, so the reproduction was safe by construction.
+
+---
+
+## OPERATIONS THAT SUCCEED BY DOING NOTHING
+
+*2026-09-07. The hardest one to catch, because the failure signal is **silence**.*
+
+A whole class of commands **exit 0 having done nothing at all**, and their success is
+indistinguishable from a real pass:
+
+* a syntax check run against **an empty file**
+* a grep or `--include` whose pattern **matched nothing**
+* a filter (`pnpm --filter`, `docker ps --filter`, `jq`) that **selected no targets**
+* a diff between **two empty extractions**
+* a test suite that **collected zero tests**
+
+All of them print nothing, return 0, and look exactly like the thing working.
+
+**The instance.** A new deploy script was syntax-checked with `bash -n` and reported
+`BASH SYNTAX OK`. It had validated an **empty file** — a relative path had resolved against
+the wrong working directory, so the read that was supposed to produce the script produced
+nothing, and the copy that followed shipped 0 bytes. Two *real* controls were in the same
+run (a deliberately broken script was rejected, a trivial one accepted) and **both still
+passed**, because they tested `bash -n` rather than the file. The check was fine. The input
+was empty.
+
+**What actually caught it** was a fourth line that had nothing to do with syntax: a
+fail-closed probe running the script with no arguments, which should have printed
+`commit sha required` and printed **nothing**. A silence where an error belonged.
+
+### The rule
+
+**Assert the SIZE of what you are about to check, not only the result of checking it.**
+
+* Print the byte count or line count of every input, next to the verdict. `OK` beside
+  `bytes=0` is self-evidently vacuous; `OK` alone is not.
+* When a file crosses a machine, **compare the count on both sides**. Here: 14,160 bytes
+  locally, 14,160 in the staging copy, 14,160 on the host — three numbers that agree.
+* **Use absolute paths in anything that reads a file to feed a check.** A relative path is
+  resolved against a working directory you did not necessarily set, and PowerShell's .NET
+  methods do not follow `Set-Location`.
+* Give the harness **a probe that must produce OUTPUT**, not merely exit 0 — an error path
+  you deliberately trigger. An empty result there is a broken harness, always.
+
+**A control that tests the TOOL does not test the INPUT.** Both controls in that run were
+correct and both were beside the point. This is the sibling of *when a probe can only say
+yes, it is not a probe* above, and of CLAUDE.md §2.11's `--include` that matched nothing —
+and it is the sharper version, because there the check reported failure and here it
+reported success.
