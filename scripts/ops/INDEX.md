@@ -282,3 +282,47 @@ branch, the build host, the environment name, or anything derived from a
 credential.
 
 **Two occurrences is a pattern, not an incident.**
+
+## WHEN A PROBE CAN ONLY SAY YES, IT IS NOT A PROBE
+
+**Ratified 2026-09-07.** Every existence check carries a **negative control that
+must fail**. If you cannot make the probe say no, you have not measured
+anything — you have confirmed your own assumption in a louder voice.
+
+**Measured the day it was written.** Establishing which Foundation instances
+existed, a DNS check reported that *every* candidate host resolved:
+
+```
+isola-360.saas00.epic.dm          RESOLVES
+isola-360-prod.saas00.epic.dm     RESOLVES
+isola-360-uat.saas00.epic.dm      RESOLVES
+isola-360-staging.saas00.epic.dm  RESOLVES
+CONTROL definitely-not-a-host-xyz.saas00.epic.dm   RESOLVES   <-- invented
+```
+
+`*.saas00.epic.dm` is a **wildcard record**, so DNS answers "is there a
+wildcard", never "does this service exist". Without the invented host, that
+output reads as *four Foundation instances exist* — and the next step would have
+been choosing between production instances that were never there.
+
+The re-run on a real instrument (HTTPS, then swarm services) showed **one**
+instance, UAT, with both controls behaving. The finding — *production has no
+Foundation* — is the opposite of what the first probe implied.
+
+### The shape
+
+1. **Name the negative control before you run the probe**, not after. A control
+   invented to explain a surprising result is a rationalisation.
+2. **It must be of the same kind as the thing you are testing** — an invented
+   hostname for a hostname probe, a nonexistent image tag for an image probe, a
+   sentinel string for a grep.
+3. **If the negative control passes, the probe is broken and its positive
+   results are void.** Not "mostly right" — void. Change instrument.
+4. **Prefer an instrument that touches the thing itself.** DNS is one layer away
+   from a service; HTTPS is at it; the container list is inside it. The further
+   out you measure, the more the infrastructure answers for the thing.
+
+Same family as the busybox grep, the ghost-id permission probe, and the
+`grep -c` over an empty file. This is that rule pointed at existence checks,
+which are the ones most likely to be believed, because a list of things that
+resolve looks like evidence.
