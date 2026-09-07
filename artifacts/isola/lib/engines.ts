@@ -19,6 +19,7 @@ import type { WhatsAppConfig } from '@/engines/whatsapp';
 import type { OdooConfig } from '@/engines/odoo';
 import type { ChatwootConfig } from '@/engines/chatwoot';
 import type { BffConfig } from '@/engines/bff';
+import { serviceTokensFrom } from '@/lib/customer-360/service-auth';
 
 // ── Magnus ───────────────────────────────────────────────────────────────────
 
@@ -376,8 +377,13 @@ export function getSetupChecklist(): SecretStatus[] {
     {
       key: 'ISOLA_360_SERVICE_TOKEN',
       label:
-        'Service token for the Customer 360 read surface (portal → Foundation). Distinct from ISOLA_AGENT_TOOLS_TOKEN on purpose — that one gates a Flowise tool catalogue and must never reach customer data. Rotation program: yes.',
-      configured: !!process.env.ISOLA_360_SERVICE_TOKEN,
+        'Service token(s) for the Customer 360 read surface (portal → Foundation). Several callers legitimately read the SAME tenant — production and staging both do — so this accepts a set: ISOLA_360_SERVICE_TOKEN plus any ISOLA_360_SERVICE_TOKEN_<LABEL>, each its own secret so each can be revoked alone. Distinct from ISOLA_AGENT_TOOLS_TOKEN on purpose — that one gates a Flowise tool catalogue and must never reach customer data. Rotation program: yes.',
+      // Answered from the SAME enumeration the door uses, never from a second
+      // reading of one variable. A readout that consults a different rule than
+      // the check can report "not configured" about a credential that in fact
+      // authenticates — which is precisely how production spent this cycle
+      // looking unconfigured while holding a perfectly good token.
+      configured: serviceTokensFrom(process.env).length > 0,
       required: false,
     },
     {

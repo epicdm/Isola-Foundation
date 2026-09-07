@@ -54,13 +54,35 @@
 
 import { createHash, timingSafeEqual } from 'node:crypto'
 
-/** Exactly the three variables this door reads. Nothing else is consulted. */
+/**
+ * Exactly three things this door reads: the kill-switch, the tenant binding, and
+ * the set of accepted secrets. Nothing else is consulted.
+ *
+ * ONE TENANT, SEVERAL CALLERS
+ * ---------------------------
+ * `tokens` is a SET because more than one deployment legitimately calls this
+ * surface for the same tenant — production and staging both do. It is NOT a
+ * widening of the ruling above: every accepted secret still resolves to the one
+ * `ISOLA_360_SERVICE_TENANT_ID`, and the tenant is still absent from the
+ * signature, so it still cannot be asserted by a caller. A set of tokens is a
+ * set of CALLERS, never a set of tenants.
+ *
+ * Measured 2026-09-07, and the reason this is a set rather than a copied value:
+ * production already holds its own distinct 44-character token, and Foundation
+ * had simply never been told about it. Giving production staging's value instead
+ * would have made the two ONE principal, and staging's access could then never
+ * be revoked without taking production down with it.
+ */
 export interface ServiceAuthEnv {
   /** `ISOLA_360_SERVICE_ENABLED` — the kill-switch. Only "true" enables. */
   enabled: string | undefined
-  /** `ISOLA_360_SERVICE_TOKEN` — the shared secret. */
-  token: string | undefined
-  /** `ISOLA_360_SERVICE_TENANT_ID` — the ONE tenant this token may read. */
+  /**
+   * Every accepted shared secret, already enumerated. Each entry is one caller's
+   * own credential, independently creatable and independently revocable — that
+   * separability is the whole point of the set.
+   */
+  tokens: readonly string[]
+  /** `ISOLA_360_SERVICE_TENANT_ID` — the ONE tenant these tokens may read. */
   tenantId: string | undefined
 }
 
@@ -78,20 +100,75 @@ export type ServiceAuthResult =
   | { ok: true; tenantId: string }
   | { ok: false; reason: ServiceAuthRefusal }
 
-/** Read the three variables off a process env without the route knowing them. */
+/**
+ * The env names that hold an accepted secret: `ISOLA_360_SERVICE_TOKEN`, and any
+ * `ISOLA_360_SERVICE_TOKEN_<LABEL>` where LABEL names the caller — `_PROD`,
+ * `_STAGING`. The label is deployment vocabulary and carries no authority; it
+ * exists so each caller's credential is a separate variable (and therefore a
+ * separate swarm secret) that can be added or deleted on its own.
+ *
+ * The rule is a closed one, stated here and nowhere else: this prefix, that
+ * shape. `ISOLA_360_SERVICE_TENANT_ID` does not match it, and neither does any
+ * plural or near-miss spelling, because `TOKEN` must be followed by `_`.
+ *
+ * DELIBERATELY CASE-SENSITIVE, and the reason is not style. Review raised that
+ * a Windows `process.env` is case-insensitive, so a variable set as
+ * `isola_360_service_token_prod` could surface in `Object.keys` lowercased and
+ * be missed here. That is true, and the fix — uppercase the key before testing
+ * — is worse: on Linux, which is the only platform this ever deploys to, a
+ * lowercase name is a genuinely DIFFERENT variable, and folding case would
+ * start collecting it as a credential. So the choice is between failing CLOSED
+ * on a developer's Windows box and WIDENING the credential surface in
+ * production. Taken knowingly: closed on Windows.
+ */
+const LABELLED_TOKEN_ENV = /^ISOLA_360_SERVICE_TOKEN_[A-Z0-9]+(?:_[A-Z0-9]+)*$/
+
+/**
+ * Enumerate every accepted secret. Exported because the operator-facing env
+ * readout in `lib/engines.ts` MUST answer "is this configured?" from the same
+ * enumeration the door uses — otherwise the screen can say "not configured"
+ * about a credential that in fact authenticates, or the reverse.
+ *
+ * Blank and whitespace-only entries are dropped here, so a secret file that
+ * exists but is empty cannot quietly become an accepted empty token.
+ */
+export function serviceTokensFrom(env: NodeJS.ProcessEnv): string[] {
+  const found = new Set<string>()
+  for (const key of Object.keys(env).sort()) {
+    if (key !== 'ISOLA_360_SERVICE_TOKEN' && !LABELLED_TOKEN_ENV.test(key)) continue
+    const value = (env[key] ?? '').trim()
+    if (value.length > 0) found.add(value)
+  }
+  return [...found]
+}
+
+/** Read what this door needs off a process env, without the route knowing them. */
 export function serviceAuthEnvFrom(env: NodeJS.ProcessEnv): ServiceAuthEnv {
   return {
     enabled: env.ISOLA_360_SERVICE_ENABLED,
-    token: env.ISOLA_360_SERVICE_TOKEN,
+    tokens: serviceTokensFrom(env),
     tenantId: env.ISOLA_360_SERVICE_TENANT_ID,
   }
 }
 
-/** Digest-then-compare: constant time, and over a fixed 32 bytes either way. */
-function secretsMatch(presented: string, expected: string): boolean {
+/**
+ * Digest-then-compare against every accepted secret: constant time, and over a
+ * fixed 32 bytes either way.
+ *
+ * There is deliberately NO early exit on the first match. An early exit would
+ * make the elapsed time depend on WHICH credential was presented — so a caller
+ * holding a valid token could learn its position in the set, and a caller
+ * holding none could learn the set's shape by comparing timings. Comparing all
+ * of them always leaks only the SET SIZE, which is not a secret.
+ */
+function secretsMatchAny(presented: string, expected: readonly string[]): boolean {
   const a = createHash('sha256').update(presented, 'utf8').digest()
-  const b = createHash('sha256').update(expected, 'utf8').digest()
-  return timingSafeEqual(a, b)
+  let matched = false
+  for (const candidate of expected) {
+    const b = createHash('sha256').update(candidate, 'utf8').digest()
+    if (timingSafeEqual(a, b)) matched = true
+  }
+  return matched
 }
 
 /** The bearer token from an Authorization header, or null. */
@@ -116,17 +193,19 @@ export function resolveServiceCaller(
   // disabled deployment cannot be probed for a token's validity.
   if (env.enabled !== 'true') return { ok: false, reason: 'disabled' }
 
-  const expected = (env.token ?? '').trim()
+  const expected = env.tokens.map((t) => t.trim()).filter((t) => t.length > 0)
   const tenantId = (env.tenantId ?? '').trim()
   // An unconfigured token NEVER authenticates. Without this, an empty expected
   // value plus an empty presented value is a match, and a deploy that forgot
-  // the secret becomes a deploy that accepts everyone.
-  if (!expected || !tenantId) return { ok: false, reason: 'not-configured' }
+  // the secret becomes a deploy that accepts everyone. An EMPTY SET is the same
+  // failure wearing the new shape, so it fails at the same line — and the trim
+  // above means a set of nothing but blanks is an empty set, not a set of one.
+  if (expected.length === 0 || !tenantId) return { ok: false, reason: 'not-configured' }
 
   const presented = bearerFrom(authorization)
   if (!presented) return { ok: false, reason: 'no-bearer' }
 
-  if (!secretsMatch(presented, expected)) return { ok: false, reason: 'mismatch' }
+  if (!secretsMatchAny(presented, expected)) return { ok: false, reason: 'mismatch' }
 
   // The tenant is configuration. It was never in the request.
   return { ok: true, tenantId }
