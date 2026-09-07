@@ -1,0 +1,125 @@
+###############################################################################
+# isola360uat - the smallest ISOLATED Customer 360 staging service.
+#
+# Compose-managed swarm stack, not an EasyPanel app service, per
+# dec-host03-deploy-hygiene-is-a-consolidation-prerequisite-2026-08-14:
+#   - EasyPanel keeps console, domains, TLS and ingress
+#   - lifecycle belongs to a compose stack
+# That ruling also matters for a measured hazard: an EasyPanel app service
+# inherits restart.condition=on-failure, under which a CLEAN EXIT strands the
+# service permanently with no alert. This stack sets `condition: any`.
+#
+# Isolation properties, deliberate:
+#   - its OWN database, containing only fixtures, no production data
+#   - its own overlay network for db traffic
+#   - a distinct stack namespace, image tag and hostname
+#   - it touches NO existing service; production is not modified
+###############################################################################
+version: "3.8"
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: isola360
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_DB: isola360uat
+    secrets:
+      - db_password
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    networks:
+      - internal
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 5s
+
+  app:
+    # Pinned to the commit. Never :latest -- a mutable tag means any task
+    # recreation silently changes what is running.
+    image: isola-foundation-360:${IMAGE_TAG}
+    environment:
+      NODE_ENV: production
+      # DATABASE_URL is NOT set here. Interpolating the password into this
+      # string would write it straight into the service spec, where
+      # `docker service inspect` discloses it -- defeating the secret it was
+      # supposedly protected by. The entrypoint composes the URL from the
+      # mounted secret file instead.
+      DB_USER: isola360
+      DB_HOST: db
+      DB_NAME: isola360uat
+      ODOO_URL: ${ODOO_URL}
+      ODOO_DB: ${ODOO_DB}
+      DEPLOY_SHA: ${DEPLOY_SHA}
+      # Customer 360 server-to-server read surface. The TOKEN is deliberately
+      # absent here and arrives as a swarm secret, for the same reason
+      # ODOO_API_KEY and DATABASE_URL do: anything written into this block is
+      # disclosed by `docker service inspect`.
+      ISOLA_360_SERVICE_TENANT_ID: cmtblqq870000pg44a2ed1hvz
+      ISOLA_360_SERVICE_ENABLED: "true"
+      ISSUER_URL: ${ISSUER_URL}
+      TENANT_MASTER_KEY: ${TENANT_MASTER_KEY}
+      # ODOO_API_KEY is NOT here on purpose, for the same reason.
+      # CHATWOOT_SERVICE_TOKEN is NOT here on purpose, for the same reason --
+      # arrives as a swarm secret, composed by entrypoint.sh.
+      #
+      # Replit OIDC is retired per dec-replit-is-retired-owner-ruling-2026-08-26.
+      # These two are set only because the api-server reads them at module load;
+      # no interactive login is expected to work, and none is needed -- staging
+      # sessions are seeded rows.
+      REPL_ID: isola-foundation
+      REPLIT_DOMAINS: isola-360-uat.saas00.epic.dm
+    secrets:
+      - odoo_api_key
+      - db_password
+      - isola_360_service_token
+      - chatwoot_service_token
+    networks:
+      - internal
+      - easypanel
+      - easypanel-isola
+    # CONTAINER labels, not deploy.labels: measured against the working
+    # isolagw@docker router, whose traefik labels live in ContainerSpec.Labels.
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: easypanel
+      traefik.http.routers.isola360uat.entrypoints: https
+      traefik.http.routers.isola360uat.priority: "100"
+      traefik.http.routers.isola360uat.rule: Host(`isola-360-uat.saas00.epic.dm`)
+      traefik.http.routers.isola360uat.tls: "true"
+      traefik.http.routers.isola360uat.tls.certresolver: letsencrypt
+      traefik.http.services.isola360uat.loadbalancer.server.port: "3000"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 10s
+      update_config:
+        order: start-first
+
+networks:
+  internal:
+    driver: overlay
+  easypanel:
+    external: true
+  easypanel-isola:
+    external: true
+
+volumes:
+  dbdata:
+
+secrets:
+  db_password:
+    external: true
+    name: isola360uat_db_password
+  isola_360_service_token:
+    external: true
+    name: isola_360_service_token_20260830
+  odoo_api_key:
+    external: true
+    name: odoo_api_key_prod_20260829
+  chatwoot_service_token:
+    external: true
+    name: chatwoot_service_token_20260904
