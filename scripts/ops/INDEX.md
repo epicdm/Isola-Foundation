@@ -769,3 +769,55 @@ A caller that treats *"I could not look"* the same as *"it is broken"* will even
 suppress both. Distinct codes let a scheduler page on FAIL, retry on CANNOT MEASURE, and
 escalate only if the inability persists — which is the true signal that something is wrong
 with the *instrument*, and it is the one this estate has repeatedly missed.
+
+---
+
+## A GAP CARRIES REPAIRS AS READILY AS FEATURES, AND A REPAIR'S ABSENCE IS INVISIBLE TO ANY DIFF OF ROUTES
+
+*Ratified 2026-09-07, after it hid a total production signup outage for a day.*
+
+When one service is behind another, the instinct is to ask **"what did the frontend gain
+that the backend cannot serve?"** — so you diff the API surface: url-confs, views,
+serializers, the GraphQL schema. All empty. You report *"benign — no route the frontend
+calls is missing."*
+
+**That answer is true and it is the wrong question.**
+
+Measured: production's web served `6097267` while its API served `b87ec1b`, 23 commits
+behind. Zero migrations, zero routing changes, zero view changes, zero schema changes — and
+**signup was completely broken**, because the gap contained a *fix*:
+
+* production had **no `free_plan` price** (3 products, none matching; control: a planted
+  fake name returned 0)
+* `get_by_plan()` returns `None`, not an exception
+* `create_schedule(price=None)` then hits `raise SubscriptionOrPriceNotDefined`
+* the `post_save` receiver re-raises it
+* **tenant creation aborts after the User row has already committed** — the account
+  authenticates and can never hydrate
+
+The repair for exactly that had been merged for a day and never deployed. **Nothing about
+it appears in a diff of routes**, because a repair changes what existing code *does*, not
+what it *exposes*.
+
+### The rule
+
+**When measuring a version gap, enumerate ALL non-test code in it and characterise every
+file — not just the ones that change the interface.** Four files is a small enough gap that
+*"probably fine"* has no excuse; forty is a reason to be systematic, not a reason to
+sample.
+
+For each file ask both questions:
+
+1. **What does this let a caller do that it could not before?** (the feature question — a diff of routes answers it)
+2. **What does this stop happening that is happening right now?** (the repair question — **only reading the change answers it**)
+
+A commit message beginning *"fix("* is the loudest available hint and costs one `git log`
+to see. In the gap above, `fix(finances): a tenant without billing must still be able to
+open the portal` was sitting in plain sight while the surface audit reported safe.
+
+### The sharper form
+
+**An undeployed repair is an outage you are already having and have already paid to fix.**
+It is worse than an undeployed feature in every way: the cost is live, the fix exists, and
+the usual instruments — route diffs, schema checks, endpoint smoke tests — are all blind to
+it by construction.
