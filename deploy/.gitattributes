@@ -1,0 +1,10 @@
+# These files are shipped to a Linux host and executed there. A CRLF checkout
+# turns `#!/bin/sh` into `#!/bin/sh\r`, which fails with a message that names a
+# shell nobody typed. Git already warned "LF will be replaced by CRLF" on every
+# file in this directory when they were first committed, so this is not
+# hypothetical.
+*.sh   text eol=lf
+*.mjs  text eol=lf
+*.ts   text eol=lf
+*.yml  text eol=lf
+Dockerfile text eol=lf

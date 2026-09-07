@@ -15,7 +15,18 @@
 # it is omitted. Cost: a slightly larger image. Reported as a false positive.
 ###############################################################################
 
-FROM node:22-bookworm-slim AS base
+# PINNED 2026-09-07. It was a floating tag until now, and host03 had no cached
+# copy -- verified, with a deliberately non-existent tag as the control so that
+# "No such image" was a real answer and not a broken lookup. So every rebuild
+# silently took whatever the tag pointed at that day.
+#
+# The digest below is what `node:22-bookworm-slim` resolved to on 2026-09-07,
+# and its image was created 2026-08-25 -- BEFORE the 5fe25d3b build of
+# 2026-09-05. So unless the tag was republished twice in that window, this is
+# the same base the running image was built on. That is evidence, not proof:
+# the base of 5fe25d3b was never pinned and is no longer cached, so it cannot be
+# recovered. Stated rather than papered over.
+FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS base
 ENV PNPM_HOME=/pnpm \
     PATH=/pnpm:$PATH \
     NEXT_TELEMETRY_DISABLED=1

@@ -99,12 +99,13 @@ clean for every file this change touches.
 
 ---
 
-## 4. The deploy delta — owner action, three steps
+## 4. The deploy delta — executed by this lane, per the 2026-09-07 ruling
 
-### Step 1 — create the secret without anyone reading it
+The owner overruled the hand-off: the value can move machine-to-machine without ever
+materialising anywhere a human or a transcript can see it, which is the same
+redact-in-the-same-pipeline rule this lane already follows.
 
-Production's token already exists in the API container's environment. It can be piped
-straight into a swarm secret, so **neither the owner nor this lane ever sees the value**:
+### Step 1 — THE EXACT PIPELINE, stated here before it was run
 
 ```bash
 PROD=$(sudo docker ps --format '{{.Names}}' | grep -m1 isola_isola-lumen-api-prod)
@@ -113,11 +114,25 @@ sudo docker exec "$PROD" printenv ISOLA_360_SERVICE_TOKEN \
   | sudo docker secret create isola_360_service_token_prod_20260907 -
 ```
 
-`tr -d '\n'` matters: `printenv` appends a newline that the HTTP caller does not send, and a
-trailing newline would produce a secret that never matches.
+Read and write are **one pipe**, entirely on host03 — the bytes never cross the SSH
+session. Against the three conditions:
 
-Verify by length only — `sudo docker secret inspect isola_360_service_token_prod_20260907`
-shows metadata, never the value.
+* **No `echo`, `cat`, `printf` or `tee` of the value.** `printenv` is the read and its
+  stdout is the pipe; `tr` is a filter. Nothing renders the value anywhere.
+* **The value never becomes a shell variable, a file, or an argument.** `$PROD` holds a
+  container name. `docker secret create … -` takes the value on **stdin**, not as an
+  argument. The only file it ever lands in is the swarm secret store, which is the
+  destination, not an intermediate.
+* **No TTY.** `docker exec` without `-t` writes raw bytes, so nothing is echoed back.
+
+`tr -d '\n'` is load-bearing: `printenv` appends a newline that the HTTP caller does not
+send, and a trailing byte would produce a secret that never matches — a failure that would
+look exactly like a wrong token.
+
+Verified afterwards **by salted digest and length only**, never the value: the digest of
+what Foundation's running process now expects for production must equal the digest of what
+the production API container sends, computed with one salt in the same run, alongside the
+two controls (a known-shared literal, and a known-equal real value).
 
 ### Step 2 — `deploy/entrypoint.sh`, mirroring lines 47–55 exactly
 

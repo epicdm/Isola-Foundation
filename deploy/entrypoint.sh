@@ -52,6 +52,25 @@ else
   log "isola-360 service token NOT present -- the server-to-server surface will refuse every caller (fail closed)"
 fi
 
+# The SAME surface, a SECOND caller. Production and staging each read the same
+# tenant and each hold their own credential; measured 2026-09-07, production had
+# always had one and Foundation had only ever been told about staging's.
+#
+# It is a separate variable, therefore a separate swarm secret, therefore
+# separately deletable -- which is the whole point. Giving production staging's
+# value instead would have made them ONE principal, and staging's access could
+# then never be revoked without taking production down with it.
+#
+# A set of tokens is a set of CALLERS, not a set of tenants: both still resolve
+# the single ISOLA_360_SERVICE_TENANT_ID below.
+if [ -f /run/secrets/isola_360_service_token_prod ]; then
+  ISOLA_360_SERVICE_TOKEN_PROD="$(cat /run/secrets/isola_360_service_token_prod)"
+  export ISOLA_360_SERVICE_TOKEN_PROD
+  log "isola-360 PROD service token loaded from swarm secret (length ${#ISOLA_360_SERVICE_TOKEN_PROD}, value not logged)"
+else
+  log "isola-360 PROD service token NOT present -- production callers are refused (fail closed); staging is unaffected"
+fi
+
 if [ -f /run/secrets/odoo_api_key ]; then
   ODOO_API_KEY="$(cat /run/secrets/odoo_api_key)"
   export ODOO_API_KEY

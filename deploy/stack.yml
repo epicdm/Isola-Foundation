@@ -75,6 +75,7 @@ services:
       - odoo_api_key
       - db_password
       - isola_360_service_token
+      - isola_360_service_token_prod
       - chatwoot_service_token
     networks:
       - internal
@@ -117,6 +118,15 @@ secrets:
   isola_360_service_token:
     external: true
     name: isola_360_service_token_20260830
+  # The production caller's OWN credential. Separate secret so it can be added
+  # or deleted without touching staging's, and vice versa -- see the block in
+  # entrypoint.sh. Created 2026-09-07 by piping production's existing value
+  # straight from its container environment into `docker secret create`, so the
+  # value never became a shell variable, a file, an argument, or a line in any
+  # transcript.
+  isola_360_service_token_prod:
+    external: true
+    name: isola_360_service_token_prod_20260907
   odoo_api_key:
     external: true
     name: odoo_api_key_prod_20260829
