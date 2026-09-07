@@ -326,3 +326,61 @@ Same family as the busybox grep, the ghost-id permission probe, and the
 `grep -c` over an empty file. This is that rule pointed at existence checks,
 which are the ones most likely to be believed, because a list of things that
 resolve looks like evidence.
+
+---
+
+## COMPARE TWO SECRETS WITHOUT DISCLOSING EITHER — THE SALTED DIGEST
+
+*Named 2026-09-07, after it settled in one run a question that had cost two cycles.*
+
+**The question that keeps coming up:** two systems each hold a credential and one
+of them is being refused. Is it the same one or a different one? Reading either
+value answers it and puts a live credential into a transcript, a log and a
+scrollback buffer — so in practice the question goes unanswered and is replaced by
+a guess.
+
+**The technique.** Generate ONE random salt for the run. In each place the value
+lives, compute `sha256(salt ‖ value)` **inside the same pipeline that reads it**,
+and print only the first ~12 hex characters. Equal prefixes mean equal values;
+unequal means different. Nothing else is learned, and nothing leaves the pipeline.
+
+```
+SALT=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+# inside each container, in one pipeline:
+#   read the variable → prepend $SALT → sha256sum → cut -c1-12
+```
+
+**The salt is not decoration.** Without it the digest is a stable fingerprint, and
+publishing it invites an offline dictionary attack against any low-entropy value.
+A fresh salt per run makes the printed digest meaningless five minutes later and
+meaningless across runs — which is exactly right, because the comparison is only
+ever valid within one run.
+
+**TWO CONTROLS, AND IT IS WORTHLESS WITHOUT BOTH.**
+
+1. **A known-shared literal.** Digest the string `control` in every location with
+   the same salt. All must match. If they do not, the pipelines are not comparable
+   — a different `sha256sum`, a shell appending a newline, a different encoding —
+   and every other digest in the run is noise.
+2. **A known-EQUAL real value.** Digest something already known to be identical in
+   both places (a tenant id, a base URL). It must match. Control 1 proves the
+   plumbing; control 2 proves the method detects sameness on real data. Without
+   it, a pipeline that produced a constant would pass control 1 and then report
+   "different" for every real comparison — and that failure reads exactly like a
+   finding.
+
+**Read the value where the PROCESS reads it, not where it is convenient.** On
+2026-09-07 the same variable was UNSET under `docker exec` and SET in the running
+server: the entrypoint reads a swarm secret file and exports it into the process
+it launches, while `docker exec` starts a NEW process from the container's
+`Config.Env`, which never contained it. Digesting `/proc/<pid>/environ` of the
+actual server answered the question. Digesting the convenient surface would have
+produced a confident, wrong "Foundation has no credential at all".
+
+**What it does NOT tell you:** whether either value is *correct* — only whether two
+copies agree. Pair it with a behavioural probe carrying its own control before
+concluding anything about a door.
+
+Same family as the ghost-id permission probe and the negative-control rule above:
+each replaces a disclosing or destructive measurement with one that answers the
+same question, and cannot be believed without its control.
