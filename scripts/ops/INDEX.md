@@ -384,3 +384,78 @@ concluding anything about a door.
 Same family as the ghost-id permission probe and the negative-control rule above:
 each replaces a disclosing or destructive measurement with one that answers the
 same question, and cannot be believed without its control.
+
+---
+
+## NO PRODUCTION IMAGE BUILDS FROM A FLOATING TAG
+
+*Ruled 2026-09-07. This is the version-identity law, one layer further down.*
+
+**A floating base tag means every rebuild is a different product.** `FROM node:22-bookworm-slim`
+is not a version; it is a subscription. Two builds of the same commit, a week apart, are
+two different images, and nothing in the build output says so.
+
+**And the damage is not recoverable after the fact.** Once the tag moves, the base an image
+already in production was built on **cannot be determined** — not from the image, not from
+the Dockerfile, not from the registry. Measured on host03: `isola-foundation-360:5fe25d3b`
+had been serving for two days; `node:22-bookworm-slim` was **not in the host's image cache**
+(verified with a deliberately non-existent tag as the control, so "No such image" was a real
+answer and not a broken lookup). Its base is gone. The best available statement was
+*"the tag's current image was created before that build, so unless it was republished twice
+in that window this is the same base"* — evidence, not proof, and it was written into the
+Dockerfile in those words.
+
+**The rule.** Pin by digest:
+
+```
+FROM node:22-bookworm-slim@sha256:83f487e0…  AS base
+```
+
+and **record the digest where the next reader will look** — in the Dockerfile, with a
+comment saying when it was resolved and why. A digest in a build log nobody reads is not a
+pin.
+
+This is the same failure as an unpinned deploy that reports success, a `BUILD_ID` nobody
+checked, and a version endpoint returning the literal string `undefined`: **the artefact
+cannot say what it is.** Pinning the base is where that chain starts.
+
+---
+
+## SCAN BEFORE YOU COMMIT A DIRECTORY YOU DID NOT AUTHOR
+
+*Added 2026-09-07, the day it stopped a live third-party API key from reaching GitHub.*
+
+Putting an unversioned operational directory under version control is a good thing to do and
+a **one-way door**: a pushed secret is public forever, and no amount of rewriting history on
+a shared remote takes it back. Scan first, and scan by the **shape of the value**, not by the
+name of the variable.
+
+For every line whose *name* looks credential-ish (`token|api_key|secret|password|credential`),
+classify its **value**:
+
+| value shape | verdict |
+|---|---|
+| contains `$` | **reference** — safe, it reads from the environment |
+| starts with `/` | **path** — safe, e.g. `/run/secrets/db_password` |
+| empty | a YAML key or a declaration, not an assignment |
+| anything else, ≥12 chars | **LITERAL — do not commit** |
+
+**PLANT A POSITIVE CONTROL FILE AND CLASSIFY IT IN THE SAME RUN.** Two lines: one
+`export X="${X}"` and one `export X="a-long-literal-value"`. The run must report exactly one
+reference and one literal. Without it this is an ordinary grep — and an ordinary grep that
+silently matches nothing reports a clean tree, which is the worst possible failure here
+because the output is indistinguishable from success.
+
+**Expect false positives, and clear them with their own control.** Prose matches: a comment
+reading `# Mediated secret: the Odoo key arrives as…` matches `secret:` and looks like an
+assignment. Clear it by testing whether the line starts with `#` — and pair that with a line
+you *know* is not a comment, or the check cannot discriminate.
+
+**Then count the copies before you write the finding.** The three literals found this way were
+in one directory the scan looked at and in **22 build directories** on the same host. §2.21:
+a remediation applied to one copy is a moved problem, and a finding that names one file
+understates the exposure by a factor of twenty-two.
+
+**Name what you held back, in the commit and in a README beside it.** The next person sees
+files present on the host and absent from git, concludes the commit was incomplete, and runs
+`git add`. That is one command away from the exposure you just prevented.
