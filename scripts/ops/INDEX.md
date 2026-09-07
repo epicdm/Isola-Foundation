@@ -658,3 +658,58 @@ correct and both were beside the point. This is the sibling of *when a probe can
 yes, it is not a probe* above, and of CLAUDE.md §2.11's `--include` that matched nothing —
 and it is the sharper version, because there the check reported failure and here it
 reported success.
+
+---
+
+# BEFORE TRUSTING A RESULT, ESTABLISH THAT THE INSTRUMENT CAN PRODUCE THE OTHER ANSWER
+
+*Ratified 2026-09-07. This is the general form of half the entries above, and it was earned
+four times in one day.*
+
+Every check in this file that has ever misled us failed the **same single question**:
+
+> **Can this instrument produce the other answer?**
+
+Not *is the answer plausible*. Not *does the check look right*. Can it say the opposite —
+and have you seen it do so?
+
+## The four instances, in one day
+
+| instrument | what it could not say |
+|---|---|
+| the e2e staff-nav firing control | could only say **yes** — it raced hydration and answered "not found" regardless, so seven customer/staff boundary assertions were vacuous for ten days |
+| `docker-build-fails-closed` on portal PRs | could say **nothing at all** — it does not run there, so its absence read as approval |
+| the `browser` CI badge | says **no regardless** — a post-job cleanup step sets the job's conclusion, so it reported failure while all 17 tests passed |
+| `git diff <base> <branch>` | answered a question about a **merge** — it showed a P1 fix as "removed" when a three-way merge provably keeps it |
+
+Three were in the estate. **The fourth was in the reviewer's own hands, in the moment**, and
+would have produced a REFUSED on a correct change. Nobody is outside this rule.
+
+## What it costs to skip
+
+An instrument that cannot produce the other answer does not merely fail to inform — **it
+actively trains people to ignore it.** The browser badge was red on seven consecutive
+branches; every one of those merges taught its author that the check means nothing. That is
+worse than having no check at all, because the absence of a check is visible and a
+permanently-red one looks like diligence.
+
+## The practice, in three lines
+
+1. **Before believing a PASS, make it fail.** Sabotage the input deliberately — plant a
+   value that cannot match, break the thing under test — and watch the check go red. Then
+   revert. Cheap, and it is the only proof that a green means anything.
+2. **Before believing a FAIL, make it pass.** A red that has never been green may be
+   measuring something other than what its name says.
+3. **Before believing a tool's answer, check that you asked it the question you think you
+   asked.** `git diff` answers "what differs", not "what would a merge do" — use
+   `git merge-tree`. A grep answers "what matched", not "what exists" — check the input
+   size. `ps %CPU` answers "average over the process's life", not "busy now".
+
+## Where the proof goes
+
+**In the run, not in your memory.** A sabotage that happened once and was never recorded is
+a claim. Put both directions in the same evidence trail: *this branch, control passes; this
+throwaway branch, control fails* — then delete the throwaway. Measured 2026-09-07 on the
+staff-nav control: **passes in 6.5s on the fix, fails in 35.1s under sabotage** (the extra
+29s being the poll's full timeout, which is itself evidence the retry is real and not
+short-circuiting).
