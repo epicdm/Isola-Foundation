@@ -550,3 +550,62 @@ path does not reliably return long property bodies.
 
 Cost of learning this the other way, twice in one night: lost entity bodies that had to be
 reconstructed from memory.
+
+---
+
+## THE FILE YOU EDITED MAY NOT BE THE FILE THE TOOL READS
+
+*2026-09-07. Third member of this family in one day.*
+
+**EasyPanel regenerates a service's `code/` directory from its own database on every
+deploy.** The Dockerfile on disk is an *output*, not an input. Editing it does nothing:
+the next deploy overwrites it with the stored copy and builds that.
+
+How it was caught, and why nothing weaker would have caught it: the file was rewritten,
+the change **verified on disk by reading it back**, and the deploy then built a Dockerfile
+containing the *old* content — while the hand-made backup left beside it had been
+**deleted**. The write succeeded, the read-back confirmed it, and the tool used something
+else entirely.
+
+The only writable input is the API: `updateAppSourceDockerfile` (or `updateAppBuild` /
+`updateAppSourceGit` for the other source types).
+
+**The family.** Same shape as *read where the PROCESS reads, not where it is convenient*
+(`docker exec printenv` vs `/proc/<pid>/environ`), and as *the export is the write*. In all
+three, a surface that looks authoritative is a copy, and the real one is somewhere else.
+**Before editing any config a tool consumes, establish that the tool reads THAT file** —
+change it, run the tool, and confirm the tool's behaviour changed. A read-back proves the
+write landed; it does not prove anything reads it.
+
+---
+
+## RE-RUN THE TOOL'S OWN COMMAND TO SEE THE REAL ERROR
+
+*Same incident, and it is what turned two failed deploys into a diagnosis.*
+
+An API wrapper reported:
+
+```
+Command failed with exit code 1: docker buildx build ... (BAD_REQUEST, HTTP 400)
+```
+
+`BAD_REQUEST` is the **wrapper's** framing. It says the call failed; it says nothing about
+why, and "400" invites you to look for a malformed request that does not exist.
+
+Good wrappers echo the command they ran. **Run it yourself, verbatim, and read the stderr
+the wrapper swallowed.** Here that produced the actual cause in one line:
+
+```
+failed to resolve source metadata for docker.io/library/isola-portal-web:lumen-0c22d82:
+pull access denied, repository does not exist or may require authorization
+```
+
+— a `FROM` pinned to a tag that only ever existed locally and had since been pruned, so
+buildx fell through to Docker Hub. Nothing about the wrapper's message pointed there, and
+two hypotheses were formed and discarded before the real command was run. One of them
+(*"buildx cannot see local images"*) was **disproved by an A/B in the same run**: plain
+`docker build` and `docker buildx build` both resolved the identical one-line Dockerfile.
+
+**Do this before hypothesising, not after.** And when the re-run touches production, check
+what it is allowed to overwrite first — here it could only rewrite a tag whose image was
+already pinned under a second name, so the reproduction was safe by construction.
