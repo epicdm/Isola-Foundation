@@ -713,3 +713,59 @@ throwaway branch, control fails* — then delete the throwaway. Measured 2026-09
 staff-nav control: **passes in 6.5s on the fix, fails in 35.1s under sabotage** (the extra
 29s being the poll's full timeout, which is itself evidence the retry is real and not
 short-circuiting).
+
+---
+
+## A CHECK MUST BE ABLE TO SAY "I DON'T KNOW"
+
+*Ratified 2026-09-07. Three answers, not two.*
+
+The rule above asks whether an instrument can produce **the other** answer. This one asks
+whether it can produce the **third**:
+
+| answer | meaning |
+|---|---|
+| **PASS** | I looked, and it is fine |
+| **FAIL** | I looked, and it is not |
+| **CANNOT MEASURE** | **I could not look** |
+
+**Most checks fold the third into the first**, and that is how a monitor pointed at a dead
+service reports health forever. *Everything matched* and *I compared nothing* produce the
+same green, and the second is indistinguishable from the first at exactly the moment you
+most need them apart.
+
+### The shape it takes in practice
+
+Every one of these returns "fine" while measuring nothing:
+
+* a loop over **zero** items — an empty set agrees with itself perfectly
+* a diff of two **empty** extractions
+* a grep whose input **file does not exist**
+* a comparison where one side is **missing**, silently compared against itself
+* a `find`/`filter` that matched **nothing**, then reported no problems in what it found
+
+### The rule
+
+**Count what you measured, and refuse below the threshold that makes the claim meaningful.**
+
+Not "warn". **Refuse** — a distinct exit code, a distinct word, and no verdict about the
+thing you were asked about. Say *what* you could not read and *how many of how many*.
+
+```
+if [ "$measured" -lt 2 ]; then
+  echo "CANNOT MEASURE -- only ${measured} of ${total} readable."
+  echo "Refusing to report coherence. Two services must be readable to compare two."
+  return 3        # NOT 0, and NOT the same code as a real mismatch
+fi
+```
+
+**And prove the third answer fires**, exactly as you prove the other two. Measured
+2026-09-07 on `lumen-coherence.sh`: a copy pointed at services that do not exist returned
+**exit 3**, not 0 — with nothing real touched.
+
+### Why the third code must differ from the second
+
+A caller that treats *"I could not look"* the same as *"it is broken"* will eventually
+suppress both. Distinct codes let a scheduler page on FAIL, retry on CANNOT MEASURE, and
+escalate only if the inability persists — which is the true signal that something is wrong
+with the *instrument*, and it is the one this estate has repeatedly missed.
