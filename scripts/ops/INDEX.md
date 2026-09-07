@@ -222,3 +222,63 @@ refuse to run against anything off an explicit fixture/target allowlist where
 the substrate is customer-facing, and end with an independent re-read that
 fails loudly (non-zero exit, explicit `FAIL:` line) if the expected end state
 was not actually reached — never trust a mutation's own return value as proof.
+
+## STANDING CHECK — a service that cannot say what commit it is, is undiagnosable
+
+**Ratified 2026-09-06 by the owner, after the second occurrence.**
+
+> Before this lane calls any deploy verified, the service must expose its
+> revision and it must be READ BACK.
+
+Two production services have now been silently stale or dangling, and **both
+were found by accident**:
+
+1. **`isola-lumen-prod` (webapp)** — its entire source was `FROM
+   isola-portal-web:lumen-6ee15ba`, an image that **no longer existed on the
+   host**. A "deploy" would not have shipped anything; it would have failed on a
+   registry pull for a local-only tag. Found only because the pin was checked
+   before deploying rather than after.
+2. **`isola-lumen-api-prod`** — ran code from 2026-08-31 while the branch had
+   moved on 2026-09-04. `GET /api/isola/tenants/<t>/customers/` answered
+   `not_configured` forever and the owner's customer list was permanently empty,
+   **while every configuration value that path needs was present and correct**.
+   The image carried **no revision label at all**. Found only by reading the
+   deployed source out of the running container by hand, after noticing that
+   `is_configured()` returning `True` contradicted a `not_configured` response.
+
+Note what both have in common: **the symptom pointed at configuration, and the
+cause was provenance.** In (2) the config was flawless. Anyone debugging from
+the symptom would have spent the day on env vars and Odoo bindings.
+
+### The check, applied to every deploy
+
+1. **Before deploying, establish what the service's source actually is.** If it
+   is `FROM <image>`, confirm that image EXISTS, with a positive control proving
+   the probe can report PRESENT and a negative control proving it can report
+   ABSENT. A dangling pin makes "just deploy" a no-op or a failure, never a fix.
+2. **After deploying, read the revision back from OUTSIDE** — the served
+   endpoint (`/version`, `version.json`), not the deploy's success response and
+   not the build log. Then read it from INSIDE the container as the second,
+   independent leg.
+3. **If the service cannot answer "what commit are you", that is the first
+   defect to fix** — before the one you came for. It is not hardening: it is the
+   difference between a five-minute diagnosis and finding a four-day-stale
+   production service by luck.
+
+### What this implies for anything new
+
+Any service this estate builds emits `org.opencontainers.image.revision` from a
+**required** `GIT_SHA` build arg, baked at BUILD time, and exposes that same
+single value on an unauthenticated endpoint. One value, both places, so they
+cannot drift — `packages/webapp/Dockerfile.prod` records a 2026-08-24 case where
+a **deploy-time** `GIT_SHA` env var drifted five days from the image tag,
+because it was set once at deploy and never updated on a later
+`docker service update --image`.
+
+An unauthenticated version endpoint is deliberate. A version you must
+authenticate to read is useless to monitoring and to an operator at 2am, which
+is precisely when this matters. Disclose the sha and nothing else — not the
+branch, the build host, the environment name, or anything derived from a
+credential.
+
+**Two occurrences is a pattern, not an incident.**
