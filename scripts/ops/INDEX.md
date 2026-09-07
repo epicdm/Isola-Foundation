@@ -459,3 +459,94 @@ understates the exposure by a factor of twenty-two.
 **Name what you held back, in the commit and in a README beside it.** The next person sees
 files present on the host and absent from git, concludes the commit was incomplete, and runs
 `git add`. That is one command away from the exposure you just prevented.
+
+---
+
+## HOW TO GIVE A SCRIPT A CREDENTIAL — THE SANCTIONED PATTERN
+
+*Ratified 2026-09-07. This is the standard. Nothing else is.*
+
+**Read this first, because it is the actual finding.** Three cleartext credentials were found
+on host03 — a live Odoo API key among them — in 66 files. Rotating 66 values does not close
+it. **The next incident produces the sixty-seventh**, because:
+
+> An operational script needs a credential at the moment it runs, and the estate offers no
+> ordinary way to give it one — so whoever was mid-incident pasted it inline, and the file
+> outlived the incident.
+
+**A rule that is harder than the thing it forbids does not get followed under incident
+pressure.** So the fix is not a prohibition, it is an easier path. It already exists, twelve
+lines from where the inline pastes were found, in Foundation's own `entrypoint.sh`.
+
+### The three lines. Copy them.
+
+```sh
+if [ -f /run/secrets/NAME ]; then
+  MY_VAR="$(cat /run/secrets/NAME)"; export MY_VAR
+  log "MY_VAR loaded from swarm secret (length ${#MY_VAR}, value not logged)"
+else
+  log "MY_VAR NOT present -- this path fails closed"
+fi
+```
+
+Create the secret **without anyone reading it** — if the value already exists somewhere on
+the host, pipe it; read and write are one pipe, and it never becomes a shell variable, a
+file, or an argument:
+
+```sh
+sudo docker exec <container> printenv THE_VAR | tr -d '\n' \
+  | sudo docker secret create the_name_$(date +%Y%m%d) -
+```
+
+`tr -d '\n'` is load-bearing: `printenv` appends a newline the real caller does not send, and
+a trailing byte produces a secret that never matches — a failure indistinguishable from a
+wrong credential.
+
+Then reference it by name only, in the stack file:
+
+```yaml
+    secrets:
+      - the_name
+secrets:
+  the_name:
+    external: true
+    name: the_name_20260907
+```
+
+### Why this shape and not another
+
+* The **value never appears in the stack file** and is never disclosed by `docker service inspect`.
+* It fails closed and **says so in the log** — a length, never a value.
+* One secret per caller means each is **separately deletable**. A shared value makes two
+  systems one principal, and then neither can be revoked without breaking the other.
+
+### The trap it creates, which you must know before you debug it
+
+`docker exec <c> printenv X` starts a **new** process from the container's `Config.Env`,
+which never held these values. It reports **UNSET while the running server has them**. Read
+`/proc/<pid>/environ` of the serving process, and carry a control in the same read (assert
+`HOSTNAME` is found) — `pgrep` is absent from these images, and a failed read looks exactly
+like an absent variable. This cost a full cycle before it was written down.
+
+### Containment when you find an inline paste and cannot rotate yet
+
+`chmod 0600`, having **recorded the before-state first** so it is reversible. Do not move,
+delete, or edit the file, and **do not rotate a key that may be load-bearing for something
+you are mid-way through proving green** — that breaks the thing you just fixed and costs
+hours proving the two were unrelated. Measured 2026-09-07: all 66 files were world-readable
+(44 at `644`, 22 at `755`) on a host running 87 containers.
+
+---
+
+## PORT'S UPSERT OVERWRITES A STRING PROPERTY WHOLESALE
+
+**`merge=true` is top-level only.** It merges *properties*, not the contents of one. Writing
+`decision_text` or `description` on an existing entity **replaces the entire body** — there
+is no append, and what was there is gone.
+
+So: **never "add a note" to an existing decision or defect.** File a new entity and link it
+by identifier from both sides. Read-modify-write is not an option either, because the read
+path does not reliably return long property bodies.
+
+Cost of learning this the other way, twice in one night: lost entity bodies that had to be
+reconstructed from memory.
