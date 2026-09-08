@@ -821,3 +821,132 @@ open the portal` was sitting in plain sight while the surface audit reported saf
 It is worse than an undeployed feature in every way: the cost is live, the fix exists, and
 the usual instruments — route diffs, schema checks, endpoint smoke tests — are all blind to
 it by construction.
+
+---
+
+## LAW 43 — Non-determinism reads as transience
+
+*Measured 2026-09-08, after eleven days.*
+
+The Lumen API image could not be built. The error was always the same shape and never the
+same detail: a 404 on `libc-dev-bin 2.31-13+deb11u14`, sometimes from `deb.debian.org`,
+sometimes from `security.debian.org`, sometimes from neither. Every time, it read as an
+archive hiccup that would clear on its own. It never cleared, because it was not a hiccup:
+Debian's CDN serves `bullseye-security` from four anycast addresses whose **pool contents
+differ per edge and over time**, while the **index keeps listing versions a given edge
+cannot serve**.
+
+The proof it varies was in our own file's comments the whole time:
+
+```
+2026-09-06   libc-dev-bin u14   deb.debian.org 404   security.debian.org 200
+2026-09-08   the exact mirror image, and then 404 on both
+```
+
+Same object, opposite hosts, two days apart.
+
+### The rule
+
+**A failure that comes and goes gets waited out instead of diagnosed. Intermittent is a
+reason to diagnose HARDER, not a reason to retry.** Determinism is what makes a fault feel
+worth investigating; its absence is precisely what lets one survive for days behind
+"probably transient". When a probe succeeds and the real run fails, do not conclude the
+problem is gone — conclude the two ran against *different state*, and go find out which.
+
+### The sharper form
+
+**"It worked when I tried it" is a data point about the trial, not about the system.** In
+this case a throwaway probe hit an edge that had the file and reported the build unblocked;
+the build hit an edge that did not.
+
+---
+
+## LAW 44 — A second source for the same suite adds no failover
+
+*Same incident.*
+
+A previous change added `security.debian.org` as a second apt source for a suite the base
+image already configured via `deb.debian.org/debian-security`, reasoning that two hosts
+would "survive a gap on either side".
+
+Both hostnames resolve to the **same four addresses**. They were never two mirrors. And
+apt does not fail over between sources for a single package — it picks one and fails if
+that one 404s.
+
+### The rule
+
+**A second source for the same suite is not redundancy, it is a coin flip** — and worse, it
+makes the failure *non-deterministic across packages within one build*, which is how this
+one disguised itself as an archive outage rather than as our own configuration. Before
+adding a mirror for resilience, check (a) whether it is actually a different host, and
+(b) whether the client fails over at all.
+
+---
+
+## A door in front of a dead service answers exactly like a door in front of a live one
+
+*Measured 2026-09-08 on staging Lumen.*
+
+Per-service basic auth was added to the staging API and confirmed working from outside:
+`401`. It looked correctly protected. It was crash-looping on a missing
+`HASHID_FIELD_SALT` the entire time, because the same deploy that added the door had wiped
+its environment. From off the box the two states are byte-identical.
+
+### The rule
+
+**Adding a door removes your ability to see the service from outside, so the liveness probe
+must move INSIDE in the same motion.** Probe the container directly: a path that must 404
+returning 404, and the real endpoint answering at all. `401` is the *door* talking; it says
+nothing whatsoever about what is behind it.
+
+Generalises to every gated surface on this estate — basic auth, IP allowlists,
+forward-auth, a WAF. The moment you gate something, your external health check starts
+measuring the gate.
+
+---
+
+## A transport artefact can wear the shape of a permission error
+
+*Measured 2026-09-08, moving a credential to host03 over stdin.*
+
+Piping one native command into another in PowerShell prepends a **UTF-8 BOM**. The
+receiving process read the credential as `﻿` + the value, and the HTTP client raised:
+
+```
+UnicodeEncodeError: 'latin-1' codec can't encode character '﻿' in position 0
+```
+
+on the `Authorization` header. The length was 72 where the stored value was 71.
+
+### The rule
+
+**Before concluding a credential is wrong, prove the bytes arrived intact.** Compare a
+length or a digest against the source. An encoding artefact on a credential surfaces as a
+header/auth error, which sends you looking for a bad key, a wrong scheme, or a revoked
+token — anywhere except the pipe. One length comparison ends it.
+
+Sibling of the PowerShell UTF-8 round-trip trap already in this index: the same shell, the
+same cause, a different disguise.
+
+---
+
+## A redirect under `sudo` is performed by the unprivileged shell
+
+`sudo cmd > /root/file` does **not** write as root. The shell opens the redirect target
+*before* `sudo` elevates anything, so the write is attempted as the calling user. Depending
+on the shell and the caller's permissions this fails — or, worse, succeeds against a
+different file than intended, or writes nothing while the pipeline still reports success.
+
+### The rule
+
+**Put the redirect inside the elevated context, never outside it:**
+
+```bash
+sudo tee /root/file >/dev/null <<'EOF'     # preferred: no shell quoting to get wrong
+sudo sh -c 'cmd > /root/file'              # acceptable
+sudo cmd > /root/file                      # WRONG: the redirect is not elevated
+```
+
+The same applies to `>>`, and to heredocs feeding a `sudo`'d command that then redirects.
+It belongs in the same family as *operations that succeed by doing nothing*: the exit code
+describes the command, not the write you thought you were making.
