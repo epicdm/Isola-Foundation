@@ -1,0 +1,74 @@
+name: CI
+
+# Runs on every PR (any branch) and on push to main, plus manual dispatch.
+# The sibling repo's CI only push-triggered on one branch, so its PRs got no
+# run at all — this workflow deliberately does not repeat that mistake.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+defaults:
+  run:
+    working-directory: artifacts/isola
+
+jobs:
+  test:
+    name: Typecheck, test
+    runs-on: ubuntu-latest
+    # NOTE: no path filters here. A path filter that skipped this job on
+    # "unrelated" changes could report success while never actually running
+    # the suite — the exact failure mode (a scope-classifier skipping the
+    # whole run in 8s while still reporting green) this workflow must not
+    # inherit. Every push/PR run does the real work, full stop.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies (frozen lockfile)
+        working-directory: .
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm exec prisma generate
+
+      - name: Typecheck
+        run: pnpm run typecheck
+        env:
+          # DATABASE_URL is required by prisma/schema.prisma's datasource
+          # block to resolve at generate/typecheck time. No real database is
+          # contacted for typecheck or for the mocked test suite below — this
+          # is a syntactically valid but non-functional placeholder, not a
+          # real credential.
+          DATABASE_URL: 'postgresql://ci:ci@localhost:5432/ci_placeholder?sslmode=disable'
+
+      # NOTE: no "lint" step. artifacts/isola/package.json defines no `lint`
+      # script and the repo ships no ESLint config (the scattered
+      # `eslint-disable` comments in the source are inert leftovers with
+      # nothing to enforce them). Inventing a lint step here would either
+      # fail immediately or silently do nothing — omitted rather than faked.
+
+      - name: Test
+        run: pnpm run test
+        env:
+          # The suite mocks @/lib/prisma (vi.mock) in every test that touches
+          # it — no real Postgres is contacted by `vitest run`. TENANT_MASTER_KEY
+          # is not read by any test path found (lib/tenant-secrets.ts derives
+          # its key lazily inside encryptSecret/decryptSecret, never at import
+          # time), so it is not required here. This DATABASE_URL is a fixed,
+          # non-functional test placeholder, not a real credential.
+          DATABASE_URL: 'postgresql://ci:ci@localhost:5432/ci_placeholder?sslmode=disable'
