@@ -28,10 +28,16 @@
  *   No arbitrary model, method or field. No caller-supplied Odoo domain. No
  *   partner id the caller invented - the partner must come from Tool 1, which
  *   resolved it from a transport-verified identity.
+ *
+ *   And, since 2026-09-09, no lead in an Odoo this tenant was never bound to.
+ *   The default resolveConfig is the WRITE door: a tenant with no OdooBinding
+ *   row is refused with `tenant_not_bound` rather than served the deployment's
+ *   own connection. A lead is a commercial record in somebody's CRM; which
+ *   somebody must be named by a binding row, never inherited from an env var.
  */
 import { json2Call, findOrCreateUtmRecord } from "@/engines/odoo"
 import type { OdooConfig } from "@/engines/odoo"
-import { resolveOdooConfigForTenant } from "@/lib/engine-bindings"
+import { isOdooBindingRequiredError, resolveOdooConfigForTenantWrite } from "@/lib/engine-bindings"
 import {
   claimOperation,
   completeOperation,
@@ -76,6 +82,10 @@ export type LeadCreateFailureCode =
   | "lead_creation_not_permitted"
   | "operation_conflict"
   | "operation_in_flight"
+  // NOT a kind of `odoo_unavailable`. Odoo was never contacted and never
+  // failed; this tenant has no system of record to write to. Retrying will be
+  // refused identically until somebody creates the binding row.
+  | "tenant_not_bound"
   | "odoo_unavailable"
   | "readback_failed"
 
@@ -179,7 +189,8 @@ async function defaultCreateLead(config: OdooConfig, vals: Record<string, unknow
 }
 
 export const DEFAULT_LEAD_CREATE_DEPS: LeadCreateDeps = {
-  resolveConfig: resolveOdooConfigForTenant,
+  // THE WRITE DOOR, not the read resolver. See the module header.
+  resolveConfig: resolveOdooConfigForTenantWrite,
   findSuitableLead: defaultFindSuitableLead,
   resolveSourceId: (config, name) => findOrCreateUtmRecord(config, "utm.source", name),
   createLead: defaultCreateLead,
@@ -276,6 +287,15 @@ export async function createGovernedLead(
   try {
     config = await deps.resolveConfig(input.tenantId)
   } catch (err) {
+    // An unbound tenant is its own outcome. Nothing was contacted, nothing was
+    // written, and no amount of retrying will change either.
+    if (isOdooBindingRequiredError(err)) {
+      return fail(
+        null,
+        "tenant_not_bound",
+        "this tenant is not bound to an Odoo instance, so there is no system of record to create a lead in",
+      )
+    }
     return fail(null, "odoo_unavailable", err instanceof Error ? err.message : "tenant Odoo binding could not be resolved")
   }
 

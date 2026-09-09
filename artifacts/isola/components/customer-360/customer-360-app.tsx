@@ -27,6 +27,10 @@ import {
   type ChatwootContextHint,
 } from '@/lib/customer-360/chatwoot-context';
 import type { Customer360Response, Customer360Snapshot } from '@/lib/customer-360/contracts';
+import {
+  FOLLOW_UP_UNREACHABLE_NOTICE,
+  followUpNoticeFor,
+} from '@/lib/customer-360/follow-up-notice';
 import type { SendOutcome } from '@/lib/customer-360/send-badge';
 import {
   CustomerWorkspaceView,
@@ -93,6 +97,9 @@ export function Customer360App() {
   const [sendPhase, setSendPhase] = useState<SendPhase>({ kind: 'previewing' });
   const inFlight = useRef(false);
   const [creatingFollowUp, setCreatingFollowUp] = useState(false);
+  /** Why the last follow-up attempt did not produce a follow-up. Null when the
+   *  last attempt succeeded, or when none has been made. */
+  const [followUpNotice, setFollowUpNotice] = useState<string | null>(null);
 
   /**
    * Writes a REAL mail.activity via the create-followup route, then merges
@@ -100,11 +107,23 @@ export function Customer360App() {
    * snapshot — no full re-fetch, and nothing added to the list until Odoo
    * has confirmed it exists. Tomorrow's real date and the design's own
    * "Follow up — {name}" wording are computed HERE, not in the pure view.
+   *
+   * A REFUSAL IS NO LONGER ABSORBED. This handler used to check
+   * `result?.ok && result.followUp` and do nothing otherwise, with a comment
+   * saying so. That made every refusal the route can return invisible — an
+   * unbound tenant, an unreachable Odoo, a failed readback — and, with no
+   * .catch() on the chain, a thrown request was an unhandled rejection and the
+   * same silence. The operator pressed a button and nothing at all happened,
+   * which they cannot even report. followUpNoticeFor() decides the words; the
+   * three cases it separates are documented in that module.
    */
   const createFollowUp = useCallback(() => {
     if (phase.kind !== 'ready' || creatingFollowUp) return;
     const { snapshot } = phase;
     setCreatingFollowUp(true);
+    // Clear the previous attempt's notice: a stale refusal sitting over a fresh
+    // attempt is its own small lie.
+    setFollowUpNotice(null);
     const tomorrow = new Date();
     tomorrow.setDate(tomorrow.getDate() + 1);
     const dueDate = tomorrow.toISOString().slice(0, 10);
@@ -119,15 +138,23 @@ export function Customer360App() {
     })
       .then(async (response) => response.json())
       .then((result) => {
-        if (result?.ok && result.followUp) {
+        const notice = followUpNoticeFor(result);
+        if (notice === null) {
           setPhase((p) => p.kind === 'ready'
             ? { ...p, snapshot: { ...p.snapshot, followUps: [...p.snapshot.followUps, result.followUp] } }
             : p);
+          return;
         }
-        // A refusal is silently absorbed here rather than replacing the
-        // whole page with an error: the customer is still fully usable,
-        // only the one write did not happen. The button re-enables so the
-        // operator can try again.
+        // The customer is still fully usable — only the one write did not
+        // happen — so this is a notice beside the workspace, not a page that
+        // replaces it. The button re-enables either way.
+        setFollowUpNotice(notice);
+      })
+      .catch(() => {
+        // The request never came back. Whether a follow-up was created is
+        // genuinely unknown, and the notice says exactly that rather than
+        // claiming nothing happened.
+        setFollowUpNotice(FOLLOW_UP_UNREACHABLE_NOTICE);
       })
       .finally(() => setCreatingFollowUp(false));
   }, [phase, creatingFollowUp]);
@@ -241,24 +268,35 @@ export function Customer360App() {
 
   const hint = phase.hint;
 
-  return <CustomerWorkspaceView
-    snapshot={phase.snapshot}
-    tab={tab}
-    onTabChange={setTab}
-    nested={nested ? { target: nested, phase: nestedPhase } : null}
-    onOpenObject={setNested}
-    onCloseObject={() => setNested(null)}
-    outcomeFor={(doc) => sent[documentKey(hint, doc)]}
-    send={sendDoc ? { doc: sendDoc, phase: sendPhase } : null}
-    onSendOpen={setSendDoc}
-    onSendConfirm={confirmSend}
-    onSendClose={() => setSendDoc(null)}
-    replyOpen={replyOpen}
-    replyPrefill={replyPrefill}
-    onReplyOpen={(prefillText) => { setReplyPrefill(prefillText); setReplyOpen(true); }}
-    onReplyClose={() => { setReplyOpen(false); setReplyPrefill(undefined); }}
-    onCreateFollowUp={createFollowUp}
-    creatingFollowUp={creatingFollowUp}
-    destinationLabel={`conversation #${hint.conversationDisplayIdHint}`}
-  />;
+  return <>
+    {followUpNotice && (
+      // Beside the workspace, never instead of it: the customer is still fully
+      // readable and every other action still works. `role="status"` so a
+      // screen reader announces it without stealing focus.
+      <section className={styles.notice} role="status">
+        <p>{followUpNotice}</p>
+        <button onClick={() => setFollowUpNotice(null)}>Dismiss</button>
+      </section>
+    )}
+    <CustomerWorkspaceView
+      snapshot={phase.snapshot}
+      tab={tab}
+      onTabChange={setTab}
+      nested={nested ? { target: nested, phase: nestedPhase } : null}
+      onOpenObject={setNested}
+      onCloseObject={() => setNested(null)}
+      outcomeFor={(doc) => sent[documentKey(hint, doc)]}
+      send={sendDoc ? { doc: sendDoc, phase: sendPhase } : null}
+      onSendOpen={setSendDoc}
+      onSendConfirm={confirmSend}
+      onSendClose={() => setSendDoc(null)}
+      replyOpen={replyOpen}
+      replyPrefill={replyPrefill}
+      onReplyOpen={(prefillText) => { setReplyPrefill(prefillText); setReplyOpen(true); }}
+      onReplyClose={() => { setReplyOpen(false); setReplyPrefill(undefined); }}
+      onCreateFollowUp={createFollowUp}
+      creatingFollowUp={creatingFollowUp}
+      destinationLabel={`conversation #${hint.conversationDisplayIdHint}`}
+    />
+  </>;
 }
