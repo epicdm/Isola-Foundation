@@ -2,18 +2,37 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { LIFECYCLE_PRESENTATION, type ActionLifecycleState } from '@/lib/customer-workspace/contract'
 
-const { getSessionMock, requireWorkspaceAccessMock, json2CallMock, resolveOdooConfigMock, rows } =
-  vi.hoisted(() => ({
-    getSessionMock: vi.fn(),
-    requireWorkspaceAccessMock: vi.fn(),
-    json2CallMock: vi.fn(),
-    resolveOdooConfigMock: vi.fn(),
-    rows: [] as Record<string, unknown>[],
-  }))
+const {
+  getSessionMock,
+  requireWorkspaceAccessMock,
+  json2CallMock,
+  resolveOdooConfigMock,
+  resolveOdooConfigWriteMock,
+  rows,
+} = vi.hoisted(() => ({
+  getSessionMock: vi.fn(),
+  requireWorkspaceAccessMock: vi.fn(),
+  json2CallMock: vi.fn(),
+  resolveOdooConfigMock: vi.fn(),
+  resolveOdooConfigWriteMock: vi.fn(),
+  rows: [] as Record<string, unknown>[],
+}))
 
 vi.mock('@/lib/session', () => ({ getSession: getSessionMock }))
 vi.mock('@/lib/workspace/authz', () => ({ requireWorkspaceAccess: requireWorkspaceAccessMock }))
-vi.mock('@/lib/engine-bindings', () => ({ resolveOdooConfigForTenant: resolveOdooConfigMock }))
+
+// The two resolvers are stubbed; everything else -- including
+// isOdooBindingRequiredError and the error class the refusal is recognised by
+// -- is the REAL module. A test that supplied its own recogniser would be
+// asserting against itself.
+vi.mock('@/lib/engine-bindings', async (orig) => {
+  const actual = await orig<typeof import('@/lib/engine-bindings')>()
+  return {
+    ...actual,
+    resolveOdooConfigForTenant: resolveOdooConfigMock,
+    resolveOdooConfigForTenantWrite: resolveOdooConfigWriteMock,
+  }
+})
 
 vi.mock('@/engines/odoo', async (orig) => {
   const actual = await orig<typeof import('@/engines/odoo')>()
@@ -43,10 +62,13 @@ vi.mock('@/lib/prisma', () => {
         },
         findMany: async () => [],
       },
+      odooBinding: { findUnique: async () => null },
     },
     default: {},
   }
 })
+
+import { OdooBindingRequiredError, TENANT_NOT_BOUND } from '@/lib/engine-bindings'
 
 import { POST } from './route'
 
@@ -101,12 +123,14 @@ beforeEach(() => {
   requireWorkspaceAccessMock.mockReset()
   json2CallMock.mockReset()
   resolveOdooConfigMock.mockReset()
+  resolveOdooConfigWriteMock.mockReset()
   resolveOdooConfigMock.mockResolvedValue({ url: 'https://tenant.odoo.com', apiKey: 'k', db: 'd' })
+  resolveOdooConfigWriteMock.mockResolvedValue({ url: 'https://tenant.odoo.com', apiKey: 'k', db: 'd' })
   getSessionMock.mockResolvedValue(session)
   requireWorkspaceAccessMock.mockResolvedValue(allow())
 })
 
-/* ── guards ────────────────────────────────────────────────────────────────*/
+/* ── guards ───────────────────────────────────────────────────────────*/
 
 describe('nothing is proposed before the reader is known', () => {
   it('answers 401 with no session and never reads the body', async () => {
@@ -156,7 +180,7 @@ describe('a malformed request is a 4xx, and an action outcome is not', () => {
   })
 })
 
-/* ── the tenant boundary ───────────────────────────────────────────────────*/
+/* ── the tenant boundary ───────────────────────────────────────────────*/
 
 describe('a customer outside this tenant cannot be acted on', () => {
   it('answers 404 and never touches the ledger', async () => {
@@ -170,12 +194,71 @@ describe('a customer outside this tenant cannot be acted on', () => {
     expect(rows).toHaveLength(0)
   })
 
-  it('resolves the system of record for the SESSION tenant', async () => {
+  it('resolves the system of record for the SESSION tenant, through the WRITE door', async () => {
     customerExists()
 
     await post(note())
 
-    expect(resolveOdooConfigMock).toHaveBeenCalledWith(TENANT)
+    expect(resolveOdooConfigWriteMock).toHaveBeenCalledWith(TENANT)
+    // The read resolver is the one that falls back to the deployment default.
+    // A write must never reach it.
+    expect(resolveOdooConfigMock).not.toHaveBeenCalled()
+  })
+})
+
+/* ── a write must name its tenant, not inherit it ────────────────────────────*/
+
+describe('a tenant with no binding row is refused before anything is written', () => {
+  it('answers 200, names the reason, and never reaches Odoo or the ledger', async () => {
+    customerExists()
+    resolveOdooConfigWriteMock.mockRejectedValue(
+      new OdooBindingRequiredError(TENANT, `tenant ${TENANT} has no OdooBinding row`),
+    )
+
+    const res = await post(note())
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body.success).toBe(false)
+    expect(body.reason).toBe(TENANT_NOT_BOUND)
+    // Asserted on the mocks, not on the body: nothing was asked of Odoo and no
+    // operation was claimed.
+    expect(json2CallMock).not.toHaveBeenCalled()
+    expect(rows).toHaveLength(0)
+  })
+
+  it('CONTROL: a BOUND tenant is served, reaches Odoo, and reaches the ledger', async () => {
+    customerExists()
+
+    const body = await (await post(note())).json()
+
+    expect(json2CallMock).toHaveBeenCalled()
+    expect(rows).toHaveLength(1)
+    expect(body.reason).toBeUndefined()
+  })
+
+  it('is not reported as an outage — an unreachable Odoo still says so in its own words', async () => {
+    customerExists()
+    resolveOdooConfigWriteMock.mockRejectedValue(new Error('connect ECONNREFUSED 10.1.2.3:5432'))
+
+    const body = await (await post(note())).json()
+
+    expect(body.lifecycle).toBe('dependency_unavailable')
+    expect(body.reason).toBeUndefined()
+    expect(LIFECYCLE_PRESENTATION[body.lifecycle as ActionLifecycleState].retryWrite).toBe('safe')
+  })
+
+  it('the unbound refusal does not advise a retry the way an outage does', async () => {
+    customerExists()
+    resolveOdooConfigWriteMock.mockRejectedValue(new OdooBindingRequiredError(TENANT, 'unbound'))
+
+    const body = await (await post(note())).json()
+    const lifecycle = body.lifecycle as ActionLifecycleState
+
+    expect(lifecycle).not.toBe('dependency_unavailable')
+    expect(LIFECYCLE_PRESENTATION[lifecycle].retryWrite).toBe('unsafe')
+    expect(LIFECYCLE_PRESENTATION[lifecycle].escalate).toBe(true)
+    expect(LIFECYCLE_PRESENTATION[lifecycle].success).toBe(false)
   })
 })
 
@@ -254,7 +337,7 @@ describe('the status line never carries the verdict', () => {
   })
 })
 
-/* ── the shared ledger ─────────────────────────────────────────────────────*/
+/* ── the shared ledger ────────────────────────────────────────────────*/
 
 describe('the shared ledger is the one that is used', () => {
   it('returns the ledger identifier for an action that reached it', async () => {
