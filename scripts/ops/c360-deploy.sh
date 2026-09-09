@@ -54,9 +54,28 @@
 # canonical copy anywhere -- exactly the class of problem this registry
 # exists to close. It now takes the commit sha as its one required argument;
 # everything else it needs is either derived from that or is a genuinely
-# static per-environment constant (ISSUER_URL, ODOO_URL/DB, the tenant-key
-# path below), which is why those stay as fixed values here rather than
-# arguments -- they do not change per deploy.
+# static per-environment constant (ISSUER_URL, the tenant-key path below),
+# which is why those stay as fixed values here rather than arguments -- they
+# do not change per deploy.
+#
+# ODOO_URL / ODOO_DB, added 2026-09-09 (fix for
+# def-odoo-binding-table-empty-shared-tenant-fallback-2026-08-30).
+# This script used to hardcode ODOO_URL/ODOO_DB to EPIC's PRODUCTION Odoo
+# (epic-communications-inc.odoo.com) as a "static per-environment constant."
+# It is not one: this script deploys the isola360uat stack, and with the
+# OdooBinding table empty for every tenant, resolveOdooConfigForTenant()
+# (lib/engine-bindings.ts) falls through to exactly these env vars -- so
+# every deploy of this UAT stack was silently re-pointing it at EPIC's real,
+# live Odoo. That is the root cause of a live P1: actions taken against the
+# UAT stack (e.g. "Schedule follow-up") wrote real records into production.
+# ODOO_URL/ODOO_DB are now REQUIRED from the calling environment and this
+# script refuses loudly (see the `: "${VAR:?...}"` guard below) if either is
+# unset, instead of defaulting to production. This does not remove EPIC's
+# ability to deploy against its own real Odoo -- a caller who genuinely
+# means that exports ODOO_URL/ODOO_DB before invoking this script, same as
+# any other environment-specific deploy value -- it removes the SILENT,
+# UNCONDITIONAL default that made that a foregone conclusion for every
+# environment this script ever serves.
 ###############################################################################
 set -uo pipefail
 
@@ -73,8 +92,10 @@ STATE_FILE="/home/epicadmin/builds/.isola360-deploy-state"
 export ISSUER_URL="https://isola-360-auth.saas00.epic.dm/realms/isola"
 export TENANT_MASTER_KEY="$(cat /home/epicadmin/builds/.tenant_master_key)"
 
-export ODOO_URL=https://epic-communications-inc.odoo.com
-export ODOO_DB=epic-communications-inc
+: "${ODOO_URL:?ODOO_URL must be set in the calling environment before running this script. It no longer defaults to EPIC's production Odoo (epic-communications-inc.odoo.com) -- see def-odoo-binding-table-empty-shared-tenant-fallback-2026-08-30. Export the Odoo URL that THIS deploy target should actually use.}"
+: "${ODOO_DB:?ODOO_DB must be set in the calling environment before running this script -- same reasoning as ODOO_URL above.}"
+export ODOO_URL
+export ODOO_DB
 
 fail() { echo "REFUSED: $1" >&2; exit 1; }
 
