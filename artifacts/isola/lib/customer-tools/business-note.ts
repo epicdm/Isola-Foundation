@@ -33,6 +33,16 @@
  *   the note it composed is what was stored. So the whole note is refused with
  *   its own code (`secret_shaped_content`) and the caller has to deal with it.
  *
+ * WHICH CRM, THOUGH (2026-09-09)
+ *   Every paragraph above is about WHAT may be written into the chatter. None of
+ *   them decided WHOSE chatter. Until now the default resolveConfig was the read
+ *   resolver, which falls back to the deployment's own ODOO_URL when the tenant
+ *   has no OdooBinding row - measured on UAT that day: zero binding rows, and
+ *   that env naming EPIC's production instance. "Permanent, replicated to every
+ *   backup, visible to everyone with chatter access" was true of a CRM nobody
+ *   chose. The default is now the WRITE door and an unbound tenant is refused
+ *   with `tenant_not_bound`.
+ *
  * THE PROPERTY THAT MATTERS MOST
  *   A retry must not post a second note. As with Tool 4, Odoo cannot be asked
  *   "did you already get this" - a chatter message can be deleted by any user
@@ -42,7 +52,7 @@
  */
 import { json2Call } from "@/engines/odoo"
 import type { OdooConfig } from "@/engines/odoo"
-import { resolveOdooConfigForTenant } from "@/lib/engine-bindings"
+import { isOdooBindingRequiredError, resolveOdooConfigForTenantWrite } from "@/lib/engine-bindings"
 import {
   claimOperation,
   completeOperation,
@@ -89,6 +99,9 @@ export type BusinessNoteFailureCode =
   | "note_not_permitted"
   | "operation_conflict"
   | "operation_in_flight"
+  // Odoo was never contacted: this tenant has no system of record. Distinct
+  // from `odoo_unavailable`, which means we tried and could not get through.
+  | "tenant_not_bound"
   | "odoo_unavailable"
   | "readback_failed"
 
@@ -161,7 +174,7 @@ export interface BusinessNoteDeps {
   store: OperationStore
 }
 
-// ── Sanitisation ─────────────────────────────────────────────────────────────
+// ── Sanitisation ────────────────────────────────────────────────────────
 
 /**
  * Shapes that must never be written into a permanent business record.
@@ -293,7 +306,7 @@ export function renderBusinessNoteBody(
   return body.slice(0, MAX_NOTE_BODY_CHARS)
 }
 
-// ── Odoo defaults ────────────────────────────────────────────────────────────
+// ── Odoo defaults ──────────────────────────────────────────────────────
 
 async function defaultReadTargetPartnerId(
   config: OdooConfig,
@@ -367,7 +380,8 @@ async function defaultReadMessage(
 }
 
 export const DEFAULT_BUSINESS_NOTE_DEPS: BusinessNoteDeps = {
-  resolveConfig: resolveOdooConfigForTenant,
+  // THE WRITE DOOR, not the read resolver. See the module header.
+  resolveConfig: resolveOdooConfigForTenantWrite,
   readTargetPartnerId: defaultReadTargetPartnerId,
   postNote: defaultPostNote,
   readRecordMessageIds: defaultReadRecordMessageIds,
@@ -391,7 +405,7 @@ function fail(
   }
 }
 
-// ── The tool ─────────────────────────────────────────────────────────────────
+// ── The tool ──────────────────────────────────────────────────────────
 
 export async function createGovernedBusinessNote(
   input: BusinessNoteInput,
@@ -502,6 +516,17 @@ export async function createGovernedBusinessNote(
   try {
     config = await deps.resolveConfig(input.tenantId)
   } catch (err) {
+    // Recorded as its own code, not as an outage: a later reader of the ledger
+    // must be able to tell "there was nowhere to write" from "we could not get
+    // through", because only one of them is worth attempting again.
+    if (isOdooBindingRequiredError(err)) {
+      await failOperation(recordId, { code: "tenant_not_bound", detail: err.message }, deps.store)
+      return fail(
+        operationId,
+        "tenant_not_bound",
+        "this tenant is not bound to an Odoo instance, so there is no record to post the note against",
+      )
+    }
     await failOperation(
       recordId,
       { code: "odoo_unavailable", detail: err instanceof Error ? err.message : null },
@@ -559,7 +584,7 @@ export async function createGovernedBusinessNote(
     return fail(operationId, "odoo_unavailable", "message_post returned no usable mail.message id")
   }
 
-  // ── Prove it landed ────────────────────────────────────────────────────────
+  // ── Prove it landed ──────────────────────────────────────────────────
   // Two independent readbacks, because the id echoed by `message_post` proves
   // only that Odoo accepted a call. The RECORD's `message_ids` proves the note
   // is attached to the record a human will open; the MESSAGE proves the stored

@@ -47,6 +47,26 @@
  *     - chatwoot: requires tenant.tenantId; looks up that tenant's
  *       ChatwootBinding row (no env fallback — always fully tenant-sourced).
  *
+ *   EXCEPT FOR THE ODOO OPS THAT WRITE (2026-09-09). The paragraph above is
+ *   the rule for reads and stays the rule for reads. `odoo` is the one engine
+ *   whose allow-list is MIXED: `createCrmLead` changes a business's CRM, while
+ *   `findCustomerByPhone` and `findOpenTasksByAssignee` only look. Resolving
+ *   one config per ENGINE meant the write inherited the read's fallback, so on
+ *   a tenant with no OdooBinding row an AI-originated lead was created in
+ *   whatever ODOO_URL the deployment named — measured on UAT 2026-09-09: zero
+ *   binding rows, and that env naming EPIC's PRODUCTION Odoo.
+ *
+ *   So resolveConfig() takes the OP as well as the engine, and ODOO_WRITE_OPS
+ *   below names the ones that go through the write door
+ *   (resolveOdooConfigForTenantWrite), which REFUSES an unbound tenant instead
+ *   of falling back. The set is declared beside ALLOW_LIST on purpose: adding a
+ *   write to one and forgetting the other is the mistake worth making hard to
+ *   miss.
+ *
+ *   A consumerAccountId-scoped odoo WRITE therefore now refuses too, where
+ *   before it silently used the platform default. That default is exactly the
+ *   connection a write may not inherit, and there is no such call site today.
+ *
  * NOT WRAPPED (flagged, not silently dropped — see engines/README.md for the
  * same discipline applied to the extraction itself)
  *   - Raw `magnusRequest` (lib/magnus-voice.ts, lib/magnus-rateplan.ts) and
@@ -88,7 +108,12 @@
 import { prisma } from './prisma';
 import { audit } from './audit';
 import { getMagnusConfig, getWhatsAppConfig, getChatwootConfig } from './engines';
-import { resolveOdooConfigForTenant, resolveFiservConfigForTenant, resolveBffConfigForTenant } from './engine-bindings';
+import {
+  resolveOdooConfigForTenant,
+  resolveOdooConfigForTenantWrite,
+  resolveFiservConfigForTenant,
+  resolveBffConfigForTenant,
+} from './engine-bindings';
 
 import { getBalance, getCalls, addCredit, debitCredit } from '@/engines/magnus';
 import { charge } from '@/engines/fiserv';
@@ -169,6 +194,20 @@ const ALLOW_LIST = {
   bff: { mirrorAccount, getTopupOptions, startTopup, startCallback },
 } as const;
 
+/**
+ * The odoo ops that CHANGE a record, and therefore may not inherit their
+ * destination from the deployment's env.
+ *
+ * Declared here, immediately under ALLOW_LIST, because the two must be edited
+ * together: an op added above and forgotten here would silently get the read
+ * resolver's fallback, which is the exact defect this set exists to close.
+ *
+ * A read is deliberately NOT in this set. `findCustomerByPhone` and
+ * `findOpenTasksByAssignee` keep the platform-default fallback — that fallback
+ * is how the current customer reads work and removing it would break them.
+ */
+const ODOO_WRITE_OPS: ReadonlySet<string> = new Set(['createCrmLead']);
+
 const TOKEN_ENV_ALLOWLIST = /^(META_|WHATSAPP_)/;
 
 export type EngineName = keyof typeof ALLOW_LIST;
@@ -226,6 +265,7 @@ function assertTenantScope(tenant: TenantScope): void {
 
 async function resolveConfig(
   engine: EngineName,
+  op: string,
   tenant: TenantScope,
   opts: CallEngineOptions,
 ): Promise<unknown> {
@@ -235,7 +275,11 @@ async function resolveConfig(
     case 'fiserv':
       return resolveFiservConfigForTenant(tenant.tenantId);
     case 'odoo':
-      return resolveOdooConfigForTenant(tenant.tenantId);
+      // The one MIXED allow-list. A write names its tenant or it does not run;
+      // a read keeps the fallback it has always had. See the module header.
+      return ODOO_WRITE_OPS.has(op)
+        ? resolveOdooConfigForTenantWrite(tenant.tenantId)
+        : resolveOdooConfigForTenant(tenant.tenantId);
     case 'bff':
       return resolveBffConfigForTenant(tenant.tenantId);
     case 'whatsapp': {
@@ -305,7 +349,7 @@ export async function callEngine<E extends EngineName, O extends OpName<E>>(
     throw new EngineOpNotAllowedError(engine, String(op));
   }
 
-  const config = await resolveConfig(engine, opts.tenant, opts);
+  const config = await resolveConfig(engine, String(op), opts.tenant, opts);
   const actorId = opts.actorId ?? 'system';
   const action = `${engine}.${String(op)}`;
   const auditBase = {

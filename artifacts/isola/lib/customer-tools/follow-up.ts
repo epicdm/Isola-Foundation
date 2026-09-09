@@ -16,6 +16,13 @@
  *   is reused - allowlist first, resolve ids from Odoo, never accept a
  *   caller-supplied id - and the allowlist itself is separate and narrower.
  *
+ * WHICH ODOO, THOUGH
+ *   An allowlist decides WHAT may be written. It says nothing about WHERE. The
+ *   default resolveConfig is therefore the WRITE door (2026-09-09): a tenant
+ *   with no OdooBinding row is refused with `tenant_not_bound` rather than
+ *   served the deployment's own connection. A mail.activity lands in somebody's
+ *   inbox and stays there; whose inbox must be named by a binding row.
+ *
  * THE PROPERTY THAT MATTERS MOST
  *   A retry after the activity has been COMPLETED or UNLINKED must not create a
  *   second follow-up. Odoo cannot help here: a done mail.activity is gone from
@@ -27,7 +34,7 @@
  */
 import { json2Call } from "@/engines/odoo"
 import type { OdooConfig } from "@/engines/odoo"
-import { resolveOdooConfigForTenant } from "@/lib/engine-bindings"
+import { isOdooBindingRequiredError, resolveOdooConfigForTenantWrite } from "@/lib/engine-bindings"
 import {
   claimOperation,
   completeOperation,
@@ -70,6 +77,9 @@ export type FollowUpFailureCode =
   | "follow_up_not_permitted"
   | "operation_conflict"
   | "operation_in_flight"
+  // Odoo was never contacted: this tenant has no system of record. Distinct
+  // from `odoo_unavailable`, which means we tried and could not get through.
+  | "tenant_not_bound"
   | "odoo_unavailable"
   | "readback_failed"
 
@@ -263,7 +273,8 @@ async function defaultReadActivity(config: OdooConfig, activityId: number): Prom
 }
 
 export const DEFAULT_FOLLOW_UP_DEPS: FollowUpDeps = {
-  resolveConfig: resolveOdooConfigForTenant,
+  // THE WRITE DOOR, not the read resolver. See the module header.
+  resolveConfig: resolveOdooConfigForTenantWrite,
   resolveResModelId: defaultResolveResModelId,
   resolveActivityType: defaultResolveActivityType,
   readTargetPartnerId: defaultReadTargetPartnerId,
@@ -380,6 +391,18 @@ export async function createGovernedFollowUp(
   try {
     config = await deps.resolveConfig(input.tenantId)
   } catch (err) {
+    // Unbound tenant, recorded as its own outcome. The detail string here has
+    // always said "tenant Odoo binding could not be resolved"; until the write
+    // door existed that was aspirational, because an unbound tenant did not
+    // fail at all - it silently resolved the deployment's connection.
+    if (isOdooBindingRequiredError(err)) {
+      await failOperation(recordId, { code: "tenant_not_bound", detail: err.message }, deps.store)
+      return fail(
+        operationId,
+        "tenant_not_bound",
+        "this tenant is not bound to an Odoo instance, so there is nowhere to create the follow-up",
+      )
+    }
     await failOperation(recordId, { code: "odoo_unavailable", detail: err instanceof Error ? err.message : null }, deps.store)
     return fail(operationId, "odoo_unavailable", "tenant Odoo binding could not be resolved")
   }

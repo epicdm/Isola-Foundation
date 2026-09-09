@@ -13,7 +13,7 @@
 import { prisma } from '../prisma'
 import { audit } from '../audit'
 import { enqueueNotification } from '../notify'
-import { resolveOdooConfigForTenant } from '../engine-bindings'
+import { isOdooBindingRequiredError, resolveOdooConfigForTenant } from '../engine-bindings'
 import {
   checkActorMayAct,
   completeVerificationActivity,
@@ -510,7 +510,16 @@ export async function applyStaffAction(input: ApplyStaffActionInput): Promise<Ap
     return { ok: false, reason, actionId: row.id, ...(validNextActions !== undefined ? { validNextActions } : {}) }
   }
 
-  const config = await resolveOdooConfigForTenant(input.binding.tenantId)
+  let config
+  try {
+    config = await resolveOdooConfigForTenant(input.binding.tenantId, { requireBinding: true })
+  } catch (err) {
+    // Not an outage. Odoo was never contacted and a retry cannot help, so it is
+    // recorded as its own failure_reason rather than left to propagate as an
+    // unhandled throw out of a webhook handler.
+    if (isOdooBindingRequiredError(err)) return fail('tenant_not_bound')
+    throw err
+  }
   const record = await readWorkRecord(config, { odooModel: input.workRefModel, odooId: input.workRefId })
   const allowed = checkActorMayAct(record, input.binding.odooResUserId)
   if (!allowed.allowed) {
@@ -1076,7 +1085,13 @@ export interface ManagerVerdictInput {
  * the system of record rather than only in a Foundation row.
  */
 export async function applyManagerVerdict(input: ManagerVerdictInput): Promise<{ ok: boolean; detail: unknown }> {
-  const config = await resolveOdooConfigForTenant(input.manager.tenantId)
+  let config
+  try {
+    config = await resolveOdooConfigForTenant(input.manager.tenantId, { requireBinding: true })
+  } catch (err) {
+    if (isOdooBindingRequiredError(err)) return { ok: false, detail: 'tenant_not_bound' }
+    throw err
+  }
   const verdict = input.approved ? 'VERIFIED' : 'RETURNED';
   const closed = await completeVerificationActivity(
     config,

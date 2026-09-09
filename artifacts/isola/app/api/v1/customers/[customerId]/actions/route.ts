@@ -32,6 +32,17 @@
  * also why `objectCompanyId` is left unwired in the governed ports — the check
  * has already happened here, against the real system of record, rather than
  * against a value the caller supplied.
+ *
+ * AND THAT SYSTEM OF RECORD IS NAMED, NOT INHERITED
+ * -------------------------------------------------
+ * The config resolved below is handed to createOdooRecordSystem, so it is the
+ * connection every executor behind this route WRITES through. Until 2026-09-09
+ * it came from resolveOdooConfigForTenant, which falls back to the
+ * deployment's own ODOO_URL/ODOO_DB for a tenant with no OdooBinding row — and
+ * on the UAT deployment, measured that day, there were zero binding rows and
+ * that env named EPIC's PRODUCTION Odoo. A write inherits nothing: the tenant
+ * whose records are about to change must be named by a binding row, so this
+ * resolves through resolveOdooConfigForTenantWrite and refuses when it cannot.
  */
 
 import { NextResponse } from 'next/server'
@@ -42,7 +53,11 @@ import { runCustomerAction } from '@/lib/governed/customer-actions'
 import { buildExecutors } from '@/lib/governed/executors'
 import { createOdooRecordSystem } from '@/lib/governed/executors/odoo-record-system'
 import { prismaLedgerStore } from '@/lib/operations/ledger'
-import { resolveOdooConfigForTenant } from '@/lib/engine-bindings'
+import {
+  TENANT_NOT_BOUND,
+  isOdooBindingRequiredError,
+  resolveOdooConfigForTenantWrite,
+} from '@/lib/engine-bindings'
 import { getSession } from '@/lib/session'
 import { requireWorkspaceAccess, type WorkspaceAuthz } from '@/lib/workspace/authz'
 
@@ -113,8 +128,36 @@ export async function POST(req: Request, { params }: Params) {
   // legitimately fail as an OUTAGE rather than as a refusal.
   let config
   try {
-    config = await resolveOdooConfigForTenant(tenantId)
-  } catch {
+    config = await resolveOdooConfigForTenantWrite(tenantId)
+  } catch (err) {
+    // An unbound tenant is NOT an outage, and must not be reported as one.
+    // `dependency_unavailable` tells the reader the system of record was not
+    // reached and that trying again is reasonable — here nothing was reached
+    // because there is nothing to reach, and retrying will be refused
+    // identically until a person binds this workspace.
+    //
+    // `executor_unavailable` is the existing state for "this is listed but
+    // there is nothing behind it to perform it — a gap in the system, not a
+    // refusal by the system of record", which is exactly the case, and it
+    // already escalates. A NEW lifecycle state was deliberately not invented:
+    // ACTION_LIFECYCLE_STATES is a closed vocabulary the portal and the
+    // workspace component both render from, and widening it to say one more
+    // thing is a bigger change than this one is allowed to be. The `reason`
+    // field carries the specific fact for anything that wants to branch on it.
+    if (isOdooBindingRequiredError(err)) {
+      return NextResponse.json(
+        {
+          actionType,
+          lifecycle: 'executor_unavailable',
+          reason: TENANT_NOT_BOUND,
+          success: false,
+          detail:
+            'This workspace is not connected to its own system of record, so there is nowhere this action could be written. Nothing was sent.',
+          operationId: null,
+        },
+        { status: 200 },
+      )
+    }
     return NextResponse.json(
       {
         actionType,
