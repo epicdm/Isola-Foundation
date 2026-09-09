@@ -73,8 +73,26 @@ STATE_FILE="/home/epicadmin/builds/.isola360-deploy-state"
 export ISSUER_URL="https://isola-360-auth.saas00.epic.dm/realms/isola"
 export TENANT_MASTER_KEY="$(cat /home/epicadmin/builds/.tenant_master_key)"
 
-export ODOO_URL=https://epic-communications-inc.odoo.com
-export ODOO_DB=epic-communications-inc
+# ODOO_URL / ODOO_DB, 2026-09-09 -- the same fix merged to main as PR #133, applied
+# to THIS copy of the script, which is the one that actually deploys this lineage.
+# main carries it as scripts/ops/c360-deploy.sh; this lineage carries it as
+# deploy/deploy.sh. Same script, two paths, and fixing only one would have left the
+# hardcode in the copy that runs.
+#
+# It used to read:
+#     export ODOO_URL=https://epic-communications-inc.odoo.com
+#     export ODOO_DB=epic-communications-inc
+# With OdooBinding empty, resolveOdooConfigForTenant() falls through to exactly
+# these, so every deploy of the UAT stack silently re-pointed it at EPIC's live
+# Odoo. That is def-odoo-binding-table-empty-shared-tenant-fallback-2026-08-30.
+#
+# THE NEXT PERSON TO RUN THIS SCRIPT MUST EXPORT BOTH, or it refuses and stops.
+# That is deliberate: a missing value must halt a deploy, never quietly aim it at
+# a customer's live system of record.
+: "${ODOO_URL:?ODOO_URL must be set in the calling environment before running this script. It no longer defaults to EPIC's production Odoo -- see def-odoo-binding-table-empty-shared-tenant-fallback-2026-08-30. Export the Odoo URL THIS deploy target should actually use.}"
+: "${ODOO_DB:?ODOO_DB must be set in the calling environment before running this script -- same reasoning as ODOO_URL above.}"
+export ODOO_URL
+export ODOO_DB
 
 fail() { echo "REFUSED: $1" >&2; exit 1; }
 
