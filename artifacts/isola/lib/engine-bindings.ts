@@ -31,8 +31,23 @@
  * deployment was therefore addressed at a live business's records. Nobody had
  * exercised it, which is luck, not a guard.
  *
- * So writes resolve through resolveOdooConfigForTenantWrite() below, which
- * REFUSES rather than falling back. The refusal is a named outcome
+ * THE TWO SPELLINGS, AND WHY THERE ARE TWO
+ * ----------------------------------------
+ * There is ONE implementation of the refusal — resolveBoundOdooConfig() — and
+ * two ways to reach it:
+ *
+ *   resolveOdooConfigForTenantWrite(id)                    ← prefer this
+ *   resolveOdooConfigForTenant(id, { requireBinding: true })
+ *
+ * The alias is the one to write in new code: it is greppable, and a reviewer
+ * can see at the import line whether a module writes. The option exists
+ * because four staff-ops suites mock this module with a single export, so a
+ * call site importing a NEW symbol gets `undefined` and takes an unrelated
+ * suite down with it. The option lets an existing module adopt the guard
+ * without rewriting its tests. That is a stated trade, not an accident — if
+ * those suites are ever updated, the option can go.
+ *
+ * Either spelling REFUSES rather than falling back, with a named outcome
  * (OdooBindingRequiredError, code 'tenant_not_bound') so a caller can tell it
  * apart from an Odoo that could not be reached — those need opposite
  * responses from whoever reads the screen: one is retryable, this one is not
@@ -45,16 +60,6 @@ import { getOdooConfig, getFiservConfig, getBffConfig } from './engines';
 import type { OdooConfig } from '@/engines/odoo';
 import type { FiservConfig } from '@/engines/fiserv';
 import type { BffConfig } from '@/engines/bff';
-
-export async function resolveOdooConfigForTenant(tenantId?: string | null): Promise<OdooConfig> {
-  if (tenantId) {
-    const binding = await prisma.odooBinding.findUnique({ where: { tenant_id: tenantId } });
-    if (binding) {
-      return getOdooConfig({ url: binding.url, db: binding.db, apiKey: decryptSecret(binding.api_key_enc) });
-    }
-  }
-  return getOdooConfig();
-}
 
 /**
  * The reason a write was refused, as a value rather than as prose.
@@ -98,11 +103,20 @@ export function isOdooBindingRequiredError(err: unknown): err is OdooBindingRequ
   return !!err && typeof err === 'object' && (err as { code?: unknown }).code === TENANT_NOT_BOUND;
 }
 
+export interface OdooResolveOptions {
+  /**
+   * Refuse instead of falling back. Set this on any call whose config will be
+   * used to CHANGE a record. Absent or false keeps the historical read
+   * behaviour exactly.
+   */
+  requireBinding?: boolean;
+}
+
 /**
  * The Odoo connection a WRITE for this tenant is allowed to use.
  *
- * Refuses in three places, and each one is a way a write could otherwise end
- * up somewhere nobody chose:
+ * Refuses in four places, and each one is a way a write could otherwise end up
+ * somewhere nobody chose:
  *
  *   1. no tenant id           — an unattributed write has no destination at
  *                               all; the deployment default is not one.
@@ -113,17 +127,14 @@ export function isOdooBindingRequiredError(err: unknown): err is OdooBindingRequ
  *                               supplied from the environment by
  *                               getOdooConfig(), which is the same defect one
  *                               level down. Both halves, or neither.
+ *   4. no usable credential   — a row whose secret decrypts to nothing would
+ *                               otherwise fall through to the deployment's
+ *                               own key.
  *
  * getOdooConfig() is only ever called here with url, db AND apiKey supplied,
  * so no field of the returned config can come from the deployment's env.
- *
- * Reads must keep using resolveOdooConfigForTenant above. This function is not
- * a stricter version of it to be adopted everywhere — it is the door for the
- * calls that change somebody's records.
  */
-export async function resolveOdooConfigForTenantWrite(
-  tenantId?: string | null,
-): Promise<OdooConfig> {
+async function resolveBoundOdooConfig(tenantId?: string | null): Promise<OdooConfig> {
   const id = (tenantId ?? '').trim();
   if (!id) {
     throw new OdooBindingRequiredError(
@@ -158,6 +169,39 @@ export async function resolveOdooConfigForTenantWrite(
   }
 
   return getOdooConfig({ url, db, apiKey });
+}
+
+/**
+ * Per-tenant Odoo config.
+ *
+ * With no options this is the READ resolver, unchanged: binding row if there
+ * is one, deployment default if there is not. With `{ requireBinding: true }`
+ * it is the write door and refuses rather than inheriting.
+ */
+export async function resolveOdooConfigForTenant(
+  tenantId?: string | null,
+  options?: OdooResolveOptions,
+): Promise<OdooConfig> {
+  if (options?.requireBinding) return resolveBoundOdooConfig(tenantId);
+
+  if (tenantId) {
+    const binding = await prisma.odooBinding.findUnique({ where: { tenant_id: tenantId } });
+    if (binding) {
+      return getOdooConfig({ url: binding.url, db: binding.db, apiKey: decryptSecret(binding.api_key_enc) });
+    }
+  }
+  return getOdooConfig();
+}
+
+/**
+ * The write door, named. Prefer this spelling in new code — an import line
+ * that says `Write` tells a reviewer what the module does before they read a
+ * single call.
+ */
+export async function resolveOdooConfigForTenantWrite(
+  tenantId?: string | null,
+): Promise<OdooConfig> {
+  return resolveBoundOdooConfig(tenantId);
 }
 
 export async function resolveFiservConfigForTenant(tenantId?: string | null): Promise<FiservConfig> {

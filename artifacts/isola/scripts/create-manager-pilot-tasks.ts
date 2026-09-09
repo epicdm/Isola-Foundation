@@ -16,8 +16,17 @@
  * The production DATABASE_URL is required because the OdooBinding naming the
  * authoritative instance lives in the production database; dev heliumdb has no
  * staff-ops rows at all.
+ *
+ * AND THAT REQUIREMENT IS NOW ENFORCED, NOT MERELY DOCUMENTED (2026-09-09).
+ * This script CREATES project.task rows. Resolved through the read resolver, a
+ * run against a database where TENANT's OdooBinding is absent would not fail -
+ * it would fall back to whatever ODOO_URL the environment named and create two
+ * real tasks there. Measured on the UAT deployment that day: zero binding rows,
+ * and ODOO_URL naming EPIC's PRODUCTION Odoo. So it resolves through the write
+ * door and refuses instead. The sentence above stops being a warning a reader
+ * has to obey and becomes a condition the script checks.
  */
-import { resolveOdooConfigForTenant } from '../lib/engine-bindings'
+import { resolveOdooConfigForTenantWrite } from '../lib/engine-bindings'
 import { json2Call } from '../engines/odoo'
 import { prisma } from '../lib/prisma'
 import type { OdooConfig } from '../engines/odoo'
@@ -84,7 +93,7 @@ function mask(v: string | null | undefined): string {
 }
 
 ;(async () => {
-  const cfg = await resolveOdooConfigForTenant(TENANT)
+  const cfg = await resolveOdooConfigForTenantWrite(TENANT)
 
   // ---- 1. The verifier resolves from the StaffBinding, never from a task field.
   const hakeem = await prisma.staffBinding.findFirst({
