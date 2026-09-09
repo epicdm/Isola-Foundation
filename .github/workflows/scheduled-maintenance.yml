@@ -1,0 +1,67 @@
+name: Scheduled Maintenance
+
+# Weekly rot check: install + typecheck + test on a fixed cadence, so
+# regressions are caught even on weeks nobody opens a PR against this repo.
+#
+# IMPORTANT: GitHub only fires `schedule:` triggers from the repository's
+# DEFAULT branch. Dominica/EPIC operates on UTC-4, so a schedule expressed
+# in local time must be converted to UTC below. This file only takes effect
+# once it is merged to `main` — while it lives only on this feature branch
+# it will never fire on its own schedule (workflow_dispatch still works from
+# any branch in the meantime, but that requires a human to trigger it).
+on:
+  schedule:
+    # 07:00 UTC every Sunday = 03:00 AM (UTC-4, Dominica) every Sunday — a
+    # quiet off-hours slot with no expected concurrent deploys.
+    - cron: '0 7 * * 0'
+  workflow_dispatch: {}
+
+defaults:
+  run:
+    working-directory: artifacts/isola
+
+jobs:
+  maintenance:
+    name: Weekly install, test, audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies (frozen lockfile)
+        working-directory: .
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm exec prisma generate
+
+      - name: Typecheck
+        run: pnpm run typecheck
+        env:
+          DATABASE_URL: 'postgresql://ci:ci@localhost:5432/ci_placeholder?sslmode=disable'
+
+      - name: Test
+        run: pnpm run test
+        env:
+          DATABASE_URL: 'postgresql://ci:ci@localhost:5432/ci_placeholder?sslmode=disable'
+
+      # Non-blocking: a dependency advisory should be visible, not gate
+      # anything. continue-on-error keeps the job green even when audit
+      # finds something, while the output remains in the run log for a human
+      # to actually read.
+      - name: pnpm audit (non-blocking, reported)
+        working-directory: .
+        continue-on-error: true
+        run: pnpm audit
