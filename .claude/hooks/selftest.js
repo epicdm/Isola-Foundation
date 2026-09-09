@@ -90,6 +90,81 @@ const cases = [
     },
   },
 
+  {
+    name: 'next build inside /opt/bff-v2 is BLOCKED (control for the message cases below)',
+    expect: BLOCK,
+    contains: 'build-in-live-checkout',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'ssh deepseek "cd /opt/bff-v2 && next build"' },
+    },
+  },
+  {
+    // 2026-09-09: this exact shape was REFUSED as a build. It is rm + git add +
+    // git commit + git status. The build it DESCRIBES already happened, in an
+    // isolated worktree. A guard that fires on the description of an action and
+    // not on the action is theatre (dec-law-27c).
+    name: 'git commit whose MESSAGE records a build in a live checkout is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: [
+          'cd /home/epicdm/_wt-isolav2-waopen-identity-2026-09-09 &&',
+          "git add app/lib/lite-owner-phone.ts && git -c user.name=EPICDM -c user.email=e@x commit -q -F - <<'MSG'",
+          'fix(lite): wa-open resolves by identity, refuses on ambiguity',
+          '',
+          'build    next build EXIT=0 both sides with env; identical VAPID failure',
+          '         without env, so the failure is pre-existing (Law 49)',
+          'Measured in production (pid 2503174, /opt/bff-v2, HEAD fbde3362).',
+          'MSG',
+        ].join('\n'),
+      },
+    },
+  },
+  {
+    // THE CONTROL THAT MATTERS. Without it the case above only proves the guard
+    // was weakened. maskSpans() blanks the message by OFFSET, so a real build
+    // chained after it is still in scanTarget and must still be refused.
+    name: 'a real build chained AFTER a commit message is still BLOCKED (no laundering)',
+    expect: BLOCK,
+    contains: 'build-in-live-checkout',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: [
+          "git commit -F - <<'MSG'",
+          'chore: a message that mentions nothing unusual at all',
+          'MSG',
+          'ssh deepseek "cd /opt/bff-v2 && npm run build"',
+        ].join('\n'),
+      },
+    },
+  },
+  {
+    // Same control, but for the -c form specifically: widening the
+    // PRECONDITION must not widen the EXEMPTION. The message is still
+    // identified by offset, so a build outside it is still refused.
+    name: 'a build outside the message is BLOCKED even with git -c global options',
+    expect: BLOCK,
+    contains: 'build-in-live-checkout',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command: [
+          "git -c user.name=EPICDM commit -q -F - <<'MSG'",
+          'chore: an ordinary message',
+          'MSG',
+          'ssh deepseek "cd /opt/bff-v2 && npm run build"',
+        ].join('\n'),
+      },
+    },
+  },
+
   // --- SECRETS ------------------------------------------------------------
   {
     name: 'Read of a .env file is BLOCKED',

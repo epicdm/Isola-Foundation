@@ -421,9 +421,31 @@ function evaluate(inp) {
   }
 
   // 3. THE R5A RULE — no builds inside a canonical live checkout.
-  if (T.BUILD_COMMAND_RE.test(cmd)) {
-    const live = T.matchLiveCheckout(cmd);
-    if (live && !T.isSafeBuildLocation(cmd)) {
+  //
+  // scanTarget, not cmd — for exactly the reason rule 2 above already gives.
+  // A commit message that RECORDS where a build was measured ("next build
+  // EXIT=0 ... pid 2503174, /opt/bff-v2") is a ledger entry, not a build.
+  //
+  // Measured 2026-09-09: this rule refused a command that was `rm`, `git add`,
+  // `git commit -F -` and `git status` — no build anywhere in it — because the
+  // heredoc body carried both "next build" and "/opt/bff-v2". The machinery to
+  // prevent that ALREADY EXISTED in this file (extractCommitMessage + maskSpans,
+  // consumed as scanTarget) and was wired into rules 1 and 2 and not into this
+  // one. CLAUDE.md §2.21: a remediation applied to one copy while an identical
+  // omission sits in the next rule is a moved problem, not a fix.
+  //
+  // THIS DOES NOT RELAX THE RULE. maskSpans() blanks the message BY OFFSET, so
+  // a real build command sitting outside the message on the same line is still
+  // present in scanTarget and still refused — proven by the selftest case
+  // "a real build chained AFTER a commit message is still BLOCKED".
+  //
+  // The specific harm of the old shape: it penalised exactly the commit
+  // messages this estate most wants — the ones naming the substrate, the pid
+  // and the path. A lane that learns to avoid that vocabulary writes worse
+  // evidence, which is the failure CLAUDE.md §7 forbids rewording around.
+  if (T.BUILD_COMMAND_RE.test(scanTarget)) {
+    const live = T.matchLiveCheckout(scanTarget);
+    if (live && !T.isSafeBuildLocation(scanTarget)) {
       deny(
         'build-in-live-checkout',
         'Build/install command targeting canonical LIVE checkout ' + live + '.\n' +

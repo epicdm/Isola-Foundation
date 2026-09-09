@@ -635,7 +635,26 @@ function isProseFile(p) {
  */
 function extractCommitMessage(cmd) {
   const s = String(cmd || '');
-  if (!/\bgit\s+(commit|tag)\b/.test(s)) return null;
+  // Git accepts GLOBAL OPTIONS between `git` and the subcommand, and this
+  // precondition did not allow for them. Measured 2026-09-09: a real commit
+  // issued as
+  //     git -c user.name=EPICDM -c user.email=... commit -q -F - <<'MSG'
+  // never matched `git\s+commit`, so NOTHING was masked, and the build rule
+  // then fired on "next build" inside the message body — refusing a commit
+  // as a build. The masking machinery was correct; it was simply never
+  // reached for the shape this estate actually uses (every commit here sets
+  // -c user.name / -c user.email because the worktrees have no local identity).
+  //
+  // The first fix for that refusal only made rule 3 consume scanTarget, and
+  // its selftest case used a bare `git commit` — so the test passed while the
+  // real command stayed blocked. A test that does not reproduce the shape
+  // under test proves nothing about it (Law 20).
+  //
+  // Only -c/-C/--no-pager/--git-dir/--work-tree/--namespace are admitted, each
+  // consuming its own argument. Anything else still falls through to null, so
+  // this widens the PRECONDITION and not the exemption: the message body is
+  // still identified by offset, and a real operation outside it is still seen.
+  if (!/\bgit\s+(?:(?:-[cC]\s+\S+|--no-pager|--git-dir[=\s]\S+|--work-tree[=\s]\S+|--namespace[=\s]\S+)\s+)*(commit|tag)\b/.test(s)) return null;
 
   const spans = [];
 
