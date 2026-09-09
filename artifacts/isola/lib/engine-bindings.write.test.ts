@@ -111,6 +111,45 @@ describe('a write must name its tenant, not inherit it', () => {
     )
     expect(getOdooConfigMock).not.toHaveBeenCalled()
   })
+
+  it('refuses a row whose credential decrypts to nothing', async () => {
+    findUniqueMock.mockResolvedValue(BOUND_ROW)
+    decryptSecretMock.mockReturnValue('')
+
+    await expect(resolveOdooConfigForTenantWrite('tenant-bound')).rejects.toThrow(
+      /no usable credential/,
+    )
+    expect(getOdooConfigMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('the option form is the same door as the named alias', () => {
+  it('refuses an unbound tenant with requireBinding:true', async () => {
+    findUniqueMock.mockResolvedValue(null)
+
+    const err = await resolveOdooConfigForTenant('tenant-unbound', { requireBinding: true }).catch(
+      (e) => e,
+    )
+
+    expect(isOdooBindingRequiredError(err)).toBe(true)
+    expect(getOdooConfigMock).not.toHaveBeenCalled()
+  })
+
+  it('CONTROL: the SAME call without the option still falls back', async () => {
+    findUniqueMock.mockResolvedValue(null)
+
+    const config = await resolveOdooConfigForTenant('tenant-unbound')
+
+    expect(config.url).toBe(PLATFORM_DEFAULT.url)
+  })
+
+  it('CONTROL: requireBinding:false is the read behaviour, not a half-guard', async () => {
+    findUniqueMock.mockResolvedValue(null)
+
+    const config = await resolveOdooConfigForTenant('tenant-unbound', { requireBinding: false })
+
+    expect(config.url).toBe(PLATFORM_DEFAULT.url)
+  })
 })
 
 describe('the refusal is its own outcome, not an outage', () => {
