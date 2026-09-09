@@ -18,6 +18,15 @@
  *   could rewrite another customers deal, and every downstream readback would
  *   cheerfully confirm the write succeeded.
  *
+ * AND THE INSTANCE IS CHECKED TOO (2026-09-09)
+ *   Ownership answers WHOSE record. It never answered WHICH Odoo. The default
+ *   resolveConfig is now the WRITE door: a tenant with no OdooBinding row is
+ *   refused with `tenant_not_bound` instead of being served the deployment's
+ *   own connection, which on the UAT deployment named EPIC's production
+ *   instance. Every ownership check below is performed against the instance the
+ *   binding names, so the check and the write can no longer disagree about
+ *   where they are.
+ *
  * STAGE MOVEMENT IS THE SHARP EDGE
  *   A stage id is just an integer, and moving a deal to Won is a commercial
  *   claim, not a data edit. Only stages the TENANT POLICY names as approved for
@@ -28,7 +37,7 @@
  */
 import { json2Call } from "@/engines/odoo"
 import type { OdooConfig } from "@/engines/odoo"
-import { resolveOdooConfigForTenant } from "@/lib/engine-bindings"
+import { isOdooBindingRequiredError, resolveOdooConfigForTenantWrite } from "@/lib/engine-bindings"
 import {
   claimOperation,
   completeOperation,
@@ -69,6 +78,9 @@ export type LeadUpdateFailureCode =
   | "assignee_not_approved"
   | "operation_conflict"
   | "operation_in_flight"
+  // Odoo was never contacted: this tenant has no system of record. Distinct
+  // from `odoo_unavailable`, which means we tried and could not get through.
+  | "tenant_not_bound"
   | "odoo_unavailable"
   | "readback_failed"
 
@@ -162,7 +174,8 @@ async function defaultWriteLead(config: OdooConfig, leadId: number, vals: Record
 }
 
 export const DEFAULT_LEAD_UPDATE_DEPS: LeadUpdateDeps = {
-  resolveConfig: resolveOdooConfigForTenant,
+  // THE WRITE DOOR, not the read resolver. See the module header.
+  resolveConfig: resolveOdooConfigForTenantWrite,
   readLead: defaultReadLead,
   readPipelineStageIds: defaultReadPipelineStageIds,
   writeLead: defaultWriteLead,
@@ -280,6 +293,15 @@ export async function updateGovernedLead(
   try {
     config = await deps.resolveConfig(input.tenantId)
   } catch (err) {
+    // Nothing was contacted and nothing was written. A retry cannot help; a
+    // binding row can.
+    if (isOdooBindingRequiredError(err)) {
+      return fail(
+        null,
+        "tenant_not_bound",
+        "this tenant is not bound to an Odoo instance, so there is no lead here to update",
+      )
+    }
     return fail(null, "odoo_unavailable", err instanceof Error ? err.message : "tenant Odoo binding could not be resolved")
   }
 
