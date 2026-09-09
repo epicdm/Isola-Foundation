@@ -34,7 +34,13 @@
  *                  claiming a state it cannot prove.
  */
 
-import { TENANT_NOT_BOUND } from '@/lib/engine-bindings'
+// FROM THE CONSTANTS MODULE, NOT FROM engine-bindings.
+// This file is reached from `components/customer-360/customer-360-app.tsx`,
+// which is `'use client'`. `@/lib/engine-bindings` imports `@/lib/tenant-secrets`,
+// which imports `node:crypto`, so importing the code from there put a Node
+// crypto module into a browser bundle and `next build` failed. Same constant,
+// same single definition, no server dependency.
+import { TENANT_NOT_BOUND } from '@/lib/engine-bindings.constants'
 
 /**
  * A business whose Odoo is not connected.

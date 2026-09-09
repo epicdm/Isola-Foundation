@@ -68,7 +68,13 @@ import type { BffConfig } from '@/engines/bff';
  * assert on it are naming the same thing rather than two strings that happen
  * to match today.
  */
-export const TENANT_NOT_BOUND = 'tenant_not_bound' as const;
+// Re-exported, not declared, so a client bundle can import the code alone
+// without dragging this module's `node:crypto` dependency behind it. Every
+// existing importer of TENANT_NOT_BOUND from '@/lib/engine-bindings' keeps
+// working unchanged; there is still exactly one definition of the string.
+// See lib/engine-bindings.constants.ts for what `next build` did about it.
+export { TENANT_NOT_BOUND } from './engine-bindings.constants';
+import { TENANT_NOT_BOUND } from './engine-bindings.constants';
 
 /**
  * A write was asked for and the destination could not be named.
