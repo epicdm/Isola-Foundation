@@ -437,6 +437,33 @@ maybe("exactly-once is enforced by the database", () => {
     expect(after.episode).toBe(1);
   }, 30_000);
 
+  /**
+   * The OTHER half of the ownership_changed_at fix below (GitHub Codex
+   * review of PR #135, pass 4 on this test file): `recordHumanReply`'s own
+   * `observe` branch (line ~796 in ownership-store.ts) omits
+   * `touchOwnershipChangedAt` entirely, relying on `applyOwnershipTransition`
+   * defaulting it to `true`. A GENUINE human reply while already HUMAN_OWNED
+   * is real activity and must still renew the sweeper's idle floor — proven
+   * here so a future change to that default cannot silently stop it, the
+   * same way `reconcileObservedAssignment`'s sibling test proves the OTHER
+   * direction (an observation with no real activity must NOT renew it).
+   */
+  it("a SECOND human reply while already HUMAN_OWNED still advances ownership_changed_at — the default, unlike reconciliation's, is to renew it", async () => {
+    const ref = freshConversation();
+    await recordHumanReply(exec, { conversation: ref, operationId: "m1" });
+    const firstReplyAt = await ownershipChangedAt(ref);
+    expect(firstReplyAt).not.toBeNull();
+
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+
+    const second = await recordHumanReply(exec, { conversation: ref, operationId: "m2" });
+    expect(second.status).toBe("applied"); // reaches the observe branch, HUMAN_OWNED unchanged
+    expect(second.state).toBe("HUMAN_OWNED");
+
+    const secondReplyAt = await ownershipChangedAt(ref);
+    expect(secondReplyAt!.getTime()).toBeGreaterThan(firstReplyAt!.getTime());
+  }, 30_000);
+
   it("refuses to persist a reason that is free text rather than a code", async () => {
     const ref = freshConversation();
     await expect(
