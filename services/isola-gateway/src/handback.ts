@@ -467,6 +467,22 @@ export function createHandbackSweeper(deps: HandbackSweeperDeps): HandbackSweepe
         // idle-only behavior, unchanged.
         const stillAssigned = recordReadable && hasAssignee(readAssignee(record));
         const idle = !stillAssigned && idleForMs !== null && idleForMs >= deps.idleMs;
+        // KNOWN, FLAGGED CONSEQUENCE OF THIS GUARD — GitHub Codex review of PR
+        // #135 pass 3: `performHandback`'s Chatwoot-side action is
+        // `pendConversation` alone (status -> pending); it has never cleared
+        // an individual `meta.assignee`. So for a conversation assigned
+        // directly ("Assign to me", no team, `stillAssigned` genuinely true
+        // and staying true), this guard means idle can NEVER complete a
+        // handback on its own — the row sits at HUMAN_OWNED until a human
+        // performs the full manual gesture. This is SAFE (evaluateSuppression
+        // independently re-checks the live assignee on every message, so no
+        // reply is ever sent to a conversation Chatwoot still shows as
+        // assigned, regardless of ledger state) but it is NOT the "10-minute
+        // idle resume" parity this module's own header describes — that
+        // would require `performHandback` to also clear the Chatwoot
+        // assignee, a new live write against a human agent's active
+        // assignment that this PR deliberately does not add without the
+        // owner's sign-off. Flagged, not fixed, pending that decision.
 
         if (!manual && !idle) {
           skip(
