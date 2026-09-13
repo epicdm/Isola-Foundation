@@ -113,6 +113,23 @@ async function transitionRows(
   return result.rows;
 }
 
+/**
+ * The raw `ownership_changed_at` column — the handback sweeper's own idle
+ * floor (handback.ts: `SELECT ... ownership_changed_at ... ORDER BY
+ * ownership_changed_at ASC NULLS FIRST`). Not exposed on `OwnershipView`,
+ * which is the reply path's own narrow contract — this reads the column
+ * directly, the same way the sweeper's SQL does.
+ */
+async function ownershipChangedAt(ref: ConversationRef): Promise<Date | null> {
+  const key = conversationKey(ref.chatwootAccountId, ref.chatwootConversationId);
+  const result = await pool.query(
+    `SELECT ownership_changed_at FROM conversation_ownership
+      WHERE tenant_id = $1 AND conversation_key = $2`,
+    [ref.tenantId, key],
+  );
+  return result.rows[0]?.ownership_changed_at ?? null;
+}
+
 beforeAll(async () => {
   if (!URL) return;
   exec = createLedger({
@@ -897,6 +914,73 @@ maybe("an assignee observed outside the escalation flow is reconciled", () => {
     });
     expect(confirmed.status).toBe("applied");
     expect(confirmed.state).toBe("HUMAN_OWNED");
+  }, 30_000);
+
+  /**
+   * GitHub Codex review of PR #135, final pass: an `observe` on an
+   * already-human-owned row must NOT advance `ownership_changed_at`, because
+   * this branch fires on EVERY suppressed delivery for that conversation —
+   * including an ordinary customer message that only re-confirms an assignee
+   * already on record. handback.ts floors its idle clock against exactly this
+   * column so a customer's own message can never postpone their own handback;
+   * bumping it here would defeat that floor through a different door. Proven
+   * against real Postgres with a real elapsed interval, not a mocked clock —
+   * a fake clock could not have caught the CASE expression being wired to the
+   * wrong branch.
+   */
+  it("observing an ALREADY human-owned row does not advance ownership_changed_at — a customer's own message must never postpone their own handback", async () => {
+    const ref = freshConversation();
+    const first = await reconcileObservedAssignment(exec, {
+      conversation: ref,
+      operationId: "assignee_observed:evt-6a",
+      hasAssignee: true,
+      status: "open",
+    });
+    expect(first?.status).toBe("applied");
+    const changedAtAfterTakeover = await ownershipChangedAt(ref);
+    expect(changedAtAfterTakeover).not.toBeNull();
+
+    // A real elapsed interval, not a mocked clock: if the CASE expression in
+    // the UPDATE were wired backwards (or absent), `now()` at this second call
+    // would measurably differ from the first.
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+
+    const second = await reconcileObservedAssignment(exec, {
+      conversation: ref,
+      // A DIFFERENT delivery id — an ordinary follow-up message, not a replay
+      // of the first event. Must reach the `observe` branch fresh, not the
+      // duplicate-claim short circuit.
+      operationId: "assignee_observed:evt-6b",
+      hasAssignee: true,
+      status: "open",
+    });
+    expect(second?.status).toBe("applied"); // claimed as its own operation
+    expect(second?.state).toBe("HUMAN_OWNED"); // nothing moved
+
+    const changedAtAfterObserve = await ownershipChangedAt(ref);
+    expect(changedAtAfterObserve?.getTime()).toBe(changedAtAfterTakeover?.getTime());
+  }, 30_000);
+
+  /**
+   * The positive control for the test above. Without it, a broken fixture —
+   * one where NOTHING ever advances `ownership_changed_at` — would make the
+   * "does not advance" assertion pass vacuously.
+   */
+  it("POSITIVE CONTROL: a genuine takeover (AI_OWNED -> HUMAN_OWNED) DOES advance ownership_changed_at", async () => {
+    const ref = freshConversation();
+    const before = await ownershipChangedAt(ref); // no row yet
+    expect(before).toBeNull();
+
+    const outcome = await reconcileObservedAssignment(exec, {
+      conversation: ref,
+      operationId: "assignee_observed:evt-7",
+      hasAssignee: true,
+      status: "open",
+    });
+    expect(outcome?.status).toBe("applied");
+
+    const after = await ownershipChangedAt(ref);
+    expect(after).not.toBeNull();
   }, 30_000);
 });
 

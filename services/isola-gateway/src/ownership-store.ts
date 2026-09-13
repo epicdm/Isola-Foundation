@@ -206,8 +206,22 @@ export type TransitionPlan =
    * conversation has moved on would find no claim and be judged fresh. For a
    * human reply that is a real hole: replay an old message after a handback and
    * it would apply a brand new takeover against AI_RESUMED.
+   *
+   * `touchOwnershipChangedAt` (default true, preserving every existing caller's
+   * behaviour unchanged) governs whether this observation also bumps
+   * `ownership_changed_at`. GitHub Codex review of PR #135, final pass: the
+   * handback sweeper floors its idle clock against that column specifically so
+   * that a CUSTOMER's own message cannot postpone their own handback (see
+   * handback.ts's own "a customer chasing for an answer no longer pushes their
+   * own handback away"). `recordHumanReply`'s `observe` is fired by a genuine
+   * human reply and correctly wants the clock bumped — that IS fresh human
+   * activity. `reconcileObservedAssignment`'s `observe` fires on EVERY
+   * suppressed delivery for an already-human-owned conversation, including an
+   * ordinary customer message that only re-confirms an assignee already on
+   * record — bumping the clock there would silently re-introduce the exact bug
+   * the floor exists to prevent, through a different door. Pass `false` there.
    */
-  | { kind: "observe" }
+  | { kind: "observe"; touchOwnershipChangedAt?: boolean }
   /** Nothing to do and nothing to claim. */
   | { kind: "duplicate" }
   | { kind: "refuse"; status: Exclude<TransitionStatus, "applied" | "duplicate"> };
@@ -472,6 +486,10 @@ export async function applyOwnershipTransition(
     // The target is resolved HERE, under the lock, never by the caller.
     let target: OwnershipState;
     let opensEpisode: boolean;
+    // Whether this call renews `ownership_changed_at`. True everywhere except
+    // an `observe` that explicitly opts out — see TransitionPlan's own doc
+    // comment on why `reconcileObservedAssignment` must opt out here.
+    let touchOwnershipChangedAt = true;
 
     if (resolvePlan !== undefined) {
       const plan = resolvePlan(view);
@@ -493,6 +511,7 @@ export async function applyOwnershipTransition(
         // Claim the operation id against the CURRENT state, moving nothing.
         target = view.state;
         opensEpisode = false;
+        touchOwnershipChangedAt = plan.touchOwnershipChangedAt ?? true;
       } else {
         if (!canTransition(view.state, plan.toState)) {
           return refused("illegal_transition", view, operationId);
@@ -556,12 +575,18 @@ export async function applyOwnershipTransition(
     await tx.query("RELEASE SAVEPOINT ownership_claim");
 
     // 5. The state change, in the same transaction as the claim.
+    //
+    // `ownership_changed_at` only advances when `touchOwnershipChangedAt` is
+    // true (the default everywhere except an `observe` that opts out — see
+    // TransitionPlan's own doc comment). A CASE, not a second query: the same
+    // transaction, no extra round trip, and no branch where the column could
+    // be left stale by an early return.
     await tx.query(
       `
       UPDATE conversation_ownership
          SET ownership_state          = $3,
              ownership_episode        = $4,
-             ownership_changed_at     = now(),
+             ownership_changed_at     = CASE WHEN $10 THEN now() ELSE ownership_changed_at END,
              ownership_reason         = $5,
              ownership_actor_ref      = $6,
              ownership_correlation_id = $7,
@@ -582,6 +607,7 @@ export async function applyOwnershipTransition(
         correlationId,
         escalationOperationId,
         handbackOperationId,
+        touchOwnershipChangedAt,
       ],
     );
 
@@ -1025,7 +1051,16 @@ export function reconcileObservedAssignment(
       if (view.state === "AI_OWNED" || view.state === "AI_RESUMED") {
         return { kind: "apply", toState: "HUMAN_OWNED", startsNewEpisode: true };
       }
-      return { kind: "observe" };
+      // touchOwnershipChangedAt: false — GitHub Codex review of PR #135, final
+      // pass. This branch runs on EVERY suppressed delivery for an
+      // already-human-owned conversation, including an ordinary customer
+      // message that merely re-confirms an assignee already on record. The
+      // handback sweeper floors its idle clock against `ownership_changed_at`
+      // specifically so a customer's own message cannot postpone their own
+      // handback (handback.ts: "a customer chasing for an answer no longer
+      // pushes their own handback away"). Bumping it here on every re-observed,
+      // unchanged fact would defeat that floor through a different door.
+      return { kind: "observe", touchOwnershipChangedAt: false };
     },
   });
 }
