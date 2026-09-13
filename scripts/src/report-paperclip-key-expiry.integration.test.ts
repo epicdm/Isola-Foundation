@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
@@ -74,6 +74,32 @@ test('scanEstateForModelLiterals finds a literal on disk and records the real fi
     assert.ok(!byModel.has('deepseek-old-vendored'), 'node_modules must be skipped')
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('scanEstateForModelLiterals does not follow a symlink out of the scanned root (Codex-caught fix)', (t) => {
+  const outside = mkdtempSync(path.join(tmpdir(), 'model-scan-outside-'))
+  const root = mkdtempSync(path.join(tmpdir(), 'model-scan-root-'))
+  try {
+    writeFileSync(path.join(outside, 'secret-cost-table.ts'), `export const MODEL = "deepseek-outside-the-root"\n`)
+    writeFileSync(path.join(root, 'inside.ts'), `export const MODEL = "deepseek-inside-the-root"\n`)
+    try {
+      symlinkSync(outside, path.join(root, 'escape-link'), 'dir')
+    } catch (err) {
+      // Creating a directory symlink needs elevated privileges on some
+      // Windows configurations. Skip rather than fail the suite on a
+      // platform limitation unrelated to the fix under test.
+      t.skip(`symlink creation not permitted in this environment: ${(err as Error).message}`)
+      return
+    }
+
+    const byModel = scanEstateForModelLiterals([root], [/^deepseek-[a-z0-9.-]+$/i])
+
+    assert.ok(byModel.has('deepseek-inside-the-root'))
+    assert.ok(!byModel.has('deepseek-outside-the-root'), 'the symlink must not be followed out of the root')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+    rmSync(outside, { recursive: true, force: true })
   }
 })
 

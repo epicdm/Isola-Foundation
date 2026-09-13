@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync, lstatSync } from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import dotenv from 'dotenv'
@@ -33,10 +33,18 @@ export interface ExpiringBoardKey {
 
 const EXPIRY_WINDOW_DAYS = 7
 
-const EXPIRING_BOARD_KEYS_SQL = `
+// Caught by independent Codex review at this branch's head: the original
+// query had no lower bound, so a key that expired months ago and was never
+// revoked would appear at the TOP of an "expiring within 7 days" report
+// (most negative days-left sorts first) -- the opposite of the warning
+// this report exists to give. `expires_at >= now()` scopes it to genuinely
+// upcoming expirations; anything already expired is a separate, already
+// urgent problem this report is not the instrument for.
+export const EXPIRING_BOARD_KEYS_SQL = `
   SELECT name, expires_at
   FROM board_api_keys
   WHERE revoked_at IS NULL
+    AND expires_at >= now()
     AND expires_at < now() + interval '7 days'
   ORDER BY expires_at ASC
 `
@@ -74,17 +82,28 @@ const REQUIRED_COLUMNS = ['name', 'expires_at', 'revoked_at'] as const
 // silently return wrong or empty data (Law 11: a check that fires zero
 // proves nothing), introspect the real table first and fail loudly, naming
 // exactly what was found, if the assumed shape does not match.
+//
+// Caught by independent Codex review at this branch's head: an earlier
+// version queried information_schema.columns by bare table_name, which
+// returns the union of every schema's board_api_keys on the search_path --
+// not necessarily the one the unqualified report query below would
+// actually resolve to if more than one exists. to_regclass('board_api_keys')
+// resolves the name through the SAME search_path Postgres itself uses,
+// so the guard inspects the exact relation the report query will read.
 export async function assertExpectedSchema(pool: Pool): Promise<void> {
   const { rows } = await pool.query<{ column_name: string }>(
-    `SELECT column_name FROM information_schema.columns WHERE table_name = $1`,
-    ['board_api_keys'],
+    `SELECT a.attname AS column_name
+     FROM pg_attribute a
+     WHERE a.attrelid = to_regclass('board_api_keys')
+       AND a.attnum > 0
+       AND NOT a.attisdropped`,
   )
   const found = new Set(rows.map((r) => r.column_name))
   const missing = REQUIRED_COLUMNS.filter((c) => !found.has(c))
   if (missing.length > 0) {
     throw new Error(
       `report-paperclip-key-expiry: board_api_keys is missing expected column(s): ${missing.join(', ')}. ` +
-        `Found columns: ${[...found].sort().join(', ') || '(table not found on this connection)'}. ` +
+        `Found columns: ${[...found].sort().join(', ') || '(table not found on this connection\'s search_path)'}. ` +
         'Refusing to run a query against an unverified shape.',
     )
   }
@@ -141,6 +160,12 @@ const SCAN_SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next'
 // Not pure: walks a repo root on disk collecting model-name literals per
 // file, so the report can say WHERE a stale name lives, not just that one
 // exists. Depth-first, skips the usual generated/vendor directories.
+//
+// Caught by independent Codex review at this branch's head: the original
+// version used statSync, which follows symlinks -- a symlink inside a
+// scanned repo could walk the scan outside the intended root entirely.
+// lstatSync reports the link itself, and a symlink (file or directory) is
+// skipped rather than followed, so the scan never leaves the given roots.
 export function scanEstateForModelLiterals(
   repoRoots: string[],
   patterns: RegExp[] = VENDOR_PRICING_SOURCES.map((v) => v.namePattern),
@@ -159,14 +184,16 @@ export function scanEstateForModelLiterals(
       const full = path.join(dir, entry)
       let st
       try {
-        st = statSync(full)
+        st = lstatSync(full)
       } catch {
         continue
       }
+      if (st.isSymbolicLink()) continue
       if (st.isDirectory()) {
         walk(full)
         continue
       }
+      if (!st.isFile()) continue
       if (!SCAN_FILE_EXTENSIONS.has(path.extname(entry))) continue
       let text: string
       try {

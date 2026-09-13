@@ -9,10 +9,44 @@ import {
   formatModelCurrencyLines,
   VENDOR_PRICING_SOURCES,
   checkModelCurrency,
+  assertExpectedSchema,
+  EXPIRING_BOARD_KEYS_SQL,
   type ModelCurrencyFinding,
 } from './report-paperclip-key-expiry'
 
+// Minimal fake matching only the `.query()` surface assertExpectedSchema
+// actually calls -- enough to pin its behaviour without a real Postgres.
+function fakePool(columnNames: string[]) {
+  return {
+    query: async () => ({ rows: columnNames.map((column_name) => ({ column_name })) }),
+  } as unknown as Parameters<typeof assertExpectedSchema>[0]
+}
+
 const NOW = new Date('2026-09-13T00:00:00Z')
+
+test('EXPIRING_BOARD_KEYS_SQL has a lower bound -- pins the Codex-caught fix that an already-expired, never-revoked key must not appear in an "expiring within 7 days" report', () => {
+  assert.match(EXPIRING_BOARD_KEYS_SQL, /expires_at\s*>=\s*now\(\)/)
+  assert.match(EXPIRING_BOARD_KEYS_SQL, /expires_at\s*<\s*now\(\)\s*\+\s*interval '7 days'/)
+})
+
+test('assertExpectedSchema resolves cleanly when all required columns are present', async () => {
+  await assert.doesNotReject(assertExpectedSchema(fakePool(['name', 'expires_at', 'revoked_at', 'id'])))
+})
+
+test('assertExpectedSchema names exactly which required column is missing, not a generic failure', async () => {
+  await assert.rejects(assertExpectedSchema(fakePool(['name', 'revoked_at'])), (err: Error) => {
+    assert.ok(err.message.includes('expires_at'))
+    assert.ok(!err.message.includes('missing expected column(s): name'))
+    return true
+  })
+})
+
+test('assertExpectedSchema reports "table not found" distinctly when to_regclass resolves nothing (positive control: the passing case above proves the harness itself works)', async () => {
+  await assert.rejects(assertExpectedSchema(fakePool([])), (err: Error) => {
+    assert.ok(err.message.includes("table not found on this connection's search_path"))
+    return true
+  })
+})
 
 test('daysLeft rounds up so a partial day still shows the full warning', () => {
   assert.equal(daysLeft(new Date('2026-09-19T14:00:00Z'), NOW), 7)
