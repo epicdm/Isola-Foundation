@@ -13,6 +13,20 @@
  * wiring this into the webhook handler is genuinely additive and genuinely
  * isolated — the live per-message reply decision is byte-identical whether
  * reconciliation succeeds, no-ops, or throws.
+ *
+ * PAYLOAD SHAPE — READ THIS BEFORE EDITING A FIXTURE HERE.
+ * GitHub Codex review of PR #135, pass 2: `conversation_updated` (and
+ * `conversation_status_changed`/`opened`/`resolved`) do NOT nest the
+ * conversation under a `conversation` key the way `message_created` does.
+ * Confirmed against Chatwoot source (`Conversations::EventDataPresenter
+ * #webhook_data`, delivered verbatim by `Webhooks::Trigger`, no re-wrapping)
+ * and empirically, by running a real-shaped payload through this file's own
+ * parseRouting/parseWebhookPayload before the fix: it produced
+ * `inboxId: null` and `conversationDisplayId: null`, meaning every such
+ * delivery was being 401-rejected at signature selection, never even
+ * reaching evaluateSuppression. `conversationUpdatedPayload` below builds
+ * the CONFIRMED real shape: `id`/`inbox_id`/`status`/`meta` all at the ROOT,
+ * `inbox_id` a bare number (no nested `inbox` object at all).
  */
 import { describe, expect, it } from "vitest";
 
@@ -37,19 +51,28 @@ const REF: ConversationRef = {
   chatwootInboxId: INBOX_ID,
 };
 
-function assigneeConversationUpdated(overrides: {
+/**
+ * The CONFIRMED real shape of conversation_updated/status_changed/opened/
+ * resolved — see this file's own header doc comment. `id`/`inbox_id`/
+ * `status`/`meta` are all top-level; there is no nested `conversation` and
+ * no nested `inbox` object.
+ */
+function conversationUpdatedPayload(overrides: {
+  event?: string;
   status?: string;
   assignee?: unknown;
+  id?: unknown;
+  inboxId?: unknown;
 } = {}): Record<string, unknown> {
-  return messageCreatedPayload({
-    event: "conversation_updated",
-    conversation: {
-      id: CONVERSATION_DISPLAY_ID,
-      status: overrides.status ?? "open",
-      meta: { assignee: "assignee" in overrides ? overrides.assignee : { id: 99 } },
-      custom_attributes: {},
-    },
-  });
+  return {
+    event: overrides.event ?? "conversation_updated",
+    id: "id" in overrides ? overrides.id : CONVERSATION_DISPLAY_ID,
+    inbox_id: "inboxId" in overrides ? overrides.inboxId : INBOX_ID,
+    status: overrides.status ?? "open",
+    meta: { assignee: "assignee" in overrides ? overrides.assignee : { id: 99 }, sender: { id: 55 } },
+    account: { id: ACCOUNT_ID, name: "EPIC" },
+    custom_attributes: {},
+  };
 }
 
 describe("reconcileObservedAssignment — wired at the webhook boundary", () => {
@@ -57,7 +80,7 @@ describe("reconcileObservedAssignment — wired at the webhook boundary", () => 
     const ownership = new InMemoryOwnershipGate();
     const server = await startServer({ ownership });
     try {
-      const res = await postWebhook(server.url, signRequest({ body: assigneeConversationUpdated() }));
+      const res = await postWebhook(server.url, signRequest({ body: conversationUpdatedPayload() }));
 
       // The REPLY decision is exactly what it always was for a non-message_created
       // event — unaffected by anything this fix adds.
@@ -81,13 +104,54 @@ describe("reconcileObservedAssignment — wired at the webhook boundary", () => 
     }
   });
 
+  it("the same event on account/inbox ROUTING alone (not the reconciliation payload) is what changed — confirm parseRouting/binding resolution succeed for this real shape", async () => {
+    // A DIRECT regression proof for the pass-2 finding: before the fix,
+    // inbox_id (a bare number, no nested `inbox` object) was read as null by
+    // parseRouting, so candidateSecrets found nothing and the delivery
+    // 401'd before evaluateSuppression ever ran. If that regressed, this
+    // would come back 401 instead of 200.
+    const ownership = new InMemoryOwnershipGate();
+    const server = await startServer({ ownership });
+    try {
+      const res = await postWebhook(server.url, signRequest({ body: conversationUpdatedPayload() }));
+      expect(res.status).toBe(200);
+    } finally {
+      await server.close();
+    }
+  });
+
+  for (const event of [
+    "conversation_status_changed",
+    "conversation_opened",
+    "conversation_resolved",
+  ] as const) {
+    it(`the same real shape for ${event} routes and parses correctly too — not just conversation_updated`, async () => {
+      const ownership = new InMemoryOwnershipGate();
+      const server = await startServer({ ownership });
+      try {
+        const res = await postWebhook(
+          server.url,
+          signRequest({ body: conversationUpdatedPayload({ event, status: event === "conversation_resolved" ? "resolved" : "open" }) }),
+        );
+        expect(res.status).toBe(200);
+        expect(res.json["outcome"]).toBe("suppressed");
+        await server.gateway.drain();
+        // Only conversation_resolved should create no row (status excludes it);
+        // the other two, carrying an assignee on a non-resolved status, should.
+        expect(ownership.hasRow(REF)).toBe(event !== "conversation_resolved");
+      } finally {
+        await server.close();
+      }
+    });
+  }
+
   it("the SAME event on a RESOLVED conversation: still suppressed as before, and NO row is created — resolve stays terminal", async () => {
     const ownership = new InMemoryOwnershipGate();
     const server = await startServer({ ownership });
     try {
       const res = await postWebhook(
         server.url,
-        signRequest({ body: assigneeConversationUpdated({ status: "resolved" }) }),
+        signRequest({ body: conversationUpdatedPayload({ status: "resolved" }) }),
       );
       expect(res.status).toBe(200);
       expect(res.json["outcome"]).toBe("suppressed");
@@ -105,7 +169,7 @@ describe("reconcileObservedAssignment — wired at the webhook boundary", () => 
     try {
       const res = await postWebhook(
         server.url,
-        signRequest({ body: assigneeConversationUpdated({ status: "pending", assignee: null }) }),
+        signRequest({ body: conversationUpdatedPayload({ status: "pending", assignee: null }) }),
       );
       expect(res.status).toBe(200);
       await server.gateway.drain();
@@ -117,20 +181,14 @@ describe("reconcileObservedAssignment — wired at the webhook boundary", () => 
     }
   });
 
-  it("a malformed/partial payload (no conversation object at all) no-ops reconciliation and the reply path still runs to completion", async () => {
+  it("a conversation_updated payload missing `id` at the root: reconciliation's own null-guard no-ops safely, the reply path still runs to completion", async () => {
     const ownership = new InMemoryOwnershipGate();
     const server = await startServer({ ownership });
     try {
-      // No `conversation` key at all — conversationDisplayId parses to null.
-      // evaluateSuppression's OWN event-type check fires first ("conversation_updated"
-      // is not "message_created"), so the reply decision is `not_message_created`
-      // regardless of this fix — but the reconciliation block runs unconditionally
-      // for every "suppressed" decision, so this still exercises ITS OWN
-      // `conversationDisplayId !== null` guard directly: nothing here should throw,
-      // and the reply path must still reach a normal 200.
-      const body = messageCreatedPayload({ event: "conversation_updated", conversation: undefined });
-      const res = await postWebhook(server.url, signRequest({ body }));
-
+      const res = await postWebhook(
+        server.url,
+        signRequest({ body: conversationUpdatedPayload({ id: undefined }) }),
+      );
       expect(res.status).toBe(200);
       expect(res.json["outcome"]).toBe("suppressed");
       expect(res.json["suppressionReason"]).toBe("not_message_created");
@@ -142,6 +200,9 @@ describe("reconcileObservedAssignment — wired at the webhook boundary", () => 
   });
 
   it("a message_created event with no conversation object at all: reconciliation's own null-guard is what prevents a crash", async () => {
+    // A DIFFERENT malformed shape from the one above — this is the
+    // message_created nested shape, deliberately missing its `conversation`
+    // key, exercising the OTHER branch of parseWebhookPayload.
     const ownership = new InMemoryOwnershipGate();
     const server = await startServer({ ownership });
     try {
@@ -162,8 +223,7 @@ describe("reconcileObservedAssignment — wired at the webhook boundary", () => 
     const ownership = new InMemoryOwnershipGate();
     const server = await startServer({ ownership });
     try {
-      const body = assigneeConversationUpdated();
-      (body["inbox"] as Record<string, unknown>)["id"] = 999_999;
+      const body = conversationUpdatedPayload({ inboxId: 999_999 });
       const res = await postWebhook(server.url, signRequest({ body }));
 
       expect(res.status).toBe(401); // no binding secret matches this inbox at all
@@ -199,7 +259,7 @@ describe("reconcileObservedAssignment — wired at the webhook boundary", () => 
     const server = await startServer({ ownership: slow });
     try {
       const startedAt = Date.now();
-      const res = await postWebhook(server.url, signRequest({ body: assigneeConversationUpdated() }));
+      const res = await postWebhook(server.url, signRequest({ body: conversationUpdatedPayload() }));
       const elapsedMs = Date.now() - startedAt;
 
       expect(res.status).toBe(200);
@@ -235,7 +295,7 @@ describe("reconcileObservedAssignment — wired at the webhook boundary", () => 
     const withThrow = await startServer({ ownership: throwing, logger: capture.logger });
     let throwingResult: { status: number; outcome: unknown; reason: unknown };
     try {
-      const res = await postWebhook(withThrow.url, signRequest({ body: assigneeConversationUpdated() }));
+      const res = await postWebhook(withThrow.url, signRequest({ body: conversationUpdatedPayload() }));
       throwingResult = { status: res.status, outcome: res.json["outcome"], reason: res.json["suppressionReason"] };
     } finally {
       await withThrow.close();
@@ -246,7 +306,7 @@ describe("reconcileObservedAssignment — wired at the webhook boundary", () => 
     const withoutThrow = await startServer({ ownership: healthy });
     let healthyResult: { status: number; outcome: unknown; reason: unknown };
     try {
-      const res = await postWebhook(withoutThrow.url, signRequest({ body: assigneeConversationUpdated() }));
+      const res = await postWebhook(withoutThrow.url, signRequest({ body: conversationUpdatedPayload() }));
       healthyResult = { status: res.status, outcome: res.json["outcome"], reason: res.json["suppressionReason"] };
     } finally {
       await withoutThrow.close();

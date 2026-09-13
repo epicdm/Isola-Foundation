@@ -141,3 +141,41 @@ describe("the idle threshold is measured from the LAST MESSAGE, not from takeove
     expect(now - lastActivity >= IDLE_MS).toBe(false);
   });
 });
+
+/**
+ * The IDLE trigger's OWN assignee guard.
+ *
+ * GitHub Codex review of PR #135, pass 2 (P2): the manual trigger got the
+ * `!hasAssignee` guard, but the idle trigger — a fully independent branch —
+ * did not. A directly-assigned conversation sitting idle for the threshold,
+ * while STILL genuinely assigned, would be handed back on the idle clock
+ * alone: same defect, a different door in.
+ *
+ * ONLY when the record is readable, deliberately — see the sweeper's own
+ * comment: an unreadable record is the EXPECTED shape once a conversation
+ * has a TEAM assigned (conversations#show 500s for an AgentBot token then),
+ * which is exactly what this gateway's own escalation flow does. Making
+ * idle depend on record-readability would silently stop the idle trigger
+ * from ever firing for that case — the one it exists for.
+ */
+describe("the idle trigger also requires no assignee — but ONLY when the record is readable", () => {
+  const idleTrigger = (record: unknown, recordReadable: boolean): boolean => {
+    const stillAssigned = recordReadable && hasAssignee(readAssignee(record));
+    return !stillAssigned;
+  };
+
+  it("does not block idle handback when unassigned", () => {
+    expect(idleTrigger({ meta: { assignee: null } }, true)).toBe(true);
+  });
+
+  it("blocks idle handback while genuinely still assigned", () => {
+    expect(idleTrigger({ meta: { assignee: { id: 7 } } }, true)).toBe(false);
+  });
+
+  it("does NOT block idle handback when the record is unreadable — the team-assigned, 500-on-read case this trigger exists for", () => {
+    // Even though this record, if it COULD be read, shows an assignee — the
+    // point is precisely that an unreadable record must not be treated as
+    // "still assigned" and must not silently disable the idle trigger.
+    expect(idleTrigger({ meta: { assignee: { id: 7 } } }, false)).toBe(true);
+  });
+});

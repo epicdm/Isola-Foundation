@@ -447,14 +447,36 @@ export function createHandbackSweeper(deps: HandbackSweeperDeps): HandbackSweepe
         }
 
         const idleForMs = idleSinceMs === null ? null : now() - idleSinceMs;
-        const idle = idleForMs !== null && idleForMs >= deps.idleMs;
+        // Same "still genuinely assigned" guard as the manual trigger, per
+        // GitHub Codex review of PR #135 pass 2 (P2): the idle path had no
+        // assignee check at all, so a directly-assigned conversation that
+        // simply hadn't been replied to yet would be handed back on the idle
+        // clock alone, same defect as the manual trigger's, via a different
+        // trigger.
+        //
+        // ONLY when the record is READABLE, deliberately — see the comment
+        // above on `recordReadable`: "Chatwoot is consulted for the MANUAL
+        // trigger only... conversations#show returns 500 for an AgentBot
+        // token once a TEAM is assigned, and escalation is what assigns the
+        // team." An unreadable record is the EXPECTED, common shape for a
+        // conversation this gateway's own handoff flow escalated (team
+        // assignment, not an individual `meta.assignee`) — making idle ALSO
+        // depend on recordReadable would silently stop handing those back at
+        // all, which is the one case this trigger exists for. When the
+        // record cannot be read, this falls through to the pre-existing
+        // idle-only behavior, unchanged.
+        const stillAssigned = recordReadable && hasAssignee(readAssignee(record));
+        const idle = !stillAssigned && idleForMs !== null && idleForMs >= deps.idleMs;
 
         if (!manual && !idle) {
-          skip(idleSinceMs === null ? "no_clock" : "not_idle_yet", {
-            clock,
-            idleForMs,
-            recordReadable,
-          });
+          skip(
+            stillAssigned
+              ? "still_assigned"
+              : idleSinceMs === null
+                ? "no_clock"
+                : "not_idle_yet",
+            { clock, idleForMs, recordReadable, stillAssigned },
+          );
           continue;
         }
 
