@@ -227,13 +227,38 @@ export async function selectHumanHeldConversations(
   exec: SqlExecutor,
   limit: number,
 ): Promise<IdleCandidate[]> {
+  // ROUND-ROBIN ACROSS TENANTS, oldest-first within each. GitHub Codex review
+  // of PR #135, final pass (P1): a plain `ORDER BY ownership_changed_at LIMIT`
+  // lets any tenant with at least `limit` rows that never leave
+  // HANDBACK_ELIGIBLE_STATES (genuinely, continuously assigned conversations —
+  // exactly the population def-handback-sweeper-is-blind-to-manually-assigned
+  // -conversations-2026-09-13's own fix makes far more common, since a routine
+  // "Assign to me" now creates a row where none existed before) permanently
+  // occupy the front of that ordering. Every sweep would then re-select the
+  // SAME rows forever and never reach a newer candidate — including a
+  // genuinely idle-eligible or manual-trigger-eligible conversation belonging
+  // to ANY OTHER TENANT sharing this gateway. `ROW_NUMBER() OVER (PARTITION BY
+  // tenant_id ...)` guarantees the oldest candidate from EVERY tenant is
+  // considered before a second candidate from ANY tenant, so one tenant's pile
+  // of permanently-assigned rows can no longer starve every other tenant's
+  // sweep — it can still consume more than its fair share of ITS OWN slots,
+  // which is a separate, pre-existing, harder problem (this sweeper has never
+  // had a way to skip past a row it cannot act on within one tenant) flagged
+  // for the owner rather than solved here.
   const rows = await exec.query(
     `SELECT tenant_id, conversation_key, ownership_episode,
             chatwoot_account_id, chatwoot_conversation_id, chatwoot_inbox_id,
             ownership_changed_at
-       FROM conversation_ownership
-      WHERE ownership_state = ANY($1::text[])
-      ORDER BY ownership_changed_at ASC NULLS FIRST
+       FROM (
+              SELECT *,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY tenant_id
+                       ORDER BY ownership_changed_at ASC NULLS FIRST
+                     ) AS tenant_rank
+                FROM conversation_ownership
+               WHERE ownership_state = ANY($1::text[])
+            ) ranked
+      ORDER BY tenant_rank ASC, ownership_changed_at ASC NULLS FIRST
       LIMIT $2`,
     [[...HANDBACK_ELIGIBLE_STATES], limit],
   );

@@ -1028,6 +1028,27 @@ export function recordResolution(
  *   - HUMAN_OWNED / HANDING_BACK: already tracked, or mid-reconciliation.
  *     Nothing to add; observing only claims the operation id so a later
  *     redelivery of the SAME event is recognised as one.
+ *
+ *     HANDING_BACK specifically, examined per GitHub Codex review of PR #135,
+ *     final pass (P2): `beginHandback` and `completeHandback` (handback.ts)
+ *     run back to back inside one `performHandback` call, with no `await` of
+ *     anything else between them — so an assignment observed in that window
+ *     is claimed here as a plain `observe` and does not interrupt the
+ *     handback in progress. `completeHandback` then still runs, moving the
+ *     ledger to AI_RESUMED -> AI_OWNED, while `pendConversation` (the ONLY
+ *     Chatwoot-side action a handback takes) never clears the newly-observed
+ *     assignee. Not an incorrect-reply risk (evaluateSuppression re-checks
+ *     the live assignee on every message regardless of ledger state) and
+ *     self-heals on the NEXT event that reaches this function for the same
+ *     conversation — which, since the assignee is still genuinely present,
+ *     is whatever the customer's very next message triggers (that suppressed
+ *     delivery calls this function too, sees AI_OWNED with hasAssignee still
+ *     true, and correctly re-applies HUMAN_OWNED). The window itself is two
+ *     sequential awaited database calls inside a single function invocation
+ *     — not a business-timescale gap like the idle-recovery limitation
+ *     flagged above — so this is documented rather than given its own
+ *     cross-function coordination, which would add real complexity to this
+ *     state machine for a substantially narrower exposure.
  */
 export function reconcileObservedAssignment(
   exec: SqlExecutor,

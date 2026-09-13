@@ -46,6 +46,7 @@ import {
   requestHumanOwnership,
   type ConversationRef,
 } from "../src/ownership-store.js";
+import { selectHumanHeldConversations } from "../src/handback.js";
 
 const { Client, Pool } = pgPkg;
 
@@ -1008,6 +1009,93 @@ maybe("an assignee observed outside the escalation flow is reconciled", () => {
 
     const after = await ownershipChangedAt(ref);
     expect(after).not.toBeNull();
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// 5c. selectHumanHeldConversations does not let one tenant starve another
+// GitHub Codex review of PR #135, final pass (P1)
+// ---------------------------------------------------------------------------
+
+maybe("the sweeper's candidate query is fair across tenants", () => {
+  /**
+   * A plain `ORDER BY ownership_changed_at ASC LIMIT` lets any tenant with at
+   * least `limit` rows that never leave HANDBACK_ELIGIBLE_STATES (exactly the
+   * population reconciliation now creates far more of than before this PR —
+   * a routine "Assign to me" that a human never explicitly finishes) occupy
+   * every slot in every sweep forever, so a genuinely idle-eligible
+   * conversation belonging to ANY OTHER TENANT is never even examined. This
+   * proves the fix — a `ROW_NUMBER() OVER (PARTITION BY tenant_id ...)` — with
+   * a scenario a plain ORDER BY LIMIT would fail outright: one tenant alone
+   * holds more stuck rows than the configured batch size.
+   */
+  it("one tenant with MORE stuck rows than the batch size does not exclude a different tenant's single candidate", async () => {
+    const busyTenant = `t-busy-${randomUUID()}`;
+    const quietTenant = `t-quiet-${randomUUID()}`;
+
+    // This file's OTHER tests leave their own residual eligible rows in this
+    // same real, shared, accumulating database — including, measured, rows
+    // with a NULL ownership_changed_at (an escalation transition that never
+    // explicitly set one), which this query's own NULLS FIRST places ahead
+    // of ANY dated timestamp, including a deliberately ancient one. So a
+    // small absolute LIMIT racing against however much of that ambient noise
+    // happens to exist is not a stable test. Instead: request a limit large
+    // enough to return every eligible row in the table (with headroom), then
+    // assert the ONE thing round-robin fairness actually guarantees and
+    // ambient noise cannot disturb — that EVERY tenant's rank-1 candidate is
+    // ordered before ANY tenant's rank-2 candidate. A plain
+    // `ORDER BY ownership_changed_at ASC` would instead place the busy
+    // tenant's five rows (all identically ancient) consecutively, with the
+    // quiet tenant's single, less-ancient row sorted after all five.
+    for (let i = 0; i < 5; i++) {
+      const ref: ConversationRef = {
+        tenantId: busyTenant,
+        chatwootAccountId: 1,
+        chatwootConversationId: 900_000 + i,
+      };
+      await recordHumanReply(exec, { conversation: ref, operationId: `busy-${i}` });
+      await pool.query(
+        `UPDATE conversation_ownership SET ownership_changed_at = $3
+          WHERE tenant_id = $1 AND conversation_key = $2`,
+        [ref.tenantId, conversationKey(ref.chatwootAccountId, ref.chatwootConversationId), new Date("1970-01-01")],
+      );
+    }
+
+    const quietRef: ConversationRef = {
+      tenantId: quietTenant,
+      chatwootAccountId: 1,
+      chatwootConversationId: 900_099,
+    };
+    await recordHumanReply(exec, { conversation: quietRef, operationId: "quiet-1" });
+    await pool.query(
+      `UPDATE conversation_ownership SET ownership_changed_at = $3
+        WHERE tenant_id = $1 AND conversation_key = $2`,
+      [quietRef.tenantId, conversationKey(quietRef.chatwootAccountId, quietRef.chatwootConversationId), new Date("1990-01-01")],
+    );
+
+    const totalEligible = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM conversation_ownership
+        WHERE ownership_state = ANY($1::text[])`,
+      [["HUMAN_REQUESTED", "HUMAN_OWNED", "HANDING_BACK"]],
+    );
+    const candidates = await selectHumanHeldConversations(
+      exec,
+      (totalEligible.rows[0]?.n ?? 0) + 10,
+    );
+
+    const busyIndices = candidates
+      .map((c, i) => (c.conversation.tenantId === busyTenant ? i : -1))
+      .filter((i) => i >= 0);
+    const quietIndex = candidates.findIndex((c) => c.conversation.tenantId === quietTenant);
+
+    expect(busyIndices, "the busy tenant's own five rows must all be present").toHaveLength(5);
+    expect(quietIndex, "the quiet tenant's only row must be present").toBeGreaterThanOrEqual(0);
+
+    const busyRank2Index = [...busyIndices].sort((a, b) => a - b)[1]!;
+    expect(
+      quietIndex,
+      "round-robin fairness: the quiet tenant's ONLY (rank-1) row must be ordered before the busy tenant's SECOND (rank-2) row, never after all five of the busy tenant's rows the way a plain ORDER BY ownership_changed_at ASC would place it",
+    ).toBeLessThan(busyRank2Index);
   }, 30_000);
 });
 
