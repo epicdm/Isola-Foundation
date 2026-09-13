@@ -40,6 +40,7 @@ import type { ChatwootApi, ChatwootTarget } from "./chatwoot.js";
 import type { Logger } from "./log.js";
 import type { SqlClient, SqlExecutor } from "./ledger.js";
 import { readLastBusinessTurnMs } from "./turns.js";
+import { hasAssignee } from "./webhook.js";
 import {
   abortHandback,
   beginHandback,
@@ -263,6 +264,33 @@ export function readConversationStatus(record: unknown): string | null {
   return typeof raw === "string" ? raw : null;
 }
 
+/**
+ * Same extraction shape as `readConversationStatus`, for `meta.assignee` —
+ * GitHub Codex review of PR #135: "pending" ALONE is not a handback signal.
+ * `evaluateSuppression` (webhook.ts) already requires BOTH status==='pending'
+ * AND no assignee before the AI may answer; the sweeper's own manual trigger
+ * below checked only the first half. That gap was latent and harmless before
+ * def-handback-sweeper-is-blind-to-manually-assigned-conversations-2026-09-13
+ * — a manually-assigned conversation never got a row for the sweeper to act
+ * on at all. Once reconcileObservedAssignment (ownership-store.ts) started
+ * creating one, the gap became reachable: a real "pending + still assigned"
+ * conversation (confirmed to exist in production — 6 such rows measured) is
+ * exactly assigned-outside-escalation's own trigger condition, and status
+ * alone would tell the sweeper to hand back to the AI while the human still
+ * holds it in Chatwoot. The AI would stay correctly silent regardless
+ * (evaluateSuppression's own assignee check saves the live reply), but the
+ * ledger would reset to AI-authority and the conversation would drop out of
+ * HANDBACK_ELIGIBLE_STATES — undoing exactly the fix this file exists for.
+ */
+export function readAssignee(record: unknown): unknown {
+  if (typeof record !== "object" || record === null) return null;
+  const payload = (record as Record<string, unknown>)["payload"] ?? record;
+  if (typeof payload !== "object" || payload === null) return null;
+  const meta = (payload as Record<string, unknown>)["meta"];
+  if (typeof meta !== "object" || meta === null) return null;
+  return (meta as Record<string, unknown>)["assignee"] ?? null;
+}
+
 /** Postgres may hand back a Date or a string depending on the driver. */
 export function toEpochMs(raw: unknown): number | null {
   if (raw === null || raw === undefined) return null;
@@ -359,11 +387,22 @@ export function createHandbackSweeper(deps: HandbackSweeperDeps): HandbackSweepe
           recordReadable = false;
         }
 
-        // TRIGGER 1 — MANUAL. A human pressed "Mark as pending" in Chatwoot.
-        // Chatwoot's status is already `pending` while the ownership store
-        // still says a human holds it, so the two disagree and the AI stays
-        // silent. An explicit gesture is not subject to the idle clock.
-        const manual = recordReadable && readConversationStatus(record) === "pending";
+        // TRIGGER 1 — MANUAL. A human pressed "Mark as pending" AND unassigned
+        // in Chatwoot — the SAME compound condition evaluateSuppression itself
+        // requires before the AI may answer (status==='pending' AND no
+        // assignee). Status alone is not the gesture: a conversation can be
+        // 'pending' while still genuinely assigned (measured in production —
+        // see readAssignee's own doc comment), and treating that as a
+        // completed handback would reset the ledger to AI-authority while a
+        // human still holds the conversation in Chatwoot, dropping it out of
+        // HANDBACK_ELIGIBLE_STATES with no assignee ever cleared. Chatwoot's
+        // status is already `pending` while the ownership store still says a
+        // human holds it, so the two disagree and the AI stays silent. An
+        // explicit gesture is not subject to the idle clock.
+        const manual =
+          recordReadable &&
+          readConversationStatus(record) === "pending" &&
+          !hasAssignee(readAssignee(record));
 
         // TRIGGER 2 — IDLE, on OUR clock. Measured from the last thing the
         // BUSINESS said, so a customer chasing for an answer no longer pushes

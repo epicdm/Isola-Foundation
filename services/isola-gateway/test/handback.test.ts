@@ -8,7 +8,8 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { readLastActivityMs } from "../src/handback.js";
+import { readAssignee, readConversationStatus, readLastActivityMs } from "../src/handback.js";
+import { hasAssignee } from "../src/webhook.js";
 
 describe("readLastActivityMs — idleness is read from Chatwoot, not inferred", () => {
   it("reads seconds and converts to milliseconds", () => {
@@ -60,6 +61,62 @@ describe("readLastActivityMs — idleness is read from Chatwoot, not inferred", 
     // The sweeper's own predicate: null must short-circuit before the comparison.
     const wouldHandBack = lastActivity !== null && now - lastActivity >= idleMs;
     expect(wouldHandBack).toBe(false);
+  });
+});
+
+/**
+ * TRIGGER 1 — the manual trigger's compound condition.
+ *
+ * GitHub Codex review of PR #135: "pending" alone is not a completed
+ * handback. def-handback-sweeper-is-blind-to-manually-assigned-conversations
+ * -2026-09-13's own fix (reconcileObservedAssignment) can now put a
+ * conversation into HANDBACK_ELIGIBLE_STATES while it is STILL genuinely
+ * assigned in Chatwoot — "pending + assigned" is a real, measured production
+ * state (6 such conversations), not a hypothetical. Before that fix this gap
+ * was latent: a manually-assigned conversation never reached the sweeper at
+ * all. This mirrors the sweeper's own predicate directly, the same way
+ * `readLastActivityMs`'s sibling describe block above tests the idle
+ * predicate by reconstructing the expression rather than invoking the whole
+ * sweep loop.
+ */
+describe("readAssignee — the manual trigger's OTHER half", () => {
+  it("reads meta.assignee from a payload-wrapped record", () => {
+    expect(readAssignee({ payload: { meta: { assignee: { id: 7 } } } })).toEqual({ id: 7 });
+  });
+
+  it("reads meta.assignee from an unwrapped record", () => {
+    expect(readAssignee({ meta: { assignee: { id: 7 } } })).toEqual({ id: 7 });
+  });
+
+  it("returns null for every shape it cannot read, never throwing", () => {
+    for (const bad of [null, undefined, 42, "nope", {}, { meta: {} }, { meta: null }]) {
+      expect(readAssignee(bad), JSON.stringify(bad)).toBeNull();
+    }
+  });
+});
+
+describe("the manual trigger requires BOTH pending AND no assignee — status alone is not the gesture", () => {
+  const manualTrigger = (record: unknown, recordReadable: boolean): boolean =>
+    recordReadable && readConversationStatus(record) === "pending" && !hasAssignee(readAssignee(record));
+
+  it("fires on a genuine handback: pending, and unassigned", () => {
+    expect(manualTrigger({ status: "pending", meta: { assignee: null } }, true)).toBe(true);
+  });
+
+  it("does NOT fire on pending-but-still-assigned — the exact production shape (6 measured rows)", () => {
+    expect(manualTrigger({ status: "pending", meta: { assignee: { id: 7 } } }, true)).toBe(false);
+  });
+
+  it("does not fire on an assigned conversation with no status change at all", () => {
+    expect(manualTrigger({ status: "open", meta: { assignee: { id: 7 } } }, true)).toBe(false);
+  });
+
+  it("does not fire when the record could not be read at all — unreadable is never treated as a gesture", () => {
+    expect(manualTrigger({ status: "pending", meta: { assignee: null } }, false)).toBe(false);
+  });
+
+  it("an assignee object with no usable id does not count as assigned (matches hasAssignee's own rule)", () => {
+    expect(manualTrigger({ status: "pending", meta: { assignee: {} } }, true)).toBe(true);
   });
 });
 
