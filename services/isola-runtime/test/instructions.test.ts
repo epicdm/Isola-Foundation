@@ -187,6 +187,44 @@ describe("resolve", () => {
   });
 });
 
+describe("resolve — a mapped template with no credential for ITS OWN exposure", () => {
+  it("keeps the compiled-in prompt and never attempts a fetch, rather than sending an empty Bearer", async () => {
+    // Reproduces the scenario found in review: some OTHER exposure has a credential
+    // (so an app.ts-level "does any credential exist at all" gate would stay open),
+    // but THIS template's own exposure has none. Must behave like "not configured",
+    // never like a live failure.
+    const { safeFetch, state } = stubFetch({});
+    const provider = createInstructionsProvider({
+      baseUrl: "https://paperclip.example",
+      map: { [TEMPLATE]: AGENT },
+      readToken: (exposure) => (exposure === "INTERNAL" ? "internal-only-key" : ""),
+      safeFetch,
+      ttlMs: 60_000,
+      timeoutMs: 5_000,
+    });
+    const r = await provider.resolve(TEMPLATE, COMPILED_IN, "PUBLIC");
+    expect(r.source).toBe("compiled_in");
+    expect(r.prompt).toBe(COMPILED_IN);
+    expect(r.failure).toBeNull();
+    expect(state.calls).toBe(0);
+  });
+
+  it("still fetches normally when the credential for this exposure IS present", async () => {
+    const { safeFetch, state } = stubFetch({});
+    const provider = createInstructionsProvider({
+      baseUrl: "https://paperclip.example",
+      map: { [TEMPLATE]: AGENT },
+      readToken: (exposure) => (exposure === "INTERNAL" ? "internal-only-key" : ""),
+      safeFetch,
+      ttlMs: 60_000,
+      timeoutMs: 5_000,
+    });
+    const r = await provider.resolve(TEMPLATE, COMPILED_IN, "INTERNAL");
+    expect(r.source).toBe("paperclip");
+    expect(state.calls).toBe(1);
+  });
+});
+
 describe("resolve — exposure-aware readToken", () => {
   it("passes the caller's exposure through to readToken", async () => {
     const seen: (string | undefined)[] = [];

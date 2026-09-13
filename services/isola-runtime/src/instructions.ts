@@ -146,11 +146,11 @@ export function createInstructionsProvider(deps: InstructionsProviderDeps): Inst
   const cache = new Map<string, CacheEntry>();
   const origin = deps.baseUrl.replace(/\/+$/, "");
 
-  async function fetchEntry(agentId: string, exposure: Exposure | undefined): Promise<string> {
+  async function fetchEntry(agentId: string, token: string): Promise<string> {
     const url = `${origin}/api/agents/${encodeURIComponent(agentId)}/instructions-bundle/file?path=AGENTS.md`;
     const res = await deps.safeFetch(url, {
       method: "GET",
-      headers: { Authorization: `Bearer ${deps.readToken(exposure)}` },
+      headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(deps.timeoutMs),
     });
     if (!res.ok) {
@@ -174,6 +174,19 @@ export function createInstructionsProvider(deps: InstructionsProviderDeps): Inst
         return { prompt: compiledIn, source: "compiled_in", cacheAgeMs: null, failure: null };
       }
 
+      // A mapping can exist globally (some exposure has SOME credential) while THIS
+      // template's own exposure has none — e.g. only an INTERNAL agent key and no
+      // board token, with a PUBLIC template still in the map. Treat that exactly
+      // like "no binding for this template": compiled-in, never a doomed fetch with
+      // an empty Bearer that would otherwise surface as a false fail_closed. Read
+      // once and reuse below, rather than re-reading inside fetchEntry: readToken
+      // is call-time-sensitive for rotation, and a single resolve() must act on one
+      // consistent value.
+      const token = deps.readToken(exposure);
+      if (token === "") {
+        return { prompt: compiledIn, source: "compiled_in", cacheAgeMs: null, failure: null };
+      }
+
       const cached = cache.get(templateId);
       if (cached !== undefined) {
         const age = now() - cached.fetchedAt;
@@ -183,7 +196,7 @@ export function createInstructionsProvider(deps: InstructionsProviderDeps): Inst
       }
 
       try {
-        const prompt = await fetchEntry(agentId, exposure);
+        const prompt = await fetchEntry(agentId, token);
         cache.set(templateId, { prompt, fetchedAt: now() });
         return { prompt, source: "paperclip", cacheAgeMs: 0, failure: null };
       } catch (err) {
