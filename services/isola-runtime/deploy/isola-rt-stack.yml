@@ -102,7 +102,7 @@ services:
       # and the public secret's source name having moved from _v1 to _v3) is
       # reported in that same defect, NOT fixed here — out of the scope the owner
       # asked for on this branch.
-      PAPERCLIP_INSTRUCTIONS_MAP: '{"isola-ai-sales-front-desk-agent@v1":"fd2867d1-ee43-4032-a1cc-52eb3379a581","isola-internal-manager@v1":"a60770e9-e0e1-431a-aef5-f2158b963f61"}'
+      PAPERCLIP_INSTRUCTIONS_MAP: '{"isola-ai-sales-front-desk-agent@v1":"fd2867d1-ee43-4032-a1cc-52eb3379a581","isola-internal-manager@v1":"a60770e9-e0e1-431a-aef5-f2158b963f61","epic-personal-line-concierge@v1":"39df5efc-0a14-476d-a1c8-8d1b4bbf4692"}'
       # Also the lag between an owner edit and a customer seeing it.
       PAPERCLIP_INSTRUCTIONS_TTL_MS: "60000"
       PAPERCLIP_INSTRUCTIONS_TIMEOUT_MS: "5000"
