@@ -491,15 +491,31 @@ export function createHandbackSweeper(deps: HandbackSweeperDeps): HandbackSweepe
         // directly ("Assign to me", no team, `stillAssigned` genuinely true
         // and staying true), this guard means idle can NEVER complete a
         // handback on its own — the row sits at HUMAN_OWNED until a human
-        // performs the full manual gesture. This is SAFE (evaluateSuppression
-        // independently re-checks the live assignee on every message, so no
-        // reply is ever sent to a conversation Chatwoot still shows as
-        // assigned, regardless of ledger state) but it is NOT the "10-minute
-        // idle resume" parity this module's own header describes — that
-        // would require `performHandback` to also clear the Chatwoot
-        // assignee, a new live write against a human agent's active
-        // assignment that this PR deliberately does not add without the
-        // owner's sign-off. Flagged, not fixed, pending that decision.
+        // performs the full manual gesture, or until idle catches it AFTER
+        // the human unassigns (see below). This does NOT risk an INCORRECT
+        // reply — evaluateSuppression independently re-checks the live
+        // assignee on every message, so the AI is never let to speak while
+        // Chatwoot still shows an assignee — but CORRECTED per GitHub Codex
+        // review of PR #135, final pass: it DOES risk a genuine, if bounded,
+        // reply GAP even for a conversation Chatwoot no longer shows as
+        // assigned. `reconcileObservedAssignment` deliberately never
+        // implements the unassign direction (by ratified design), so
+        // unassigning ALONE (without also marking pending) leaves the ledger
+        // at HUMAN_OWNED. `pipeline.ts`'s OWN separate ownership gate reads
+        // that stale ledger state BEFORE evaluateSuppression's live check
+        // ever runs for message_created, and deliberately does not trust a
+        // live Chatwoot snapshot over the store's memory (see its own "the
+        // store remembers; the snapshot cannot" comment) — so a customer's
+        // message can be silently acknowledged with NO reply generated,
+        // even though Chatwoot itself would now allow one, until THIS idle
+        // sweep runs and the elapsed time since `ownership_changed_at`
+        // clears `deps.idleMs`. Bounded and self-healing, not permanent, but
+        // a real gap, not merely "no auto-recovery" as earlier documented
+        // here. Closing it fully would require `performHandback` to also
+        // clear the Chatwoot assignee — a new live write against a human
+        // agent's active assignment that this PR deliberately does not add
+        // without the owner's sign-off. Flagged, not fixed, pending that
+        // decision; this comment corrects the SEVERITY of what is flagged.
 
         if (!manual && !idle) {
           skip(
