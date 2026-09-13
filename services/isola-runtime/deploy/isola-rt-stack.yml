@@ -87,7 +87,22 @@ services:
       # agent, fetched per reply. Editing it in Paperclip changes what customers are
       # told, within the TTL below. A template absent from this map keeps the prompt
       # compiled into registry.ts.
-      PAPERCLIP_INSTRUCTIONS_MAP: '{"isola-ai-sales-front-desk-agent@v1":"fd2867d1-ee43-4032-a1cc-52eb3379a581"}'
+      #
+      # RECONCILIATION, not a new binding: "isola-internal-manager@v1" was ALREADY
+      # LIVE in this service's actual running environment (verified 2026-09-13 via
+      # `docker exec ... env` against isolart_runtime) but had never been checked
+      # into this file. This commit records existing production state; it changes
+      # nothing running. def-isolart-deploy-file-drift-would-silently-drop-a-live-
+      # paperclip-binding-2026-09-13 names the risk this closes: deploying THIS
+      # FILE as it stood before this commit would have silently REMOVED the live
+      # internal-manager binding on next redeploy. Other drift found in the same
+      # comparison (EGRESS_ALLOWLIST missing "hermes-tunnel", HERMES_API_KEY_FILE
+      # and its secret entirely absent below, PAPERCLIP_AGENT_KEY_INTERNAL_FILE
+      # live despite the comment two lines below saying it is deliberately unset,
+      # and the public secret's source name having moved from _v1 to _v3) is
+      # reported in that same defect, NOT fixed here — out of the scope the owner
+      # asked for on this branch.
+      PAPERCLIP_INSTRUCTIONS_MAP: '{"isola-ai-sales-front-desk-agent@v1":"fd2867d1-ee43-4032-a1cc-52eb3379a581","isola-internal-manager@v1":"a60770e9-e0e1-431a-aef5-f2158b963f61","epic-personal-line-concierge@v1":"39df5efc-0a14-476d-a1c8-8d1b4bbf4692"}'
       # Also the lag between an owner edit and a customer seeing it.
       PAPERCLIP_INSTRUCTIONS_TTL_MS: "60000"
       PAPERCLIP_INSTRUCTIONS_TIMEOUT_MS: "5000"
