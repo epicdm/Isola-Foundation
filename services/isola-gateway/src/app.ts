@@ -493,6 +493,68 @@ export function createGateway(deps: GatewayDeps): Gateway {
     void work.finally(() => inflight.delete(work));
   }
 
+  /**
+   * OWNERSHIP RECONCILIATION — best-effort, fire-and-forget, tracked exactly
+   * like `processDelivery` below so `gateway.drain()` still waits for it on
+   * shutdown. def-handback-sweeper-is-blind-to-manually-assigned-conversations-2026-09-13.
+   *
+   * MUST NEVER BE AWAITED ON THE RESPONSE PATH. GitHub Codex review of PR #135
+   * caught the first version doing exactly that: awaiting it before `finish(...)`
+   * meant a slow or unreachable ownership store gated the customer-facing ACK
+   * itself, turning an otherwise-instant 200 into a Chatwoot timeout/retry —
+   * violating the design's own "side-effect-only and non-gating" requirement
+   * in TIMING, not just in the reply's CONTENT. Every call site below calls
+   * `track(reconcileAssignmentBestEffort(...))` AFTER its own `finish(...)`,
+   * the same ordering `processDelivery` already uses.
+   *
+   * Never throws — every failure is caught and logged here, once, so no
+   * caller needs its own try/catch.
+   */
+  async function reconcileAssignmentBestEffort(
+    decision: DeliveryDecision,
+    deliveryId: string | null,
+    correlationId: string,
+  ): Promise<void> {
+    if (decision.kind !== "accept" && decision.kind !== "suppressed") return;
+    const payload = decision.payload;
+    if (payload.conversationDisplayId === null || deliveryId === null) return;
+
+    const b =
+      decision.kind === "accept"
+        ? ({ kind: "ok" as const, binding: decision.binding })
+        : resolveBinding(bindingStore.list(), payload.accountId, payload.inboxId);
+    if (b.kind !== "ok") return;
+
+    try {
+      await deps.ownership.reconcileObservedAssignment({
+        conversation: {
+          tenantId: b.binding.tenantId,
+          chatwootAccountId: b.binding.chatwootAccountId,
+          chatwootConversationId: payload.conversationDisplayId,
+          chatwootInboxId: b.binding.chatwootInboxId,
+          bindingId: bindingIdentity(b.binding),
+        },
+        // Stable per delivery, so a Chatwoot redelivery of the identical
+        // event is a no-op rather than a second write (the store's own
+        // exactly-once claim key is (tenant, conversation, operationId)).
+        operationId: `assignee_observed:${deliveryId}`,
+        hasAssignee: hasAssignee(payload.assignee),
+        status: payload.conversationStatus,
+      });
+    } catch (err) {
+      // Never let a reconciliation failure look like a reply failure, and
+      // never let it retry by re-throwing — the next conversation_updated/
+      // status_changed delivery for this conversation gets another chance,
+      // and the automatic idle-based handback sweep is unaffected either way.
+      logger.warn({
+        event: "ownership",
+        correlationId,
+        outcome: "reconcile_observed_assignment_failed",
+        detail: err instanceof Error ? err.message : "unknown",
+      });
+    }
+  }
+
   async function handleWebhook(
     req: IncomingMessage,
     res: ServerResponse,
@@ -640,64 +702,6 @@ export function createGateway(deps: GatewayDeps): Gateway {
       }
     }
 
-    // OWNERSHIP RECONCILIATION.
-    // def-handback-sweeper-is-blind-to-manually-assigned-conversations-2026-09-13.
-    //
-    // Runs ALONGSIDE the reply decision above, never inside it: `decision` was
-    // already fully computed by the pure `decideDelivery`, so nothing below
-    // this point can change what this turn replies. Best-effort, exactly like
-    // the turn-recording block above it — any failure is logged and swallowed.
-    //
-    // Fires for BOTH "accept" and "suppressed". In practice this almost always
-    // matches on a "suppressed" delivery: a conversation_updated event
-    // carrying a newly-set assignee is not `message_created`, so
-    // evaluateSuppression already discards it with `reason: "not_message_created"`
-    // — discards it for the REPLY decision, which is correct and unchanged,
-    // but that payload is exactly the signal this reconciliation exists to
-    // read. Chatwoot's own AgentBotListener already delivers it to this same
-    // Agent Bot endpoint for every inbox this gateway serves; nothing new is
-    // subscribed to produce it.
-    if (decision.kind === "accept" || decision.kind === "suppressed") {
-      const payload = decision.payload;
-      if (payload.conversationDisplayId !== null && deliveryId !== null) {
-        const b =
-          decision.kind === "accept"
-            ? ({ kind: "ok" as const, binding: decision.binding })
-            : resolveBinding(bindingStore.list(), payload.accountId, payload.inboxId);
-        if (b.kind === "ok") {
-          try {
-            await deps.ownership.reconcileObservedAssignment({
-              conversation: {
-                tenantId: b.binding.tenantId,
-                chatwootAccountId: b.binding.chatwootAccountId,
-                chatwootConversationId: payload.conversationDisplayId,
-                chatwootInboxId: b.binding.chatwootInboxId,
-                bindingId: bindingIdentity(b.binding),
-              },
-              // Stable per delivery, so a Chatwoot redelivery of the identical
-              // event is a no-op rather than a second write (the store's own
-              // exactly-once claim key is (tenant, conversation, operationId)).
-              operationId: `assignee_observed:${deliveryId}`,
-              hasAssignee: hasAssignee(payload.assignee),
-              status: payload.conversationStatus,
-            });
-          } catch (err) {
-            // Never let a reconciliation failure look like a reply failure,
-            // and never let it retry by re-throwing into the request path —
-            // the next conversation_updated/status_changed delivery for this
-            // conversation gets another chance, and the automatic idle-based
-            // handback sweep is unaffected either way.
-            logger.warn({
-              event: "ownership",
-              correlationId,
-              outcome: "reconcile_observed_assignment_failed",
-              detail: err instanceof Error ? err.message : "unknown",
-            });
-          }
-        }
-      }
-    }
-
     switch (decision.kind) {
       case "reject": {
         // The reason is logged, never returned. Telling the caller which half
@@ -758,6 +762,12 @@ export function createGateway(deps: GatewayDeps): Gateway {
           },
           { suppressionReason: decision.reason },
         );
+        // AFTER the ACK, never before it — see reconcileAssignmentBestEffort's
+        // own doc comment. This is the common case: a conversation_updated
+        // carrying a newly-set assignee is suppressed here on the reply
+        // decision (it is not message_created), and is exactly the payload
+        // this reconciliation exists to read.
+        track(reconcileAssignmentBestEffort(decision, deliveryId, correlationId));
         return;
 
       case "accept":
@@ -892,6 +902,13 @@ export function createGateway(deps: GatewayDeps): Gateway {
             attachmentCount: decision.classification.attachmentCount,
           }),
     });
+
+    // Same "an assignee was observed" reconciliation as the "suppressed" case
+    // above — an accepted delivery can ALSO carry an assignee (e.g. a
+    // message_created where the payload's own meta.assignee is populated),
+    // so this checks the same signal here too. AFTER the ACK, alongside
+    // `processDelivery` below, not awaited by it.
+    track(reconcileAssignmentBestEffort(decision, deliveryId, correlationId));
 
     track(
       processDelivery(

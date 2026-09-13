@@ -65,6 +65,13 @@ describe("reconcileObservedAssignment — wired at the webhook boundary", () => 
       expect(res.json["outcome"]).toBe("suppressed");
       expect(res.json["suppressionReason"]).toBe("not_message_created");
 
+      // Reconciliation is fire-and-forget (tracked, not awaited on the
+      // response path — see reconcileAssignmentBestEffort's own doc comment,
+      // added after GitHub Codex caught the first version blocking the ACK
+      // on it). `drain()` is the same wait `close()` performs; called
+      // explicitly here so the assertion below is not a race.
+      await server.gateway.drain();
+
       // But the ledger now knows a human holds this conversation.
       expect(ownership.hasRow(REF)).toBe(true);
       const view: OwnershipView = await ownership.read(REF);
@@ -84,6 +91,7 @@ describe("reconcileObservedAssignment — wired at the webhook boundary", () => 
       );
       expect(res.status).toBe(200);
       expect(res.json["outcome"]).toBe("suppressed");
+      await server.gateway.drain();
       expect(ownership.hasRow(REF)).toBe(false);
     } finally {
       await server.close();
@@ -100,6 +108,7 @@ describe("reconcileObservedAssignment — wired at the webhook boundary", () => 
         signRequest({ body: assigneeConversationUpdated({ status: "pending", assignee: null }) }),
       );
       expect(res.status).toBe(200);
+      await server.gateway.drain();
       const view = await ownership.read(REF);
       expect(view.state).toBe("HUMAN_OWNED"); // untouched
       expect(view.episode).toBe(3); // untouched
@@ -125,6 +134,7 @@ describe("reconcileObservedAssignment — wired at the webhook boundary", () => 
       expect(res.status).toBe(200);
       expect(res.json["outcome"]).toBe("suppressed");
       expect(res.json["suppressionReason"]).toBe("not_message_created");
+      await server.gateway.drain();
       expect(ownership.hasRow(REF)).toBe(false);
     } finally {
       await server.close();
@@ -141,6 +151,7 @@ describe("reconcileObservedAssignment — wired at the webhook boundary", () => 
       expect(res.status).toBe(200);
       expect(res.json["outcome"]).toBe("suppressed");
       expect(res.json["suppressionReason"]).toBe("no_conversation_id");
+      await server.gateway.drain();
       expect(ownership.hasRow(REF)).toBe(false);
     } finally {
       await server.close();
@@ -156,7 +167,51 @@ describe("reconcileObservedAssignment — wired at the webhook boundary", () => 
       const res = await postWebhook(server.url, signRequest({ body }));
 
       expect(res.status).toBe(401); // no binding secret matches this inbox at all
+      await server.gateway.drain();
       expect(ownership.hasRow({ ...REF, chatwootInboxId: 999_999 })).toBe(false);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("a SLOW ownership store never delays the ACK — reconciliation is fire-and-forget, not awaited on the response path", async () => {
+    // Regression test for GitHub Codex's finding on PR #135: the first
+    // version awaited reconcileObservedAssignment before `finish(...)`, so a
+    // slow or hung ownership store gated the customer-facing ACK itself.
+    const inner = new InMemoryOwnershipGate();
+    const DELAY_MS = 500;
+    let resolved = false;
+    const slow = {
+      read: inner.read.bind(inner),
+      requestHuman: inner.requestHuman.bind(inner),
+      claimAck: inner.claimAck.bind(inner),
+      reconcileObservedAssignment: (
+        input: Parameters<InMemoryOwnershipGate["reconcileObservedAssignment"]>[0],
+      ) =>
+        new Promise<TransitionOutcome | null>((resolve) => {
+          setTimeout(() => {
+            resolved = true;
+            resolve(inner.reconcileObservedAssignment(input));
+          }, DELAY_MS);
+        }),
+    };
+
+    const server = await startServer({ ownership: slow });
+    try {
+      const startedAt = Date.now();
+      const res = await postWebhook(server.url, signRequest({ body: assigneeConversationUpdated() }));
+      const elapsedMs = Date.now() - startedAt;
+
+      expect(res.status).toBe(200);
+      // The ACK came back well before the slow store's own delay — proof, not
+      // just "under 5s": if this were still awaited, elapsedMs would be >= 500.
+      expect(elapsedMs).toBeLessThan(DELAY_MS);
+      expect(resolved).toBe(false); // the slow work had not even finished yet
+
+      // But it DOES eventually land — this is fire-and-forget, not fire-and-drop.
+      await server.gateway.drain();
+      expect(resolved).toBe(true);
+      expect(inner.hasRow(REF)).toBe(true);
     } finally {
       await server.close();
     }
