@@ -85,6 +85,120 @@ describe("parseRouting", () => {
   });
 });
 
+/**
+ * conversation_updated / conversation_status_changed / conversation_opened /
+ * conversation_resolved — the ROOT-shaped events, distinct from
+ * message_created's nested shape.
+ *
+ * GitHub Codex review of PR #135, pass 2 (P1, confirmed against Chatwoot
+ * source — Conversations::EventDataPresenter#webhook_data, delivered
+ * verbatim by Webhooks::Trigger with no re-wrapping): these four events put
+ * `id`/`inbox_id`/`status`/`meta` at the TOP LEVEL, with `inbox_id` a bare
+ * number and NO nested `inbox` object and NO nested `conversation` object
+ * at all. Before this fix, running one of these through parseRouting
+ * produced `inboxId: null` — meaning candidateSecrets found nothing and
+ * EVERY such delivery was 401-rejected before evaluateSuppression ever ran.
+ * That was a pre-existing gap (nothing needed these event types to route
+ * correctly before def-handback-sweeper-is-blind-to-manually-assigned-
+ * conversations-2026-09-13's reconcileObservedAssignment became the first
+ * thing that does).
+ */
+function conversationUpdatedFixture(
+  overrides: { event?: string; id?: unknown; inbox_id?: unknown; status?: unknown; assignee?: unknown } = {},
+): Record<string, unknown> {
+  return {
+    event: overrides.event ?? "conversation_updated",
+    id: "id" in overrides ? overrides.id : CONVERSATION_DISPLAY_ID,
+    inbox_id: "inbox_id" in overrides ? overrides.inbox_id : 7,
+    status: "status" in overrides ? overrides.status : "open",
+    meta: { assignee: "assignee" in overrides ? overrides.assignee : { id: 99 } },
+    account: { id: 1, name: "EPIC" },
+    custom_attributes: {},
+  };
+}
+
+describe("the root-shaped conversation events — parseRouting", () => {
+  it("reads inbox_id as a bare number, not a nested { id } object", () => {
+    expect(parseRouting(Buffer.from(JSON.stringify(conversationUpdatedFixture())))).toEqual({
+      accountId: 1,
+      inboxId: 7,
+    });
+  });
+
+  it("still returns null for a truly missing inbox_id, never guessing", () => {
+    expect(
+      parseRouting(Buffer.from(JSON.stringify(conversationUpdatedFixture({ inbox_id: undefined })))),
+    ).toEqual({ accountId: 1, inboxId: null });
+  });
+
+  for (const event of [
+    "conversation_status_changed",
+    "conversation_opened",
+    "conversation_resolved",
+  ] as const) {
+    it(`routes ${event} the same way as conversation_updated`, () => {
+      expect(
+        parseRouting(Buffer.from(JSON.stringify(conversationUpdatedFixture({ event })))),
+      ).toEqual({ accountId: 1, inboxId: 7 });
+    });
+  }
+
+  it("a message_created payload is NOT parsed with the root shape — inbox stays nested", () => {
+    // Negative control: the branch must key on `event`, not accidentally
+    // apply to every payload.
+    expect(parseRouting(Buffer.from(JSON.stringify(messageCreatedPayload())))).toEqual({
+      accountId: 1,
+      inboxId: 7,
+    });
+  });
+});
+
+describe("the root-shaped conversation events — parseWebhookPayload", () => {
+  function rootPayloadFrom(overrides: Parameters<typeof conversationUpdatedFixture>[0] = {}) {
+    const parsed = parseWebhookPayload(
+      Buffer.from(JSON.stringify(conversationUpdatedFixture(overrides)), "utf8"),
+    );
+    if (parsed === null) throw new Error("fixture did not parse");
+    return parsed;
+  }
+
+  it("reads conversationDisplayId, inboxId, status and assignee from the ROOT", () => {
+    const payload = rootPayloadFrom();
+    expect(payload.event).toBe("conversation_updated");
+    expect(payload.conversationDisplayId).toBe(CONVERSATION_DISPLAY_ID);
+    expect(payload.inboxId).toBe(7);
+    expect(payload.accountId).toBe(1);
+    expect(payload.conversationStatus).toBe("open");
+    expect(payload.assignee).toEqual({ id: 99 });
+  });
+
+  it("still correctly reports not_message_created for the reply decision — this fix never changes that", () => {
+    expect(evaluateSuppression(rootPayloadFrom()).action).toBe("suppress");
+    expect((evaluateSuppression(rootPayloadFrom()) as { reason: string }).reason).toBe(
+      "not_message_created",
+    );
+  });
+
+  it("message-specific fields are absent, never guessed, for this shape", () => {
+    const payload = rootPayloadFrom();
+    expect(payload.messageId).toBeNull();
+    expect(payload.content).toBeNull();
+    expect(payload.messageType).toBe("unknown");
+    expect(payload.attachmentTypes).toEqual([]);
+    expect(payload.senderType).toBeNull();
+    expect(payload.senderPhone).toBeNull();
+  });
+
+  it("a missing root `id` yields conversationDisplayId: null, never a guess", () => {
+    expect(rootPayloadFrom({ id: undefined }).conversationDisplayId).toBeNull();
+  });
+
+  it("hasAssignee reads correctly from this shape's assignee value", () => {
+    expect(hasAssignee(rootPayloadFrom().assignee)).toBe(true);
+    expect(hasAssignee(rootPayloadFrom({ assignee: null }).assignee)).toBe(false);
+  });
+});
+
 describe("hasAssignee", () => {
   it("is false for null, undefined and an empty object", () => {
     expect(hasAssignee(null)).toBe(false);

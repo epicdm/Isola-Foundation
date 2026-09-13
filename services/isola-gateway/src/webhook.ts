@@ -197,6 +197,38 @@ export function readAttachmentTypes(value: unknown): string[] {
 }
 
 /**
+ * Events whose payload IS the conversation itself, at the ROOT — not a
+ * message with a nested `conversation` sub-object.
+ *
+ * GitHub Codex review of PR #135, and confirmed independently against
+ * Chatwoot source (`app/listeners/agent_bot_listener.rb` builds these four
+ * from `conversation.webhook_data.merge(event:, changed_attributes:)`, and
+ * `Conversations::EventDataPresenter#webhook_data` — the method that
+ * actually produces it — returns `id: display_id`, `inbox_id: inbox_id` (a
+ * bare number, no nested `inbox` object at all), `status:`, `meta:` all at
+ * the TOP LEVEL, merged with `account: account.webhook_data`; there is no
+ * `conversation` key anywhere in the object). `Webhooks::Trigger` (the
+ * delivery job) posts this object verbatim — nothing re-wraps or
+ * re-nests it before it reaches this gateway.
+ *
+ * Verified empirically, not just read: a real-shaped payload run through
+ * this file's OWN parseRouting/parseWebhookPayload before this fix produced
+ * inboxId: null and conversationDisplayId: null — meaning EVERY delivery of
+ * one of these four event types was being 401-rejected at signature
+ * selection (no binding matches a null inboxId), never even reaching
+ * evaluateSuppression. That is a PRE-EXISTING gap, not introduced by this
+ * PR — it was unreachable before because nothing ever needed these event
+ * types to route or parse correctly; reconcileObservedAssignment
+ * (ownership-store.ts) is the first thing that does.
+ */
+const CONVERSATION_ROOT_EVENTS: ReadonlySet<string> = new Set([
+  "conversation_updated",
+  "conversation_status_changed",
+  "conversation_opened",
+  "conversation_resolved",
+]);
+
+/**
  * Extract only the routing identifiers, without validating anything else.
  *
  * This runs on an UNVERIFIED body, purely to select which AgentBot secret to
@@ -211,11 +243,14 @@ export function parseRouting(raw: Buffer): { accountId: number | null; inboxId: 
   }
   if (!isRecord(parsed)) return { accountId: null, inboxId: null };
   const account = child(parsed, "account");
+  const accountId = account === null ? null : readInt(account["id"]);
+
+  const eventName = readString(parsed["event"]);
+  if (eventName !== null && CONVERSATION_ROOT_EVENTS.has(eventName)) {
+    return { accountId, inboxId: readInt(parsed["inbox_id"]) };
+  }
   const inbox = child(parsed, "inbox");
-  return {
-    accountId: account === null ? null : readInt(account["id"]),
-    inboxId: inbox === null ? null : readInt(inbox["id"]),
-  };
+  return { accountId, inboxId: inbox === null ? null : readInt(inbox["id"]) };
 }
 
 /** Full parse of a verified body. Returns null when the body is not a JSON object. */
@@ -229,6 +264,36 @@ export function parseWebhookPayload(raw: Buffer): WebhookPayload | null {
   if (!isRecord(parsed)) return null;
 
   const account = child(parsed, "account");
+  const accountId = account === null ? null : readInt(account["id"]);
+  const eventName = readString(parsed["event"]);
+
+  if (eventName !== null && CONVERSATION_ROOT_EVENTS.has(eventName)) {
+    // Root-shaped: see CONVERSATION_ROOT_EVENTS's own doc comment. None of
+    // the message-specific fields exist in this shape at all — they are set
+    // to their "absent" values. This is safe: evaluateSuppression's very
+    // first check is `event !== "message_created"`, which is always true
+    // here and returns before touching any of them.
+    const meta = child(parsed, "meta");
+    const attributes = child(parsed, "custom_attributes");
+    return {
+      event: eventName,
+      messageId: null,
+      content: null,
+      messageType: "unknown",
+      attachmentTypes: [],
+      contentType: null,
+      private: null,
+      senderType: null,
+      senderPhone: null,
+      accountId,
+      inboxId: readInt(parsed["inbox_id"]),
+      conversationDisplayId: readInt(parsed["id"]),
+      conversationStatus: readString(parsed["status"]),
+      assignee: meta === null ? null : (meta["assignee"] ?? null),
+      customAttributes: (attributes ?? {}) as Record<string, unknown>,
+    };
+  }
+
   const inbox = child(parsed, "inbox");
   const conversation = child(parsed, "conversation");
   const meta = conversation === null ? null : child(conversation, "meta");
@@ -239,7 +304,7 @@ export function parseWebhookPayload(raw: Buffer): WebhookPayload | null {
   const privateRaw = parsed["private"];
 
   return {
-    event: readString(parsed["event"]),
+    event: eventName,
     messageId: readInt(parsed["id"]),
     content: readString(parsed["content"]),
     messageType: readMessageType(parsed["message_type"]),
@@ -255,7 +320,7 @@ export function parseWebhookPayload(raw: Buffer): WebhookPayload | null {
       sender === null
         ? null
         : (readString(sender["phone_number"]) ?? readString(sender["identifier"])),
-    accountId: account === null ? null : readInt(account["id"]),
+    accountId,
     inboxId: inbox === null ? null : readInt(inbox["id"]),
     conversationDisplayId: conversation === null ? null : readInt(conversation["id"]),
     conversationStatus: conversation === null ? null : readString(conversation["status"]),

@@ -37,13 +37,16 @@ import {
   beginHandback,
   claimHandoverAck,
   completeHandback,
+  confirmHumanOwnership,
   migrateOwnershipStore,
   readConversationOwnership,
+  reconcileObservedAssignment,
   recordHumanReply,
   recordResolution,
   requestHumanOwnership,
   type ConversationRef,
 } from "../src/ownership-store.js";
+import { selectHumanHeldConversations } from "../src/handback.js";
 
 const { Client, Pool } = pgPkg;
 
@@ -109,6 +112,23 @@ async function transitionRows(
     [ref.tenantId, key],
   );
   return result.rows;
+}
+
+/**
+ * The raw `ownership_changed_at` column — the handback sweeper's own idle
+ * floor (handback.ts: `SELECT ... ownership_changed_at ... ORDER BY
+ * ownership_changed_at ASC NULLS FIRST`). Not exposed on `OwnershipView`,
+ * which is the reply path's own narrow contract — this reads the column
+ * directly, the same way the sweeper's SQL does.
+ */
+async function ownershipChangedAt(ref: ConversationRef): Promise<Date | null> {
+  const key = conversationKey(ref.chatwootAccountId, ref.chatwootConversationId);
+  const result = await pool.query(
+    `SELECT ownership_changed_at FROM conversation_ownership
+      WHERE tenant_id = $1 AND conversation_key = $2`,
+    [ref.tenantId, key],
+  );
+  return result.rows[0]?.ownership_changed_at ?? null;
 }
 
 beforeAll(async () => {
@@ -416,6 +436,33 @@ maybe("exactly-once is enforced by the database", () => {
     const after = await readConversationOwnership(exec, ref);
     expect(after.state).toBe("AI_RESUMED"); // NOT dragged back to HUMAN_OWNED
     expect(after.episode).toBe(1);
+  }, 30_000);
+
+  /**
+   * The OTHER half of the ownership_changed_at fix below (GitHub Codex
+   * review of PR #135, pass 4 on this test file): `recordHumanReply`'s own
+   * `observe` branch (line ~796 in ownership-store.ts) omits
+   * `touchOwnershipChangedAt` entirely, relying on `applyOwnershipTransition`
+   * defaulting it to `true`. A GENUINE human reply while already HUMAN_OWNED
+   * is real activity and must still renew the sweeper's idle floor — proven
+   * here so a future change to that default cannot silently stop it, the
+   * same way `reconcileObservedAssignment`'s sibling test proves the OTHER
+   * direction (an observation with no real activity must NOT renew it).
+   */
+  it("a SECOND human reply while already HUMAN_OWNED still advances ownership_changed_at — the default, unlike reconciliation's, is to renew it", async () => {
+    const ref = freshConversation();
+    await recordHumanReply(exec, { conversation: ref, operationId: "m1" });
+    const firstReplyAt = await ownershipChangedAt(ref);
+    expect(firstReplyAt).not.toBeNull();
+
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+
+    const second = await recordHumanReply(exec, { conversation: ref, operationId: "m2" });
+    expect(second.status).toBe("applied"); // reaches the observe branch, HUMAN_OWNED unchanged
+    expect(second.state).toBe("HUMAN_OWNED");
+
+    const secondReplyAt = await ownershipChangedAt(ref);
+    expect(secondReplyAt!.getTime()).toBeGreaterThan(firstReplyAt!.getTime());
   }, 30_000);
 
   it("refuses to persist a reason that is free text rather than a code", async () => {
@@ -764,6 +811,291 @@ maybe("resolution is an observation, not a grant of authority", () => {
     const view = await readConversationOwnership(exec, ref);
     expect(view.state).toBe("HUMAN_OWNED");
     expect(view.diverged).toBe(true);
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// 5b. Reconciliation of an assignee observed outside the escalation flow
+// def-handback-sweeper-is-blind-to-manually-assigned-conversations-2026-09-13
+// ---------------------------------------------------------------------------
+
+maybe("an assignee observed outside the escalation flow is reconciled", () => {
+  it("assign-outside-escalation on an OPEN conversation: a row is created, eligible for the sweeper", async () => {
+    const ref = freshConversation();
+    expect((await readConversationOwnership(exec, ref)).state).toBe("AI_OWNED"); // no row yet
+
+    const outcome = await reconcileObservedAssignment(exec, {
+      conversation: ref,
+      operationId: "assignee_observed:evt-1",
+      hasAssignee: true,
+      status: "open",
+    });
+    expect(outcome?.status).toBe("applied");
+    expect(outcome?.state).toBe("HUMAN_OWNED");
+
+    const after = await readConversationOwnership(exec, ref);
+    // HUMAN_OWNED is one of handback.ts's own HANDBACK_ELIGIBLE_STATES
+    // (["HUMAN_REQUESTED", "HUMAN_OWNED", "HANDING_BACK"]) — this is exactly
+    // the row `selectHumanHeldConversations` will now find that it could not
+    // find before this fix.
+    expect(after.state).toBe("HUMAN_OWNED");
+    expect(after.episode).toBe(1); // a new episode opened — a takeover with no prior escalation
+
+    const row = (await transitionRows(ref)).find((r) => r.operation_id === "assignee_observed:evt-1")!;
+    expect(row.from_state).toBe("AI_OWNED");
+    expect(row.to_state).toBe("HUMAN_OWNED");
+  }, 30_000);
+
+  it("the SAME check on a RESOLVED conversation: NO row is created, nothing touched", async () => {
+    const ref = freshConversation();
+
+    const outcome = await reconcileObservedAssignment(exec, {
+      conversation: ref,
+      operationId: "assignee_observed:evt-2",
+      hasAssignee: true,
+      status: "resolved",
+    });
+    expect(outcome).toBeNull();
+
+    // Not just "still AI_OWNED" (a state a real row could also hold) — no row
+    // exists at all, and no transition was ever written under this operation id.
+    expect((await readConversationOwnership(exec, ref)).episode).toBe(0);
+    expect(await transitionRows(ref)).toHaveLength(0);
+  }, 30_000);
+
+  it("no assignee present (the unassign direction): a no-op, even against an EXISTING human hold — no stale row is corrupted", async () => {
+    const ref = freshConversation();
+    await recordHumanReply(exec, { conversation: ref, operationId: "msg-1" });
+    const held = await readConversationOwnership(exec, ref);
+    expect(held.state).toBe("HUMAN_OWNED");
+
+    const outcome = await reconcileObservedAssignment(exec, {
+      conversation: ref,
+      operationId: "assignee_observed:evt-3",
+      hasAssignee: false,
+      status: "pending",
+    });
+    expect(outcome).toBeNull();
+
+    const after = await readConversationOwnership(exec, ref);
+    expect(after.state).toBe("HUMAN_OWNED"); // untouched
+    expect(after.episode).toBe(held.episode); // untouched
+    // This function deliberately does not act on the unassign direction — the
+    // EXISTING sweeper (handback.ts's MANUAL trigger, `readConversationStatus
+    // (record) === "pending"`) already completes that side once a row exists
+    // in an eligible state, the same way it already does for a gateway-
+    // escalated conversation. Recording it here too would be a second path
+    // to the same outcome.
+    expect(await transitionRows(ref)).toHaveLength(1); // only msg-1, no evt-3 row
+  }, 30_000);
+
+  it("a replayed identical event is a duplicate, not a second episode", async () => {
+    const ref = freshConversation();
+    const first = await reconcileObservedAssignment(exec, {
+      conversation: ref,
+      operationId: "assignee_observed:evt-4",
+      hasAssignee: true,
+      status: "open",
+    });
+    expect(first?.status).toBe("applied");
+    expect(first?.episode).toBe(1);
+
+    const replay = await reconcileObservedAssignment(exec, {
+      conversation: ref,
+      operationId: "assignee_observed:evt-4",
+      hasAssignee: true,
+      status: "open",
+    });
+    expect(replay?.status).toBe("duplicate");
+    expect(replay?.episode).toBe(1); // unchanged — not a second takeover
+  }, 30_000);
+
+  it("an escalation already in flight (HUMAN_REQUESTED) is observed, never overtaken — confirmHumanOwnership still gets to complete it", async () => {
+    const ref = freshConversation();
+    await requestHumanOwnership(exec, {
+      conversation: ref,
+      operationId: "esc-1",
+      reason: "explicit_human_request",
+    });
+    expect((await readConversationOwnership(exec, ref)).state).toBe("HUMAN_REQUESTED");
+
+    const observed = await reconcileObservedAssignment(exec, {
+      conversation: ref,
+      operationId: "assignee_observed:evt-5",
+      hasAssignee: true,
+      status: "pending",
+    });
+    // Observed, not applied over — state and episode are unchanged.
+    expect(observed?.status).toBe("applied"); // the observation ITSELF claims and is recorded
+    expect(observed?.state).toBe("HUMAN_REQUESTED");
+    const mid = await readConversationOwnership(exec, ref);
+    expect(mid.state).toBe("HUMAN_REQUESTED");
+    expect(mid.episode).toBe(1);
+
+    // The escalation flow's own completion is NOT refused as illegal — proving
+    // the two writers do not race each other for the same transition.
+    const confirmed = await confirmHumanOwnership(exec, {
+      conversation: ref,
+      operationId: "confirm-1",
+      episode: 1,
+      reason: "human_assigned",
+    });
+    expect(confirmed.status).toBe("applied");
+    expect(confirmed.state).toBe("HUMAN_OWNED");
+  }, 30_000);
+
+  /**
+   * GitHub Codex review of PR #135, final pass: an `observe` on an
+   * already-human-owned row must NOT advance `ownership_changed_at`, because
+   * this branch fires on EVERY suppressed delivery for that conversation —
+   * including an ordinary customer message that only re-confirms an assignee
+   * already on record. handback.ts floors its idle clock against exactly this
+   * column so a customer's own message can never postpone their own handback;
+   * bumping it here would defeat that floor through a different door. Proven
+   * against real Postgres with a real elapsed interval, not a mocked clock —
+   * a fake clock could not have caught the CASE expression being wired to the
+   * wrong branch.
+   */
+  it("observing an ALREADY human-owned row does not advance ownership_changed_at — a customer's own message must never postpone their own handback", async () => {
+    const ref = freshConversation();
+    const first = await reconcileObservedAssignment(exec, {
+      conversation: ref,
+      operationId: "assignee_observed:evt-6a",
+      hasAssignee: true,
+      status: "open",
+    });
+    expect(first?.status).toBe("applied");
+    const changedAtAfterTakeover = await ownershipChangedAt(ref);
+    expect(changedAtAfterTakeover).not.toBeNull();
+
+    // A real elapsed interval, not a mocked clock: if the CASE expression in
+    // the UPDATE were wired backwards (or absent), `now()` at this second call
+    // would measurably differ from the first.
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+
+    const second = await reconcileObservedAssignment(exec, {
+      conversation: ref,
+      // A DIFFERENT delivery id — an ordinary follow-up message, not a replay
+      // of the first event. Must reach the `observe` branch fresh, not the
+      // duplicate-claim short circuit.
+      operationId: "assignee_observed:evt-6b",
+      hasAssignee: true,
+      status: "open",
+    });
+    expect(second?.status).toBe("applied"); // claimed as its own operation
+    expect(second?.state).toBe("HUMAN_OWNED"); // nothing moved
+
+    const changedAtAfterObserve = await ownershipChangedAt(ref);
+    expect(changedAtAfterObserve?.getTime()).toBe(changedAtAfterTakeover?.getTime());
+  }, 30_000);
+
+  /**
+   * The positive control for the test above. Without it, a broken fixture —
+   * one where NOTHING ever advances `ownership_changed_at` — would make the
+   * "does not advance" assertion pass vacuously.
+   */
+  it("POSITIVE CONTROL: a genuine takeover (AI_OWNED -> HUMAN_OWNED) DOES advance ownership_changed_at", async () => {
+    const ref = freshConversation();
+    const before = await ownershipChangedAt(ref); // no row yet
+    expect(before).toBeNull();
+
+    const outcome = await reconcileObservedAssignment(exec, {
+      conversation: ref,
+      operationId: "assignee_observed:evt-7",
+      hasAssignee: true,
+      status: "open",
+    });
+    expect(outcome?.status).toBe("applied");
+
+    const after = await ownershipChangedAt(ref);
+    expect(after).not.toBeNull();
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// 5c. selectHumanHeldConversations does not let one tenant starve another
+// GitHub Codex review of PR #135, final pass (P1)
+// ---------------------------------------------------------------------------
+
+maybe("the sweeper's candidate query is fair across tenants", () => {
+  /**
+   * A plain `ORDER BY ownership_changed_at ASC LIMIT` lets any tenant with at
+   * least `limit` rows that never leave HANDBACK_ELIGIBLE_STATES (exactly the
+   * population reconciliation now creates far more of than before this PR —
+   * a routine "Assign to me" that a human never explicitly finishes) occupy
+   * every slot in every sweep forever, so a genuinely idle-eligible
+   * conversation belonging to ANY OTHER TENANT is never even examined. This
+   * proves the fix — a `ROW_NUMBER() OVER (PARTITION BY tenant_id ...)` — with
+   * a scenario a plain ORDER BY LIMIT would fail outright: one tenant alone
+   * holds more stuck rows than the configured batch size.
+   */
+  it("one tenant with MORE stuck rows than the batch size does not exclude a different tenant's single candidate", async () => {
+    const busyTenant = `t-busy-${randomUUID()}`;
+    const quietTenant = `t-quiet-${randomUUID()}`;
+
+    // This file's OTHER tests leave their own residual eligible rows in this
+    // same real, shared, accumulating database — including, measured, rows
+    // with a NULL ownership_changed_at (an escalation transition that never
+    // explicitly set one), which this query's own NULLS FIRST places ahead
+    // of ANY dated timestamp, including a deliberately ancient one. So a
+    // small absolute LIMIT racing against however much of that ambient noise
+    // happens to exist is not a stable test. Instead: request a limit large
+    // enough to return every eligible row in the table (with headroom), then
+    // assert the ONE thing round-robin fairness actually guarantees and
+    // ambient noise cannot disturb — that EVERY tenant's rank-1 candidate is
+    // ordered before ANY tenant's rank-2 candidate. A plain
+    // `ORDER BY ownership_changed_at ASC` would instead place the busy
+    // tenant's five rows (all identically ancient) consecutively, with the
+    // quiet tenant's single, less-ancient row sorted after all five.
+    for (let i = 0; i < 5; i++) {
+      const ref: ConversationRef = {
+        tenantId: busyTenant,
+        chatwootAccountId: 1,
+        chatwootConversationId: 900_000 + i,
+      };
+      await recordHumanReply(exec, { conversation: ref, operationId: `busy-${i}` });
+      await pool.query(
+        `UPDATE conversation_ownership SET ownership_changed_at = $3
+          WHERE tenant_id = $1 AND conversation_key = $2`,
+        [ref.tenantId, conversationKey(ref.chatwootAccountId, ref.chatwootConversationId), new Date("1970-01-01")],
+      );
+    }
+
+    const quietRef: ConversationRef = {
+      tenantId: quietTenant,
+      chatwootAccountId: 1,
+      chatwootConversationId: 900_099,
+    };
+    await recordHumanReply(exec, { conversation: quietRef, operationId: "quiet-1" });
+    await pool.query(
+      `UPDATE conversation_ownership SET ownership_changed_at = $3
+        WHERE tenant_id = $1 AND conversation_key = $2`,
+      [quietRef.tenantId, conversationKey(quietRef.chatwootAccountId, quietRef.chatwootConversationId), new Date("1990-01-01")],
+    );
+
+    const totalEligible = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM conversation_ownership
+        WHERE ownership_state = ANY($1::text[])`,
+      [["HUMAN_REQUESTED", "HUMAN_OWNED", "HANDING_BACK"]],
+    );
+    const candidates = await selectHumanHeldConversations(
+      exec,
+      (totalEligible.rows[0]?.n ?? 0) + 10,
+    );
+
+    const busyIndices = candidates
+      .map((c, i) => (c.conversation.tenantId === busyTenant ? i : -1))
+      .filter((i) => i >= 0);
+    const quietIndex = candidates.findIndex((c) => c.conversation.tenantId === quietTenant);
+
+    expect(busyIndices, "the busy tenant's own five rows must all be present").toHaveLength(5);
+    expect(quietIndex, "the quiet tenant's only row must be present").toBeGreaterThanOrEqual(0);
+
+    const busyRank2Index = [...busyIndices].sort((a, b) => a - b)[1]!;
+    expect(
+      quietIndex,
+      "round-robin fairness: the quiet tenant's ONLY (rank-1) row must be ordered before the busy tenant's SECOND (rank-2) row, never after all five of the busy tenant's rows the way a plain ORDER BY ownership_changed_at ASC would place it",
+    ).toBeLessThan(busyRank2Index);
   }, 30_000);
 });
 

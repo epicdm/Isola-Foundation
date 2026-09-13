@@ -206,8 +206,22 @@ export type TransitionPlan =
    * conversation has moved on would find no claim and be judged fresh. For a
    * human reply that is a real hole: replay an old message after a handback and
    * it would apply a brand new takeover against AI_RESUMED.
+   *
+   * `touchOwnershipChangedAt` (default true, preserving every existing caller's
+   * behaviour unchanged) governs whether this observation also bumps
+   * `ownership_changed_at`. GitHub Codex review of PR #135, final pass: the
+   * handback sweeper floors its idle clock against that column specifically so
+   * that a CUSTOMER's own message cannot postpone their own handback (see
+   * handback.ts's own "a customer chasing for an answer no longer pushes their
+   * own handback away"). `recordHumanReply`'s `observe` is fired by a genuine
+   * human reply and correctly wants the clock bumped — that IS fresh human
+   * activity. `reconcileObservedAssignment`'s `observe` fires on EVERY
+   * suppressed delivery for an already-human-owned conversation, including an
+   * ordinary customer message that only re-confirms an assignee already on
+   * record — bumping the clock there would silently re-introduce the exact bug
+   * the floor exists to prevent, through a different door. Pass `false` there.
    */
-  | { kind: "observe" }
+  | { kind: "observe"; touchOwnershipChangedAt?: boolean }
   /** Nothing to do and nothing to claim. */
   | { kind: "duplicate" }
   | { kind: "refuse"; status: Exclude<TransitionStatus, "applied" | "duplicate"> };
@@ -472,6 +486,10 @@ export async function applyOwnershipTransition(
     // The target is resolved HERE, under the lock, never by the caller.
     let target: OwnershipState;
     let opensEpisode: boolean;
+    // Whether this call renews `ownership_changed_at`. True everywhere except
+    // an `observe` that explicitly opts out — see TransitionPlan's own doc
+    // comment on why `reconcileObservedAssignment` must opt out here.
+    let touchOwnershipChangedAt = true;
 
     if (resolvePlan !== undefined) {
       const plan = resolvePlan(view);
@@ -493,6 +511,7 @@ export async function applyOwnershipTransition(
         // Claim the operation id against the CURRENT state, moving nothing.
         target = view.state;
         opensEpisode = false;
+        touchOwnershipChangedAt = plan.touchOwnershipChangedAt ?? true;
       } else {
         if (!canTransition(view.state, plan.toState)) {
           return refused("illegal_transition", view, operationId);
@@ -556,12 +575,18 @@ export async function applyOwnershipTransition(
     await tx.query("RELEASE SAVEPOINT ownership_claim");
 
     // 5. The state change, in the same transaction as the claim.
+    //
+    // `ownership_changed_at` only advances when `touchOwnershipChangedAt` is
+    // true (the default everywhere except an `observe` that opts out — see
+    // TransitionPlan's own doc comment). A CASE, not a second query: the same
+    // transaction, no extra round trip, and no branch where the column could
+    // be left stale by an early return.
     await tx.query(
       `
       UPDATE conversation_ownership
          SET ownership_state          = $3,
              ownership_episode        = $4,
-             ownership_changed_at     = now(),
+             ownership_changed_at     = CASE WHEN $10 THEN now() ELSE ownership_changed_at END,
              ownership_reason         = $5,
              ownership_actor_ref      = $6,
              ownership_correlation_id = $7,
@@ -582,6 +607,7 @@ export async function applyOwnershipTransition(
         correlationId,
         escalationOperationId,
         handbackOperationId,
+        touchOwnershipChangedAt,
       ],
     );
 
@@ -695,6 +721,7 @@ export function createPostgresOwnershipGate(exec: SqlExecutor): OwnershipGate {
     read: (ref) => readConversationOwnership(exec, ref),
     requestHuman: (input) => requestHumanOwnership(exec, input),
     claimAck: (ref, episode, claimantRef) => claimHandoverAck(exec, ref, episode, claimantRef),
+    reconcileObservedAssignment: (input) => reconcileObservedAssignment(exec, input),
   };
 }
 
@@ -957,5 +984,104 @@ export function recordResolution(
     // from- and the to-state, so this is legal from anywhere and moves nothing.
     selfTransition: true,
     actorRef: "chatwoot:conversation_resolved",
+  });
+}
+
+/**
+ * RECONCILIATION for a human assignee observed OUTSIDE this gateway's own
+ * escalation flow. See the doc comment on `OwnershipGate.reconcileObservedAssignment`
+ * for the full rationale; this is that port's Postgres implementation.
+ *
+ * def-handback-sweeper-is-blind-to-manually-assigned-conversations-2026-09-13.
+ *
+ * TWO GUARDS, BOTH BEFORE ANY LOCK IS TAKEN — cheap and deliberate:
+ *   - no assignee present: nothing to reconcile, and this is also the
+ *     "assignee just cleared" direction, which this function does NOT act on.
+ *     The existing sweeper's own MANUAL trigger (handback.ts, `readConversationStatus
+ *     (record) === "pending"`) already completes that side once a row exists in
+ *     an eligible state — recording the un-assign here too would be a second,
+ *     unneeded path to the same outcome, and this function stays a pure
+ *     "notice a hold" primitive.
+ *   - status is 'resolved': resolve is a terminal state an operator chose
+ *     deliberately. recordResolution already exists to OBSERVE a resolution
+ *     without granting authority; this function must not treat a resolved-
+ *     and-still-assigned conversation as newly human-held, which would make
+ *     the sweeper's idle clock eligible to act on a thread nobody expects it
+ *     to touch. (Chatwoot's own `resolved` clears `waiting_since`, but does
+ *     NOT clear the assignee — the two are independent, confirmed from
+ *     `Conversation#handle_resolved_status_change`.)
+ *
+ * THE STATE-DEPENDENT PLAN, decided under the lock like every other transition
+ * here, never from a value read before it:
+ *   - AI_OWNED / AI_RESUMED: exactly the blind spot this function exists to
+ *     close. Opens a NEW episode — this is a takeover with no prior
+ *     escalation, the same shape `recordHumanReply`'s own "fromAi" branch
+ *     already treats a human's first dashboard reply as.
+ *   - HUMAN_REQUESTED: an escalation is already in flight and
+ *     `confirmHumanOwnership` (allowedFrom: ["HUMAN_REQUESTED"]) is the
+ *     function that legitimately completes it. Observing here instead of
+ *     applying avoids two writers racing the SAME transition under two
+ *     different operation ids — had this applied HUMAN_OWNED first, the
+ *     escalation flow's own later confirmHumanOwnership call would find
+ *     HUMAN_OWNED already there and be refused `illegal_transition` for an
+ *     operation that should have succeeded.
+ *   - HUMAN_OWNED / HANDING_BACK: already tracked, or mid-reconciliation.
+ *     Nothing to add; observing only claims the operation id so a later
+ *     redelivery of the SAME event is recognised as one.
+ *
+ *     HANDING_BACK specifically, examined per GitHub Codex review of PR #135,
+ *     final pass (P2): `beginHandback` and `completeHandback` (handback.ts)
+ *     run back to back inside one `performHandback` call, with no `await` of
+ *     anything else between them — so an assignment observed in that window
+ *     is claimed here as a plain `observe` and does not interrupt the
+ *     handback in progress. `completeHandback` then still runs, moving the
+ *     ledger to AI_RESUMED -> AI_OWNED, while `pendConversation` (the ONLY
+ *     Chatwoot-side action a handback takes) never clears the newly-observed
+ *     assignee. Not an incorrect-reply risk (evaluateSuppression re-checks
+ *     the live assignee on every message regardless of ledger state) and
+ *     self-heals on the NEXT event that reaches this function for the same
+ *     conversation — which, since the assignee is still genuinely present,
+ *     is whatever the customer's very next message triggers (that suppressed
+ *     delivery calls this function too, sees AI_OWNED with hasAssignee still
+ *     true, and correctly re-applies HUMAN_OWNED). The window itself is two
+ *     sequential awaited database calls inside a single function invocation
+ *     — not a business-timescale gap like the idle-recovery limitation
+ *     flagged above — so this is documented rather than given its own
+ *     cross-function coordination, which would add real complexity to this
+ *     state machine for a substantially narrower exposure.
+ */
+export function reconcileObservedAssignment(
+  exec: SqlExecutor,
+  input: {
+    conversation: ConversationRef;
+    operationId: string;
+    hasAssignee: boolean;
+    status: string | null;
+  },
+): Promise<TransitionOutcome | null> {
+  if (!input.hasAssignee) return Promise.resolve(null);
+  if (input.status === "resolved") return Promise.resolve(null);
+
+  return applyOwnershipTransition(exec, {
+    conversation: input.conversation,
+    operationId: input.operationId,
+    operationKind: "assignee_observed",
+    reason: "assignee_observed_without_escalation",
+    actorRef: "chatwoot:conversation_updated_assignee_observed",
+    resolvePlan: (view) => {
+      if (view.state === "AI_OWNED" || view.state === "AI_RESUMED") {
+        return { kind: "apply", toState: "HUMAN_OWNED", startsNewEpisode: true };
+      }
+      // touchOwnershipChangedAt: false — GitHub Codex review of PR #135, final
+      // pass. This branch runs on EVERY suppressed delivery for an
+      // already-human-owned conversation, including an ordinary customer
+      // message that merely re-confirms an assignee already on record. The
+      // handback sweeper floors its idle clock against `ownership_changed_at`
+      // specifically so a customer's own message cannot postpone their own
+      // handback (handback.ts: "a customer chasing for an answer no longer
+      // pushes their own handback away"). Bumping it here on every re-observed,
+      // unchanged fact would defeat that floor through a different door.
+      return { kind: "observe", touchOwnershipChangedAt: false };
+    },
   });
 }

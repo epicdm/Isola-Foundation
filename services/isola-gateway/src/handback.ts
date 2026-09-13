@@ -40,6 +40,8 @@ import type { ChatwootApi, ChatwootTarget } from "./chatwoot.js";
 import type { Logger } from "./log.js";
 import type { SqlClient, SqlExecutor } from "./ledger.js";
 import { readLastBusinessTurnMs } from "./turns.js";
+import { hasAssignee } from "./webhook.js";
+import { ChatwootApiError } from "./errors.js";
 import {
   abortHandback,
   beginHandback,
@@ -225,13 +227,38 @@ export async function selectHumanHeldConversations(
   exec: SqlExecutor,
   limit: number,
 ): Promise<IdleCandidate[]> {
+  // ROUND-ROBIN ACROSS TENANTS, oldest-first within each. GitHub Codex review
+  // of PR #135, final pass (P1): a plain `ORDER BY ownership_changed_at LIMIT`
+  // lets any tenant with at least `limit` rows that never leave
+  // HANDBACK_ELIGIBLE_STATES (genuinely, continuously assigned conversations —
+  // exactly the population def-handback-sweeper-is-blind-to-manually-assigned
+  // -conversations-2026-09-13's own fix makes far more common, since a routine
+  // "Assign to me" now creates a row where none existed before) permanently
+  // occupy the front of that ordering. Every sweep would then re-select the
+  // SAME rows forever and never reach a newer candidate — including a
+  // genuinely idle-eligible or manual-trigger-eligible conversation belonging
+  // to ANY OTHER TENANT sharing this gateway. `ROW_NUMBER() OVER (PARTITION BY
+  // tenant_id ...)` guarantees the oldest candidate from EVERY tenant is
+  // considered before a second candidate from ANY tenant, so one tenant's pile
+  // of permanently-assigned rows can no longer starve every other tenant's
+  // sweep — it can still consume more than its fair share of ITS OWN slots,
+  // which is a separate, pre-existing, harder problem (this sweeper has never
+  // had a way to skip past a row it cannot act on within one tenant) flagged
+  // for the owner rather than solved here.
   const rows = await exec.query(
     `SELECT tenant_id, conversation_key, ownership_episode,
             chatwoot_account_id, chatwoot_conversation_id, chatwoot_inbox_id,
             ownership_changed_at
-       FROM conversation_ownership
-      WHERE ownership_state = ANY($1::text[])
-      ORDER BY ownership_changed_at ASC NULLS FIRST
+       FROM (
+              SELECT *,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY tenant_id
+                       ORDER BY ownership_changed_at ASC NULLS FIRST
+                     ) AS tenant_rank
+                FROM conversation_ownership
+               WHERE ownership_state = ANY($1::text[])
+            ) ranked
+      ORDER BY tenant_rank ASC, ownership_changed_at ASC NULLS FIRST
       LIMIT $2`,
     [[...HANDBACK_ELIGIBLE_STATES], limit],
   );
@@ -261,6 +288,33 @@ export function readConversationStatus(record: unknown): string | null {
   if (typeof payload !== "object" || payload === null) return null;
   const raw = (payload as Record<string, unknown>)["status"];
   return typeof raw === "string" ? raw : null;
+}
+
+/**
+ * Same extraction shape as `readConversationStatus`, for `meta.assignee` —
+ * GitHub Codex review of PR #135: "pending" ALONE is not a handback signal.
+ * `evaluateSuppression` (webhook.ts) already requires BOTH status==='pending'
+ * AND no assignee before the AI may answer; the sweeper's own manual trigger
+ * below checked only the first half. That gap was latent and harmless before
+ * def-handback-sweeper-is-blind-to-manually-assigned-conversations-2026-09-13
+ * — a manually-assigned conversation never got a row for the sweeper to act
+ * on at all. Once reconcileObservedAssignment (ownership-store.ts) started
+ * creating one, the gap became reachable: a real "pending + still assigned"
+ * conversation (confirmed to exist in production — 6 such rows measured) is
+ * exactly assigned-outside-escalation's own trigger condition, and status
+ * alone would tell the sweeper to hand back to the AI while the human still
+ * holds it in Chatwoot. The AI would stay correctly silent regardless
+ * (evaluateSuppression's own assignee check saves the live reply), but the
+ * ledger would reset to AI-authority and the conversation would drop out of
+ * HANDBACK_ELIGIBLE_STATES — undoing exactly the fix this file exists for.
+ */
+export function readAssignee(record: unknown): unknown {
+  if (typeof record !== "object" || record === null) return null;
+  const payload = (record as Record<string, unknown>)["payload"] ?? record;
+  if (typeof payload !== "object" || payload === null) return null;
+  const meta = (payload as Record<string, unknown>)["meta"];
+  if (typeof meta !== "object" || meta === null) return null;
+  return (meta as Record<string, unknown>)["assignee"] ?? null;
 }
 
 /** Postgres may hand back a Date or a string depending on the driver. */
@@ -353,17 +407,42 @@ export function createHandbackSweeper(deps: HandbackSweeperDeps): HandbackSweepe
         // team — so this endpoint breaks precisely when the sweeper needs it.
         let record: unknown = null;
         let recordReadable = true;
+        // Distinguishes the ONE documented, structurally-permanent failure
+        // (the 500 above) from anything else — a timeout, a transport error,
+        // any other status. GitHub Codex review of PR #135, final pass: a
+        // PLAIN TRANSIENT failure on a DIRECTLY (individually) assigned
+        // conversation was being read exactly like the team-assigned 500, so
+        // the idle guard below treated "we don't know" as "not assigned",
+        // handed back, and — since Chatwoot's assignee was never actually
+        // cleared — permanently stranded the conversation out of
+        // HANDBACK_ELIGIBLE_STATES with no further sweep ever revisiting it.
+        // Only a confirmed 500 gets that treatment now; every other failure
+        // is UNKNOWN, not "safe to proceed", and blocks idle for this tick.
+        let assigneeUnknown = false;
         try {
           record = await deps.chatwoot.getConversationRecord(target);
-        } catch {
+        } catch (err) {
           recordReadable = false;
+          const status = err instanceof ChatwootApiError ? err.status : null;
+          if (status !== 500) assigneeUnknown = true;
         }
 
-        // TRIGGER 1 — MANUAL. A human pressed "Mark as pending" in Chatwoot.
-        // Chatwoot's status is already `pending` while the ownership store
-        // still says a human holds it, so the two disagree and the AI stays
-        // silent. An explicit gesture is not subject to the idle clock.
-        const manual = recordReadable && readConversationStatus(record) === "pending";
+        // TRIGGER 1 — MANUAL. A human pressed "Mark as pending" AND unassigned
+        // in Chatwoot — the SAME compound condition evaluateSuppression itself
+        // requires before the AI may answer (status==='pending' AND no
+        // assignee). Status alone is not the gesture: a conversation can be
+        // 'pending' while still genuinely assigned (measured in production —
+        // see readAssignee's own doc comment), and treating that as a
+        // completed handback would reset the ledger to AI-authority while a
+        // human still holds the conversation in Chatwoot, dropping it out of
+        // HANDBACK_ELIGIBLE_STATES with no assignee ever cleared. Chatwoot's
+        // status is already `pending` while the ownership store still says a
+        // human holds it, so the two disagree and the AI stays silent. An
+        // explicit gesture is not subject to the idle clock.
+        const manual =
+          recordReadable &&
+          readConversationStatus(record) === "pending" &&
+          !hasAssignee(readAssignee(record));
 
         // TRIGGER 2 — IDLE, on OUR clock. Measured from the last thing the
         // BUSINESS said, so a customer chasing for an answer no longer pushes
@@ -408,14 +487,72 @@ export function createHandbackSweeper(deps: HandbackSweeperDeps): HandbackSweepe
         }
 
         const idleForMs = idleSinceMs === null ? null : now() - idleSinceMs;
-        const idle = idleForMs !== null && idleForMs >= deps.idleMs;
+        // Same "still genuinely assigned" guard as the manual trigger, per
+        // GitHub Codex review of PR #135 pass 2 (P2): the idle path had no
+        // assignee check at all, so a directly-assigned conversation that
+        // simply hadn't been replied to yet would be handed back on the idle
+        // clock alone, same defect as the manual trigger's, via a different
+        // trigger.
+        //
+        // The record's readability alone is NOT enough to decide this — see
+        // GitHub Codex review of PR #135, final pass. A confirmed 500 (see
+        // `assigneeUnknown` above) is the ONE case documented to mean "team
+        // assigned, no individual assignee to find" — proceed with idle-only,
+        // unchanged. Anything else that made the record unreadable (a
+        // timeout, a transport blip, any other status) means we genuinely do
+        // not know, and "unknown" must NOT be read as "safe to hand back":
+        // that would have handed back a directly-assigned conversation whose
+        // assignee Chatwoot never actually clears (see performHandback's own
+        // comment below), stranding it out of HANDBACK_ELIGIBLE_STATES with
+        // no further sweep ever revisiting it. `assigneeUnknown` blocks idle
+        // for this tick only — the next sweep tries the read again.
+        const stillAssigned =
+          assigneeUnknown || (recordReadable && hasAssignee(readAssignee(record)));
+        const idle = !stillAssigned && idleForMs !== null && idleForMs >= deps.idleMs;
+        // KNOWN, FLAGGED CONSEQUENCE OF THIS GUARD — GitHub Codex review of PR
+        // #135 pass 3: `performHandback`'s Chatwoot-side action is
+        // `pendConversation` alone (status -> pending); it has never cleared
+        // an individual `meta.assignee`. So for a conversation assigned
+        // directly ("Assign to me", no team, `stillAssigned` genuinely true
+        // and staying true), this guard means idle can NEVER complete a
+        // handback on its own — the row sits at HUMAN_OWNED until a human
+        // performs the full manual gesture, or until idle catches it AFTER
+        // the human unassigns (see below). This does NOT risk an INCORRECT
+        // reply — evaluateSuppression independently re-checks the live
+        // assignee on every message, so the AI is never let to speak while
+        // Chatwoot still shows an assignee — but CORRECTED per GitHub Codex
+        // review of PR #135, final pass: it DOES risk a genuine, if bounded,
+        // reply GAP even for a conversation Chatwoot no longer shows as
+        // assigned. `reconcileObservedAssignment` deliberately never
+        // implements the unassign direction (by ratified design), so
+        // unassigning ALONE (without also marking pending) leaves the ledger
+        // at HUMAN_OWNED. `pipeline.ts`'s OWN separate ownership gate reads
+        // that stale ledger state BEFORE evaluateSuppression's live check
+        // ever runs for message_created, and deliberately does not trust a
+        // live Chatwoot snapshot over the store's memory (see its own "the
+        // store remembers; the snapshot cannot" comment) — so a customer's
+        // message can be silently acknowledged with NO reply generated,
+        // even though Chatwoot itself would now allow one, until THIS idle
+        // sweep runs and the elapsed time since `ownership_changed_at`
+        // clears `deps.idleMs`. Bounded and self-healing, not permanent, but
+        // a real gap, not merely "no auto-recovery" as earlier documented
+        // here. Closing it fully would require `performHandback` to also
+        // clear the Chatwoot assignee — a new live write against a human
+        // agent's active assignment that this PR deliberately does not add
+        // without the owner's sign-off. Flagged, not fixed, pending that
+        // decision; this comment corrects the SEVERITY of what is flagged.
 
         if (!manual && !idle) {
-          skip(idleSinceMs === null ? "no_clock" : "not_idle_yet", {
-            clock,
-            idleForMs,
-            recordReadable,
-          });
+          skip(
+            assigneeUnknown
+              ? "assignee_unknown"
+              : stillAssigned
+                ? "still_assigned"
+                : idleSinceMs === null
+                  ? "no_clock"
+                  : "not_idle_yet",
+            { clock, idleForMs, recordReadable, stillAssigned, assigneeUnknown },
+          );
           continue;
         }
 

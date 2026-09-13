@@ -103,6 +103,17 @@ export const OWNERSHIP_OPERATION_KINDS = [
   "handback_failed",
   "resolution_observed",
   "resumed_settled",
+  /**
+   * A human assignee was OBSERVED on a conversation_updated/status_changed
+   * payload that did not arrive through this gateway's own escalation flow —
+   * an "Assign to me" done directly in Chatwoot, outside requestHumanOwnership
+   * / confirmHumanOwnership. Kept distinct from "human_assigned" (which is
+   * confirmHumanOwnership's own escalation-confirmed transition) so the audit
+   * trail can tell the two provenances apart: one is the gateway's own flow
+   * completing, the other is this reconciliation noticing a hold it never
+   * created. def-handback-sweeper-is-blind-to-manually-assigned-conversations-2026-09-13.
+   */
+  "assignee_observed",
 ] as const;
 
 export type OwnershipOperationKind = (typeof OWNERSHIP_OPERATION_KINDS)[number];
@@ -393,4 +404,39 @@ export interface OwnershipGate {
    * guard, which also reconciles an ambiguous send rather than repeating it.
    */
   claimAck(ref: ConversationRef, episode: number, claimantRef: string): Promise<boolean>;
+
+  /**
+   * RECONCILIATION, not part of the reply path's own decision.
+   *
+   * def-handback-sweeper-is-blind-to-manually-assigned-conversations-2026-09-13:
+   * a conversation assigned directly in Chatwoot ("Assign to me"), outside
+   * requestHumanOwnership/confirmHumanOwnership, leaves NO row here — reads
+   * default to AI_OWNED, which is correct for a conversation with no history
+   * but wrong once a human has quietly started holding it. This method is
+   * how that gets noticed and recorded, from signals the gateway ALREADY
+   * receives (conversation_updated/conversation_status_changed on its
+   * existing Agent Bot endpoint) but previously discarded.
+   *
+   * Called from the webhook handler ALONGSIDE evaluateSuppression, never
+   * inside it and never gating it — the live reply decision this turn must
+   * be byte-identical whether this call succeeds, no-ops, or throws. Its
+   * caller is expected to swallow any rejection.
+   *
+   * Returns null (and writes nothing) when there is nothing to reconcile:
+   * no assignee present, or the conversation is resolved — resolve is a
+   * terminal state this must never reopen (see recordResolution's own doc
+   * comment on the identical principle for the escalation-driven path).
+   */
+  reconcileObservedAssignment(input: {
+    conversation: ConversationRef;
+    /** Stable per delivery, so a Chatwoot redelivery of the same event is a
+     *  no-op rather than a second write. */
+    operationId: string;
+    /** Whether Chatwoot's payload currently shows a human assignee present. */
+    hasAssignee: boolean;
+    /** Chatwoot's raw conversation status string from the payload, or null
+     *  when absent/unreadable. Only 'resolved' is checked; anything else
+     *  (open, pending, snoozed, unknown, null) is treated as reconcilable. */
+    status: string | null;
+  }): Promise<TransitionOutcome | null>;
 }

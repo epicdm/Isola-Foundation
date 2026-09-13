@@ -354,6 +354,7 @@ describe("an unreadable stored state is loud as well as safe", () => {
         }),
         requestHuman: ownership.requestHuman.bind(ownership),
         claimAck: ownership.claimAck.bind(ownership),
+        reconcileObservedAssignment: ownership.reconcileObservedAssignment.bind(ownership),
       },
     });
 
