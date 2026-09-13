@@ -37,8 +37,10 @@ import {
   beginHandback,
   claimHandoverAck,
   completeHandback,
+  confirmHumanOwnership,
   migrateOwnershipStore,
   readConversationOwnership,
+  reconcileObservedAssignment,
   recordHumanReply,
   recordResolution,
   requestHumanOwnership,
@@ -764,6 +766,137 @@ maybe("resolution is an observation, not a grant of authority", () => {
     const view = await readConversationOwnership(exec, ref);
     expect(view.state).toBe("HUMAN_OWNED");
     expect(view.diverged).toBe(true);
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// 5b. Reconciliation of an assignee observed outside the escalation flow
+// def-handback-sweeper-is-blind-to-manually-assigned-conversations-2026-09-13
+// ---------------------------------------------------------------------------
+
+maybe("an assignee observed outside the escalation flow is reconciled", () => {
+  it("assign-outside-escalation on an OPEN conversation: a row is created, eligible for the sweeper", async () => {
+    const ref = freshConversation();
+    expect((await readConversationOwnership(exec, ref)).state).toBe("AI_OWNED"); // no row yet
+
+    const outcome = await reconcileObservedAssignment(exec, {
+      conversation: ref,
+      operationId: "assignee_observed:evt-1",
+      hasAssignee: true,
+      status: "open",
+    });
+    expect(outcome?.status).toBe("applied");
+    expect(outcome?.state).toBe("HUMAN_OWNED");
+
+    const after = await readConversationOwnership(exec, ref);
+    // HUMAN_OWNED is one of handback.ts's own HANDBACK_ELIGIBLE_STATES
+    // (["HUMAN_REQUESTED", "HUMAN_OWNED", "HANDING_BACK"]) — this is exactly
+    // the row `selectHumanHeldConversations` will now find that it could not
+    // find before this fix.
+    expect(after.state).toBe("HUMAN_OWNED");
+    expect(after.episode).toBe(1); // a new episode opened — a takeover with no prior escalation
+
+    const row = (await transitionRows(ref)).find((r) => r.operation_id === "assignee_observed:evt-1")!;
+    expect(row.from_state).toBe("AI_OWNED");
+    expect(row.to_state).toBe("HUMAN_OWNED");
+  }, 30_000);
+
+  it("the SAME check on a RESOLVED conversation: NO row is created, nothing touched", async () => {
+    const ref = freshConversation();
+
+    const outcome = await reconcileObservedAssignment(exec, {
+      conversation: ref,
+      operationId: "assignee_observed:evt-2",
+      hasAssignee: true,
+      status: "resolved",
+    });
+    expect(outcome).toBeNull();
+
+    // Not just "still AI_OWNED" (a state a real row could also hold) — no row
+    // exists at all, and no transition was ever written under this operation id.
+    expect((await readConversationOwnership(exec, ref)).episode).toBe(0);
+    expect(await transitionRows(ref)).toHaveLength(0);
+  }, 30_000);
+
+  it("no assignee present (the unassign direction): a no-op, even against an EXISTING human hold — no stale row is corrupted", async () => {
+    const ref = freshConversation();
+    await recordHumanReply(exec, { conversation: ref, operationId: "msg-1" });
+    const held = await readConversationOwnership(exec, ref);
+    expect(held.state).toBe("HUMAN_OWNED");
+
+    const outcome = await reconcileObservedAssignment(exec, {
+      conversation: ref,
+      operationId: "assignee_observed:evt-3",
+      hasAssignee: false,
+      status: "pending",
+    });
+    expect(outcome).toBeNull();
+
+    const after = await readConversationOwnership(exec, ref);
+    expect(after.state).toBe("HUMAN_OWNED"); // untouched
+    expect(after.episode).toBe(held.episode); // untouched
+    // This function deliberately does not act on the unassign direction — the
+    // EXISTING sweeper (handback.ts's MANUAL trigger, `readConversationStatus
+    // (record) === "pending"`) already completes that side once a row exists
+    // in an eligible state, the same way it already does for a gateway-
+    // escalated conversation. Recording it here too would be a second path
+    // to the same outcome.
+    expect(await transitionRows(ref)).toHaveLength(1); // only msg-1, no evt-3 row
+  }, 30_000);
+
+  it("a replayed identical event is a duplicate, not a second episode", async () => {
+    const ref = freshConversation();
+    const first = await reconcileObservedAssignment(exec, {
+      conversation: ref,
+      operationId: "assignee_observed:evt-4",
+      hasAssignee: true,
+      status: "open",
+    });
+    expect(first?.status).toBe("applied");
+    expect(first?.episode).toBe(1);
+
+    const replay = await reconcileObservedAssignment(exec, {
+      conversation: ref,
+      operationId: "assignee_observed:evt-4",
+      hasAssignee: true,
+      status: "open",
+    });
+    expect(replay?.status).toBe("duplicate");
+    expect(replay?.episode).toBe(1); // unchanged — not a second takeover
+  }, 30_000);
+
+  it("an escalation already in flight (HUMAN_REQUESTED) is observed, never overtaken — confirmHumanOwnership still gets to complete it", async () => {
+    const ref = freshConversation();
+    await requestHumanOwnership(exec, {
+      conversation: ref,
+      operationId: "esc-1",
+      reason: "explicit_human_request",
+    });
+    expect((await readConversationOwnership(exec, ref)).state).toBe("HUMAN_REQUESTED");
+
+    const observed = await reconcileObservedAssignment(exec, {
+      conversation: ref,
+      operationId: "assignee_observed:evt-5",
+      hasAssignee: true,
+      status: "pending",
+    });
+    // Observed, not applied over — state and episode are unchanged.
+    expect(observed?.status).toBe("applied"); // the observation ITSELF claims and is recorded
+    expect(observed?.state).toBe("HUMAN_REQUESTED");
+    const mid = await readConversationOwnership(exec, ref);
+    expect(mid.state).toBe("HUMAN_REQUESTED");
+    expect(mid.episode).toBe(1);
+
+    // The escalation flow's own completion is NOT refused as illegal — proving
+    // the two writers do not race each other for the same transition.
+    const confirmed = await confirmHumanOwnership(exec, {
+      conversation: ref,
+      operationId: "confirm-1",
+      episode: 1,
+      reason: "human_assigned",
+    });
+    expect(confirmed.status).toBe("applied");
+    expect(confirmed.state).toBe("HUMAN_OWNED");
   }, 30_000);
 });
 

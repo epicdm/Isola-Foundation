@@ -88,6 +88,13 @@ export class InMemoryOwnershipGate implements OwnershipGate {
     return `${ref.tenantId}|${conversationKey(ref.chatwootAccountId, ref.chatwootConversationId)}`;
   }
 
+  /** Test-only introspection: true only if a row actually exists — distinct
+   *  from `read()`, which returns the same default AI_OWNED view whether a
+   *  row is genuinely absent or merely happens to hold that value. */
+  hasRow(ref: ConversationRef): boolean {
+    return this.rows.has(this.key(ref));
+  }
+
   async read(ref: ConversationRef): Promise<OwnershipView> {
     const row = this.rows.get(this.key(ref));
     if (row === undefined) {
@@ -184,6 +191,73 @@ export class InMemoryOwnershipGate implements OwnershipGate {
     row.ackRef = claimantRef;
     return true;
   }
+
+  /** Mirrors `reconcileObservedAssignment` in src/ownership-store.ts exactly:
+   *  same two pre-lock guards, same state-dependent plan (AI states apply and
+   *  open a new episode; every human/handback state only observes). */
+  async reconcileObservedAssignment(input: {
+    conversation: ConversationRef;
+    operationId: string;
+    hasAssignee: boolean;
+    status: string | null;
+  }): Promise<TransitionOutcome | null> {
+    if (!input.hasAssignee) return null;
+    if (input.status === "resolved") return null;
+
+    const key = this.key(input.conversation);
+    const claimKey = `${key}|${input.operationId}`;
+    const row =
+      this.rows.get(key) ??
+      {
+        state: DEFAULT_OWNERSHIP_STATE as OwnershipState,
+        episode: 0,
+        ack: null,
+        ackRef: null,
+        escalationOperationId: null,
+      };
+
+    if (this.claimed.has(claimKey)) {
+      return {
+        ok: true,
+        status: "duplicate",
+        state: row.state,
+        episode: row.episode,
+        operationId: input.operationId,
+        duplicateSource: "replay",
+      };
+    }
+    this.claimed.add(claimKey);
+
+    if (row.state !== "AI_OWNED" && row.state !== "AI_RESUMED") {
+      // observe: claim the operation id, move nothing.
+      this.rows.set(key, row);
+      return {
+        ok: true,
+        status: "applied",
+        state: row.state,
+        episode: row.episode,
+        operationId: input.operationId,
+        duplicateSource: null,
+      };
+    }
+
+    const next = {
+      state: "HUMAN_OWNED" as const,
+      episode: row.episode + 1,
+      ack: row.ack,
+      ackRef: row.ackRef,
+      escalationOperationId: row.escalationOperationId,
+    };
+    this.rows.set(key, next);
+    return {
+      ok: true,
+      status: "applied",
+      state: next.state,
+      episode: next.episode,
+      operationId: input.operationId,
+      duplicateSource: null,
+    };
+  }
 }
 
 /** An ownership gate whose store is unreachable. Every call rejects, so a test
@@ -196,6 +270,9 @@ export class UnavailableOwnershipGate implements OwnershipGate {
     throw new Error("ownership store unavailable");
   }
   async claimAck(): Promise<boolean> {
+    throw new Error("ownership store unavailable");
+  }
+  async reconcileObservedAssignment(): Promise<TransitionOutcome | null> {
     throw new Error("ownership store unavailable");
   }
 }

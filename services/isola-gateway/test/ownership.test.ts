@@ -53,7 +53,7 @@ describe("the vocabulary matches the ratified contract", () => {
     expect(ESCALATION_REASON_CODES).toHaveLength(7);
   });
 
-  it("declares exactly the eight operation kinds", () => {
+  it("declares exactly the nine operation kinds", () => {
     expect([...OWNERSHIP_OPERATION_KINDS]).toEqual([
       "escalate",
       "human_assigned",
@@ -63,6 +63,7 @@ describe("the vocabulary matches the ratified contract", () => {
       "handback_failed",
       "resolution_observed",
       "resumed_settled",
+      "assignee_observed",
     ]);
   });
 

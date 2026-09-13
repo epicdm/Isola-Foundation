@@ -695,6 +695,7 @@ export function createPostgresOwnershipGate(exec: SqlExecutor): OwnershipGate {
     read: (ref) => readConversationOwnership(exec, ref),
     requestHuman: (input) => requestHumanOwnership(exec, input),
     claimAck: (ref, episode, claimantRef) => claimHandoverAck(exec, ref, episode, claimantRef),
+    reconcileObservedAssignment: (input) => reconcileObservedAssignment(exec, input),
   };
 }
 
@@ -957,5 +958,74 @@ export function recordResolution(
     // from- and the to-state, so this is legal from anywhere and moves nothing.
     selfTransition: true,
     actorRef: "chatwoot:conversation_resolved",
+  });
+}
+
+/**
+ * RECONCILIATION for a human assignee observed OUTSIDE this gateway's own
+ * escalation flow. See the doc comment on `OwnershipGate.reconcileObservedAssignment`
+ * for the full rationale; this is that port's Postgres implementation.
+ *
+ * def-handback-sweeper-is-blind-to-manually-assigned-conversations-2026-09-13.
+ *
+ * TWO GUARDS, BOTH BEFORE ANY LOCK IS TAKEN — cheap and deliberate:
+ *   - no assignee present: nothing to reconcile, and this is also the
+ *     "assignee just cleared" direction, which this function does NOT act on.
+ *     The existing sweeper's own MANUAL trigger (handback.ts, `readConversationStatus
+ *     (record) === "pending"`) already completes that side once a row exists in
+ *     an eligible state — recording the un-assign here too would be a second,
+ *     unneeded path to the same outcome, and this function stays a pure
+ *     "notice a hold" primitive.
+ *   - status is 'resolved': resolve is a terminal state an operator chose
+ *     deliberately. recordResolution already exists to OBSERVE a resolution
+ *     without granting authority; this function must not treat a resolved-
+ *     and-still-assigned conversation as newly human-held, which would make
+ *     the sweeper's idle clock eligible to act on a thread nobody expects it
+ *     to touch. (Chatwoot's own `resolved` clears `waiting_since`, but does
+ *     NOT clear the assignee — the two are independent, confirmed from
+ *     `Conversation#handle_resolved_status_change`.)
+ *
+ * THE STATE-DEPENDENT PLAN, decided under the lock like every other transition
+ * here, never from a value read before it:
+ *   - AI_OWNED / AI_RESUMED: exactly the blind spot this function exists to
+ *     close. Opens a NEW episode — this is a takeover with no prior
+ *     escalation, the same shape `recordHumanReply`'s own "fromAi" branch
+ *     already treats a human's first dashboard reply as.
+ *   - HUMAN_REQUESTED: an escalation is already in flight and
+ *     `confirmHumanOwnership` (allowedFrom: ["HUMAN_REQUESTED"]) is the
+ *     function that legitimately completes it. Observing here instead of
+ *     applying avoids two writers racing the SAME transition under two
+ *     different operation ids — had this applied HUMAN_OWNED first, the
+ *     escalation flow's own later confirmHumanOwnership call would find
+ *     HUMAN_OWNED already there and be refused `illegal_transition` for an
+ *     operation that should have succeeded.
+ *   - HUMAN_OWNED / HANDING_BACK: already tracked, or mid-reconciliation.
+ *     Nothing to add; observing only claims the operation id so a later
+ *     redelivery of the SAME event is recognised as one.
+ */
+export function reconcileObservedAssignment(
+  exec: SqlExecutor,
+  input: {
+    conversation: ConversationRef;
+    operationId: string;
+    hasAssignee: boolean;
+    status: string | null;
+  },
+): Promise<TransitionOutcome | null> {
+  if (!input.hasAssignee) return Promise.resolve(null);
+  if (input.status === "resolved") return Promise.resolve(null);
+
+  return applyOwnershipTransition(exec, {
+    conversation: input.conversation,
+    operationId: input.operationId,
+    operationKind: "assignee_observed",
+    reason: "assignee_observed_without_escalation",
+    actorRef: "chatwoot:conversation_updated_assignee_observed",
+    resolvePlan: (view) => {
+      if (view.state === "AI_OWNED" || view.state === "AI_RESUMED") {
+        return { kind: "apply", toState: "HUMAN_OWNED", startsNewEpisode: true };
+      }
+      return { kind: "observe" };
+    },
   });
 }
