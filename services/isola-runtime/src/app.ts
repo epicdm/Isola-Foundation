@@ -420,20 +420,41 @@ export function createRuntime(deps: AppDeps): Runtime {
       : createPaperclipApi({ baseUrl: config.paperclipBaseUrl, safeFetch });
 
   /**
-   * A template is only bound to Paperclip when BOTH a mapping and a board token are
-   * configured. Without the token the map collapses to empty and every template keeps
-   * its compiled-in prompt — a missing credential must not silently become the
-   * fail-closed prompt for live customers.
+   * The map gate below is a coarse, top-level short-circuit only: when NO credential
+   * of any kind exists anywhere (no board token, no agent key for either exposure),
+   * skip the map entirely so every template cleanly keeps its compiled-in prompt.
+   * It does NOT guarantee any individual mapped template has a usable credential for
+   * ITS OWN exposure — a deployment can have only PAPERCLIP_AGENT_KEY_INTERNAL set,
+   * pass this gate, and still map a PUBLIC template. That per-template case is
+   * handled inside instructions.ts's resolve(), which checks readToken(exposure) for
+   * emptiness before ever attempting a fetch, and falls back to compiled_in rather
+   * than risking an empty-Bearer request that would otherwise surface as a false
+   * fail_closed (caught in review, see def-paperclip-credential-presence-gates-without-fallback-2026-09-13).
+   *
+   * CREDENTIAL PRESENCE VS. CREDENTIAL USE: paperclipBoardToken's non-nullness used
+   * to be the ONLY gate here, and also the ONLY wire credential ever sent — a board
+   * token could sit expired-but-non-null, silently doing gate duty alone. Fixed by
+   * preferring the calling template's own exposure-scoped agent key, falling back to
+   * the board token only when no agent key is configured for that exposure. NOTE:
+   * this is similar in spirit to, but not the same mechanism as, createRecorder's
+   * apiKeyByExposure above — that gate still keys on the flat apiKey field alone and
+   * has the identical class of gap this fix closes here; it is untouched by this PR.
    */
   const instructions =
     deps.instructions ??
     createInstructionsProvider({
       baseUrl: config.paperclipBaseUrl ?? "",
       map:
-        config.paperclipBoardToken === null || config.paperclipBaseUrl === null
+        config.paperclipBaseUrl === null ||
+        (config.paperclipBoardToken === null &&
+          config.paperclipAgentKeys.INTERNAL === null &&
+          config.paperclipAgentKeys.PUBLIC === null)
           ? {}
           : config.paperclipInstructionsMap,
-      readToken: () => config.paperclipBoardToken ?? "",
+      readToken: (exposure) =>
+        (exposure !== undefined ? config.paperclipAgentKeys[exposure] : null) ??
+        config.paperclipBoardToken ??
+        "",
       safeFetch,
       ttlMs: config.paperclipInstructionsTtlMs,
       timeoutMs: config.paperclipInstructionsTimeoutMs,
@@ -1040,7 +1061,11 @@ export function createRuntime(deps: AppDeps): Runtime {
       // invoke line so the next question is answered by reading a log rather than
       // by instrumenting under pressure.
       const tCharterStart = now();
-      const resolvedPrompt = await instructions.resolve(template.id, template.systemPrompt);
+      const resolvedPrompt = await instructions.resolve(
+        template.id,
+        template.systemPrompt,
+        template.exposure,
+      );
       const charterMs = now() - tCharterStart;
       if (resolvedPrompt.source === "fail_closed") {
         logger.error({

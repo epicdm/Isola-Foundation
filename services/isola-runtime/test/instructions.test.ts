@@ -19,12 +19,14 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-/** A SafeFetch stub that counts calls and can be told to fail. */
+/** A SafeFetch stub that counts calls, records headers, and can be told to fail. */
 function stubFetch(behaviour: { body?: unknown; status?: number; throws?: boolean }) {
-  const state = { calls: 0, urls: [] as string[], ...behaviour };
-  const safeFetch = async (input: string | URL): Promise<Response> => {
+  const state = { calls: 0, urls: [] as string[], authHeaders: [] as string[], ...behaviour };
+  const safeFetch = async (input: string | URL, init?: RequestInit): Promise<Response> => {
     state.calls++;
     state.urls.push(String(input));
+    const headers = new Headers(init?.headers);
+    state.authHeaders.push(headers.get("Authorization") ?? "");
     if (state.throws) throw new Error("egress blocked");
     return jsonResponse(state.body ?? { content: BUNDLE }, state.status ?? 200);
   };
@@ -182,6 +184,112 @@ describe("resolve", () => {
     clock.t += 60_000 * GRACE_MULTIPLIER; // now beyond the grace window
     const gone = await provider.resolve(TEMPLATE, COMPILED_IN);
     expect(gone.source).toBe("fail_closed");
+  });
+});
+
+describe("resolve — a mapped template with no credential for ITS OWN exposure", () => {
+  it("keeps the compiled-in prompt and never attempts a fetch, rather than sending an empty Bearer", async () => {
+    // Reproduces the scenario found in review: some OTHER exposure has a credential
+    // (so an app.ts-level "does any credential exist at all" gate would stay open),
+    // but THIS template's own exposure has none. Must behave like "not configured",
+    // never like a live failure.
+    const { safeFetch, state } = stubFetch({});
+    const provider = createInstructionsProvider({
+      baseUrl: "https://paperclip.example",
+      map: { [TEMPLATE]: AGENT },
+      readToken: (exposure) => (exposure === "INTERNAL" ? "internal-only-key" : ""),
+      safeFetch,
+      ttlMs: 60_000,
+      timeoutMs: 5_000,
+    });
+    const r = await provider.resolve(TEMPLATE, COMPILED_IN, "PUBLIC");
+    expect(r.source).toBe("compiled_in");
+    expect(r.prompt).toBe(COMPILED_IN);
+    expect(r.failure).toBeNull();
+    expect(state.calls).toBe(0);
+  });
+
+  it("still fetches normally when the credential for this exposure IS present", async () => {
+    const { safeFetch, state } = stubFetch({});
+    const provider = createInstructionsProvider({
+      baseUrl: "https://paperclip.example",
+      map: { [TEMPLATE]: AGENT },
+      readToken: (exposure) => (exposure === "INTERNAL" ? "internal-only-key" : ""),
+      safeFetch,
+      ttlMs: 60_000,
+      timeoutMs: 5_000,
+    });
+    const r = await provider.resolve(TEMPLATE, COMPILED_IN, "INTERNAL");
+    expect(r.source).toBe("paperclip");
+    expect(state.calls).toBe(1);
+  });
+});
+
+describe("resolve — exposure-aware readToken", () => {
+  it("passes the caller's exposure through to readToken", async () => {
+    const seen: (string | undefined)[] = [];
+    const { safeFetch } = stubFetch({});
+    const provider = createInstructionsProvider({
+      baseUrl: "https://paperclip.example",
+      map: { [TEMPLATE]: AGENT },
+      readToken: (exposure) => {
+        seen.push(exposure);
+        return "whichever-token";
+      },
+      safeFetch,
+      ttlMs: 60_000,
+      timeoutMs: 5_000,
+    });
+    await provider.resolve(TEMPLATE, COMPILED_IN, "PUBLIC");
+    expect(seen).toEqual(["PUBLIC"]);
+  });
+
+  it("passes undefined through when the caller supplies no exposure", async () => {
+    const seen: (string | undefined)[] = [];
+    const { safeFetch } = stubFetch({});
+    const provider = createInstructionsProvider({
+      baseUrl: "https://paperclip.example",
+      map: { [TEMPLATE]: AGENT },
+      readToken: (exposure) => {
+        seen.push(exposure);
+        return "whichever-token";
+      },
+      safeFetch,
+      ttlMs: 60_000,
+      timeoutMs: 5_000,
+    });
+    // Caller omits the third argument entirely — exercises the same call shape as
+    // any pre-existing caller that has not been updated to pass exposure.
+    await provider.resolve(TEMPLATE, COMPILED_IN);
+    expect(seen).toEqual([undefined]);
+  });
+
+  it("sends the Bearer value readToken returns for the given exposure, not a fixed token", async () => {
+    const { safeFetch, state } = stubFetch({});
+    const provider = createInstructionsProvider({
+      baseUrl: "https://paperclip.example",
+      map: { [TEMPLATE]: AGENT },
+      readToken: (exposure) => (exposure === "PUBLIC" ? "agent-key-value" : "board-token-value"),
+      safeFetch,
+      ttlMs: 60_000,
+      timeoutMs: 5_000,
+    });
+    await provider.resolve(TEMPLATE, COMPILED_IN, "PUBLIC");
+    expect(state.authHeaders).toEqual(["Bearer agent-key-value"]);
+  });
+
+  it("falls back to the board-token branch of readToken for an INTERNAL template", async () => {
+    const { safeFetch, state } = stubFetch({});
+    const provider = createInstructionsProvider({
+      baseUrl: "https://paperclip.example",
+      map: { [TEMPLATE]: AGENT },
+      readToken: (exposure) => (exposure === "PUBLIC" ? "agent-key-value" : "board-token-value"),
+      safeFetch,
+      ttlMs: 60_000,
+      timeoutMs: 5_000,
+    });
+    await provider.resolve(TEMPLATE, COMPILED_IN, "INTERNAL");
+    expect(state.authHeaders).toEqual(["Bearer board-token-value"]);
   });
 });
 
