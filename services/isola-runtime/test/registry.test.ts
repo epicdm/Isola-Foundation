@@ -15,6 +15,7 @@ describe("registry shape", () => {
       "epic-staff-operations-coordinator@v1",
       "isola-ai-sales-front-desk-agent@v1",
       "isola-internal-manager@v1",
+      "epic-personal-line-concierge@v1",
     ]);
     expect(healthTemplateSummary()).toEqual([
       {
@@ -24,6 +25,7 @@ describe("registry shape", () => {
       },
       { id: "isola-ai-sales-front-desk-agent@v1", version: "v1", exposure: "PUBLIC" },
       { id: "isola-internal-manager@v1", version: "v1", exposure: "INTERNAL" },
+      { id: "epic-personal-line-concierge@v1", version: "v1", exposure: "PUBLIC" },
     ]);
   });
 
@@ -133,6 +135,23 @@ describe("system prompt content commitments", () => {
     expect(frontDesk.systemPrompt).toMatch(/full name/i);
     expect(frontDesk.systemPrompt).toMatch(/Never say or imply that you have/i);
     expect(frontDesk.systemPrompt).toMatch(/I don't have that detail here/);
+  });
+
+  /**
+   * Asserts this template REUSES the ratified Paperclip charter rather than
+   * a separately-invented prompt — each match below is a clause that exists
+   * verbatim in artifacts/isola/templates/employees/epic-personal-line-
+   * concierge/v1/AGENTS.md, not a paraphrase.
+   */
+  it("the personal line concierge reuses the ratified charter: never-claim-success, handoff triggers, honest limits", () => {
+    const concierge = findTemplate("epic-personal-line-concierge@v1")!;
+    expect(concierge.exposure).toBe("PUBLIC");
+    expect(concierge.systemPrompt).toMatch(/Never claim an action succeeded unless the system confirmed it/);
+    expect(concierge.systemPrompt).toMatch(/Never invent a price, a balance, an allowance, a date or a policy/);
+    expect(concierge.systemPrompt).toMatch(/the customer asks for a person, in any wording/);
+    expect(concierge.systemPrompt).toMatch(/you are silent until the conversation is handed back/);
+    expect(concierge.systemPrompt).toMatch(/never build a payment page or ask for card details/);
+    expect(concierge.systemPrompt).toMatch(/You cannot browse, you cannot\s*\nlook things up on your own/);
   });
 });
 
