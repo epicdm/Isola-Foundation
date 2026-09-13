@@ -41,6 +41,7 @@ import type { Logger } from "./log.js";
 import type { SqlClient, SqlExecutor } from "./ledger.js";
 import { readLastBusinessTurnMs } from "./turns.js";
 import { hasAssignee } from "./webhook.js";
+import { ChatwootApiError } from "./errors.js";
 import {
   abortHandback,
   beginHandback,
@@ -381,10 +382,24 @@ export function createHandbackSweeper(deps: HandbackSweeperDeps): HandbackSweepe
         // team — so this endpoint breaks precisely when the sweeper needs it.
         let record: unknown = null;
         let recordReadable = true;
+        // Distinguishes the ONE documented, structurally-permanent failure
+        // (the 500 above) from anything else — a timeout, a transport error,
+        // any other status. GitHub Codex review of PR #135, final pass: a
+        // PLAIN TRANSIENT failure on a DIRECTLY (individually) assigned
+        // conversation was being read exactly like the team-assigned 500, so
+        // the idle guard below treated "we don't know" as "not assigned",
+        // handed back, and — since Chatwoot's assignee was never actually
+        // cleared — permanently stranded the conversation out of
+        // HANDBACK_ELIGIBLE_STATES with no further sweep ever revisiting it.
+        // Only a confirmed 500 gets that treatment now; every other failure
+        // is UNKNOWN, not "safe to proceed", and blocks idle for this tick.
+        let assigneeUnknown = false;
         try {
           record = await deps.chatwoot.getConversationRecord(target);
-        } catch {
+        } catch (err) {
           recordReadable = false;
+          const status = err instanceof ChatwootApiError ? err.status : null;
+          if (status !== 500) assigneeUnknown = true;
         }
 
         // TRIGGER 1 — MANUAL. A human pressed "Mark as pending" AND unassigned
@@ -454,18 +469,20 @@ export function createHandbackSweeper(deps: HandbackSweeperDeps): HandbackSweepe
         // clock alone, same defect as the manual trigger's, via a different
         // trigger.
         //
-        // ONLY when the record is READABLE, deliberately — see the comment
-        // above on `recordReadable`: "Chatwoot is consulted for the MANUAL
-        // trigger only... conversations#show returns 500 for an AgentBot
-        // token once a TEAM is assigned, and escalation is what assigns the
-        // team." An unreadable record is the EXPECTED, common shape for a
-        // conversation this gateway's own handoff flow escalated (team
-        // assignment, not an individual `meta.assignee`) — making idle ALSO
-        // depend on recordReadable would silently stop handing those back at
-        // all, which is the one case this trigger exists for. When the
-        // record cannot be read, this falls through to the pre-existing
-        // idle-only behavior, unchanged.
-        const stillAssigned = recordReadable && hasAssignee(readAssignee(record));
+        // The record's readability alone is NOT enough to decide this — see
+        // GitHub Codex review of PR #135, final pass. A confirmed 500 (see
+        // `assigneeUnknown` above) is the ONE case documented to mean "team
+        // assigned, no individual assignee to find" — proceed with idle-only,
+        // unchanged. Anything else that made the record unreadable (a
+        // timeout, a transport blip, any other status) means we genuinely do
+        // not know, and "unknown" must NOT be read as "safe to hand back":
+        // that would have handed back a directly-assigned conversation whose
+        // assignee Chatwoot never actually clears (see performHandback's own
+        // comment below), stranding it out of HANDBACK_ELIGIBLE_STATES with
+        // no further sweep ever revisiting it. `assigneeUnknown` blocks idle
+        // for this tick only — the next sweep tries the read again.
+        const stillAssigned =
+          assigneeUnknown || (recordReadable && hasAssignee(readAssignee(record)));
         const idle = !stillAssigned && idleForMs !== null && idleForMs >= deps.idleMs;
         // KNOWN, FLAGGED CONSEQUENCE OF THIS GUARD — GitHub Codex review of PR
         // #135 pass 3: `performHandback`'s Chatwoot-side action is
@@ -486,12 +503,14 @@ export function createHandbackSweeper(deps: HandbackSweeperDeps): HandbackSweepe
 
         if (!manual && !idle) {
           skip(
-            stillAssigned
-              ? "still_assigned"
-              : idleSinceMs === null
-                ? "no_clock"
-                : "not_idle_yet",
-            { clock, idleForMs, recordReadable, stillAssigned },
+            assigneeUnknown
+              ? "assignee_unknown"
+              : stillAssigned
+                ? "still_assigned"
+                : idleSinceMs === null
+                  ? "no_clock"
+                  : "not_idle_yet",
+            { clock, idleForMs, recordReadable, stillAssigned, assigneeUnknown },
           );
           continue;
         }

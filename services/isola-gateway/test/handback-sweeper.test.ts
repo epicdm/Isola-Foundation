@@ -17,6 +17,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createHandbackSweeper } from "../src/handback.js";
 import type { HandbackSweeperDeps } from "../src/handback.js";
+import { ChatwootApiError } from "../src/errors.js";
 
 const NOW = Date.parse("2026-08-17T12:00:00.000Z");
 const IDLE_MS = 10 * 60 * 1000;
@@ -43,6 +44,7 @@ interface Harness {
 
 function harness(opts: {
   showThrows?: boolean;
+  showThrowsUnknownCause?: boolean;
   showStatus?: string;
   lastActivityAt?: number | null;
   lastBusinessTurnAt?: number | null;
@@ -93,7 +95,19 @@ function harness(opts: {
 
   const chatwoot = {
     getConversationRecord: vi.fn(async () => {
-      if (opts.showThrows === true) throw new Error("HTTP 500");
+      // The REAL client (chatwoot.ts's `request`) always throws
+      // `ChatwootApiError`, status 500 specifically for this documented,
+      // structurally-permanent case — never a plain Error. Faking it as a
+      // bare Error would silently defeat the status-based distinction the
+      // production code now makes (GitHub Codex review of PR #135, final
+      // pass) between "the one documented cause" and "genuinely unknown".
+      if (opts.showThrows === true) throw new ChatwootApiError("returned HTTP 500", 500);
+      // A DIFFERENT failure shape — a timeout, a transport blip, anything
+      // that is NOT the documented 500. Must be treated as unknown, not as
+      // "safe to proceed with idle".
+      if (opts.showThrowsUnknownCause === true) {
+        throw new ChatwootApiError("call timed out", null);
+      }
       return {
         payload: {
           status: opts.showStatus ?? "open",
@@ -152,6 +166,33 @@ describe("A BROKEN conversations#show MUST NOT STRAND THE CUSTOMER", () => {
     await sweeper.sweep();
 
     expect(h.claimed, "handback must have been attempted").toHaveLength(1);
+  });
+
+  /**
+   * GitHub Codex review of PR #135, final pass: an unreadable record is NOT
+   * uniformly safe to treat as "not assigned". Only the ONE documented,
+   * structurally-permanent cause (a confirmed 500) is. Anything else — here,
+   * a timeout — must be treated as genuinely unknown and must NOT let idle
+   * fire: a directly-assigned conversation whose read merely blipped would
+   * otherwise be hand-back'd while Chatwoot still shows it assigned (which
+   * `pendConversation` never clears), permanently stranding it out of
+   * HANDBACK_ELIGIBLE_STATES with no future sweep ever revisiting it — the
+   * exact regression this test exists to catch.
+   */
+  it("does NOT hand back on a failure that is NOT the documented 500 — unknown is not 'safe to proceed'", async () => {
+    const h = harness({
+      showThrowsUnknownCause: true,
+      lastBusinessTurnAt: NOW - 3 * 60 * 60 * 1000, // idle threshold long past
+    });
+    const sweeper = createHandbackSweeper(h.deps);
+    await sweeper.sweep();
+
+    expect(h.claimed, "handback must NOT have been attempted on an unknown failure").toHaveLength(
+      0,
+    );
+    const s = skips(h.logs);
+    expect(s).toHaveLength(1);
+    expect(s[0]!["reason"]).toBe("assignee_unknown");
   });
 });
 
