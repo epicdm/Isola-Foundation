@@ -39,20 +39,20 @@ const AFTER = () => envConfig({ RUNTIME_SECRET_PUBLIC: NEW_PUBLIC });
 describe("the rotation matrix for RUNTIME_SECRET_PUBLIC", () => {
   it("BEFORE grace: old accepted, new rejected", () => {
     const c = BEFORE();
-    expect(kindOf(c, PUBLIC_SECRET)).toEqual({ kind: "ok", credentialExposure: "PUBLIC" });
+    expect(kindOf(c, PUBLIC_SECRET)).toEqual({ kind: "ok", credentialExposure: "PUBLIC", credentialAgentId: null });
     expect(kindOf(c, NEW_PUBLIC).kind).toBe("unauthorized");
   });
 
   it("DURING overlap: BOTH old and new accepted, as PUBLIC", () => {
     const c = OVERLAP();
-    expect(kindOf(c, PUBLIC_SECRET)).toEqual({ kind: "ok", credentialExposure: "PUBLIC" });
-    expect(kindOf(c, NEW_PUBLIC)).toEqual({ kind: "ok", credentialExposure: "PUBLIC" });
+    expect(kindOf(c, PUBLIC_SECRET)).toEqual({ kind: "ok", credentialExposure: "PUBLIC", credentialAgentId: null });
+    expect(kindOf(c, NEW_PUBLIC)).toEqual({ kind: "ok", credentialExposure: "PUBLIC", credentialAgentId: null });
   });
 
   it("AFTER cutover: old rejected, new accepted", () => {
     const c = AFTER();
     expect(kindOf(c, PUBLIC_SECRET).kind).toBe("unauthorized");
-    expect(kindOf(c, NEW_PUBLIC)).toEqual({ kind: "ok", credentialExposure: "PUBLIC" });
+    expect(kindOf(c, NEW_PUBLIC)).toEqual({ kind: "ok", credentialExposure: "PUBLIC", credentialAgentId: null });
   });
 
   it("an unrelated token is rejected in ALL THREE states", () => {
@@ -73,18 +73,18 @@ describe("grace does not widen authority", () => {
   it("a PUBLIC grace value is never accepted as INTERNAL", () => {
     const c = OVERLAP();
     const r = kindOf(c, NEW_PUBLIC);
-    expect(r).toEqual({ kind: "ok", credentialExposure: "PUBLIC" });
-    expect(r).not.toEqual({ kind: "ok", credentialExposure: "INTERNAL" });
+    expect(r).toEqual({ kind: "ok", credentialExposure: "PUBLIC", credentialAgentId: null });
+    expect(r).not.toEqual({ kind: "ok", credentialExposure: "INTERNAL", credentialAgentId: null });
   });
 
   it("an INTERNAL grace value is never accepted as PUBLIC", () => {
     const c = envConfig({ RUNTIME_SECRET_INTERNAL_NEXT: NEW_INTERNAL });
-    expect(kindOf(c, NEW_INTERNAL)).toEqual({ kind: "ok", credentialExposure: "INTERNAL" });
+    expect(kindOf(c, NEW_INTERNAL)).toEqual({ kind: "ok", credentialExposure: "INTERNAL", credentialAgentId: null });
   });
 
   it("the INTERNAL credential is untouched while PUBLIC is mid-rotation", () => {
     const c = OVERLAP();
-    expect(kindOf(c, INTERNAL_SECRET)).toEqual({ kind: "ok", credentialExposure: "INTERNAL" });
+    expect(kindOf(c, INTERNAL_SECRET)).toEqual({ kind: "ok", credentialExposure: "INTERNAL", credentialAgentId: null });
   });
 
   it("both classes can hold a grace value at once without crossing", () => {
@@ -92,10 +92,10 @@ describe("grace does not widen authority", () => {
       RUNTIME_SECRET_PUBLIC_NEXT: NEW_PUBLIC,
       RUNTIME_SECRET_INTERNAL_NEXT: NEW_INTERNAL,
     });
-    expect(kindOf(c, PUBLIC_SECRET)).toEqual({ kind: "ok", credentialExposure: "PUBLIC" });
-    expect(kindOf(c, NEW_PUBLIC)).toEqual({ kind: "ok", credentialExposure: "PUBLIC" });
-    expect(kindOf(c, INTERNAL_SECRET)).toEqual({ kind: "ok", credentialExposure: "INTERNAL" });
-    expect(kindOf(c, NEW_INTERNAL)).toEqual({ kind: "ok", credentialExposure: "INTERNAL" });
+    expect(kindOf(c, PUBLIC_SECRET)).toEqual({ kind: "ok", credentialExposure: "PUBLIC", credentialAgentId: null });
+    expect(kindOf(c, NEW_PUBLIC)).toEqual({ kind: "ok", credentialExposure: "PUBLIC", credentialAgentId: null });
+    expect(kindOf(c, INTERNAL_SECRET)).toEqual({ kind: "ok", credentialExposure: "INTERNAL", credentialAgentId: null });
+    expect(kindOf(c, NEW_INTERNAL)).toEqual({ kind: "ok", credentialExposure: "INTERNAL", credentialAgentId: null });
     expect(kindOf(c, UNRELATED).kind).toBe("unauthorized");
   });
 });
@@ -105,8 +105,8 @@ describe("with no grace configured, behaviour is exactly what it was", () => {
     const c = envConfig();
     expect(c.secretsNext.PUBLIC).toBeNull();
     expect(c.secretsNext.INTERNAL).toBeNull();
-    expect(kindOf(c, PUBLIC_SECRET)).toEqual({ kind: "ok", credentialExposure: "PUBLIC" });
-    expect(kindOf(c, INTERNAL_SECRET)).toEqual({ kind: "ok", credentialExposure: "INTERNAL" });
+    expect(kindOf(c, PUBLIC_SECRET)).toEqual({ kind: "ok", credentialExposure: "PUBLIC", credentialAgentId: null });
+    expect(kindOf(c, INTERNAL_SECRET)).toEqual({ kind: "ok", credentialExposure: "INTERNAL", credentialAgentId: null });
     expect(kindOf(c, UNRELATED).kind).toBe("unauthorized");
   });
 

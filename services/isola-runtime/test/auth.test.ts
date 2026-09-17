@@ -11,6 +11,7 @@ import {
   envConfig,
   get,
   invoke,
+  placeholder,
   startServer,
   type TestServer,
 } from "./harness.js";
@@ -49,10 +50,12 @@ describe("resolveCredential", () => {
     expect(resolveCredential(config, `Bearer ${INTERNAL_SECRET}`)).toEqual({
       kind: "ok",
       credentialExposure: "INTERNAL",
+      credentialAgentId: null,
     });
     expect(resolveCredential(config, `Bearer ${PUBLIC_SECRET}`)).toEqual({
       kind: "ok",
       credentialExposure: "PUBLIC",
+      credentialAgentId: null,
     });
   });
 
@@ -70,6 +73,66 @@ describe("resolveCredential", () => {
     });
     expect(resolveCredential(config, `Bearer ${INTERNAL_SECRET}`)).toEqual({
       kind: "not_configured",
+    });
+  });
+});
+
+describe("resolveCredential -- agent-bound credentials (the caller-to-agent binding)", () => {
+  const AGENT_A = "eeeeeeee-1111-4111-8111-111111111111";
+  const AGENT_B = "eeeeeeee-2222-4222-8222-222222222222";
+  const AGENT_A_SECRET = placeholder("agent-a");
+  const AGENT_B_SECRET = placeholder("agent-b");
+
+  it("a caller presenting an agent-bound secret is resolved to that specific agent, at PUBLIC exposure", () => {
+    const config = envConfig({
+      PAPERCLIP_AGENT_CALLER_SECRETS: JSON.stringify({ [AGENT_A]: AGENT_A_SECRET, [AGENT_B]: AGENT_B_SECRET }),
+    });
+    expect(resolveCredential(config, `Bearer ${AGENT_A_SECRET}`)).toEqual({
+      kind: "ok",
+      credentialExposure: "PUBLIC",
+      credentialAgentId: AGENT_A,
+    });
+    expect(resolveCredential(config, `Bearer ${AGENT_B_SECRET}`)).toEqual({
+      kind: "ok",
+      credentialExposure: "PUBLIC",
+      credentialAgentId: AGENT_B,
+    });
+  });
+
+  it("THE EXACT IMPERSONATION QUESTION -- the plain shared PUBLIC secret proves no specific agent, even when agent-bound secrets are configured", () => {
+    // This is the confirmed gap PAPERCLIP_BUSINESS_FACTS_MAP alone could not close:
+    // a caller holding only the shared class secret must never be treated as
+    // representing any particular agent, no matter what a request body claims.
+    const config = envConfig({
+      PAPERCLIP_AGENT_CALLER_SECRETS: JSON.stringify({ [AGENT_A]: AGENT_A_SECRET, [AGENT_B]: AGENT_B_SECRET }),
+    });
+    expect(resolveCredential(config, `Bearer ${PUBLIC_SECRET}`)).toEqual({
+      kind: "ok",
+      credentialExposure: "PUBLIC",
+      credentialAgentId: null,
+    });
+  });
+
+  it("an agent-bound secret colliding with the shared PUBLIC secret is refused entirely, not silently resolved to one identity", () => {
+    const config = envConfig({
+      PAPERCLIP_AGENT_CALLER_SECRETS: JSON.stringify({ [AGENT_A]: PUBLIC_SECRET }),
+    });
+    expect(resolveCredential(config, `Bearer ${PUBLIC_SECRET}`)).toEqual({ kind: "unauthorized" });
+  });
+
+  it("two agents sharing the same secret by misconfiguration are refused, never resolved to either", () => {
+    const config = envConfig({
+      PAPERCLIP_AGENT_CALLER_SECRETS: JSON.stringify({ [AGENT_A]: AGENT_A_SECRET, [AGENT_B]: AGENT_A_SECRET }),
+    });
+    expect(resolveCredential(config, `Bearer ${AGENT_A_SECRET}`)).toEqual({ kind: "unauthorized" });
+  });
+
+  it("no agent-bound secrets configured at all -- behaviour is exactly what it was before this mechanism existed", () => {
+    const config = envConfig();
+    expect(resolveCredential(config, `Bearer ${PUBLIC_SECRET}`)).toEqual({
+      kind: "ok",
+      credentialExposure: "PUBLIC",
+      credentialAgentId: null,
     });
   });
 });

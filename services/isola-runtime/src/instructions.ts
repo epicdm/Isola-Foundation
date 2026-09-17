@@ -68,6 +68,26 @@
  * agent says. That is the intent — it is the owner's console — but it means Paperclip
  * board access is now customer-facing authority. Bundle edits are the change surface
  * to audit.
+ *
+ * A SECOND, DEEPER GAP -- FOUND, PROVEN, CLOSED (OPT-IN) 2026-09-17
+ * ------------------------------------------------------------------
+ * The design above closes "does this claimed (agentId, templateId) pair make sense"
+ * (an admin allowlist). It does NOT close "did the caller who sent THIS request
+ * actually have any right to name that agent" -- proven live with isolated fixtures
+ * over a real HTTP `/v1/invoke`: two agents A and B, both genuinely authorized for
+ * the SAME template, are indistinguishable to this file by anything except a
+ * request-body field. The single shared PUBLIC bearer let a caller claim to be
+ * EITHER, on demand. An allowlist proves a claim is well-formed; it never proves
+ * THIS caller may make it.
+ *
+ * Closed via `auth.ts`'s `agentCallerSecrets` extension (the SAME constant-time,
+ * no-early-exit bearer-comparison pattern this file's design note above already
+ * uses for `PAPERCLIP_INSTRUCTIONS_MAP`, applied one level deeper): an operator can
+ * give a specific agent its OWN bearer, and a caller presenting it proves it
+ * genuinely represents that agent (`credentialAgentId`). This is deliberately
+ * OPT-IN per agent (`agentsRequiringCallerProof`), not a blanket requirement -- an
+ * agent an operator has not yet hardened keeps exactly today's behaviour, so
+ * existing release plans built on `businessFactsMap` alone are unaffected.
  */
 import type { SafeFetch } from "./egress.js";
 
@@ -91,6 +111,9 @@ Keep it under 60 words. Plain sentences, no Markdown, no emoji.`;
 
 /** A prompt must be non-trivial to be trusted; an empty file is a misconfiguration. */
 const MIN_USABLE_PROMPT_CHARS = 200;
+
+/** Default for `deps.agentsRequiringCallerProof` when omitted -- nobody opted in. */
+const EMPTY_SET: ReadonlySet<string> = new Set();
 
 export function isUsablePrompt(value: unknown): value is string {
   return typeof value === "string" && value.trim().length >= MIN_USABLE_PROMPT_CHARS;
@@ -151,15 +174,15 @@ export interface ResolvedPrompt {
   readonly failure: string | null;
   /**
    * The Paperclip agent id whose BUSINESS.md is actually present in `prompt`, or
-   * `null` when no business facts are attached. Non-null only when the invocation's
-   * claimed agent id was found in `PAPERCLIP_BUSINESS_FACTS_MAP` AUTHORIZED for
-   * exactly this `templateId`, AND that agent has a BUSINESS.md uploaded, AND the
-   * fetch succeeded (or a fresh-enough cached copy exists). Absent claim, unauthorized
-   * claim, template mismatch (a forged or stale claim naming a real agent id
-   * authorized for a DIFFERENT template), and fetch failure are all indistinguishable
-   * from the caller's perspective -- all of them yield `null`, never another tenant's
-   * content. See the module-level comment for why a claimed agent id is CHECKED
-   * against an admin-published table rather than merely consulted.
+   * `null` when no business facts are attached. Non-null only when the claimed
+   * agent id is found in `PAPERCLIP_BUSINESS_FACTS_MAP` AUTHORIZED for exactly this
+   * `templateId`, AND -- for an agent opted into `agentsRequiringCallerProof` --
+   * the CALLER'S OWN CREDENTIAL (never the request body) PROVED that exact
+   * identity, AND that agent has a BUSINESS.md uploaded, AND the fetch succeeded
+   * (or a fresh-enough cached copy exists). No claim, an unauthorized claim, a
+   * template mismatch, a failed caller-proof check, and fetch failure are all
+   * indistinguishable from the caller's perspective -- all of them yield `null`,
+   * never another tenant's content.
    *
    * Exists so a caller (a setup demonstration, a log line, an audit) can tell WHICH
    * tenant's facts, if any, actually reached the model on this reply, instead of
@@ -168,14 +191,15 @@ export interface ResolvedPrompt {
   readonly businessFactsAgentId: string | null;
   /**
    * Set ONLY when the invocation carried a claimed agent id that FAILED
-   * authorization (absent from `PAPERCLIP_BUSINESS_FACTS_MAP`, or present but
-   * authorized for a different templateId than the one actually invoked) -- `null`
-   * in every other case, including the ordinary "no claim at all" and "authorized but
-   * no BUSINESS.md yet" cases. This is deliberately a SEPARATE field from
-   * `businessFactsAgentId` rather than an inferred negative of it, because a rejected
-   * claim is a distinct, log-worthy event (a forged or stale identity, or a gateway
-   * binding bug) and must not be conflated with the routine "nothing uploaded yet"
-   * case.
+   * authorization -- absent from `PAPERCLIP_BUSINESS_FACTS_MAP`, authorized for a
+   * different templateId than the one actually invoked, or (for an agent opted
+   * into `agentsRequiringCallerProof`) a claim the caller's own credential did NOT
+   * prove -- `null` in every other case, including the ordinary "no claim at all"
+   * and "authorized but no BUSINESS.md yet" cases. This is deliberately a SEPARATE
+   * field from `businessFactsAgentId` rather than an inferred negative of it,
+   * because a rejected claim is a distinct, log-worthy event (a forged or stale
+   * identity, or a gateway binding bug) and must not be conflated with the routine
+   * "nothing uploaded yet" case.
    */
   readonly businessFactsRejectedAgentId: string | null;
 }
@@ -198,6 +222,19 @@ export interface InstructionsProviderDeps {
    * authorized -- BUSINESS.md resolution is off until an operator opts an agent in.
    */
   readonly businessFactsMap: BusinessFactsAuthorizationMap;
+  /**
+   * Agent ids an operator has given their OWN caller-bound secret (see auth.ts's
+   * `PAPERCLIP_AGENT_CALLER_SECRETS`). OPT-IN hardening, per agent: for an agent in
+   * this set, a request-body claim is trusted ONLY when the caller's own credential
+   * PROVED that exact identity (auth.ts's `credentialAgentId`) -- closing the
+   * confirmed impersonation gap (isolated fixtures, real HTTP `/v1/invoke`,
+   * 2026-09-17: A's shared PUBLIC bearer could claim B's already-authorized
+   * identity, and the claim alone was believed). An agent NOT in this set keeps
+   * exactly today's behaviour -- the claim in `businessFactsMap` alone decides --
+   * so agents an operator has not yet hardened are unaffected and existing release
+   * plans that only ever set `businessFactsMap` keep working unchanged.
+   */
+  readonly agentsRequiringCallerProof?: ReadonlySet<string>;
   /** Reads the board token at call time so a rotated secret is picked up. */
   readonly readToken: () => string;
   /**
@@ -228,15 +265,24 @@ export interface InstructionsProvider {
    * Paperclip binding keeps its compiled-in prompt, and a binding that cannot be
    * read yields the fail-closed prompt.
    *
-   * @param claimedAgentId The invocation's claimed agent id (gateway-supplied --
-   *   see the module-level comment), or `null` when the invocation carried none.
-   *   Used ONLY to look up business-fact authorization; it can never override, add
-   *   to, or redirect the persona resolved from `templateId` via `deps.map`.
+   * @param claimedAgentId The invocation's request-body agent id claim. Checked
+   *   against `deps.businessFactsMap` as before. For an agent NOT in
+   *   `deps.agentsRequiringCallerProof`, the claim alone still decides -- unchanged
+   *   from before this file added caller-bound credentials.
+   * @param credentialAgentId The agent id PROVEN by the caller's own presented
+   *   credential (`auth.ts`'s `resolveCredential`). For an agent that IS in
+   *   `deps.agentsRequiringCallerProof`, `claimedAgentId` is trusted ONLY when it
+   *   equals this proven identity -- closing the confirmed impersonation gap
+   *   (isolated fixtures, real HTTP `/v1/invoke`, 2026-09-17: a caller holding the
+   *   shared PUBLIC bearer could claim any already-authorized agent's identity by
+   *   request-body field alone, and the claim was believed). `null` means the
+   *   caller's credential proved no specific agent.
    */
   resolve(
     templateId: string,
     compiledIn: string,
     claimedAgentId: string | null,
+    credentialAgentId?: string | null,
   ): Promise<ResolvedPrompt>;
   /** Drop cached copies so the next reply re-reads Paperclip. */
   invalidate(templateId?: string): void;
@@ -314,17 +360,30 @@ export function createInstructionsProvider(deps: InstructionsProviderDeps): Inst
   }
 
   /**
-   * The invocation's claimed agent id is CHECKED here, never merely consulted: it must
-   * be present in `deps.businessFactsMap` AND authorized for EXACTLY the templateId
-   * actually being invoked. A real agent id authorized for a DIFFERENT template is a
-   * mismatched (forged or stale) claim and is rejected the same as an absent one --
-   * this is the one place a spoofed identity is caught.
+   * Two questions, in order: is the CLAIMED agent authorized for EXACTLY this
+   * templateId (unchanged from before caller-bound credentials existed), and --
+   * ONLY for an agent an operator has opted into `agentsRequiringCallerProof` --
+   * did the caller's OWN credential PROVE that exact identity? An agent not opted
+   * in skips the second question entirely: the claim alone still decides, exactly
+   * as before this file added caller-bound credentials. This is deliberately
+   * opt-in per agent, not a blanket requirement, so an operator who has not yet
+   * minted a caller secret for a given agent sees no behaviour change at all.
    */
-  function authorizedBusinessAgent(templateId: string, claimedAgentId: string | null): string | null {
+  function authorizedBusinessAgent(
+    templateId: string,
+    claimedAgentId: string | null,
+    credentialAgentId: string | null,
+  ): string | null {
     if (claimedAgentId === null) return null;
     const authorizedTemplateId = deps.businessFactsMap[claimedAgentId];
     if (authorizedTemplateId === undefined) return null;
     if (authorizedTemplateId !== templateId) return null;
+    if (
+      (deps.agentsRequiringCallerProof ?? EMPTY_SET).has(claimedAgentId) &&
+      credentialAgentId !== claimedAgentId
+    ) {
+      return null;
+    }
     return claimedAgentId;
   }
 
@@ -371,7 +430,7 @@ export function createInstructionsProvider(deps: InstructionsProviderDeps): Inst
   }
 
   return {
-    async resolve(templateId, compiledIn, claimedAgentId) {
+    async resolve(templateId, compiledIn, claimedAgentId, credentialAgentId) {
       const persona = await resolvePersona(templateId, compiledIn);
 
       // Business facts are only ever attempted once persona resolution actually
@@ -382,10 +441,12 @@ export function createInstructionsProvider(deps: InstructionsProviderDeps): Inst
         return { ...persona, businessFactsAgentId: null, businessFactsRejectedAgentId: null };
       }
 
-      const businessAgentId = authorizedBusinessAgent(templateId, claimedAgentId);
+      const businessAgentId = authorizedBusinessAgent(templateId, claimedAgentId, credentialAgentId ?? null);
       if (businessAgentId === null) {
         // Distinguish "no claim at all" (ordinary) from "a claim was made and it
-        // failed authorization" (log-worthy -- see businessFactsRejectedAgentId's doc).
+        // failed authorization" -- whether that failure was an unrecognised/
+        // mismatched templateId or a claim that required, and lacked, caller proof
+        // (log-worthy -- see businessFactsRejectedAgentId's doc).
         const rejected = claimedAgentId !== null ? claimedAgentId : null;
         return { ...persona, businessFactsAgentId: null, businessFactsRejectedAgentId: rejected };
       }

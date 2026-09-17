@@ -76,7 +76,10 @@ function fakePaperclipFetch(businessFactsMap: Record<string, string>) {
   };
 }
 
-async function bootWithAuthorization(businessFactsMap: Record<string, string>) {
+async function bootWithAuthorization(
+  businessFactsMap: Record<string, string>,
+  agentCallerSecrets: Record<string, string> = {},
+) {
   const logger = new CapturingLogger();
   const model = StubModelClient.returning("stub answer");
   server = await startServer({
@@ -87,6 +90,7 @@ async function bootWithAuthorization(businessFactsMap: Record<string, string>) {
         [PUBLIC_TEMPLATE]: "dddddddd-0000-4000-8000-000000000001",
       }),
       PAPERCLIP_BUSINESS_FACTS_MAP: JSON.stringify(businessFactsMap),
+      PAPERCLIP_AGENT_CALLER_SECRETS: JSON.stringify(agentCallerSecrets),
     }),
     logger: logger.logger,
     modelClient: model,
@@ -181,5 +185,84 @@ describe("business-facts identity boundary -- real HTTP end to end", () => {
     const systemPrompt = model.calls[0]?.messages.find((m) => m.role === "system")?.content ?? "";
     expect(systemPrompt).not.toContain(FACTS_B);
     expect(systemPrompt).not.toContain(FACTS_A); // AGENT_A's facts must not leak in via context either -- only body.agentId is read
+  });
+
+  it("PRE-FIX BEHAVIOUR, PRESERVED AS A REGRESSION GUARD -- with NO agent-bound secrets configured, the shared PUBLIC bearer alone still lets a caller claim either agent's identity by request-body field alone", async () => {
+    // This documents the exact vulnerability that was confirmed live before the fix
+    // (isolated fixtures, real HTTP /v1/invoke, 2026-09-17) and shows it is a
+    // DELIBERATE, backward-compatible default, not something the fix removed by
+    // accident: an operator who has not yet configured PAPERCLIP_AGENT_CALLER_SECRETS
+    // for an agent gets EXACTLY today's behaviour. The fix is opt-in per agent, not a
+    // breaking change to every existing deployment.
+    const { model } = await bootWithAuthorization({ [AGENT_A]: PUBLIC_TEMPLATE, [AGENT_B]: PUBLIC_TEMPLATE });
+    const asA = await invoke(server!.url, { bearer: PUBLIC_SECRET, body: invokeBody(AGENT_A, "run-imp-a") });
+    const asB = await invoke(server!.url, { bearer: PUBLIC_SECRET, body: invokeBody(AGENT_B, "run-imp-b") });
+    expect(asA.status).toBe(200);
+    expect(asB.status).toBe(200);
+    const promptAsA = model.calls[0]?.messages.find((m) => m.role === "system")?.content ?? "";
+    const promptAsB = model.calls[1]?.messages.find((m) => m.role === "system")?.content ?? "";
+    expect(promptAsA).toContain(FACTS_A);
+    expect(promptAsB).toContain(FACTS_B);
+  });
+
+  it("THE FIX, RE-VERIFIED BY RE-RUNNING THE ACTUAL IMPERSONATION ATTEMPT -- once agent-bound secrets are configured, A's own real credential cannot be used to claim B's identity, even naming a genuinely authorized (agentId, templateId) pair", async () => {
+    const AGENT_A_SECRET = placeholder("agent-a-caller");
+    const AGENT_B_SECRET = placeholder("agent-b-caller");
+    const { model } = await bootWithAuthorization(
+      { [AGENT_A]: PUBLIC_TEMPLATE, [AGENT_B]: PUBLIC_TEMPLATE },
+      { [AGENT_A]: AGENT_A_SECRET, [AGENT_B]: AGENT_B_SECRET },
+    );
+
+    // THE EXACT ATTACK: A's own real, working credential (its own agent-bound
+    // secret -- "the actual caller authentication available to A"), presenting a
+    // genuinely authorized (agentId, templateId) pair -- but for B, not itself.
+    const impersonationAttempt = await invoke(server!.url, {
+      bearer: AGENT_A_SECRET,
+      body: invokeBody(AGENT_B, "run-fixed-impersonation"),
+    });
+    expect(impersonationAttempt.status).toBe(200); // still answers -- fails closed to persona-only, not an error
+    const impersonationPrompt =
+      model.calls[0]?.messages.find((m) => m.role === "system")?.content ?? "";
+    expect(impersonationPrompt).not.toContain(FACTS_B);
+    expect(impersonationPrompt).not.toContain(FACTS_A); // A's own facts don't leak in either -- the claim named B, and B is what was checked
+
+    // Confirm the harness itself is sound (a real negative control, not a
+    // vacuously-passing test): A's own secret, honestly naming ITSELF, still works.
+    const honestCall = await invoke(server!.url, {
+      bearer: AGENT_A_SECRET,
+      body: invokeBody(AGENT_A, "run-fixed-honest"),
+    });
+    expect(honestCall.status).toBe(200);
+    const honestPrompt = model.calls[1]?.messages.find((m) => m.role === "system")?.content ?? "";
+    expect(honestPrompt).toContain(FACTS_A);
+
+    // Negative control on the credential itself: the WRONG shared bearer (a
+    // different exposure class entirely) is rejected outright, proving this test
+    // harness actually enforces authentication rather than accepting anything.
+    const wrongExposure = await invoke(server!.url, {
+      bearer: "not-a-real-bearer-at-all",
+      body: invokeBody(AGENT_B, "run-should-not-run"),
+    });
+    expect(wrongExposure.status).toBe(401);
+  });
+
+  it("OPT-IN IS PER AGENT -- hardening A does not silently harden B: the plain shared PUBLIC bearer still gets B's facts (B not yet hardened) but is refused for A (A IS hardened)", async () => {
+    const AGENT_A_SECRET = placeholder("agent-a-caller-2");
+    const { model } = await bootWithAuthorization(
+      { [AGENT_A]: PUBLIC_TEMPLATE, [AGENT_B]: PUBLIC_TEMPLATE },
+      { [AGENT_A]: AGENT_A_SECRET }, // only A has been given an agent-bound secret; B has not yet
+    );
+    // B is unaffected by A's hardening -- exactly today's (pre-fix) behaviour,
+    // deliberately preserved until an operator opts B in too.
+    const asB = await invoke(server!.url, { bearer: PUBLIC_SECRET, body: invokeBody(AGENT_B, "run-b-unhardened") });
+    expect(asB.status).toBe(200);
+    const promptB = model.calls[0]?.messages.find((m) => m.role === "system")?.content ?? "";
+    expect(promptB).toContain(FACTS_B);
+
+    // A IS hardened -- the same plain shared bearer, now claiming A, is refused.
+    const asA = await invoke(server!.url, { bearer: PUBLIC_SECRET, body: invokeBody(AGENT_A, "run-a-hardened") });
+    expect(asA.status).toBe(200);
+    const promptA = model.calls[1]?.messages.find((m) => m.role === "system")?.content ?? "";
+    expect(promptA).not.toContain(FACTS_A);
   });
 });

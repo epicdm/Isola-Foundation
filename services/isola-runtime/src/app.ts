@@ -440,6 +440,10 @@ export function createRuntime(deps: AppDeps): Runtime {
         config.paperclipBoardToken === null || config.paperclipBaseUrl === null
           ? {}
           : config.paperclipBusinessFactsMap,
+      // Which agents an operator has opted into caller-proof hardening -- derived
+      // from the SAME agentCallerSecrets auth.ts already resolves credentials
+      // against, never a second, independently-set list that could drift from it.
+      agentsRequiringCallerProof: new Set(Object.keys(config.agentCallerSecrets)),
       readToken: () => config.paperclipBoardToken ?? "",
       safeFetch,
       ttlMs: config.paperclipInstructionsTtlMs,
@@ -707,6 +711,10 @@ export function createRuntime(deps: AppDeps): Runtime {
       return;
     }
     const credentialExposure = auth.credentialExposure;
+    // The agent id PROVEN by the caller's own presented credential -- see auth.ts's
+    // module comment. This, never body.agentId, is what business-facts
+    // authorization is keyed by from here on.
+    const credentialAgentId = auth.credentialAgentId;
 
     let raw: Buffer;
     try {
@@ -1047,7 +1055,12 @@ export function createRuntime(deps: AppDeps): Runtime {
       // invoke line so the next question is answered by reading a log rather than
       // by instrumenting under pressure.
       const tCharterStart = now();
-      const resolvedPrompt = await instructions.resolve(template.id, template.systemPrompt, agentId);
+      const resolvedPrompt = await instructions.resolve(
+        template.id,
+        template.systemPrompt,
+        agentId,
+        credentialAgentId,
+      );
       const charterMs = now() - tCharterStart;
       if (resolvedPrompt.source === "fail_closed") {
         logger.error({
@@ -1512,11 +1525,14 @@ export function createRuntime(deps: AppDeps): Runtime {
         // one. These two fields are what make that visible without reading the text.
         brain: template.modelBaseUrl ?? "default",
         charterSource: resolvedPrompt.source,
-        // WHICH TENANT'S BUSINESS FACTS, IF ANY. The invoke's claimed agentId, but
-        // only once CHECKED against PAPERCLIP_BUSINESS_FACTS_MAP for this exact
-        // templateId -- never trusted merely because it was present. Null covers both
-        // "no claim" and "claim rejected"; see businessFactsRejectedAgentId below for
-        // the security-relevant subset of that null.
+        // WHICH TENANT'S BUSINESS FACTS, IF ANY. body.agentId, checked against
+        // PAPERCLIP_BUSINESS_FACTS_MAP for this exact templateId, and -- for an
+        // agent opted into caller-proof hardening -- also checked against the
+        // caller's own credential-proven identity (credentialAgentId). An agent not
+        // opted in is unaffected by credentialAgentId at all, exactly as before that
+        // mechanism existed. Null covers both "no claim" and "claim rejected"; see
+        // businessFactsRejectedAgentId below for the security-relevant subset of
+        // that null.
         businessFactsAgentId: resolvedPrompt.businessFactsAgentId,
         businessFactsRejectedAgentId: resolvedPrompt.businessFactsRejectedAgentId,
         // WHERE THE TIME WENT. `durationMs` is the total; these three name the
