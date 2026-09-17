@@ -140,6 +140,36 @@ export function createInstructionsProvider(deps: InstructionsProviderDeps): Inst
   const cache = new Map<string, CacheEntry>();
   const origin = deps.baseUrl.replace(/\/+$/, "");
 
+  /**
+   * Optional supplementary business knowledge (BUSINESS.md), fetched from the SAME
+   * instructions bundle as AGENTS.md, by the SAME config-resolved agentId, with the
+   * SAME credential -- never a second, request-suppliable identifier. This is the
+   * previously-missing connection: a per-tenant business profile (name, hours,
+   * services, policies -- produced by the existing business-discovery scan) can now
+   * reach the model, through the one channel registry.ts's law already permits
+   * behaviour-bearing content to travel by (the runtime's own fetch, keyed by
+   * configuration, never by the request). Deliberately fail-SOFT, not fail-closed:
+   * a template with no BUSINESS.md file is a normal, expected state (nothing has
+   * been discovered/uploaded for it yet), not an outage of the persona itself --
+   * the FAIL_CLOSED_PROMPT stays reserved for AGENTS.md being unreachable.
+   */
+  async function fetchBusinessFacts(agentId: string): Promise<string | null> {
+    const url = `${origin}/api/agents/${encodeURIComponent(agentId)}/instructions-bundle/file?path=BUSINESS.md`;
+    try {
+      const res = await deps.safeFetch(url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${deps.readToken()}` },
+        signal: AbortSignal.timeout(deps.timeoutMs),
+      });
+      if (!res.ok) return null; // no BUSINESS.md for this agent yet -- not an error
+      const body = (await res.json()) as { content?: unknown };
+      if (typeof body.content !== "string" || body.content.trim().length === 0) return null;
+      return body.content.trim();
+    } catch {
+      return null; // fail-soft: supplementary knowledge, never blocks the reply
+    }
+  }
+
   async function fetchEntry(agentId: string): Promise<string> {
     const url = `${origin}/api/agents/${encodeURIComponent(agentId)}/instructions-bundle/file?path=AGENTS.md`;
     const res = await deps.safeFetch(url, {
@@ -158,7 +188,12 @@ export function createInstructionsProvider(deps: InstructionsProviderDeps): Inst
         })`,
       );
     }
-    return body.content.trim();
+    const persona = body.content.trim();
+    // Fetched by the SAME agentId as the persona above -- same trust boundary, same
+    // tenant scope. A business-facts fetch failure never fails the persona fetch.
+    const businessFacts = await fetchBusinessFacts(agentId);
+    if (businessFacts === null) return persona;
+    return `${persona}\n\n----- BUSINESS INFORMATION (from the tenant's own discovery profile) -----\n${businessFacts}\n----- END BUSINESS INFORMATION -----`;
   }
 
   return {
