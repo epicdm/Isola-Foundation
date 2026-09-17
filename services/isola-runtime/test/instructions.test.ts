@@ -4,17 +4,31 @@ import {
   GRACE_MULTIPLIER,
   createInstructionsProvider,
   isUsablePrompt,
+  parseBusinessFactsMap,
   parseInstructionsMap,
 } from "../src/instructions.js";
 
+// Synthetic ids throughout -- deliberately NOT any real Paperclip agent id. Real
+// production candidates for this template (fd2867d1, 5c3277f0, a9dce05a) are exactly
+// the ones this correction must not casually treat as "safe example data": fd2867d1 in
+// particular was placed under an explicit owner containment instruction ("do not wake,
+// promote or reuse") and its runtime callback key was revoked -- see
+// defect-isolart-runtime-no-per-tenant-business-knowledge-2026-09-17.
 const TEMPLATE = "isola-ai-sales-front-desk-agent@v1";
-const AGENT = "fd2867d1-ee43-4032-a1cc-52eb3379a581";
+const PERSONA_AGENT = "aaaaaaaa-0000-4000-8000-000000000001";
 const OTHER_TEMPLATE = "isola-internal-manager@v1";
-const OTHER_AGENT = "a60770e9-e0e1-431a-aef5-f2158b963f61";
+const OTHER_PERSONA_AGENT = "aaaaaaaa-0000-4000-8000-000000000002";
+// Two DIFFERENT tenants' agents sharing the SAME TEMPLATE for business-fact purposes.
+const AGENT_A = "bbbbbbbb-1111-4111-8111-111111111111";
+const AGENT_B = "bbbbbbbb-2222-4222-8222-222222222222";
+// A real, mapped agent id -- but authorized for a DIFFERENT template than the one it
+// will be invoked under. This is the "spoofed/mismatched identity" case.
+const MISMATCHED_AGENT = "bbbbbbbb-3333-4333-8333-333333333333";
+
 const COMPILED_IN = "compiled-in prompt".padEnd(300, ".");
 const BUNDLE = "EPIC opens Monday to Friday, 8:00am to 4:00pm.".padEnd(400, ".");
-const BUSINESS_FACTS = "EPIC Communications Inc. -- Roseau, Dominica. Services: internet, VoIP, IT.";
-const OTHER_BUSINESS_FACTS = "A DIFFERENT tenant's own facts -- must never appear in AGENT's reply.";
+const FACTS_A = "Aurora Boat Yard -- Hull cleaning, EC$450 per visit.";
+const FACTS_B = "Zephyr Kite School -- Kite rigging, EC$1,275 per course.";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -25,9 +39,9 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 /**
  * A SafeFetch stub that counts calls and can be told to fail. Distinguishes
- * AGENTS.md from BUSINESS.md by URL, since fetchEntry() now requests both --
- * BUSINESS.md defaults to 404 (no file uploaded yet) unless a test supplies one
- * per-agent via `businessFactsByAgent`, matching the real, expected common case.
+ * AGENTS.md from BUSINESS.md by URL and, for BUSINESS.md, by WHICH agent id the URL
+ * names -- `businessFactsByAgent` supplies content per agent, matching the real shape
+ * (each agent has its own bundle).
  */
 function stubFetch(behaviour: {
   body?: unknown;
@@ -60,7 +74,8 @@ function makeProvider(
   const { safeFetch, state } = stubFetch({});
   const provider = createInstructionsProvider({
     baseUrl: "https://paperclip.example",
-    map: { [TEMPLATE]: AGENT },
+    map: { [TEMPLATE]: PERSONA_AGENT },
+    businessFactsMap: {},
     readToken: () => "board-token",
     safeFetch,
     ttlMs: 60_000,
@@ -73,7 +88,9 @@ function makeProvider(
 
 describe("parseInstructionsMap", () => {
   it("parses a template -> agent mapping", () => {
-    expect(parseInstructionsMap(`{"${TEMPLATE}":"${AGENT}"}`)).toEqual({ [TEMPLATE]: AGENT });
+    expect(parseInstructionsMap(`{"${TEMPLATE}":"${PERSONA_AGENT}"}`)).toEqual({
+      [TEMPLATE]: PERSONA_AGENT,
+    });
   });
 
   it("returns an EMPTY map on anything malformed — never a partial redirect", () => {
@@ -90,21 +107,29 @@ describe("parseInstructionsMap", () => {
     expect(parseInstructionsMap('{"a":123,"b":"","":"x","c":"ok"}')).toEqual({ c: "ok" });
   });
 
-  it("STRUCTURAL LIMIT -- a templateId maps to exactly ONE agent id; a second live Paperclip agent sharing that template cannot be represented here at all", () => {
-    // Confirmed live 2026-09-17: isola-ai-sales-front-desk-agent@v1 is shared by
-    // THREE real Paperclip agents (fd2867d1 mapped and live, plus 5c3277f0 and
-    // a9dce05a, paused) -- see defect-isolart-runtime-no-per-tenant-business-
-    // knowledge-2026-09-17. `PAPERCLIP_INSTRUCTIONS_MAP` is `Record<templateId,
-    // agentId>`: a raw JSON object literally cannot carry two values under one
-    // key, so JSON.parse silently keeps only the LAST one written -- there is no
-    // way to express "two agents, one template" in this config shape, let alone
-    // pick between them per request. This is not a bug in parseInstructionsMap;
-    // it is the reason `resolve()` can only ever serve business facts for the
-    // ONE agent an operator chose, and why fixing that requires an authenticated
-    // per-invocation identity this runtime does not have today (see the note on
-    // ResolvedPrompt.businessFactsAgentId).
-    const raw = `{"${TEMPLATE}":"${AGENT}","${TEMPLATE}":"${OTHER_AGENT}"}`;
-    expect(parseInstructionsMap(raw)).toEqual({ [TEMPLATE]: OTHER_AGENT });
+  it("STRUCTURAL LIMIT, BY DESIGN -- a templateId maps to exactly ONE persona agent id, and that is deliberate", () => {
+    // A template's persona (AGENTS.md) is meant to be the SAME reusable behaviour
+    // script for every tenant instantiating that template -- this map is correctly
+    // one-agent-per-template and is UNCHANGED by this correction. Business-fact
+    // authorization (below) is the map that had to become many-agents-per-template;
+    // this one never should.
+    const raw = `{"${TEMPLATE}":"${PERSONA_AGENT}","${TEMPLATE}":"${OTHER_PERSONA_AGENT}"}`;
+    expect(parseInstructionsMap(raw)).toEqual({ [TEMPLATE]: OTHER_PERSONA_AGENT });
+  });
+});
+
+describe("parseBusinessFactsMap", () => {
+  it("parses an agent -> authorized templateId mapping, and supports MULTIPLE agents under the SAME template", () => {
+    // The fix for defect-isolart-runtime-no-per-tenant-business-knowledge-2026-09-17:
+    // unlike parseInstructionsMap, this shape is keyed by agent id, so two agents
+    // sharing one templateId are both representable, each under their own key.
+    const raw = `{"${AGENT_A}":"${TEMPLATE}","${AGENT_B}":"${TEMPLATE}"}`;
+    expect(parseBusinessFactsMap(raw)).toEqual({ [AGENT_A]: TEMPLATE, [AGENT_B]: TEMPLATE });
+  });
+
+  it("returns an EMPTY map on anything malformed -- absence of authorization, never a guess", () => {
+    expect(parseBusinessFactsMap("not json")).toEqual({});
+    expect(parseBusinessFactsMap(undefined)).toEqual({});
   });
 });
 
@@ -117,61 +142,61 @@ describe("isUsablePrompt", () => {
   });
 });
 
-describe("resolve", () => {
+describe("resolve -- persona (unchanged mechanism)", () => {
   it("keeps the compiled-in prompt for a template with no Paperclip binding", async () => {
     const { provider, state } = makeProvider({ map: {} });
-    const r = await provider.resolve(TEMPLATE, COMPILED_IN);
+    const r = await provider.resolve(TEMPLATE, COMPILED_IN, null);
     expect(r.source).toBe("compiled_in");
     expect(r.prompt).toBe(COMPILED_IN);
     expect(state.calls).toBe(0);
   });
 
-  it("fetches the bundle and uses it as the system prompt (no BUSINESS.md configured -- persona only)", async () => {
+  it("fetches the bundle and uses it as the system prompt (no claimed agent -- persona only)", async () => {
     const { provider, state } = makeProvider();
-    const r = await provider.resolve(TEMPLATE, COMPILED_IN);
+    const r = await provider.resolve(TEMPLATE, COMPILED_IN, null);
     expect(r.source).toBe("paperclip");
     expect(r.prompt).toBe(BUNDLE);
     expect(r.failure).toBeNull();
-    // Two fetches per resolution now: AGENTS.md (persona) and BUSINESS.md (facts,
-    // 404 by default in this stub -- confirmed a real attempt is made, not skipped).
-    expect(state.calls).toBe(2);
-    expect(state.urls[0]).toContain(`/api/agents/${AGENT}/instructions-bundle/file?path=AGENTS.md`);
-    expect(state.urls[1]).toContain(`/api/agents/${AGENT}/instructions-bundle/file?path=BUSINESS.md`);
+    expect(r.businessFactsAgentId).toBeNull();
+    // Exactly one fetch: no claimed agent id means business facts are never attempted.
+    expect(state.calls).toBe(1);
+    expect(state.urls[0]).toContain(`/api/agents/${PERSONA_AGENT}/instructions-bundle/file?path=AGENTS.md`);
   });
 
   it("serves from cache inside the TTL, then re-reads after it", async () => {
     const clock = { t: 1_000_000 };
     const { provider, state } = makeProvider({}, clock);
-    await provider.resolve(TEMPLATE, COMPILED_IN);
+    await provider.resolve(TEMPLATE, COMPILED_IN, null);
     clock.t += 30_000;
-    const cached = await provider.resolve(TEMPLATE, COMPILED_IN);
-    expect(state.calls).toBe(2); // one AGENTS.md + one BUSINESS.md fetch, then cached
+    const cached = await provider.resolve(TEMPLATE, COMPILED_IN, null);
+    expect(state.calls).toBe(1);
     expect(cached.cacheAgeMs).toBe(30_000);
 
     clock.t += 40_000; // now past the 60s TTL
-    await provider.resolve(TEMPLATE, COMPILED_IN);
-    expect(state.calls).toBe(4); // re-fetches both on cache expiry
+    await provider.resolve(TEMPLATE, COMPILED_IN, null);
+    expect(state.calls).toBe(2); // re-fetches persona on cache expiry
   });
 
   it("invalidate() forces the next reply to re-read Paperclip", async () => {
     const { provider, state } = makeProvider();
-    await provider.resolve(TEMPLATE, COMPILED_IN);
+    await provider.resolve(TEMPLATE, COMPILED_IN, null);
     provider.invalidate();
-    await provider.resolve(TEMPLATE, COMPILED_IN);
-    expect(state.calls).toBe(4);
+    await provider.resolve(TEMPLATE, COMPILED_IN, null);
+    expect(state.calls).toBe(2);
   });
 
   it("FAILS CLOSED when Paperclip cannot be read and nothing is cached", async () => {
     const { safeFetch } = stubFetch({ throws: true });
     const provider = createInstructionsProvider({
       baseUrl: "https://paperclip.example",
-      map: { [TEMPLATE]: AGENT },
+      map: { [TEMPLATE]: PERSONA_AGENT },
+      businessFactsMap: {},
       readToken: () => "t",
       safeFetch,
       ttlMs: 60_000,
       timeoutMs: 5_000,
     });
-    const r = await provider.resolve(TEMPLATE, COMPILED_IN);
+    const r = await provider.resolve(TEMPLATE, COMPILED_IN, null);
     expect(r.source).toBe("fail_closed");
     expect(r.prompt).toBe(FAIL_CLOSED_PROMPT);
     expect(r.failure).toContain("egress blocked");
@@ -184,13 +209,14 @@ describe("resolve", () => {
       const { safeFetch } = stubFetch(behaviour);
       const provider = createInstructionsProvider({
         baseUrl: "https://paperclip.example",
-        map: { [TEMPLATE]: AGENT },
+        map: { [TEMPLATE]: PERSONA_AGENT },
+        businessFactsMap: {},
         readToken: () => "t",
         safeFetch,
         ttlMs: 60_000,
         timeoutMs: 5_000,
       });
-      const r = await provider.resolve(TEMPLATE, COMPILED_IN);
+      const r = await provider.resolve(TEMPLATE, COMPILED_IN, null);
       expect(r.source).toBe("fail_closed");
     }
   });
@@ -201,60 +227,176 @@ describe("resolve", () => {
     const safeFetch = async (input: string | URL): Promise<Response> => {
       state.calls++;
       if (state.fail) throw new Error("paperclip down");
-      if (String(input).includes("path=BUSINESS.md")) return jsonResponse({ error: "not found" }, 404);
       return jsonResponse({ content: BUNDLE });
     };
     const provider = createInstructionsProvider({
       baseUrl: "https://paperclip.example",
-      map: { [TEMPLATE]: AGENT },
+      map: { [TEMPLATE]: PERSONA_AGENT },
+      businessFactsMap: {},
       readToken: () => "t",
       safeFetch,
       ttlMs: 60_000,
       timeoutMs: 5_000,
       now: () => clock.t,
     });
-    await provider.resolve(TEMPLATE, COMPILED_IN);
+    await provider.resolve(TEMPLATE, COMPILED_IN, null);
     state.fail = true;
 
     clock.t += 120_000; // past TTL, well inside grace
-    const stale = await provider.resolve(TEMPLATE, COMPILED_IN);
+    const stale = await provider.resolve(TEMPLATE, COMPILED_IN, null);
     expect(stale.source).toBe("paperclip");
     expect(stale.prompt).toBe(BUNDLE);
     expect(stale.failure).toContain("paperclip down");
 
     clock.t += 60_000 * GRACE_MULTIPLIER; // now beyond the grace window
-    const gone = await provider.resolve(TEMPLATE, COMPILED_IN);
+    const gone = await provider.resolve(TEMPLATE, COMPILED_IN, null);
     expect(gone.source).toBe("fail_closed");
   });
 });
 
-describe("business-facts connection (the previously-missing per-tenant knowledge link)", () => {
-  it("appends BUSINESS.md content to the persona when the configured agent has one uploaded", async () => {
-    const { safeFetch, state } = stubFetch({ businessFactsByAgent: { [AGENT]: BUSINESS_FACTS } });
+describe("business facts -- authorized-identity connection (the corrected fix)", () => {
+  it("attaches BUSINESS.md when the claimed agent is authorized for the invoked template", async () => {
+    const { safeFetch, state } = stubFetch({ businessFactsByAgent: { [AGENT_A]: FACTS_A } });
     const provider = createInstructionsProvider({
       baseUrl: "https://paperclip.example",
-      map: { [TEMPLATE]: AGENT },
+      map: { [TEMPLATE]: PERSONA_AGENT },
+      businessFactsMap: { [AGENT_A]: TEMPLATE },
       readToken: () => "t",
       safeFetch,
       ttlMs: 60_000,
       timeoutMs: 5_000,
     });
-    const r = await provider.resolve(TEMPLATE, COMPILED_IN);
+    const r = await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_A);
     expect(r.source).toBe("paperclip");
     expect(r.prompt).toContain(BUNDLE);
-    expect(r.prompt).toContain(BUSINESS_FACTS);
-    expect(state.calls).toBe(2);
-    // Observable, not just present in the prompt string: which agent's facts these are.
-    expect(r.businessFactsAgentId).toBe(AGENT);
+    expect(r.prompt).toContain(FACTS_A);
+    expect(r.businessFactsAgentId).toBe(AGENT_A);
+    expect(state.calls).toBe(2); // persona (PERSONA_AGENT) + business facts (AGENT_A)
   });
 
-  it("falls back cleanly to persona-only when no BUSINESS.md exists yet -- absence is not a failure", async () => {
-    const { provider } = makeProvider(); // default stub: BUSINESS.md 404s
-    const r = await provider.resolve(TEMPLATE, COMPILED_IN);
-    expect(r.source).toBe("paperclip"); // NOT fail_closed -- missing business facts is normal
-    expect(r.prompt).toBe(BUNDLE); // exactly the persona, nothing appended
+  it("REQUIREMENT 1 -- two agents sharing the SAME template each receive ONLY their own business facts", async () => {
+    const { safeFetch, state } = stubFetch({
+      businessFactsByAgent: { [AGENT_A]: FACTS_A, [AGENT_B]: FACTS_B },
+    });
+    const provider = createInstructionsProvider({
+      baseUrl: "https://paperclip.example",
+      map: { [TEMPLATE]: PERSONA_AGENT }, // ONE shared persona, retained
+      businessFactsMap: { [AGENT_A]: TEMPLATE, [AGENT_B]: TEMPLATE }, // BOTH share TEMPLATE
+      readToken: () => "t",
+      safeFetch,
+      ttlMs: 60_000,
+      timeoutMs: 5_000,
+    });
+
+    const a = await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_A);
+    const b = await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_B);
+
+    // Same shared template, same persona -- but each invocation's OWN facts only.
+    expect(a.prompt).toContain(BUNDLE);
+    expect(b.prompt).toContain(BUNDLE);
+    expect(a.prompt).toContain(FACTS_A);
+    expect(a.prompt).not.toContain(FACTS_B);
+    expect(b.prompt).toContain(FACTS_B);
+    expect(b.prompt).not.toContain(FACTS_A);
+    expect(a.businessFactsAgentId).toBe(AGENT_A);
+    expect(b.businessFactsAgentId).toBe(AGENT_B);
+
+    // Structural, not coincidental: the business fetch itself was scoped to each
+    // agent's own id.
+    const businessUrls = state.urls.filter((u) => u.includes("path=BUSINESS.md"));
+    expect(businessUrls).toContain(
+      `https://paperclip.example/api/agents/${AGENT_A}/instructions-bundle/file?path=BUSINESS.md`,
+    );
+    expect(businessUrls).toContain(
+      `https://paperclip.example/api/agents/${AGENT_B}/instructions-bundle/file?path=BUSINESS.md`,
+    );
+  });
+
+  it("REQUIREMENT 2 & 4 -- an unauthorized claimed agent id gets no facts at all, never falls back to another tenant's", async () => {
+    const { safeFetch } = stubFetch({
+      businessFactsByAgent: { [AGENT_A]: FACTS_A, [AGENT_B]: FACTS_B },
+    });
+    const provider = createInstructionsProvider({
+      baseUrl: "https://paperclip.example",
+      map: { [TEMPLATE]: PERSONA_AGENT },
+      businessFactsMap: { [AGENT_A]: TEMPLATE }, // ONLY AGENT_A is authorized
+      readToken: () => "t",
+      safeFetch,
+      ttlMs: 60_000,
+      timeoutMs: 5_000,
+    });
+    // A caller claims AGENT_B, which is real and has real facts, but is NOT in this
+    // template's authorization table at all.
+    const r = await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_B);
+    expect(r.prompt).not.toContain(FACTS_B);
+    expect(r.prompt).not.toContain(FACTS_A); // and certainly not someone else's either
+    expect(r.businessFactsAgentId).toBeNull();
+    expect(r.prompt).toBe(BUNDLE); // persona-only, exactly the safe fallback
+    // Observable: this was a REJECTED claim, not merely "nothing uploaded yet".
+    expect(r.businessFactsRejectedAgentId).toBe(AGENT_B);
+  });
+
+  it("a claim with no authorization table entry at all is rejected the same way, and observably so", async () => {
+    const { provider } = makeProvider(); // businessFactsMap: {} by default
+    const r = await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_A);
+    expect(r.businessFactsAgentId).toBeNull();
+    expect(r.businessFactsRejectedAgentId).toBe(AGENT_A);
+  });
+
+  it("REQUIREMENT 4 -- a caller claiming NO agent id at all gets no business facts, even when the template has authorized agents", async () => {
+    const { safeFetch, state } = stubFetch({ businessFactsByAgent: { [AGENT_A]: FACTS_A } });
+    const provider = createInstructionsProvider({
+      baseUrl: "https://paperclip.example",
+      map: { [TEMPLATE]: PERSONA_AGENT },
+      businessFactsMap: { [AGENT_A]: TEMPLATE },
+      readToken: () => "t",
+      safeFetch,
+      ttlMs: 60_000,
+      timeoutMs: 5_000,
+    });
+    const r = await provider.resolve(TEMPLATE, COMPILED_IN, null);
+    expect(r.businessFactsAgentId).toBeNull();
+    expect(r.prompt).not.toContain(FACTS_A);
+    // No business-facts URL is even attempted without a claimed identity.
+    expect(state.urls.some((u) => u.includes("path=BUSINESS.md"))).toBe(false);
+    // "no claim at all" is the routine case, NOT a rejected/suspicious one.
+    expect(r.businessFactsRejectedAgentId).toBeNull();
+  });
+
+  it("SPOOFED / MISMATCHED IDENTITY -- a real, authorized agent id claimed under the WRONG template is rejected, not just relocated", async () => {
+    // MISMATCHED_AGENT is genuinely authorized -- but for OTHER_TEMPLATE, not TEMPLATE.
+    // A request that claims it while invoking TEMPLATE is exactly the forged/stale
+    // claim this correction exists to catch.
+    const { safeFetch, state } = stubFetch({
+      businessFactsByAgent: { [MISMATCHED_AGENT]: "OTHER TENANT'S FACTS -- must never leak here" },
+    });
+    const provider = createInstructionsProvider({
+      baseUrl: "https://paperclip.example",
+      map: { [TEMPLATE]: PERSONA_AGENT },
+      businessFactsMap: { [MISMATCHED_AGENT]: OTHER_TEMPLATE }, // authorized for a DIFFERENT template
+      readToken: () => "t",
+      safeFetch,
+      ttlMs: 60_000,
+      timeoutMs: 5_000,
+    });
+    const r = await provider.resolve(TEMPLATE, COMPILED_IN, MISMATCHED_AGENT);
+    expect(r.businessFactsAgentId).toBeNull();
+    expect(r.prompt).not.toContain("OTHER TENANT'S FACTS");
+    expect(r.prompt).toBe(BUNDLE);
+    // The mismatch is caught before any network call for that agent's facts is made.
+    expect(state.urls.some((u) => u.includes(`/agents/${MISMATCHED_AGENT}/`) && u.includes("BUSINESS.md"))).toBe(
+      false,
+    );
+    // Observable and distinguishable from "not authorized at all".
+    expect(r.businessFactsRejectedAgentId).toBe(MISMATCHED_AGENT);
+  });
+
+  it("falls back cleanly to persona-only when the authorized agent has no BUSINESS.md yet -- absence is not a failure", async () => {
+    const { provider } = makeProvider({ businessFactsMap: { [AGENT_A]: TEMPLATE } });
+    const r = await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_A); // default stub: 404s
+    expect(r.source).toBe("paperclip");
+    expect(r.prompt).toBe(BUNDLE);
     expect(r.failure).toBeNull();
-    // No facts attached -> never falsely claim an agent's facts are present.
     expect(r.businessFactsAgentId).toBeNull();
   });
 
@@ -265,63 +407,43 @@ describe("business-facts connection (the previously-missing per-tenant knowledge
     };
     const provider = createInstructionsProvider({
       baseUrl: "https://paperclip.example",
-      map: { [TEMPLATE]: AGENT },
+      map: { [TEMPLATE]: PERSONA_AGENT },
+      businessFactsMap: { [AGENT_A]: TEMPLATE },
       readToken: () => "t",
       safeFetch,
       ttlMs: 60_000,
       timeoutMs: 5_000,
     });
-    const r = await provider.resolve(TEMPLATE, COMPILED_IN);
+    const r = await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_A);
     expect(r.source).toBe("paperclip");
     expect(r.prompt).toBe(BUNDLE);
     expect(r.failure).toBeNull();
     expect(r.businessFactsAgentId).toBeNull();
   });
 
-  it("TENANT ISOLATION -- two different templates mapped to two different agents each get ONLY their own agent's business facts, never the other's", async () => {
+  it("caches business facts per AGENT id, independent of the shared persona cache", async () => {
+    const clock = { t: 1_000_000 };
     const { safeFetch, state } = stubFetch({
-      businessFactsByAgent: { [AGENT]: BUSINESS_FACTS, [OTHER_AGENT]: OTHER_BUSINESS_FACTS },
+      businessFactsByAgent: { [AGENT_A]: FACTS_A, [AGENT_B]: FACTS_B },
     });
     const provider = createInstructionsProvider({
       baseUrl: "https://paperclip.example",
-      map: { [TEMPLATE]: AGENT, [OTHER_TEMPLATE]: OTHER_AGENT },
+      map: { [TEMPLATE]: PERSONA_AGENT },
+      businessFactsMap: { [AGENT_A]: TEMPLATE, [AGENT_B]: TEMPLATE },
       readToken: () => "t",
       safeFetch,
       ttlMs: 60_000,
       timeoutMs: 5_000,
+      now: () => clock.t,
     });
-    const a = await provider.resolve(TEMPLATE, COMPILED_IN);
-    const b = await provider.resolve(OTHER_TEMPLATE, COMPILED_IN);
+    await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_A); // persona + A's facts: 2 calls
+    await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_B); // persona cached, B's facts: 1 call
+    expect(state.calls).toBe(3);
 
-    expect(a.prompt).toContain(BUSINESS_FACTS);
-    expect(a.prompt).not.toContain(OTHER_BUSINESS_FACTS);
-    expect(b.prompt).toContain(OTHER_BUSINESS_FACTS);
-    expect(b.prompt).not.toContain(BUSINESS_FACTS);
-    expect(a.businessFactsAgentId).toBe(AGENT);
-    expect(b.businessFactsAgentId).toBe(OTHER_AGENT);
-
-    // The fetch itself was scoped to each agent's own id -- proves isolation is
-    // structural (a different URL per agent), not merely coincidental in this fixture.
-    const businessUrls = state.urls.filter((u) => u.includes("path=BUSINESS.md"));
-    expect(businessUrls).toContain(`https://paperclip.example/api/agents/${AGENT}/instructions-bundle/file?path=BUSINESS.md`);
-    expect(businessUrls).toContain(`https://paperclip.example/api/agents/${OTHER_AGENT}/instructions-bundle/file?path=BUSINESS.md`);
-  });
-
-  it("TENANT ISOLATION CONTROL -- the caller cannot redirect which agent's facts are fetched; only the config map decides", async () => {
-    // Proves the fetch key comes from `map[templateId]` (configuration), never from
-    // anything the caller of resolve() supplies -- resolve() takes no agentId
-    // parameter at all, so there is no request-suppliable channel to abuse here.
-    const { safeFetch } = stubFetch({ businessFactsByAgent: { [OTHER_AGENT]: OTHER_BUSINESS_FACTS } });
-    const provider = createInstructionsProvider({
-      baseUrl: "https://paperclip.example",
-      map: { [TEMPLATE]: AGENT }, // TEMPLATE maps to AGENT, never to OTHER_AGENT
-      readToken: () => "t",
-      safeFetch,
-      ttlMs: 60_000,
-      timeoutMs: 5_000,
-    });
-    const r = await provider.resolve(TEMPLATE, COMPILED_IN);
-    expect(r.prompt).not.toContain(OTHER_BUSINESS_FACTS);
+    clock.t += 30_000; // inside TTL
+    const cachedA = await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_A);
+    expect(cachedA.prompt).toContain(FACTS_A);
+    expect(state.calls).toBe(3); // both persona and A's facts served from cache
   });
 });
 

@@ -8,7 +8,7 @@ import { templateModelHosts } from "./registry.js";
 import type { RateOverrides } from "./money.js";
 import { DEFAULT_HANDOFF, type HandoffPolicy } from "./callbacks.js";
 import { isIssueStatus } from "./paperclip.js";
-import { parseInstructionsMap } from "./instructions.js";
+import { parseInstructionsMap, parseBusinessFactsMap } from "./instructions.js";
 import { DEFAULT_STATE_DIR } from "./state.js";
 
 export interface RuntimeConfig {
@@ -52,6 +52,18 @@ export interface RuntimeConfig {
    * A template absent from this map keeps its compiled-in prompt.
    */
   paperclipInstructionsMap: Readonly<Record<string, string>>;
+  /**
+   * `PAPERCLIP_BUSINESS_FACTS_MAP` binds a Paperclip agent id to the ONE templateId
+   * that agent is authorized to run business-fact (BUSINESS.md) resolution under --
+   * inverted from `paperclipInstructionsMap` on purpose, because more than one agent
+   * can legitimately share a templateId (that is the whole reason this map exists),
+   * while a real Paperclip agent's own `adapterConfig` always names exactly one
+   * template. The invoke's claimed `agentId` is looked up here and CHECKED against
+   * the templateId actually being invoked -- an agent absent from this map, or
+   * present under a different templateId, gets no business facts. Absent (default
+   * `{}`) means no agent is authorized yet; this must never default open.
+   */
+  paperclipBusinessFactsMap: Readonly<Record<string, string>>;
   /**
    * Board-scoped token used ONLY to read instruction bundles. Deliberately not the
    * agent keys above: reading company configuration is a different authority from
@@ -282,6 +294,7 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
     paperclipRecordPath: str(env, "PAPERCLIP_RECORD_PATH") ?? DEFAULT_RECORD_PATH,
     paperclipCompanyId: str(env, "PAPERCLIP_COMPANY_ID"),
     paperclipInstructionsMap: parseInstructionsMap(str(env, "PAPERCLIP_INSTRUCTIONS_MAP")),
+    paperclipBusinessFactsMap: parseBusinessFactsMap(str(env, "PAPERCLIP_BUSINESS_FACTS_MAP")),
     paperclipBoardToken: str(env, "PAPERCLIP_BOARD_TOKEN"),
     paperclipInstructionsTtlMs: int(
       env,
@@ -462,6 +475,14 @@ export function bootWarnings(config: RuntimeConfig): string[] {
   if (config.paperclipCompanyId === null) {
     warnings.push(
       "PAPERCLIP_COMPANY_ID is unset and no run context supplies one: cost events cannot be addressed, so spend will not reach the Paperclip ledger.",
+    );
+  }
+  if (
+    Object.keys(config.paperclipBusinessFactsMap).length === 0 &&
+    Object.keys(config.paperclipInstructionsMap).length > 0
+  ) {
+    warnings.push(
+      "PAPERCLIP_BUSINESS_FACTS_MAP is unset: no agent is authorized for business-fact (BUSINESS.md) resolution, so every reply is persona-only. This is the safe default, not a defect -- set it deliberately, per agent id, to opt an agent in.",
     );
   }
   if (

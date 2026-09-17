@@ -433,6 +433,13 @@ export function createRuntime(deps: AppDeps): Runtime {
         config.paperclipBoardToken === null || config.paperclipBaseUrl === null
           ? {}
           : config.paperclipInstructionsMap,
+      // Same "no board token/base URL, no binding at all" collapse as the persona map
+      // above -- an unreachable credential must never silently become "every agent is
+      // authorized", it must become "no agent is authorized".
+      businessFactsMap:
+        config.paperclipBoardToken === null || config.paperclipBaseUrl === null
+          ? {}
+          : config.paperclipBusinessFactsMap,
       readToken: () => config.paperclipBoardToken ?? "",
       safeFetch,
       ttlMs: config.paperclipInstructionsTtlMs,
@@ -1040,7 +1047,7 @@ export function createRuntime(deps: AppDeps): Runtime {
       // invoke line so the next question is answered by reading a log rather than
       // by instrumenting under pressure.
       const tCharterStart = now();
-      const resolvedPrompt = await instructions.resolve(template.id, template.systemPrompt);
+      const resolvedPrompt = await instructions.resolve(template.id, template.systemPrompt, agentId);
       const charterMs = now() - tCharterStart;
       if (resolvedPrompt.source === "fail_closed") {
         logger.error({
@@ -1060,6 +1067,21 @@ export function createRuntime(deps: AppDeps): Runtime {
           templateId: template.id,
           cacheAgeMs: resolvedPrompt.cacheAgeMs,
           detail: resolvedPrompt.failure,
+        });
+      }
+      if (resolvedPrompt.businessFactsRejectedAgentId !== null) {
+        // A claimed agent id that failed business-facts authorization is either a
+        // forged/stale claim or a gateway binding bug -- either way it is the exact
+        // signal that would reveal a compromised or misconfigured caller, and it must
+        // never be silent just because the reply itself degraded safely to
+        // persona-only.
+        logger.warn({
+          event: "instructions",
+          outcome: "business_facts_identity_rejected",
+          correlationId,
+          runId,
+          templateId: template.id,
+          rejectedAgentId: resolvedPrompt.businessFactsRejectedAgentId,
         });
       }
 
@@ -1490,12 +1512,13 @@ export function createRuntime(deps: AppDeps): Runtime {
         // one. These two fields are what make that visible without reading the text.
         brain: template.modelBaseUrl ?? "default",
         charterSource: resolvedPrompt.source,
-        // WHICH TENANT'S BUSINESS FACTS, IF ANY. Always deps.map[template.id] --
-        // never body.agentId. A templateId shared by more than one live Paperclip
-        // agent still resolves to exactly one id here; see
-        // defect-isolart-runtime-no-per-tenant-business-knowledge-2026-09-17. This
-        // makes that limit visible in every invoke line instead of silent.
+        // WHICH TENANT'S BUSINESS FACTS, IF ANY. The invoke's claimed agentId, but
+        // only once CHECKED against PAPERCLIP_BUSINESS_FACTS_MAP for this exact
+        // templateId -- never trusted merely because it was present. Null covers both
+        // "no claim" and "claim rejected"; see businessFactsRejectedAgentId below for
+        // the security-relevant subset of that null.
         businessFactsAgentId: resolvedPrompt.businessFactsAgentId,
+        businessFactsRejectedAgentId: resolvedPrompt.businessFactsRejectedAgentId,
         // WHERE THE TIME WENT. `durationMs` is the total; these three name the
         // legs, so "why was that slow" is a log read and not an investigation.
         // They do not have to sum to durationMs — the remainder is this service's
