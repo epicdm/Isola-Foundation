@@ -94,6 +94,23 @@ export interface ResolvedPrompt {
   readonly cacheAgeMs: number | null;
   /** Present when Paperclip was configured for this template but could not be read. */
   readonly failure: string | null;
+  /**
+   * The Paperclip agent id whose BUSINESS.md is actually present in `prompt`, or
+   * `null` when no business facts are attached (no `deps.map` entry for this
+   * template, no BUSINESS.md uploaded yet, or the fetch failed). ALWAYS the same
+   * admin-configured id `deps.map[templateId]` already resolves for the persona
+   * fetch -- never a caller-supplied value; nothing in the request can change it.
+   *
+   * Exists so a caller (a setup demonstration, a log line, an audit) can tell
+   * WHICH tenant's facts, if any, actually reached the model on this reply,
+   * instead of guessing from whether the prompt string happens to be long. A
+   * templateId shared by more than one live Paperclip agent still resolves to
+   * exactly one configured id here -- see the note on `parseInstructionsMap` and
+   * defect-isolart-runtime-no-per-tenant-business-knowledge-2026-09-17. This field
+   * makes that single-tenant-per-template limit visible rather than silent; it does
+   * not lift it.
+   */
+  readonly businessFactsAgentId: string | null;
 }
 
 /**
@@ -122,6 +139,8 @@ export interface InstructionsProviderDeps {
 interface CacheEntry {
   prompt: string;
   fetchedAt: number;
+  /** Whether `prompt` has BUSINESS.md content appended -- see ResolvedPrompt. */
+  businessFactsAttached: boolean;
 }
 
 export interface InstructionsProvider {
@@ -170,7 +189,9 @@ export function createInstructionsProvider(deps: InstructionsProviderDeps): Inst
     }
   }
 
-  async function fetchEntry(agentId: string): Promise<string> {
+  async function fetchEntry(
+    agentId: string,
+  ): Promise<{ prompt: string; businessFactsAttached: boolean }> {
     const url = `${origin}/api/agents/${encodeURIComponent(agentId)}/instructions-bundle/file?path=AGENTS.md`;
     const res = await deps.safeFetch(url, {
       method: "GET",
@@ -192,29 +213,50 @@ export function createInstructionsProvider(deps: InstructionsProviderDeps): Inst
     // Fetched by the SAME agentId as the persona above -- same trust boundary, same
     // tenant scope. A business-facts fetch failure never fails the persona fetch.
     const businessFacts = await fetchBusinessFacts(agentId);
-    if (businessFacts === null) return persona;
-    return `${persona}\n\n----- BUSINESS INFORMATION (from the tenant's own discovery profile) -----\n${businessFacts}\n----- END BUSINESS INFORMATION -----`;
+    if (businessFacts === null) return { prompt: persona, businessFactsAttached: false };
+    return {
+      prompt: `${persona}\n\n----- BUSINESS INFORMATION (from the tenant's own discovery profile) -----\n${businessFacts}\n----- END BUSINESS INFORMATION -----`,
+      businessFactsAttached: true,
+    };
   }
 
   return {
     async resolve(templateId, compiledIn) {
       const agentId = deps.map[templateId];
       if (agentId === undefined) {
-        return { prompt: compiledIn, source: "compiled_in", cacheAgeMs: null, failure: null };
+        return {
+          prompt: compiledIn,
+          source: "compiled_in",
+          cacheAgeMs: null,
+          failure: null,
+          businessFactsAgentId: null,
+        };
       }
 
       const cached = cache.get(templateId);
       if (cached !== undefined) {
         const age = now() - cached.fetchedAt;
         if (age < deps.ttlMs) {
-          return { prompt: cached.prompt, source: "paperclip", cacheAgeMs: age, failure: null };
+          return {
+            prompt: cached.prompt,
+            source: "paperclip",
+            cacheAgeMs: age,
+            failure: null,
+            businessFactsAgentId: cached.businessFactsAttached ? agentId : null,
+          };
         }
       }
 
       try {
-        const prompt = await fetchEntry(agentId);
-        cache.set(templateId, { prompt, fetchedAt: now() });
-        return { prompt, source: "paperclip", cacheAgeMs: 0, failure: null };
+        const { prompt, businessFactsAttached } = await fetchEntry(agentId);
+        cache.set(templateId, { prompt, fetchedAt: now(), businessFactsAttached });
+        return {
+          prompt,
+          source: "paperclip",
+          cacheAgeMs: 0,
+          failure: null,
+          businessFactsAgentId: businessFactsAttached ? agentId : null,
+        };
       } catch (err) {
         const failure = err instanceof Error ? err.message : String(err);
         // A cached copy is better than refusing to serve, but it is NOT unbounded:
@@ -226,9 +268,16 @@ export function createInstructionsProvider(deps: InstructionsProviderDeps): Inst
             source: "paperclip",
             cacheAgeMs: now() - cached.fetchedAt,
             failure,
+            businessFactsAgentId: cached.businessFactsAttached ? agentId : null,
           };
         }
-        return { prompt: FAIL_CLOSED_PROMPT, source: "fail_closed", cacheAgeMs: null, failure };
+        return {
+          prompt: FAIL_CLOSED_PROMPT,
+          source: "fail_closed",
+          cacheAgeMs: null,
+          failure,
+          businessFactsAgentId: null,
+        };
       }
     },
 

@@ -89,6 +89,23 @@ describe("parseInstructionsMap", () => {
   it("skips non-string and empty entries rather than coercing them", () => {
     expect(parseInstructionsMap('{"a":123,"b":"","":"x","c":"ok"}')).toEqual({ c: "ok" });
   });
+
+  it("STRUCTURAL LIMIT -- a templateId maps to exactly ONE agent id; a second live Paperclip agent sharing that template cannot be represented here at all", () => {
+    // Confirmed live 2026-09-17: isola-ai-sales-front-desk-agent@v1 is shared by
+    // THREE real Paperclip agents (fd2867d1 mapped and live, plus 5c3277f0 and
+    // a9dce05a, paused) -- see defect-isolart-runtime-no-per-tenant-business-
+    // knowledge-2026-09-17. `PAPERCLIP_INSTRUCTIONS_MAP` is `Record<templateId,
+    // agentId>`: a raw JSON object literally cannot carry two values under one
+    // key, so JSON.parse silently keeps only the LAST one written -- there is no
+    // way to express "two agents, one template" in this config shape, let alone
+    // pick between them per request. This is not a bug in parseInstructionsMap;
+    // it is the reason `resolve()` can only ever serve business facts for the
+    // ONE agent an operator chose, and why fixing that requires an authenticated
+    // per-invocation identity this runtime does not have today (see the note on
+    // ResolvedPrompt.businessFactsAgentId).
+    const raw = `{"${TEMPLATE}":"${AGENT}","${TEMPLATE}":"${OTHER_AGENT}"}`;
+    expect(parseInstructionsMap(raw)).toEqual({ [TEMPLATE]: OTHER_AGENT });
+  });
 });
 
 describe("isUsablePrompt", () => {
@@ -227,6 +244,8 @@ describe("business-facts connection (the previously-missing per-tenant knowledge
     expect(r.prompt).toContain(BUNDLE);
     expect(r.prompt).toContain(BUSINESS_FACTS);
     expect(state.calls).toBe(2);
+    // Observable, not just present in the prompt string: which agent's facts these are.
+    expect(r.businessFactsAgentId).toBe(AGENT);
   });
 
   it("falls back cleanly to persona-only when no BUSINESS.md exists yet -- absence is not a failure", async () => {
@@ -235,6 +254,8 @@ describe("business-facts connection (the previously-missing per-tenant knowledge
     expect(r.source).toBe("paperclip"); // NOT fail_closed -- missing business facts is normal
     expect(r.prompt).toBe(BUNDLE); // exactly the persona, nothing appended
     expect(r.failure).toBeNull();
+    // No facts attached -> never falsely claim an agent's facts are present.
+    expect(r.businessFactsAgentId).toBeNull();
   });
 
   it("a BUSINESS.md fetch error never fails the reply -- fail-soft, unlike the persona fetch", async () => {
@@ -254,6 +275,7 @@ describe("business-facts connection (the previously-missing per-tenant knowledge
     expect(r.source).toBe("paperclip");
     expect(r.prompt).toBe(BUNDLE);
     expect(r.failure).toBeNull();
+    expect(r.businessFactsAgentId).toBeNull();
   });
 
   it("TENANT ISOLATION -- two different templates mapped to two different agents each get ONLY their own agent's business facts, never the other's", async () => {
@@ -275,6 +297,8 @@ describe("business-facts connection (the previously-missing per-tenant knowledge
     expect(a.prompt).not.toContain(OTHER_BUSINESS_FACTS);
     expect(b.prompt).toContain(OTHER_BUSINESS_FACTS);
     expect(b.prompt).not.toContain(BUSINESS_FACTS);
+    expect(a.businessFactsAgentId).toBe(AGENT);
+    expect(b.businessFactsAgentId).toBe(OTHER_AGENT);
 
     // The fetch itself was scoped to each agent's own id -- proves isolation is
     // structural (a different URL per agent), not merely coincidental in this fixture.

@@ -1490,6 +1490,12 @@ export function createRuntime(deps: AppDeps): Runtime {
         // one. These two fields are what make that visible without reading the text.
         brain: template.modelBaseUrl ?? "default",
         charterSource: resolvedPrompt.source,
+        // WHICH TENANT'S BUSINESS FACTS, IF ANY. Always deps.map[template.id] --
+        // never body.agentId. A templateId shared by more than one live Paperclip
+        // agent still resolves to exactly one id here; see
+        // defect-isolart-runtime-no-per-tenant-business-knowledge-2026-09-17. This
+        // makes that limit visible in every invoke line instead of silent.
+        businessFactsAgentId: resolvedPrompt.businessFactsAgentId,
         // WHERE THE TIME WENT. `durationMs` is the total; these three name the
         // legs, so "why was that slow" is a log read and not an investigation.
         // They do not have to sum to durationMs — the remainder is this service's
