@@ -69,8 +69,8 @@
  * board access is now customer-facing authority. Bundle edits are the change surface
  * to audit.
  *
- * A SECOND, DEEPER GAP -- FOUND, PROVEN, CLOSED (OPT-IN) 2026-09-17
- * ------------------------------------------------------------------
+ * A SECOND, DEEPER GAP -- FOUND, PROVEN, CLOSED (UNCONDITIONALLY) 2026-09-17
+ * ---------------------------------------------------------------------------
  * The design above closes "does this claimed (agentId, templateId) pair make sense"
  * (an admin allowlist). It does NOT close "did the caller who sent THIS request
  * actually have any right to name that agent" -- proven live with isolated fixtures
@@ -84,10 +84,17 @@
  * no-early-exit bearer-comparison pattern this file's design note above already
  * uses for `PAPERCLIP_INSTRUCTIONS_MAP`, applied one level deeper): an operator can
  * give a specific agent its OWN bearer, and a caller presenting it proves it
- * genuinely represents that agent (`credentialAgentId`). This is deliberately
- * OPT-IN per agent (`agentsRequiringCallerProof`), not a blanket requirement -- an
- * agent an operator has not yet hardened keeps exactly today's behaviour, so
- * existing release plans built on `businessFactsMap` alone are unaffected.
+ * genuinely represents that agent (`credentialAgentId`).
+ *
+ * OWNER CORRECTION, same day: an EARLIER version of this fix made caller-proof
+ * OPT-IN per agent, so an agent authorized in `businessFactsMap` but not yet given
+ * a caller secret (a real, planned deployment shape -- not a hypothetical) still
+ * fell back to the pre-fix claim-alone path, unprotected. Ruled unacceptable
+ * regardless of the content's sensitivity. There is now only ONE rule: ANY agent
+ * present in `businessFactsMap` MUST be proven by its own credential, or it gets
+ * no facts at all -- business-facts authorization and caller-proof authorization
+ * are the same gate now, not two independently-optional ones. An agent with NO
+ * `businessFactsMap` entry (the persona-only path) is unaffected either way.
  */
 import type { SafeFetch } from "./egress.js";
 
@@ -111,9 +118,6 @@ Keep it under 60 words. Plain sentences, no Markdown, no emoji.`;
 
 /** A prompt must be non-trivial to be trusted; an empty file is a misconfiguration. */
 const MIN_USABLE_PROMPT_CHARS = 200;
-
-/** Default for `deps.agentsRequiringCallerProof` when omitted -- nobody opted in. */
-const EMPTY_SET: ReadonlySet<string> = new Set();
 
 export function isUsablePrompt(value: unknown): value is string {
   return typeof value === "string" && value.trim().length >= MIN_USABLE_PROMPT_CHARS;
@@ -176,13 +180,13 @@ export interface ResolvedPrompt {
    * The Paperclip agent id whose BUSINESS.md is actually present in `prompt`, or
    * `null` when no business facts are attached. Non-null only when the claimed
    * agent id is found in `PAPERCLIP_BUSINESS_FACTS_MAP` AUTHORIZED for exactly this
-   * `templateId`, AND -- for an agent opted into `agentsRequiringCallerProof` --
-   * the CALLER'S OWN CREDENTIAL (never the request body) PROVED that exact
-   * identity, AND that agent has a BUSINESS.md uploaded, AND the fetch succeeded
-   * (or a fresh-enough cached copy exists). No claim, an unauthorized claim, a
-   * template mismatch, a failed caller-proof check, and fetch failure are all
-   * indistinguishable from the caller's perspective -- all of them yield `null`,
-   * never another tenant's content.
+   * `templateId`, AND the CALLER'S OWN CREDENTIAL (never the request body alone)
+   * PROVED that exact identity -- UNCONDITIONALLY, for every agent in the map, not
+   * only ones an operator separately opted in -- AND that agent has a BUSINESS.md
+   * uploaded, AND the fetch succeeded (or a fresh-enough cached copy exists). No
+   * claim, an unauthorized claim, a template mismatch, a claim the credential did
+   * not prove, and fetch failure are all indistinguishable from the caller's
+   * perspective -- all of them yield `null`, never another tenant's content.
    *
    * Exists so a caller (a setup demonstration, a log line, an audit) can tell WHICH
    * tenant's facts, if any, actually reached the model on this reply, instead of
@@ -192,9 +196,9 @@ export interface ResolvedPrompt {
   /**
    * Set ONLY when the invocation carried a claimed agent id that FAILED
    * authorization -- absent from `PAPERCLIP_BUSINESS_FACTS_MAP`, authorized for a
-   * different templateId than the one actually invoked, or (for an agent opted
-   * into `agentsRequiringCallerProof`) a claim the caller's own credential did NOT
-   * prove -- `null` in every other case, including the ordinary "no claim at all"
+   * different templateId than the one actually invoked, or a claim the caller's
+   * own credential did NOT prove -- `null` in every other case, including the
+   * ordinary "no claim at all"
    * and "authorized but no BUSINESS.md yet" cases. This is deliberately a SEPARATE
    * field from `businessFactsAgentId` rather than an inferred negative of it,
    * because a rejected claim is a distinct, log-worthy event (a forged or stale
@@ -222,19 +226,6 @@ export interface InstructionsProviderDeps {
    * authorized -- BUSINESS.md resolution is off until an operator opts an agent in.
    */
   readonly businessFactsMap: BusinessFactsAuthorizationMap;
-  /**
-   * Agent ids an operator has given their OWN caller-bound secret (see auth.ts's
-   * `PAPERCLIP_AGENT_CALLER_SECRETS`). OPT-IN hardening, per agent: for an agent in
-   * this set, a request-body claim is trusted ONLY when the caller's own credential
-   * PROVED that exact identity (auth.ts's `credentialAgentId`) -- closing the
-   * confirmed impersonation gap (isolated fixtures, real HTTP `/v1/invoke`,
-   * 2026-09-17: A's shared PUBLIC bearer could claim B's already-authorized
-   * identity, and the claim alone was believed). An agent NOT in this set keeps
-   * exactly today's behaviour -- the claim in `businessFactsMap` alone decides --
-   * so agents an operator has not yet hardened are unaffected and existing release
-   * plans that only ever set `businessFactsMap` keep working unchanged.
-   */
-  readonly agentsRequiringCallerProof?: ReadonlySet<string>;
   /** Reads the board token at call time so a rotated secret is picked up. */
   readonly readToken: () => string;
   /**
@@ -266,17 +257,20 @@ export interface InstructionsProvider {
    * read yields the fail-closed prompt.
    *
    * @param claimedAgentId The invocation's request-body agent id claim. Checked
-   *   against `deps.businessFactsMap` as before. For an agent NOT in
-   *   `deps.agentsRequiringCallerProof`, the claim alone still decides -- unchanged
-   *   from before this file added caller-bound credentials.
+   *   against `deps.businessFactsMap` as before -- but no longer sufficient on its
+   *   own for ANY agent in that map (see `credentialAgentId`).
    * @param credentialAgentId The agent id PROVEN by the caller's own presented
-   *   credential (`auth.ts`'s `resolveCredential`). For an agent that IS in
-   *   `deps.agentsRequiringCallerProof`, `claimedAgentId` is trusted ONLY when it
-   *   equals this proven identity -- closing the confirmed impersonation gap
-   *   (isolated fixtures, real HTTP `/v1/invoke`, 2026-09-17: a caller holding the
-   *   shared PUBLIC bearer could claim any already-authorized agent's identity by
-   *   request-body field alone, and the claim was believed). `null` means the
-   *   caller's credential proved no specific agent.
+   *   credential (`auth.ts`'s `resolveCredential`). For EVERY agent authorized in
+   *   `deps.businessFactsMap`, `claimedAgentId` is trusted ONLY when it equals this
+   *   proven identity -- unconditionally, not only for agents an operator
+   *   separately opted in. Closes the confirmed impersonation gap (isolated
+   *   fixtures, real HTTP `/v1/invoke`, 2026-09-17: a caller holding the shared
+   *   PUBLIC bearer could claim any already-authorized agent's identity by
+   *   request-body field alone, and the claim was believed) WITHOUT leaving an
+   *   unprotected fallback for an authorized agent that has not yet been given a
+   *   caller secret -- that agent now gets no facts at all rather than the
+   *   claim-alone path. `null` means the caller's credential proved no specific
+   *   agent, which can never equal a real claimed id.
    */
   resolve(
     templateId: string,
@@ -360,14 +354,21 @@ export function createInstructionsProvider(deps: InstructionsProviderDeps): Inst
   }
 
   /**
-   * Two questions, in order: is the CLAIMED agent authorized for EXACTLY this
-   * templateId (unchanged from before caller-bound credentials existed), and --
-   * ONLY for an agent an operator has opted into `agentsRequiringCallerProof` --
-   * did the caller's OWN credential PROVE that exact identity? An agent not opted
-   * in skips the second question entirely: the claim alone still decides, exactly
-   * as before this file added caller-bound credentials. This is deliberately
-   * opt-in per agent, not a blanket requirement, so an operator who has not yet
-   * minted a caller secret for a given agent sees no behaviour change at all.
+   * OWNER CORRECTION, 2026-09-17, on top of the fix above: opt-in per agent left
+   * exactly the gap it was meant to close reachable by construction -- an agent
+   * authorized in `businessFactsMap` but not YET given a caller secret (5c3277f0's
+   * actual planned shape) was still exploitable via the claim-alone path, and that
+   * is not acceptable to ship regardless of how sensitive the content is. There is
+   * now only ONE rule, unconditional: any `claimedAgentId` authorized in
+   * `businessFactsMap` for EXACTLY this `templateId` MUST also be PROVEN by the
+   * caller's own credential (`credentialAgentId`) -- an agent with no caller
+   * secret configured at all gets `credentialAgentId` that can never equal its own
+   * id (nothing can present a secret that does not exist), so it is REJECTED, not
+   * silently served on the claim alone. Business-facts authorization now implies
+   * caller-proof authorization; they are no longer two independently-optional
+   * gates. An agent with NO `businessFactsMap` entry at all (the pure
+   * persona-only path) is unaffected -- this check is only ever reached once a
+   * claim already passed the two `businessFactsMap` checks above.
    */
   function authorizedBusinessAgent(
     templateId: string,
@@ -378,12 +379,7 @@ export function createInstructionsProvider(deps: InstructionsProviderDeps): Inst
     const authorizedTemplateId = deps.businessFactsMap[claimedAgentId];
     if (authorizedTemplateId === undefined) return null;
     if (authorizedTemplateId !== templateId) return null;
-    if (
-      (deps.agentsRequiringCallerProof ?? EMPTY_SET).has(claimedAgentId) &&
-      credentialAgentId !== claimedAgentId
-    ) {
-      return null;
-    }
+    if (credentialAgentId !== claimedAgentId) return null;
     return claimedAgentId;
   }
 

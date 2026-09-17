@@ -440,10 +440,6 @@ export function createRuntime(deps: AppDeps): Runtime {
         config.paperclipBoardToken === null || config.paperclipBaseUrl === null
           ? {}
           : config.paperclipBusinessFactsMap,
-      // Which agents an operator has opted into caller-proof hardening -- derived
-      // from the SAME agentCallerSecrets auth.ts already resolves credentials
-      // against, never a second, independently-set list that could drift from it.
-      agentsRequiringCallerProof: new Set(Object.keys(config.agentCallerSecrets)),
       readToken: () => config.paperclipBoardToken ?? "",
       safeFetch,
       ttlMs: config.paperclipInstructionsTtlMs,

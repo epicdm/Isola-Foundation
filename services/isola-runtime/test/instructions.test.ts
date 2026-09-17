@@ -266,12 +266,38 @@ describe("business facts -- authorized-identity connection (the corrected fix)",
       ttlMs: 60_000,
       timeoutMs: 5_000,
     });
-    const r = await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_A);
+    // credentialAgentId (4th arg) must PROVE AGENT_A -- caller proof is now
+    // unconditional for every agent in businessFactsMap, not opt-in.
+    const r = await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_A, AGENT_A);
     expect(r.source).toBe("paperclip");
     expect(r.prompt).toContain(BUNDLE);
     expect(r.prompt).toContain(FACTS_A);
     expect(r.businessFactsAgentId).toBe(AGENT_A);
     expect(state.calls).toBe(2); // persona (PERSONA_AGENT) + business facts (AGENT_A)
+  });
+
+  it("REQUIRED, NOT OPTIONAL -- an authorized claim with NO matching credential (e.g. no caller secret minted yet) gets NOTHING, never the claim-alone fallback", async () => {
+    // The owner-corrected invariant, tested directly: business-facts authorization
+    // in the map is no longer sufficient by itself for ANY agent, regardless of
+    // whether an operator has separately "opted in" to hardening -- there is no
+    // such separate opt-in anymore. credentialAgentId is null here exactly as it
+    // would be for a real caller holding only the shared PUBLIC bearer with no
+    // agent-bound secret minted for AGENT_A at all.
+    const { safeFetch } = stubFetch({ businessFactsByAgent: { [AGENT_A]: FACTS_A } });
+    const provider = createInstructionsProvider({
+      baseUrl: "https://paperclip.example",
+      map: { [TEMPLATE]: PERSONA_AGENT },
+      businessFactsMap: { [AGENT_A]: TEMPLATE },
+      readToken: () => "t",
+      safeFetch,
+      ttlMs: 60_000,
+      timeoutMs: 5_000,
+    });
+    const r = await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_A, null);
+    expect(r.businessFactsAgentId).toBeNull();
+    expect(r.prompt).not.toContain(FACTS_A);
+    expect(r.prompt).toBe(BUNDLE);
+    expect(r.businessFactsRejectedAgentId).toBe(AGENT_A);
   });
 
   it("REQUIREMENT 1 -- two agents sharing the SAME template each receive ONLY their own business facts", async () => {
@@ -288,8 +314,8 @@ describe("business facts -- authorized-identity connection (the corrected fix)",
       timeoutMs: 5_000,
     });
 
-    const a = await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_A);
-    const b = await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_B);
+    const a = await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_A, AGENT_A);
+    const b = await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_B, AGENT_B);
 
     // Same shared template, same persona -- but each invocation's OWN facts only.
     expect(a.prompt).toContain(BUNDLE);
@@ -310,6 +336,27 @@ describe("business facts -- authorized-identity connection (the corrected fix)",
     expect(businessUrls).toContain(
       `https://paperclip.example/api/agents/${AGENT_B}/instructions-bundle/file?path=BUSINESS.md`,
     );
+  });
+
+  it("IMPERSONATION, UNIT LEVEL -- A's own proven credential cannot be used to claim B's identity, even though both are genuinely authorized for this template", async () => {
+    const { safeFetch } = stubFetch({
+      businessFactsByAgent: { [AGENT_A]: FACTS_A, [AGENT_B]: FACTS_B },
+    });
+    const provider = createInstructionsProvider({
+      baseUrl: "https://paperclip.example",
+      map: { [TEMPLATE]: PERSONA_AGENT },
+      businessFactsMap: { [AGENT_A]: TEMPLATE, [AGENT_B]: TEMPLATE },
+      readToken: () => "t",
+      safeFetch,
+      ttlMs: 60_000,
+      timeoutMs: 5_000,
+    });
+    // claimedAgentId = B, but credentialAgentId (what A's real credential proves) = A.
+    const r = await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_B, AGENT_A);
+    expect(r.businessFactsAgentId).toBeNull();
+    expect(r.prompt).not.toContain(FACTS_B);
+    expect(r.prompt).not.toContain(FACTS_A);
+    expect(r.businessFactsRejectedAgentId).toBe(AGENT_B);
   });
 
   it("REQUIREMENT 2 & 4 -- an unauthorized claimed agent id gets no facts at all, never falls back to another tenant's", async () => {
@@ -436,12 +483,12 @@ describe("business facts -- authorized-identity connection (the corrected fix)",
       timeoutMs: 5_000,
       now: () => clock.t,
     });
-    await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_A); // persona + A's facts: 2 calls
-    await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_B); // persona cached, B's facts: 1 call
+    await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_A, AGENT_A); // persona + A's facts: 2 calls
+    await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_B, AGENT_B); // persona cached, B's facts: 1 call
     expect(state.calls).toBe(3);
 
     clock.t += 30_000; // inside TTL
-    const cachedA = await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_A);
+    const cachedA = await provider.resolve(TEMPLATE, COMPILED_IN, AGENT_A, AGENT_A);
     expect(cachedA.prompt).toContain(FACTS_A);
     expect(state.calls).toBe(3); // both persona and A's facts served from cache
   });
