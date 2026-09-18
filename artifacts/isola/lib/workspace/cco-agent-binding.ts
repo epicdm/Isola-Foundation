@@ -134,6 +134,21 @@ export async function resolveCcoAgentBinding(
       // proceed to invoke the runtime with an empty agentId.
       return { outcome: 'unreachable', detail: 'linked_state_missing_ids' };
     }
+    // DEFENSE IN DEPTH, FOUND BY CODEX REVIEW (2026-09-18): this call asked
+    // the portal to resolve ONE specific, owner-selected agent
+    // (`agent_id: paperclipAgentId` above) — the response is trusted to
+    // answer that exact question, but nothing previously checked that it
+    // did. Under a malformed or buggy portal response (the same class of
+    // defect CLAUDE.md's own register already names for ghost-id lookups),
+    // Foundation would silently invoke whatever agent the response
+    // happened to name, not the one actually requested/authorized — a
+    // cross-tenant invocation with no client-side check at all. The portal
+    // is the source of truth for WHICH tenant an agent belongs to; this is
+    // not re-deriving that, only refusing to act on an answer that
+    // disagrees with the question that was asked.
+    if (agentId !== paperclipAgentId) {
+      return { outcome: 'unreachable', detail: 'linked_state_agent_id_mismatch' };
+    }
     return { outcome: 'linked', paperclipAgentId: agentId, paperclipCompanyId: companyId };
   }
   return { outcome: 'unreachable', detail: 'unrecognised_state' };

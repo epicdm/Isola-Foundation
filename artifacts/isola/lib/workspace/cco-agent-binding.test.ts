@@ -60,6 +60,14 @@ describe('resolveCcoAgentBinding', () => {
     expect(result).toEqual({ outcome: 'linked', paperclipAgentId: AGENT_ID, paperclipCompanyId: 'co-real' });
   });
 
+  it('CODEX FINDING (2026-09-18): a "linked" response naming a DIFFERENT agent than requested is refused, not silently trusted', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { ok: true, state: 'linked', paperclip_agent_id: 'some-other-agent-99', paperclip_company_id: 'co-real' }),
+    );
+    const result = await resolveCcoAgentBinding(TENANT, AGENT_ID);
+    expect(result).toEqual({ outcome: 'unreachable', detail: 'linked_state_agent_id_mismatch' });
+  });
+
   it.each(['tenant_not_mapped', 'not_found', 'not_ready'])(
     'passes through the honest-negative state %s unchanged',
     async (state) => {
