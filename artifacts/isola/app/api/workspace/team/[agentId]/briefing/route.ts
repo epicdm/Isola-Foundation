@@ -2,14 +2,38 @@
  * GET /api/workspace/team/[agentId]/briefing — read-only Odoo business
  * briefing for an authenticated staff session.
  *
- * Gated identically to POST .../chat (same file's sibling route): session,
- * manager-or-above workspace access, and the agent must pass
- * `resolveStaffChatEligibility` (active, INTERNAL-classified, allowlisted,
- * belongs to this tenant). This does not call Clawith, Paperclip or
- * isola-runtime — it is a plain Foundation-owned Odoo read, reusing the
- * already-governed `getBusinessBriefing` (lib/workspace/business-briefing.ts),
- * which itself reuses the tenant's own OdooBinding and never falls back to a
- * shared platform-default credential.
+ * TWO GATES, BOTH DB-BACKED, NEITHER A BARE ROLE STRING
+ * -------------------------------------------------------
+ * 1. `requireWorkspaceAccess(session, 'manager')` -> `resolveWorkspaceAuthz`
+ *    (lib/workspace/authz.ts) resolves the caller's role by querying
+ *    `Membership` for `(identityId, session.effectiveTenantId)` — it is not
+ *    satisfied by any claim on the session object alone. Proven independently
+ *    in authz.test.ts, e.g. "denies a user with no membership who is not the
+ *    home-tenant owner" and "does not let the User.role default promote a
+ *    staff member".
+ * 2. `resolveStaffChatEligibility(session.effectiveTenantId, agentId)`
+ *    (lib/workspace/staff-agent-chat.ts) confirms the requested agent
+ *    actually BELONGS to that same tenant (`prisma.agent.findFirst({ id,
+ *    tenant_id })`), is active, and is INTERNAL-classified (B1-B4 exposure
+ *    policy) — an agent belonging to another tenant, or a PUBLIC/unclassified
+ *    one, never resolves. Proven independently in staff-agent-chat.test.ts,
+ *    e.g. "tenant scoping is still mandatory — a same-id agent on a DIFFERENT
+ *    tenant never resolves" and the B3 exposure-classification proofs.
+ * Both are the exact same functions the already-live POST .../chat route
+ * (this file's sibling) uses — reused, not re-derived, so a review of one
+ * covers the other.
+ *
+ * There is no tenant_id or agent scope in the request body or query string:
+ * this is a GET with no body, and the only tenant ever used is
+ * `session.effectiveTenantId` — never anything caller-supplied.
+ *
+ * This does not call Clawith, Paperclip or isola-runtime — it is a plain
+ * Foundation-owned Odoo read, reusing the already-governed
+ * `getBusinessBriefing` (lib/workspace/business-briefing.ts), which reuses
+ * the tenant's own OdooBinding (never a shared platform-default credential),
+ * applies a record-scope guard (refuses a section outright rather than
+ * blending rows from more than one Odoo company_id), and builds every
+ * source link from that same tenant-scoped OdooBinding.url.
  *
  * Every section reports explicit unavailability rather than fabricating or
  * omitting data — see lib/workspace/business-briefing.ts's module docstring.
