@@ -139,4 +139,42 @@ describe('getBusinessBriefing', () => {
       '40.00 USD outstanding, due 2026-08-02',
     ]);
   });
+
+  it('RECORD SCOPE: refuses a section outright (never a mixed rendering) when one binding somehow returns rows from more than one Odoo company', async () => {
+    findUniqueOdooBinding.mockResolvedValue(BINDING);
+    json2Call.mockImplementation(async (_config: unknown, model: string) => {
+      if (model === 'account.move') {
+        return [
+          { id: 1, name: 'INV/1', partner_id: [1, 'A'], amount_residual: 100, currency_id: [1, 'XCD'], invoice_date_due: '2026-08-01', company_id: [1, 'Company A'] },
+          { id: 2, name: 'INV/2', partner_id: [2, 'B'], amount_residual: 40, currency_id: [1, 'XCD'], invoice_date_due: '2026-08-02', company_id: [2, 'Company B'] },
+        ];
+      }
+      // A single company is fine and must not be affected by the other section's ambiguity.
+      return [{ id: 9, name: 'Lead', partner_id: [1, 'A'], expected_revenue: 10, stage_id: [1, 'New'], date_deadline: null, company_id: [1, 'Company A'] }];
+    });
+
+    const briefing = await getBusinessBriefing(TENANT);
+
+    expect(briefing.sections.find((s) => s.id === 'overdue_receivables')).toEqual({
+      id: 'overdue_receivables',
+      title: 'Overdue receivables',
+      state: 'unavailable',
+      reason: 'multi_company_records_in_one_binding',
+      rows: [],
+    });
+    expect(briefing.sections.find((s) => s.id === 'open_opportunities')?.state).toBe('ok');
+  });
+
+  it('a single company_id across all rows (the normal case) is unaffected by the record-scope guard', async () => {
+    findUniqueOdooBinding.mockResolvedValue(BINDING);
+    json2Call.mockImplementation(async (_config: unknown, model: string) => {
+      if (model === 'account.move') {
+        return [{ id: 1, name: 'INV/1', partner_id: [1, 'A'], amount_residual: 100, currency_id: [1, 'XCD'], invoice_date_due: '2026-08-01', company_id: [1, 'Company A'] }];
+      }
+      return [];
+    });
+
+    const briefing = await getBusinessBriefing(TENANT);
+    expect(briefing.sections.find((s) => s.id === 'overdue_receivables')?.state).toBe('ok');
+  });
 });

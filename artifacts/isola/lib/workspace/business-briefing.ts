@@ -56,7 +56,8 @@ export type BriefingSectionId = 'overdue_receivables' | 'open_opportunities';
 export type BriefingUnavailableReason =
   | 'no_odoo_connected_for_tenant'
   | 'odoo_binding_incomplete'
-  | 'odoo_read_failed';
+  | 'odoo_read_failed'
+  | 'multi_company_records_in_one_binding';
 
 export interface BriefingRow {
   id: number;
@@ -124,13 +125,54 @@ function formatMoney(amount: unknown, currency: unknown): string {
 }
 
 const TOLERATED_FAILURE = Symbol('business-briefing-read-failure');
+const MULTI_COMPANY = Symbol('business-briefing-multi-company-in-one-binding');
 
-function sectionFrom(id: BriefingSectionId, result: BriefingRow[] | typeof TOLERATED_FAILURE): BriefingSection {
+function sectionFrom(
+  id: BriefingSectionId,
+  result: BriefingRow[] | typeof TOLERATED_FAILURE | typeof MULTI_COMPANY,
+): BriefingSection {
   if (result === TOLERATED_FAILURE) return unavailable(id, 'odoo_read_failed');
+  if (result === MULTI_COMPANY) return unavailable(id, 'multi_company_records_in_one_binding');
   return ok(id, result);
 }
 
-async function readOverdueReceivables(config: OdooConfig): Promise<BriefingRow[]> {
+function companyIdOf(value: unknown): number | null {
+  if (Array.isArray(value) && typeof value[0] === 'number') return value[0];
+  return null;
+}
+
+/**
+ * RECORD SCOPE. An `OdooBinding` names one Odoo DATABASE, not one COMPANY —
+ * a hosted_saas or local_docker_clone instance could in principle hold more
+ * than one `res.company`. Odoo's own record rules already scope a
+ * `search_read` to the API key's authorised companies (see CLAUDE.md's ACL
+ * law: the ceiling is `ir.model.access` intersected with the user's
+ * effective groups), so this is defense-in-depth, not the primary control —
+ * but a briefing titled "this tenant's receivables" must never silently
+ * blend two companies' records into one list. Every row's `company_id` is
+ * checked; if more than one distinct company appears, the WHOLE section is
+ * refused by name rather than rendered as if it were one company's data.
+ */
+function withSingleCompanyGuard<T extends { company_id: unknown }>(
+  rows: T[],
+  build: (rows: T[]) => BriefingRow[],
+): BriefingRow[] | typeof MULTI_COMPANY {
+  const companyIds = new Set(rows.map((r) => companyIdOf(r.company_id)).filter((id): id is number => id !== null));
+  if (companyIds.size > 1) return MULTI_COMPANY;
+  return build(rows);
+}
+
+interface AccountMoveRow {
+  id: unknown;
+  name: unknown;
+  partner_id: unknown;
+  amount_residual: unknown;
+  currency_id: unknown;
+  invoice_date_due: unknown;
+  company_id: unknown;
+}
+
+async function readOverdueReceivables(config: OdooConfig): Promise<BriefingRow[] | typeof MULTI_COMPANY> {
   checkOdooPolicy('account.move', 'search_read');
   const today = new Date().toISOString().slice(0, 10);
   const rows = (await json2Call(
@@ -144,26 +186,38 @@ async function readOverdueReceivables(config: OdooConfig): Promise<BriefingRow[]
         ['payment_state', 'in', ['not_paid', 'partial']],
         ['invoice_date_due', '<', today],
       ],
-      fields: ['id', 'name', 'partner_id', 'amount_residual', 'currency_id', 'invoice_date_due'],
+      fields: ['id', 'name', 'partner_id', 'amount_residual', 'currency_id', 'invoice_date_due', 'company_id'],
       order: 'invoice_date_due asc',
       limit: 25,
     },
     12000,
-  )) as Record<string, unknown>[];
+  )) as AccountMoveRow[];
 
-  return (rows ?? []).map((row) => {
-    const id = Number(row.id);
-    const partner = displayName(row.partner_id);
-    return {
-      id,
-      label: `${String(row.name ?? '')} — ${partner}`,
-      detail: `${formatMoney(row.amount_residual, row.currency_id)} outstanding, due ${String(row.invoice_date_due ?? 'unknown')}`,
-      sourceUrl: safeLink(config.url, 'account.move', id),
-    };
-  });
+  return withSingleCompanyGuard(rows ?? [], (scoped) =>
+    scoped.map((row) => {
+      const id = Number(row.id);
+      const partner = displayName(row.partner_id);
+      return {
+        id,
+        label: `${String(row.name ?? '')} — ${partner}`,
+        detail: `${formatMoney(row.amount_residual, row.currency_id)} outstanding, due ${String(row.invoice_date_due ?? 'unknown')}`,
+        sourceUrl: safeLink(config.url, 'account.move', id),
+      };
+    }),
+  );
 }
 
-async function readOpenOpportunities(config: OdooConfig): Promise<BriefingRow[]> {
+interface CrmLeadRow {
+  id: unknown;
+  name: unknown;
+  partner_id: unknown;
+  expected_revenue: unknown;
+  stage_id: unknown;
+  date_deadline: unknown;
+  company_id: unknown;
+}
+
+async function readOpenOpportunities(config: OdooConfig): Promise<BriefingRow[] | typeof MULTI_COMPANY> {
   checkOdooPolicy('crm.lead', 'search_read');
   const rows = (await json2Call(
     config,
@@ -174,25 +228,27 @@ async function readOpenOpportunities(config: OdooConfig): Promise<BriefingRow[]>
         ['active', '=', true],
         ['type', '=', 'opportunity'],
       ],
-      fields: ['id', 'name', 'partner_id', 'expected_revenue', 'stage_id', 'date_deadline'],
+      fields: ['id', 'name', 'partner_id', 'expected_revenue', 'stage_id', 'date_deadline', 'company_id'],
       order: 'write_date desc',
       limit: 25,
     },
     12000,
-  )) as Record<string, unknown>[];
+  )) as CrmLeadRow[];
 
-  return (rows ?? []).map((row) => {
-    const id = Number(row.id);
-    const partner = displayName(row.partner_id);
-    const stage = displayName(row.stage_id);
-    const revenue = typeof row.expected_revenue === 'number' ? row.expected_revenue.toFixed(2) : 'unknown';
-    return {
-      id,
-      label: `${String(row.name ?? '')} — ${partner}`,
-      detail: `Stage: ${stage}, expected ${revenue}, deadline ${String(row.date_deadline ?? 'none set')}`,
-      sourceUrl: safeLink(config.url, 'crm.lead', id),
-    };
-  });
+  return withSingleCompanyGuard(rows ?? [], (scoped) =>
+    scoped.map((row) => {
+      const id = Number(row.id);
+      const partner = displayName(row.partner_id);
+      const stage = displayName(row.stage_id);
+      const revenue = typeof row.expected_revenue === 'number' ? row.expected_revenue.toFixed(2) : 'unknown';
+      return {
+        id,
+        label: `${String(row.name ?? '')} — ${partner}`,
+        detail: `Stage: ${stage}, expected ${revenue}, deadline ${String(row.date_deadline ?? 'none set')}`,
+        sourceUrl: safeLink(config.url, 'crm.lead', id),
+      };
+    }),
+  );
 }
 
 export async function getBusinessBriefing(tenantId: string): Promise<BusinessBriefing> {
