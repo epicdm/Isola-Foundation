@@ -29,6 +29,33 @@ export interface RuntimeConfig {
    * NEXT configured the resolver behaves exactly as it did before.
    */
   secretsNext: Readonly<Record<Exposure, string | null>>;
+  /**
+   * `PAPERCLIP_AGENT_CALLER_SECRETS` — agent id -> a bearer secret unique to that
+   * agent, resolved at PUBLIC exposure. A caller presenting one proves it
+   * specifically represents that agent (`credentialAgentId` in auth.ts), which a
+   * shared PUBLIC secret cannot: the caller-to-agent binding an admin allowlist
+   * (`paperclipBusinessFactsMap`) alone does not provide. Absent (default `{}`)
+   * means no agent has a caller secret; every PUBLIC caller then resolves to
+   * `credentialAgentId: null`, exactly today's behaviour.
+   *
+   * PROVENANCE: this field originates on PR #139
+   * (feat/isola-runtime-business-facts-connection-2026-09-17, OPEN/DRAFT, not
+   * deployed) and is reproduced byte-for-byte here so this branch does not fork
+   * a second, divergent copy — see auth.ts's module doc.
+   */
+  agentCallerSecrets: Readonly<Record<string, string>>;
+  /**
+   * The SAME mechanism as `agentCallerSecrets` immediately above, resolved at
+   * INTERNAL exposure instead of PUBLIC — added on THIS branch, symmetrically,
+   * for `epic-staff-operations-coordinator@v1` specifically (see
+   * agent-caller-proof.ts). A separate map, not a widened version of
+   * `agentCallerSecrets`, so PR #139's own PUBLIC-only shape and tests are
+   * untouched by this addition. Absent (default `{}`) means no INTERNAL agent
+   * has a caller secret, which — for any template this branch's
+   * `agentCallerProofRequiredTemplateIds` names — means every caller is
+   * refused `no_agent_bound_credential`: fails closed, not open.
+   */
+  internalAgentCallerSecrets: Readonly<Record<string, string>>;
   modelBaseUrl: string;
   modelApiKey: string | null;
   /** Env override for the model name; `null` means "use the template's model". */
@@ -162,18 +189,15 @@ export interface RuntimeConfig {
 
   // ---- agent-specific caller proof (see agent-caller-proof.ts) -----------
   /**
-   * Templates that require a per-agent proof beyond the shared exposure
-   * bearer. EMPTY by default (no template is gated) — an operator opts a
-   * template in explicitly via RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES.
+   * Templates that require the caller's own credential to PROVE the
+   * specific `agentId` it claims (`credentialAgentId` from auth.ts must
+   * equal `body.agentId` — see agent-caller-proof.ts). EMPTY by default (no
+   * template is gated) — an operator opts a template in explicitly via
+   * RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES. Mandatory, not opt-in,
+   * once a template IS in this set — same "no authorized-but-unprotected
+   * state" ruling PR #139 already applied to business-facts authorization.
    */
   agentCallerProofRequiredTemplateIds: ReadonlySet<string>;
-  /**
-   * `agentId` -> expected proof value. OPERATOR-CONFIGURED, never derived
-   * from a request. Empty (the default, until an operator sets
-   * RUNTIME_AGENT_CALLER_PROOF_MAP) means every gated-template call is
-   * refused with `no_proof_configured_for_agent` — fails closed, not open.
-   */
-  agentCallerProofByAgentId: Readonly<Record<string, string>>;
 }
 
 export const DEFAULT_MODEL_BASE_URL = "https://api.deepseek.com";
@@ -346,6 +370,8 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
       INTERNAL: str(env, "RUNTIME_SECRET_INTERNAL_NEXT"),
       PUBLIC: str(env, "RUNTIME_SECRET_PUBLIC_NEXT"),
     }),
+    agentCallerSecrets: parseInstructionsMap(str(env, "PAPERCLIP_AGENT_CALLER_SECRETS")),
+    internalAgentCallerSecrets: parseInstructionsMap(str(env, "RUNTIME_INTERNAL_AGENT_CALLER_SECRETS")),
     modelBaseUrl,
     modelApiKey: str(env, "MODEL_API_KEY"),
     modelNameOverride: str(env, "MODEL_NAME"),
@@ -461,12 +487,6 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
           .filter((s) => s.length > 0),
       ),
     ),
-    // Reuses PAPERCLIP_INSTRUCTIONS_MAP's own parser: same shape (a JSON
-    // object of string keys to string values), same fail-soft-to-empty
-    // behaviour on a malformed value.
-    agentCallerProofByAgentId: parseInstructionsMap(
-      str(env, "RUNTIME_AGENT_CALLER_PROOF_MAP"),
-    ),
   };
 }
 
@@ -528,6 +548,50 @@ export function bootErrors(config: RuntimeConfig): string[] {
       errors.push(
         `RUNTIME_SECRET_${cls}_NEXT collides with a ${other} credential. One token would satisfy both exposure classes and the boundary would not exist.`,
       );
+    }
+  }
+
+  // ── AGENT-BOUND CREDENTIAL VALIDATION ─────────────────────────────────────
+  //
+  // The whole point of an agent-bound secret is that it, and only it, proves a
+  // caller represents that specific agent. A value that collides with anything
+  // else -- another agent's secret in either map, or a shared exposure secret --
+  // silently dissolves that proof exactly the way an INTERNAL/PUBLIC collision
+  // would, and must be refused at boot rather than discovered from a live
+  // impersonation. Checked across BOTH agentCallerSecrets (PUBLIC, PR #139) and
+  // internalAgentCallerSecrets (INTERNAL, this branch) together, since a
+  // collision between the two maps is exactly as dangerous as a collision
+  // within one.
+  {
+    const allAgentEntries: Array<[string, string, "PUBLIC" | "INTERNAL"]> = [
+      ...Object.entries(config.agentCallerSecrets).map(
+        ([id, secret]): [string, string, "PUBLIC" | "INTERNAL"] => [id, secret, "PUBLIC"],
+      ),
+      ...Object.entries(config.internalAgentCallerSecrets).map(
+        ([id, secret]): [string, string, "PUBLIC" | "INTERNAL"] => [id, secret, "INTERNAL"],
+      ),
+    ];
+    for (let i = 0; i < allAgentEntries.length; i++) {
+      const [agentId, secret, cls] = allAgentEntries[i] as [string, string, "PUBLIC" | "INTERNAL"];
+      const envVar = cls === "PUBLIC" ? "PAPERCLIP_AGENT_CALLER_SECRETS" : "RUNTIME_INTERNAL_AGENT_CALLER_SECRETS";
+      if (secret === config.secrets.INTERNAL || secret === config.secretsNext.INTERNAL) {
+        errors.push(
+          `${envVar}["${agentId}"] collides with an INTERNAL credential. One token would satisfy both, and the caller-to-agent binding would not exist.`,
+        );
+      }
+      if (secret === config.secrets.PUBLIC || secret === config.secretsNext.PUBLIC) {
+        errors.push(
+          `${envVar}["${agentId}"] collides with the shared PUBLIC credential. Any PUBLIC caller could then claim this agent's identity.`,
+        );
+      }
+      for (let j = i + 1; j < allAgentEntries.length; j++) {
+        const [otherAgentId, otherSecret] = allAgentEntries[j] as [string, string, "PUBLIC" | "INTERNAL"];
+        if (secret === otherSecret) {
+          errors.push(
+            `An agent-bound secret for "${agentId}" and "${otherAgentId}" are identical. One token would satisfy both agent identities, and the caller-to-agent binding would not exist.`,
+          );
+        }
+      }
     }
   }
 
@@ -633,10 +697,10 @@ export function bootWarnings(config: RuntimeConfig): string[] {
   }
   if (
     config.agentCallerProofRequiredTemplateIds.size > 0 &&
-    Object.keys(config.agentCallerProofByAgentId).length === 0
+    Object.keys(config.internalAgentCallerSecrets).length === 0
   ) {
     warnings.push(
-      "RUNTIME_AGENT_CALLER_PROOF_MAP is unset while RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES names at least one template: every call to those templates will be refused with no_proof_configured_for_agent. This is the fail-closed default, not a bug — populate the map when a caller besides Paperclip's own dispatch is ready to invoke them.",
+      "RUNTIME_INTERNAL_AGENT_CALLER_SECRETS is unset while RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES names at least one template: every call to those templates will be refused with no_agent_bound_credential. This is the fail-closed default, not a bug — populate the map, keyed by the real paperclip_agent_id, when a caller besides Paperclip's own dispatch is ready to invoke them.",
     );
   }
   if (config.stateBackend === "file" && config.stateDir.startsWith("/tmp")) {

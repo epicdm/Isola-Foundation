@@ -11,6 +11,7 @@ import {
   envConfig,
   get,
   invoke,
+  placeholder,
   startServer,
   type TestServer,
 } from "./harness.js";
@@ -49,10 +50,12 @@ describe("resolveCredential", () => {
     expect(resolveCredential(config, `Bearer ${INTERNAL_SECRET}`)).toEqual({
       kind: "ok",
       credentialExposure: "INTERNAL",
+      credentialAgentId: null,
     });
     expect(resolveCredential(config, `Bearer ${PUBLIC_SECRET}`)).toEqual({
       kind: "ok",
       credentialExposure: "PUBLIC",
+      credentialAgentId: null,
     });
   });
 
@@ -70,6 +73,142 @@ describe("resolveCredential", () => {
     });
     expect(resolveCredential(config, `Bearer ${INTERNAL_SECRET}`)).toEqual({
       kind: "not_configured",
+    });
+  });
+});
+
+// PR #139 (feat/isola-runtime-business-facts-connection-2026-09-17, OPEN/DRAFT,
+// not deployed) reproduced byte-for-byte -- see auth.ts's own module doc. This
+// branch does not fork a second, divergent copy of the PUBLIC-side mechanism.
+describe("resolveCredential -- agent-bound credentials (the caller-to-agent binding)", () => {
+  const AGENT_A = "eeeeeeee-1111-4111-8111-111111111111";
+  const AGENT_B = "eeeeeeee-2222-4222-8222-222222222222";
+  const AGENT_A_SECRET = placeholder("agent-a");
+  const AGENT_B_SECRET = placeholder("agent-b");
+
+  it("a caller presenting an agent-bound secret is resolved to that specific agent, at PUBLIC exposure", () => {
+    const config = envConfig({
+      PAPERCLIP_AGENT_CALLER_SECRETS: JSON.stringify({ [AGENT_A]: AGENT_A_SECRET, [AGENT_B]: AGENT_B_SECRET }),
+    });
+    expect(resolveCredential(config, `Bearer ${AGENT_A_SECRET}`)).toEqual({
+      kind: "ok",
+      credentialExposure: "PUBLIC",
+      credentialAgentId: AGENT_A,
+    });
+    expect(resolveCredential(config, `Bearer ${AGENT_B_SECRET}`)).toEqual({
+      kind: "ok",
+      credentialExposure: "PUBLIC",
+      credentialAgentId: AGENT_B,
+    });
+  });
+
+  it("THE EXACT IMPERSONATION QUESTION -- the plain shared PUBLIC secret proves no specific agent, even when agent-bound secrets are configured", () => {
+    const config = envConfig({
+      PAPERCLIP_AGENT_CALLER_SECRETS: JSON.stringify({ [AGENT_A]: AGENT_A_SECRET, [AGENT_B]: AGENT_B_SECRET }),
+    });
+    expect(resolveCredential(config, `Bearer ${PUBLIC_SECRET}`)).toEqual({
+      kind: "ok",
+      credentialExposure: "PUBLIC",
+      credentialAgentId: null,
+    });
+  });
+
+  it("an agent-bound secret colliding with the shared PUBLIC secret is refused entirely, not silently resolved to one identity", () => {
+    const config = envConfig({
+      PAPERCLIP_AGENT_CALLER_SECRETS: JSON.stringify({ [AGENT_A]: PUBLIC_SECRET }),
+    });
+    expect(resolveCredential(config, `Bearer ${PUBLIC_SECRET}`)).toEqual({ kind: "unauthorized" });
+  });
+
+  it("two agents sharing the same secret by misconfiguration are refused, never resolved to either", () => {
+    const config = envConfig({
+      PAPERCLIP_AGENT_CALLER_SECRETS: JSON.stringify({ [AGENT_A]: AGENT_A_SECRET, [AGENT_B]: AGENT_A_SECRET }),
+    });
+    expect(resolveCredential(config, `Bearer ${AGENT_A_SECRET}`)).toEqual({ kind: "unauthorized" });
+  });
+
+  it("no agent-bound secrets configured at all -- behaviour is exactly what it was before this mechanism existed", () => {
+    const config = envConfig();
+    expect(resolveCredential(config, `Bearer ${PUBLIC_SECRET}`)).toEqual({
+      kind: "ok",
+      credentialExposure: "PUBLIC",
+      credentialAgentId: null,
+    });
+  });
+});
+
+// THIS BRANCH'S OWN ADDITION -- the SAME mechanism immediately above, applied
+// symmetrically to INTERNAL exposure for the CCO's caller-proof gate
+// (agent-caller-proof.ts). A separate map (RUNTIME_INTERNAL_AGENT_CALLER_SECRETS),
+// not a widened version of PR #139's PUBLIC-only map, so its shape/tests above
+// are completely untouched by this addition.
+describe("resolveCredential -- INTERNAL-exposure agent-bound credentials (the CCO caller-proof gate)", () => {
+  const CCO_AGENT = "cco-agent-real-42";
+  const OTHER_INTERNAL_AGENT = "other-internal-agent-7";
+  const CCO_AGENT_SECRET = placeholder("cco-agent");
+  const OTHER_INTERNAL_AGENT_SECRET = placeholder("other-internal-agent");
+
+  it("a caller presenting an INTERNAL agent-bound secret is resolved to that specific agent, at INTERNAL exposure", () => {
+    const config = envConfig({
+      RUNTIME_INTERNAL_AGENT_CALLER_SECRETS: JSON.stringify({
+        [CCO_AGENT]: CCO_AGENT_SECRET,
+        [OTHER_INTERNAL_AGENT]: OTHER_INTERNAL_AGENT_SECRET,
+      }),
+    });
+    expect(resolveCredential(config, `Bearer ${CCO_AGENT_SECRET}`)).toEqual({
+      kind: "ok",
+      credentialExposure: "INTERNAL",
+      credentialAgentId: CCO_AGENT,
+    });
+    expect(resolveCredential(config, `Bearer ${OTHER_INTERNAL_AGENT_SECRET}`)).toEqual({
+      kind: "ok",
+      credentialExposure: "INTERNAL",
+      credentialAgentId: OTHER_INTERNAL_AGENT,
+    });
+  });
+
+  it("the plain shared INTERNAL secret proves no specific agent, even when INTERNAL agent-bound secrets are configured", () => {
+    const config = envConfig({
+      RUNTIME_INTERNAL_AGENT_CALLER_SECRETS: JSON.stringify({ [CCO_AGENT]: CCO_AGENT_SECRET }),
+    });
+    expect(resolveCredential(config, `Bearer ${INTERNAL_SECRET}`)).toEqual({
+      kind: "ok",
+      credentialExposure: "INTERNAL",
+      credentialAgentId: null,
+    });
+  });
+
+  it("an INTERNAL agent-bound secret colliding with the shared INTERNAL secret is refused entirely", () => {
+    const config = envConfig({
+      RUNTIME_INTERNAL_AGENT_CALLER_SECRETS: JSON.stringify({ [CCO_AGENT]: INTERNAL_SECRET }),
+    });
+    expect(resolveCredential(config, `Bearer ${INTERNAL_SECRET}`)).toEqual({ kind: "unauthorized" });
+  });
+
+  it("an INTERNAL agent-bound secret colliding with a PUBLIC agent-bound secret (cross-map) is refused entirely", () => {
+    const config = envConfig({
+      PAPERCLIP_AGENT_CALLER_SECRETS: JSON.stringify({ [OTHER_INTERNAL_AGENT]: CCO_AGENT_SECRET }),
+      RUNTIME_INTERNAL_AGENT_CALLER_SECRETS: JSON.stringify({ [CCO_AGENT]: CCO_AGENT_SECRET }),
+    });
+    expect(resolveCredential(config, `Bearer ${CCO_AGENT_SECRET}`)).toEqual({ kind: "unauthorized" });
+  });
+
+  it("two INTERNAL agents sharing the same secret by misconfiguration are refused, never resolved to either", () => {
+    const config = envConfig({
+      RUNTIME_INTERNAL_AGENT_CALLER_SECRETS: JSON.stringify({
+        [CCO_AGENT]: CCO_AGENT_SECRET,
+        [OTHER_INTERNAL_AGENT]: CCO_AGENT_SECRET,
+      }),
+    });
+    expect(resolveCredential(config, `Bearer ${CCO_AGENT_SECRET}`)).toEqual({ kind: "unauthorized" });
+  });
+
+  it("no INTERNAL agent-bound secrets configured at all -- behaviour is exactly what it was before this mechanism existed", () => {
+    const config = envConfig();
+    expect(resolveCredential(config, `Bearer ${INTERNAL_SECRET}`)).toEqual({
+      kind: "ok",
+      credentialExposure: "INTERNAL",
+      credentialAgentId: null,
     });
   });
 });

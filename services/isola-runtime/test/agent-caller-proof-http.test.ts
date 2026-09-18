@@ -3,6 +3,10 @@
  * the pure decision function -- same discipline as agentos-routing.test.ts:
  * a unit test on the decision function proves nothing about whether app.ts
  * actually wired it in.
+ *
+ * The proof is the CALLER'S BEARER (RUNTIME_INTERNAL_AGENT_CALLER_SECRETS,
+ * resolved via auth.ts's resolveCredential into credentialAgentId) -- never a
+ * request-body field. There is nothing to "supply" in the body at all.
  */
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -15,6 +19,7 @@ import {
   StubModelClient,
   envConfig,
   invoke,
+  placeholder,
   startServer,
   type TestServer,
 } from "./harness.js";
@@ -28,6 +33,9 @@ class RecordingAgentOsProvider implements ExecutionProvider {
   }
 }
 
+const CCO_AGENT = "cco-agent-real-42";
+const CCO_AGENT_SECRET = placeholder("cco-agent");
+
 let server: TestServer | null = null;
 afterEach(async () => {
   await server?.close();
@@ -35,11 +43,11 @@ afterEach(async () => {
 });
 
 describe("agent caller proof over HTTP", () => {
-  it("POSITIVE CONTROL: with the feature NOT opted in (the shipped default), the gated template invokes exactly as it always has -- no callerProof required", async () => {
+  it("POSITIVE CONTROL: with the feature NOT opted in (the shipped default), the gated template invokes exactly as it always has -- no agent-bound credential required", async () => {
     const logger = new CapturingLogger();
     const model = StubModelClient.returning("hello");
     server = await startServer({
-      config: envConfig(), // no RUNTIME_AGENT_CALLER_PROOF_* overrides
+      config: envConfig(), // no RUNTIME_AGENT_CALLER_PROOF_* / RUNTIME_INTERNAL_AGENT_CALLER_SECRETS overrides
       logger: logger.logger,
       modelClient: model,
     });
@@ -52,7 +60,6 @@ describe("agent caller proof over HTTP", () => {
         agentId: "agent-7",
         runId: "run-no-opt-in",
         context: OVERDUE_FIXTURE,
-        // no callerProof field at all
       },
     });
 
@@ -60,14 +67,14 @@ describe("agent caller proof over HTTP", () => {
     expect(logger.withOutcome("agent_caller_proof_required")).toHaveLength(0);
   });
 
-  it("refuses with 403 agent_caller_proof_required when the template is opted in and no callerProof is supplied -- the shared bearer alone is not enough", async () => {
+  it("refuses with 403 agent_caller_proof_required when the template is opted in and the caller holds only the shared INTERNAL bearer -- the shared bearer alone is not enough", async () => {
     const logger = new CapturingLogger();
     const model = StubModelClient.returning("should never be called");
     const agentOs = new RecordingAgentOsProvider({ status: "completed", content: "x", model: null, usage: null });
     server = await startServer({
       config: envConfig({
         RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES: INTERNAL_TEMPLATE,
-        RUNTIME_AGENT_CALLER_PROOF_MAP: JSON.stringify({ "agent-7": "the-real-proof" }),
+        RUNTIME_INTERNAL_AGENT_CALLER_SECRETS: JSON.stringify({ [CCO_AGENT]: CCO_AGENT_SECRET }),
       }),
       logger: logger.logger,
       modelClient: model,
@@ -75,12 +82,12 @@ describe("agent caller proof over HTTP", () => {
     });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: INTERNAL_SECRET, // the plain shared bearer, not the agent-bound one
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",
-        agentId: "agent-7",
-        runId: "run-no-proof",
+        agentId: CCO_AGENT,
+        runId: "run-shared-bearer-only",
         context: OVERDUE_FIXTURE,
       },
     });
@@ -91,28 +98,27 @@ describe("agent caller proof over HTTP", () => {
     expect(model.calls).toHaveLength(0);
     const lines = logger.withOutcome("agent_caller_proof_required");
     expect(lines).toHaveLength(1);
-    expect(lines[0]!["reason"]).toBe("missing_proof");
+    expect(lines[0]!["reason"]).toBe("no_agent_bound_credential");
   });
 
-  it("refuses with proof_mismatch when the supplied callerProof does not match this agentId's configured value", async () => {
+  it("refuses agent_identity_mismatch when the caller's OWN agent-bound credential claims a DIFFERENT agentId than the one it actually proves", async () => {
     const model = StubModelClient.returning("should never be called");
     server = await startServer({
       config: envConfig({
         RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES: INTERNAL_TEMPLATE,
-        RUNTIME_AGENT_CALLER_PROOF_MAP: JSON.stringify({ "agent-7": "the-real-proof" }),
+        RUNTIME_INTERNAL_AGENT_CALLER_SECRETS: JSON.stringify({ [CCO_AGENT]: CCO_AGENT_SECRET }),
       }),
       modelClient: model,
     });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: CCO_AGENT_SECRET, // proves CCO_AGENT
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",
-        agentId: "agent-7",
-        runId: "run-wrong-proof",
+        agentId: "some-other-claimed-agent", // CROSS-AGENT CLAIM
+        runId: "run-cross-agent-claim",
         context: OVERDUE_FIXTURE,
-        callerProof: "a-guess",
       },
     });
 
@@ -121,53 +127,53 @@ describe("agent caller proof over HTTP", () => {
     expect(model.calls).toHaveLength(0);
   });
 
-  it("succeeds when the correct callerProof for this exact agentId is supplied", async () => {
+  it("succeeds when the caller's own agent-bound credential proves exactly the agentId it claims", async () => {
     const model = StubModelClient.returning("the real answer");
     server = await startServer({
       config: envConfig({
         RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES: INTERNAL_TEMPLATE,
-        RUNTIME_AGENT_CALLER_PROOF_MAP: JSON.stringify({ "agent-7": "the-real-proof" }),
+        RUNTIME_INTERNAL_AGENT_CALLER_SECRETS: JSON.stringify({ [CCO_AGENT]: CCO_AGENT_SECRET }),
       }),
       modelClient: model,
     });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: CCO_AGENT_SECRET,
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",
-        agentId: "agent-7",
-        runId: "run-right-proof",
+        agentId: CCO_AGENT,
+        runId: "run-honest-agent-bound-caller",
         context: OVERDUE_FIXTURE,
-        callerProof: "the-real-proof",
       },
     });
 
     expect(res.status).not.toBe(403);
   });
 
-  it("a DIFFERENT agent's correct proof is still refused for agent-7 -- proof is per-agent, not a second shared secret", async () => {
+  it("a DIFFERENT agent's own real, valid credential is still refused when claiming CCO_AGENT -- proof is per-agent, not a second shared secret", async () => {
+    const OTHER_AGENT = "other-internal-agent-7";
+    const OTHER_AGENT_SECRET = placeholder("other-internal-agent");
     const model = StubModelClient.returning("should never be called");
     server = await startServer({
       config: envConfig({
         RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES: INTERNAL_TEMPLATE,
-        RUNTIME_AGENT_CALLER_PROOF_MAP: JSON.stringify({
-          "agent-7": "proof-for-seven",
-          "agent-8": "proof-for-eight",
+        RUNTIME_INTERNAL_AGENT_CALLER_SECRETS: JSON.stringify({
+          [CCO_AGENT]: CCO_AGENT_SECRET,
+          [OTHER_AGENT]: OTHER_AGENT_SECRET,
         }),
       }),
       modelClient: model,
     });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: OTHER_AGENT_SECRET, // OTHER_AGENT's own real, valid, working credential
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",
-        agentId: "agent-7",
-        runId: "run-cross-agent-proof",
+        agentId: CCO_AGENT, // claiming to be CCO_AGENT
+        runId: "run-different-agents-real-credential",
         context: OVERDUE_FIXTURE,
-        callerProof: "proof-for-eight",
       },
     });
 
@@ -175,12 +181,40 @@ describe("agent caller proof over HTTP", () => {
     expect(model.calls).toHaveLength(0);
   });
 
+  it("BOTH agents' own honest calls still work -- the refusal above is identity-specific, not a blanket failure", async () => {
+    const OTHER_AGENT = "other-internal-agent-7";
+    const OTHER_AGENT_SECRET = placeholder("other-internal-agent");
+    const model = StubModelClient.returning("ok");
+    server = await startServer({
+      config: envConfig({
+        RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES: INTERNAL_TEMPLATE,
+        RUNTIME_INTERNAL_AGENT_CALLER_SECRETS: JSON.stringify({
+          [CCO_AGENT]: CCO_AGENT_SECRET,
+          [OTHER_AGENT]: OTHER_AGENT_SECRET,
+        }),
+      }),
+      modelClient: model,
+    });
+
+    const resCco = await invoke(server.url, {
+      bearer: CCO_AGENT_SECRET,
+      body: { templateId: INTERNAL_TEMPLATE, exposure: "INTERNAL", agentId: CCO_AGENT, runId: "run-cco-honest", context: OVERDUE_FIXTURE },
+    });
+    const resOther = await invoke(server.url, {
+      bearer: OTHER_AGENT_SECRET,
+      body: { templateId: INTERNAL_TEMPLATE, exposure: "INTERNAL", agentId: OTHER_AGENT, runId: "run-other-honest", context: OVERDUE_FIXTURE },
+    });
+
+    expect(resCco.status).not.toBe(403);
+    expect(resOther.status).not.toBe(403);
+  });
+
   it("an UNGATED template is completely unaffected even when the feature is opted in for a DIFFERENT template", async () => {
     const model = StubModelClient.returning("public answer");
     server = await startServer({
       config: envConfig({
         RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES: INTERNAL_TEMPLATE,
-        RUNTIME_AGENT_CALLER_PROOF_MAP: JSON.stringify({ "agent-7": "the-real-proof" }),
+        RUNTIME_INTERNAL_AGENT_CALLER_SECRETS: JSON.stringify({ [CCO_AGENT]: CCO_AGENT_SECRET }),
       }),
       modelClient: model,
     });
@@ -193,7 +227,6 @@ describe("agent caller proof over HTTP", () => {
         agentId: "agent-mgr",
         runId: "run-ungated",
         context: { note: "not the gated template" },
-        // no callerProof -- must not matter for an ungated template
       },
     });
 

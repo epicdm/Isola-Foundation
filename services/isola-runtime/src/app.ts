@@ -298,12 +298,6 @@ export interface InvokeRequestShape {
    * 400 — see `parseResponseMode`.
    */
   responseMode: unknown;
-  /**
-   * The agent-specific proof required for templates in
-   * config.agentCallerProofRequiredTemplateIds — see agent-caller-proof.ts.
-   * Absent/ignored for every other template, exactly as today.
-   */
-  callerProof: unknown;
 }
 
 export function parseInvokeBody(raw: Buffer): InvokeRequestShape | null {
@@ -324,7 +318,6 @@ export function parseInvokeBody(raw: Buffer): InvokeRequestShape | null {
     runIdIssuedBy: body["runIdIssuedBy"],
     context: body["context"],
     responseMode: body["responseMode"],
-    callerProof: body["callerProof"],
   };
 }
 
@@ -760,6 +753,11 @@ export function createRuntime(deps: AppDeps): Runtime {
       return;
     }
     const credentialExposure = auth.credentialExposure;
+    // The agent id PROVEN by the caller's own presented credential — see
+    // auth.ts's module comment. This, never body.agentId, is what the
+    // agent-caller-proof gate below (and PR #139's business-facts
+    // authorization) is keyed by.
+    const credentialAgentId = auth.credentialAgentId;
 
     let raw: Buffer;
     try {
@@ -911,9 +909,8 @@ export function createRuntime(deps: AppDeps): Runtime {
     const callerProofResult = verifyAgentCallerProof({
       templateId: template.id,
       agentId,
-      suppliedProof: asString(body.callerProof),
+      credentialAgentId,
       requiredForTemplateIds: config.agentCallerProofRequiredTemplateIds,
-      proofByAgentId: config.agentCallerProofByAgentId,
     });
     if (callerProofResult.kind !== "not_required" && callerProofResult.kind !== "ok") {
       finish(

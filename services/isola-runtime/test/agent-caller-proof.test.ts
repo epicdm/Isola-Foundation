@@ -5,29 +5,27 @@ import { verifyAgentCallerProof } from "../src/agent-caller-proof.js";
 const GATED = "epic-staff-operations-coordinator@v1";
 const UNGATED = "isola-ai-sales-front-desk-agent@v1";
 const REQUIRED = new Set([GATED]);
-const PROOF_MAP = Object.freeze({ "agent-7": "correct-proof-value" });
+const AGENT = "agent-real-42";
 
 describe("verifyAgentCallerProof", () => {
-  it("not_required for a template outside the gated set, regardless of agentId/proof", () => {
+  it("not_required for a template outside the gated set, regardless of agentId/credentialAgentId", () => {
     expect(
       verifyAgentCallerProof({
         templateId: UNGATED,
         agentId: null,
-        suppliedProof: null,
+        credentialAgentId: null,
         requiredForTemplateIds: REQUIRED,
-        proofByAgentId: PROOF_MAP,
       }),
     ).toEqual({ kind: "not_required" });
   });
 
-  it("ok when the supplied proof matches the value configured for this exact agentId", () => {
+  it("ok when the credential-proven agent id matches the claimed agentId", () => {
     expect(
       verifyAgentCallerProof({
         templateId: GATED,
-        agentId: "agent-7",
-        suppliedProof: "correct-proof-value",
+        agentId: AGENT,
+        credentialAgentId: AGENT,
         requiredForTemplateIds: REQUIRED,
-        proofByAgentId: PROOF_MAP,
       }),
     ).toEqual({ kind: "ok" });
   });
@@ -37,70 +35,53 @@ describe("verifyAgentCallerProof", () => {
       verifyAgentCallerProof({
         templateId: GATED,
         agentId: null,
-        suppliedProof: "correct-proof-value",
+        credentialAgentId: AGENT,
         requiredForTemplateIds: REQUIRED,
-        proofByAgentId: PROOF_MAP,
       }),
     ).toEqual({ kind: "missing_agent_id" });
   });
 
-  it("no_proof_configured_for_agent when the map has no entry for this agentId -- refuses even a syntactically valid caller", () => {
+  it("no_agent_bound_credential when the caller's credential proves no agent identity at all -- includes every caller holding only the shared exposure bearer", () => {
     expect(
       verifyAgentCallerProof({
         templateId: GATED,
-        agentId: "agent-unknown",
-        suppliedProof: "anything",
+        agentId: AGENT,
+        credentialAgentId: null,
         requiredForTemplateIds: REQUIRED,
-        proofByAgentId: PROOF_MAP,
       }),
-    ).toEqual({ kind: "no_proof_configured_for_agent" });
+    ).toEqual({ kind: "no_agent_bound_credential" });
   });
 
-  it("no_proof_configured_for_agent when the map is EMPTY -- the fail-closed default, not fail-open", () => {
+  it("agent_identity_mismatch when the credential proves a DIFFERENT agent than the one claimed", () => {
     expect(
       verifyAgentCallerProof({
         templateId: GATED,
-        agentId: "agent-7",
-        suppliedProof: "anything",
+        agentId: AGENT,
+        credentialAgentId: "some-other-agent",
         requiredForTemplateIds: REQUIRED,
-        proofByAgentId: {},
       }),
-    ).toEqual({ kind: "no_proof_configured_for_agent" });
+    ).toEqual({ kind: "agent_identity_mismatch" });
   });
 
-  it("missing_proof when this exact agentId HAS a configured value but the caller supplied none", () => {
-    expect(
-      verifyAgentCallerProof({
-        templateId: GATED,
-        agentId: "agent-7",
-        suppliedProof: null,
-        requiredForTemplateIds: REQUIRED,
-        proofByAgentId: PROOF_MAP,
-      }),
-    ).toEqual({ kind: "missing_proof" });
-  });
-
-  it("proof_mismatch when the supplied proof does not equal the configured value for this agentId -- a DIFFERENT agent's real proof is still a mismatch", () => {
-    expect(
-      verifyAgentCallerProof({
-        templateId: GATED,
-        agentId: "agent-7",
-        suppliedProof: "some-other-agents-proof",
-        requiredForTemplateIds: REQUIRED,
-        proofByAgentId: { "agent-7": "correct-proof-value", "agent-8": "some-other-agents-proof" },
-      }),
-    ).toEqual({ kind: "proof_mismatch" });
-  });
-
-  it("holding the shared exposure bearer alone is never sufficient for a gated template -- a caller with no proof at all is refused even with a perfectly valid agentId", () => {
+  it("holding the shared exposure bearer alone is NEVER sufficient for a gated template -- even with a perfectly valid claimed agentId", () => {
     const result = verifyAgentCallerProof({
       templateId: GATED,
-      agentId: "agent-7",
-      suppliedProof: null,
+      agentId: AGENT,
+      credentialAgentId: null,
       requiredForTemplateIds: REQUIRED,
-      proofByAgentId: PROOF_MAP,
     });
     expect(result.kind).not.toBe("ok");
     expect(result.kind).not.toBe("not_required");
+  });
+
+  it("NO INSECURE FALLBACK: every non-ok, non-not_required outcome is a refusal -- there is no branch that treats a mismatch as acceptable", () => {
+    const outcomes = [
+      verifyAgentCallerProof({ templateId: GATED, agentId: null, credentialAgentId: AGENT, requiredForTemplateIds: REQUIRED }),
+      verifyAgentCallerProof({ templateId: GATED, agentId: AGENT, credentialAgentId: null, requiredForTemplateIds: REQUIRED }),
+      verifyAgentCallerProof({ templateId: GATED, agentId: AGENT, credentialAgentId: "wrong", requiredForTemplateIds: REQUIRED }),
+    ];
+    for (const outcome of outcomes) {
+      expect(["ok", "not_required"]).not.toContain(outcome.kind);
+    }
   });
 });

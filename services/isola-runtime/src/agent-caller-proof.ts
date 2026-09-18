@@ -1,92 +1,93 @@
 /**
- * Agent-specific caller proof for business-facts-enabled templates.
+ * Agent-specific caller proof for the CCO template
+ * (`epic-staff-operations-coordinator@v1`, INTERNAL exposure).
  *
- * THE GAP THIS CLOSES
- * --------------------
- * `auth.ts` resolves a caller to an EXPOSURE CLASS (INTERNAL or PUBLIC) from a
- * single bearer shared by every template in that class. `agentId` in the
- * request body is otherwise purely descriptive — nothing before this module
- * checks that the caller is actually authorised to invoke AS that specific
- * agent. Measured 2026-09-18: the SAME shared value
- * (`settings.ISOLA_RUNTIME_BEARER`) is embedded in every Paperclip hire's
- * `adapterConfig.headers.Authorization` regardless of which agent it is — so
- * even Paperclip's own dispatch does not distinguish individual agents today.
- * That is fine for a template that never sees real business data. It stops
- * being fine the moment a template like `epic-staff-operations-coordinator@v1`
- * can be handed a live, tenant-scoped Odoo business briefing: at that point,
- * "holds the shared INTERNAL bearer" is not the same claim as "is authorised
- * to ask for THIS tenant's business facts under THIS agent's identity", and a
- * shared bearer alone cannot distinguish a legitimate caller from any other
- * holder of the same class-wide secret.
+ * THIS IS PR #139'S MECHANISM, EXTENDED — NOT A SECOND ONE
+ * ------------------------------------------------------------
+ * `auth.ts`'s `resolveCredential` already resolves, for any caller, whether
+ * its OWN presented bearer proves it represents a specific `agentId`
+ * (`credentialAgentId`) — that mechanism was built on
+ * `feat/isola-runtime-business-facts-connection-2026-09-17` (PR #139, OPEN/
+ * DRAFT, not deployed) to close a confirmed impersonation gap for
+ * PUBLIC-exposure business-facts-enabled agents. This module does not
+ * duplicate that: it reuses `credentialAgentId` exactly as PR #139 produces
+ * it, and adds only the ONE thing PR #139 does not cover — an INTERNAL,
+ * business-facts-INDEPENDENT template (the CCO, fed a live Odoo briefing as
+ * caller-supplied `context`, never as BUSINESS.md/persona content) that
+ * ALSO needs its invoking `agentId` proven, not merely claimed.
  *
- * THE MECHANISM
- * --------------
- * A SECOND, narrower proof, required ONLY for templates named in
- * `requiredForTemplateIds` (operator-configured; EMPTY by default — an
- * explicit opt-in, same "master switch off unless named" shape as
- * AGENTOS_ENABLED, and for the same reason: defaulting this ON for
- * `epic-staff-operations-coordinator@v1` would refuse Paperclip's OWN
- * existing dispatch to it the moment this shipped, since its adapterConfig
- * sends no `callerProof` today — see config.ts). The expected value per `agentId` is an
- * OPERATOR-CONFIGURED map (`RUNTIME_AGENT_CALLER_PROOF_MAP`), never derived
- * from the request and never customer-controlled — the same trust model as
- * every other runtime credential in this service. A caller invoking a gated
- * template must additionally supply `callerProof` in the request body,
- * matching the value configured for that exact `agentId`.
+ * `internalAgentCallerSecrets` (config.ts) is the symmetric, INTERNAL-side
+ * counterpart of PR #139's `agentCallerSecrets` — same map shape, same
+ * `resolveCredential` comparison, same constant-time discipline — checked in
+ * auth.ts itself, not here. This module ONLY decides, given the
+ * ALREADY-RESOLVED `credentialAgentId`, whether a specific template requires
+ * it to equal the claimed `agentId`.
+ *
+ * THE GAP THIS CLOSES, RESTATED FOR THE INTERNAL SIDE
+ * -------------------------------------------------------
+ * The exposure-class bearer (RUNTIME_SECRET_INTERNAL) is shared by every
+ * INTERNAL template and every caller — measured 2026-09-18, the SAME value
+ * is embedded in every Paperclip hire's `adapterConfig` regardless of which
+ * agent it is, so even Paperclip's own dispatch does not distinguish
+ * individual agents by the shared bearer alone. That was fine while no
+ * INTERNAL template saw real business data. It stops being fine once a
+ * caller can hand `epic-staff-operations-coordinator@v1` a live,
+ * tenant-scoped Odoo briefing: holding the shared INTERNAL bearer is not the
+ * same claim as being authorized to ask for THIS tenant's business facts
+ * under THIS agent's identity.
+ *
+ * MANDATORY, NOT OPT-IN, ONCE A TEMPLATE IS LISTED
+ * -----------------------------------------------------
+ * Same ruling PR #139 already applied to business-facts authorization
+ * ("OWNER CORRECTION... there is now only ONE rule"): a template named in
+ * `requiredForTemplateIds` gets NO invocation without a proven agent
+ * identity — there is no "authorized template, unprotected caller" state.
+ * `requiredForTemplateIds` is EMPTY by default (the master-switch-off shape
+ * `AGENTOS_ENABLED` already uses) so this ships inert until an operator
+ * opts a template in — defaulting it on would refuse Paperclip's own
+ * existing dispatch to that template the moment this shipped, since
+ * Paperclip's `adapterConfig` carries no agent-bound secret today.
  *
  * FAILS CLOSED, EVERY SHAPE NAMED. A template not in the required set is
- * untouched (`not_required` — the exact behaviour every other template has
- * always had). A gated template with no `agentId`, no proof configured for
- * that `agentId`, no supplied proof, or a supplied proof that does not match
- * are FOUR DISTINCT refusal reasons — never collapsed into one generic
- * "unauthorized", so an operator reading a log knows which one happened.
+ * untouched (`not_required`). A gated template with no `agentId` at all, a
+ * caller with no agent-bound credential (`credentialAgentId: null` —
+ * including every caller using only the shared class bearer), or a proven
+ * identity that does not match the CLAIMED `agentId` are THREE DISTINCT
+ * refusal reasons — never collapsed into one generic "unauthorized".
  *
- * DEPLOYMENT STATE. `RUNTIME_AGENT_CALLER_PROOF_MAP` is unset in every
- * environment as of 2026-09-18 (same as `FOUNDATION_BASE_URL` /
- * `FOUNDATION_INTERNAL_TOKEN` on the isola-portal side — see
- * `foundation_client.py`). Until an operator populates it, EVERY caller for a
- * gated template gets `no_proof_configured_for_agent` — fails closed, not
- * open: an unconfigured map refuses every agent rather than admitting all of
- * them. This mirrors `RUNTIME_BUDGET_FALLBACK_CENTS`'s own "absence must
- * never silently become permissive" law.
+ * NO INSECURE FALLBACK. There is no branch in this function, or in its
+ * caller in app.ts, that treats a missing or mismatched proof as anything
+ * other than a refusal — no legacy code path, no "unless this is Paperclip"
+ * exception. A gated template's ONLY route to invocation is a caller whose
+ * own credential proves the agent identity it claims.
  */
-import { createHash, timingSafeEqual } from "node:crypto";
 
 export type AgentCallerProofOutcome =
   /** This template is not in the gated set — the existing, unaffected behaviour. */
   | { kind: "not_required" }
   | { kind: "ok" }
   | { kind: "missing_agent_id" }
-  | { kind: "missing_proof" }
-  /** The map has no entry for this agentId — refuses even a syntactically valid caller. */
-  | { kind: "no_proof_configured_for_agent" }
-  | { kind: "proof_mismatch" };
-
-/** Same technique as `auth.ts`'s `constantTimeEquals` — hash first so the
- *  comparison is over two equal-length buffers and neither string's length
- *  leaks through an early return. Duplicated rather than imported: this
- *  module must stay independently reviewable without pulling in auth.ts's
- *  exposure-class concerns. */
-function constantTimeEquals(a: string, b: string): boolean {
-  const ha = createHash("sha256").update(a, "utf8").digest();
-  const hb = createHash("sha256").update(b, "utf8").digest();
-  return timingSafeEqual(ha, hb);
-}
+  /** The caller's own credential proves no agent identity at all — includes
+   *  every caller presenting only the shared INTERNAL/PUBLIC class bearer. */
+  | { kind: "no_agent_bound_credential" }
+  /** The credential proves a DIFFERENT agent than the one claimed. */
+  | { kind: "agent_identity_mismatch" };
 
 export interface AgentCallerProofArgs {
   templateId: string;
   agentId: string | null;
-  suppliedProof: string | null;
+  /** Resolved by auth.ts's `resolveCredential` — never derived from the
+   *  request body, and never null for a caller who does not hold an
+   *  agent-bound secret. */
+  credentialAgentId: string | null;
   requiredForTemplateIds: ReadonlySet<string>;
-  proofByAgentId: Readonly<Record<string, string>>;
 }
 
 /**
  * Pure decision function — no I/O, no config lookup, mirroring
  * `agentos-allowlist.ts`'s `evaluateAgentOsEligibility` on purpose: this is
- * the second gate of the same shape, trivially unit-testable and auditable.
- * Called on every request; no caching, for the same reason a routing
- * decision is never cached in this service.
+ * the same shape of gate, trivially unit-testable and auditable. Called on
+ * every request; no caching.
  */
 export function verifyAgentCallerProof(args: AgentCallerProofArgs): AgentCallerProofOutcome {
   if (!args.requiredForTemplateIds.has(args.templateId)) {
@@ -95,17 +96,11 @@ export function verifyAgentCallerProof(args: AgentCallerProofArgs): AgentCallerP
   if (args.agentId === null || args.agentId.length === 0) {
     return { kind: "missing_agent_id" };
   }
-
-  const expected = args.proofByAgentId[args.agentId];
-  if (expected === undefined) {
-    return { kind: "no_proof_configured_for_agent" };
+  if (args.credentialAgentId === null) {
+    return { kind: "no_agent_bound_credential" };
   }
-
-  if (args.suppliedProof === null || args.suppliedProof.length === 0) {
-    return { kind: "missing_proof" };
+  if (args.credentialAgentId !== args.agentId) {
+    return { kind: "agent_identity_mismatch" };
   }
-
-  return constantTimeEquals(args.suppliedProof, expected)
-    ? { kind: "ok" }
-    : { kind: "proof_mismatch" };
+  return { kind: "ok" };
 }
