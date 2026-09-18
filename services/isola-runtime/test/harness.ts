@@ -38,9 +38,26 @@ export const PUBLIC_SECRET = placeholder("public");
 export const INTERNAL_TEMPLATE = "epic-staff-operations-coordinator@v1";
 export const PUBLIC_TEMPLATE = "isola-ai-sales-front-desk-agent@v1";
 
+// REQUIRED IN PRODUCTION (owner ruling 2026-09-18,
+// MANDATORY_AGENT_CALLER_PROOF_TEMPLATE_IDS in config.ts): INTERNAL_TEMPLATE
+// (the CCO) now refuses every caller holding only the shared
+// RUNTIME_SECRET_INTERNAL bearer, unconditionally — no opt-in, no config can
+// remove it. Same reasoning as RUNTIME_BUDGET_FALLBACK_CENTS above: the
+// harness's job is to make tests genuinely SATISFY a new mandatory
+// requirement, not paper over it. "agent-7" is this suite's own pre-existing
+// convention for a generic caller against INTERNAL_TEMPLATE (used across
+// metering/invoke/callbacks/agentos-routing/conversation/inline); "agent-1"
+// is exposure.test.ts's own. Registering both here, by their own already-used
+// identities, is what makes every EXISTING fixture in this suite a properly
+// agent-bound caller by default — not a new identity invented to route
+// around the gate.
+export const AGENT7_SECRET = placeholder("agent-7-bound");
+export const AGENT1_SECRET = placeholder("agent-1-bound");
+
 export const BASE_ENV: EnvRecord = {
   RUNTIME_SECRET_INTERNAL: INTERNAL_SECRET,
   RUNTIME_SECRET_PUBLIC: PUBLIC_SECRET,
+  RUNTIME_INTERNAL_AGENT_CALLER_SECRETS: JSON.stringify({ "agent-7": AGENT7_SECRET, "agent-1": AGENT1_SECRET }),
   MODEL_BASE_URL: "https://api.deepseek.com",
   MODEL_API_KEY: placeholder("model"),
   PAPERCLIP_BASE_URL: "https://paperclip.example.test",

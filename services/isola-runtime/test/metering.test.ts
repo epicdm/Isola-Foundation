@@ -18,6 +18,7 @@ import { InMemoryStateStore, type OutboxEntry, type StateStore } from "../src/st
 import {
   CapturingLogger,
   INTERNAL_SECRET,
+  AGENT7_SECRET,
   INTERNAL_TEMPLATE,
   OVERDUE_FIXTURE,
   RecordingRecorder,
@@ -117,13 +118,13 @@ describe("sub-cent accumulation over HTTP", () => {
     const { server, paperclip } = await boot();
 
     for (const runId of ["r1", "r2", "r3"]) {
-      const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body(runId) });
+      const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body(runId) });
       expect(res.status).toBe(200);
     }
     // 3 x 0.25 cents = 0.75 cents. Rounding up here would have invented money.
     expect(paperclip.costEvents).toHaveLength(0);
 
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r4") });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r4") });
     expect(paperclip.costEvents).toHaveLength(1);
     const event = paperclip.costEvents[0]!;
     expect(event.costCents).toBe(1);
@@ -135,7 +136,7 @@ describe("sub-cent accumulation over HTTP", () => {
   it("eight runs produce two events totalling two cents, with nothing dropped", async () => {
     const { server, paperclip, store } = await boot();
     for (let i = 1; i <= 8; i += 1) {
-      await invoke(server.url, { bearer: INTERNAL_SECRET, body: body(`run-${i}`) });
+      await invoke(server.url, { bearer: AGENT7_SECRET, body: body(`run-${i}`) });
     }
     expect(paperclip.costEvents).toHaveLength(2);
     const total = paperclip.costEvents.reduce((sum, e) => sum + e.costCents, 0);
@@ -149,7 +150,7 @@ describe("sub-cent accumulation over HTTP", () => {
   it("carries a genuine remainder forward rather than dropping or inflating it", async () => {
     const { server, paperclip, store } = await boot();
     for (let i = 1; i <= 5; i += 1) {
-      await invoke(server.url, { bearer: INTERNAL_SECRET, body: body(`run-${i}`) });
+      await invoke(server.url, { bearer: AGENT7_SECRET, body: body(`run-${i}`) });
     }
     // 1.25 cents accrued: one cent billed, a quarter of a cent carried.
     expect(paperclip.costEvents.reduce((s, e) => s + e.costCents, 0)).toBe(1);
@@ -163,7 +164,7 @@ describe("sub-cent accumulation over HTTP", () => {
   it("the emitted event matches Paperclip's cost-event schema exactly", async () => {
     const { server, paperclip } = await boot();
     for (let i = 1; i <= 4; i += 1) {
-      await invoke(server.url, { bearer: INTERNAL_SECRET, body: body(`run-${i}`) });
+      await invoke(server.url, { bearer: AGENT7_SECRET, body: body(`run-${i}`) });
     }
     const event = paperclip.costEvents[0]!;
     expect(event.agentId).toBe("agent-7");
@@ -209,8 +210,8 @@ describe("sub-cent accumulation over HTTP", () => {
     });
     // 3000 fresh at 250 + 1000 cached at 50 = 750,000 + 50,000 = 800,000 mc.
     // Two runs = 1,600,000 -> one cent, 600,000 carried.
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r2") });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r2") });
     expect(paperclip.costEvents).toHaveLength(1);
     expect(paperclip.costEvents[0]!.costCents).toBe(1);
     expect(paperclip.costEvents[0]!.inputTokens).toBe(6000);
@@ -221,7 +222,7 @@ describe("sub-cent accumulation over HTTP", () => {
     const { server, paperclip, store } = await boot();
     for (let i = 0; i < 6; i += 1) {
       // The same run id every time — a duplicate webhook or an adapter retry.
-      await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("same-run") });
+      await invoke(server.url, { bearer: AGENT7_SECRET, body: body("same-run") });
     }
     expect(paperclip.costEvents).toHaveLength(0);
     const state = await store.read();
@@ -241,7 +242,7 @@ describe("never fabricate cost", () => {
       },
       model: modelWithUsage(1234, 567),
     });
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
 
     expect(paperclip.costEvents).toHaveLength(1);
     const event = paperclip.costEvents[0]!;
@@ -267,7 +268,7 @@ describe("never fabricate cost", () => {
       // Synthetic input is 10 cents/Mtok, so 150,000 tokens is 1.5 cents.
       model: modelWithUsage(150_000),
     });
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
 
     expect(paperclip.costEvents).toHaveLength(1);
     const event = paperclip.costEvents[0]!;
@@ -298,7 +299,7 @@ describe("never fabricate cost", () => {
       env: { RUNTIME_SYNTHETIC_PRICING: "on" },
     });
     for (let i = 1; i <= 4; i += 1) {
-      await invoke(server.url, { bearer: INTERNAL_SECRET, body: body(`r${i}`) });
+      await invoke(server.url, { bearer: AGENT7_SECRET, body: body(`r${i}`) });
     }
     expect(paperclip.costEvents[0]!.billingCode).toBe("provider-rates@v1");
     expect(paperclip.costEvents[0]!.billingType).toBe("metered_api");
@@ -308,7 +309,7 @@ describe("never fabricate cost", () => {
     const { server, paperclip, logger } = await boot({
       model: StubModelClient.returning("answer"),
     });
-    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
     expect(res.status).toBe(200);
     expect(paperclip.costEvents).toHaveLength(0);
     expect(logger.withOutcome("cost_usage_unavailable")).toHaveLength(1);
@@ -318,7 +319,7 @@ describe("never fabricate cost", () => {
     const { server, paperclip, logger } = await boot({
       env: { PAPERCLIP_COMPANY_ID: undefined },
     });
-    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
     expect(res.status).toBe(200);
     expect(paperclip.costEvents).toHaveLength(0);
     expect(logger.withOutcome("cost_no_company_context")).toHaveLength(1);
@@ -330,7 +331,7 @@ describe("never fabricate cost", () => {
       model: modelWithUsage(20_000),
     });
     await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: body("r1", { context: { ...OVERDUE_FIXTURE, companyId: "company-from-ctx" } }),
     });
     const call = paperclip.calls.find((c) => c.kind === "cost_event")!;
@@ -345,7 +346,7 @@ describe("budget thresholds", () => {
     const { server, logger } = await boot({ paperclip });
 
     for (const runId of ["r1", "r2", "r3"]) {
-      const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body(runId) });
+      const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body(runId) });
       expect(res.status).toBe(200);
     }
 
@@ -364,7 +365,7 @@ describe("budget thresholds", () => {
     const paperclip = new StubPaperclipApi();
     paperclip.budget = { budgetMonthlyCents: 10_000, spentMonthlyCents: 100 };
     const { server, logger } = await boot({ paperclip });
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
     expect(logger.withOutcome("budget_alert")).toHaveLength(0);
   });
 
@@ -386,7 +387,7 @@ describe("budget thresholds", () => {
       env: { RUNTIME_BUDGET_FALLBACK_CENTS: "10" },
     });
 
-    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
 
     expect(res.status).toBe(402);
     expect(res.json["outcome"]).toBe("budget_exhausted");
@@ -406,7 +407,7 @@ describe("budget thresholds", () => {
       env: { RUNTIME_BUDGET_FALLBACK_CENTS: "5000" },
     });
 
-    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
 
     expect(res.status).toBe(200);
     expect(model.calls).toHaveLength(1);
@@ -417,7 +418,7 @@ describe("budget thresholds", () => {
     paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 100 };
     const { server, model, logger } = await boot({ paperclip });
 
-    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
 
     expect(res.status).toBe(402);
     expect(res.json["outcome"]).toBe("budget_exhausted");
@@ -447,7 +448,7 @@ describe("budget thresholds", () => {
     paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 100 };
     const { server, model } = await boot({ paperclip });
     for (const runId of ["r1", "r2", "r3"]) {
-      const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body(runId) });
+      const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body(runId) });
       expect(res.status).toBe(402);
     }
     expect(paperclip.pauses).toHaveLength(1);
@@ -459,17 +460,17 @@ describe("budget thresholds", () => {
     paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 100 };
     const { server, model, store, clock } = await boot({ paperclip });
 
-    expect((await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") })).status).toBe(402);
+    expect((await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") })).status).toBe(402);
     // Nothing is remembered as a completed result for this run.
     expect(Object.keys((await store.read()).idempotency)).toHaveLength(0);
 
     // Budget raised. The cached ledger snapshot has to expire first — until it
     // does, the runtime keeps failing closed on the figure it last read.
     paperclip.budget = { budgetMonthlyCents: 100_000, spentMonthlyCents: 100 };
-    expect((await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") })).status).toBe(402);
+    expect((await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") })).status).toBe(402);
     clock.ms += 60_000;
 
-    const retry = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    const retry = await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
     expect(retry.status).toBe(200);
     expect(model.calls).toHaveLength(1);
   });
@@ -478,7 +479,7 @@ describe("budget thresholds", () => {
     const paperclip = new StubPaperclipApi();
     paperclip.budgetFailure = new PaperclipApiError("returned HTTP 500", 500, true);
     const { server, model, logger } = await boot({ paperclip });
-    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
     expect(res.status).toBe(200);
     expect(model.calls).toHaveLength(1);
     expect(logger.withOutcome("budget_read_failed")).toHaveLength(1);
@@ -491,7 +492,7 @@ describe("budget thresholds", () => {
       paperclip,
       env: { RUNTIME_BUDGET_ENFORCEMENT: "off" },
     });
-    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
     expect(res.status).toBe(200);
     expect(model.calls).toHaveLength(1);
   });
@@ -531,7 +532,7 @@ describe("reservations", () => {
 
     const responses = Promise.all(
       ["c1", "c2", "c3"].map((runId) =>
-        invoke(server.url, { bearer: INTERNAL_SECRET, body: body(runId) }),
+        invoke(server.url, { bearer: AGENT7_SECRET, body: body(runId) }),
       ),
     );
 
@@ -561,7 +562,7 @@ describe("reservations", () => {
       },
     });
     for (const runId of ["s1", "s2", "s3", "s4"]) {
-      const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body(runId) });
+      const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body(runId) });
       expect(res.status).toBe(200);
     }
     // Serial runs each reserve and release, so nothing accumulates.
@@ -572,7 +573,7 @@ describe("reservations", () => {
     const { server, store } = await boot({
       model: StubModelClient.throwing(new PaperclipApiError("x", null, true)),
     });
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("f1") });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: body("f1") });
     expect(Object.keys((await store.read()).reservations)).toHaveLength(0);
   });
 });
@@ -622,7 +623,7 @@ describe("fail closed on undelivered spend", () => {
     const store = await storeWith(undelivered());
     const { server, model, logger } = await boot({ store });
 
-    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
 
     expect(res.status).toBe(503);
     expect(res.json["outcome"]).toBe("cost_delivery_unconfirmed");
@@ -639,7 +640,7 @@ describe("fail closed on undelivered spend", () => {
       store,
       env: { RUNTIME_MAX_UNDELIVERED_COST_CENTS: "4" },
     });
-    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
     expect(res.status).toBe(503);
     expect(model.calls).toHaveLength(0);
   });
@@ -652,7 +653,7 @@ describe("fail closed on undelivered spend", () => {
       store,
       env: { RUNTIME_MAX_UNDELIVERED_AGE_MS: "1000" },
     });
-    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
     expect(res.status).toBe(503);
     expect(model.calls).toHaveLength(0);
     expect(String(logger.withOutcome("cost_delivery_unconfirmed")[0]!["failureCategory"])).toContain(
@@ -663,7 +664,7 @@ describe("fail closed on undelivered spend", () => {
   it("lets the run through once the backlog is delivered", async () => {
     const store = await storeWith(undelivered({ state: "pending", attempts: 0 }));
     const { server, model, paperclip } = await boot({ store });
-    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
     // The flush at the start of the invocation clears the backlog first.
     expect(res.status).toBe(200);
     expect(model.calls).toHaveLength(1);
@@ -683,14 +684,14 @@ describe("outbox delivery over HTTP", () => {
       env: { MODEL_PRICE_INPUT_PER_MTOK_CENTS: "2000" },
     });
 
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
     let state = await store.read();
     expect(state.outbox[outboxKey("company-1", "agent-7", "r1")]!.state).toBe("pending");
     expect(state.outbox[outboxKey("company-1", "agent-7", "r1")]!.attempts).toBe(1);
 
     // Move past the backoff and run again: the pending entry is flushed first.
     clock.ms += 5000;
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r2") });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r2") });
 
     state = await store.read();
     expect(state.outbox[outboxKey("company-1", "agent-7", "r1")]!.state).toBe("delivered");

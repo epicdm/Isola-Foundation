@@ -43,22 +43,56 @@ afterEach(async () => {
 });
 
 describe("agent caller proof over HTTP", () => {
-  it("POSITIVE CONTROL: with the feature NOT opted in (the shipped default), the gated template invokes exactly as it always has -- no agent-bound credential required", async () => {
+  it("CORRECTED 2026-09-18 (owner ruling) — with NO explicit RUNTIME_AGENT_CALLER_PROOF_* override at all, the CCO template is STILL refused for a caller holding only the shared bearer: the requirement is hardcoded (MANDATORY_AGENT_CALLER_PROOF_TEMPLATE_IDS), never something a missing config value can opt out of", async () => {
     const logger = new CapturingLogger();
-    const model = StubModelClient.returning("hello");
+    const model = StubModelClient.returning("should never be called");
     server = await startServer({
-      config: envConfig(), // no RUNTIME_AGENT_CALLER_PROOF_* / RUNTIME_INTERNAL_AGENT_CALLER_SECRETS overrides
+      config: envConfig(), // deliberately NO RUNTIME_AGENT_CALLER_PROOF_*/RUNTIME_INTERNAL_AGENT_CALLER_SECRETS override — the baseline shipped config
       logger: logger.logger,
       modelClient: model,
     });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: INTERNAL_SECRET, // the plain shared bearer only — no agent-bound proof
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",
         agentId: "agent-7",
-        runId: "run-no-opt-in",
+        runId: "run-no-config-at-all",
+        context: OVERDUE_FIXTURE,
+      },
+    });
+
+    // This is the exact, intended, owner-ruled consequence: even Paperclip's
+    // OWN existing dispatch (which presents no agent-bound secret today) is
+    // refused until RUNTIME_INTERNAL_AGENT_CALLER_SECRETS is populated.
+    expect(res.status).toBe(403);
+    expect(res.json["outcome"]).toBe("agent_caller_proof_required");
+    expect(model.calls).toHaveLength(0);
+    const lines = logger.withOutcome("agent_caller_proof_required");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!["reason"]).toBe("no_agent_bound_credential");
+  });
+
+  it("POSITIVE CONTROL: an honest agent-bound caller still succeeds — the mandatory gate refuses an UNPROVEN caller, not every caller", async () => {
+    const logger = new CapturingLogger();
+    const model = StubModelClient.returning("hello");
+    server = await startServer({
+      // Still NO explicit RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES override
+      // — proving the CCO is gated by the hardcoded default, not by this test
+      // opting it in itself. Only the secret map is supplied.
+      config: envConfig({ RUNTIME_INTERNAL_AGENT_CALLER_SECRETS: JSON.stringify({ [CCO_AGENT]: CCO_AGENT_SECRET }) }),
+      logger: logger.logger,
+      modelClient: model,
+    });
+
+    const res = await invoke(server.url, {
+      bearer: CCO_AGENT_SECRET,
+      body: {
+        templateId: INTERNAL_TEMPLATE,
+        exposure: "INTERNAL",
+        agentId: CCO_AGENT,
+        runId: "run-mandatory-but-provable",
         context: OVERDUE_FIXTURE,
       },
     });

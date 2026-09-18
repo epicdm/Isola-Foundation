@@ -10,6 +10,7 @@ import { findTemplate, normaliseRequestedExposure } from "../src/registry.js";
 import {
   CapturingLogger,
   INTERNAL_SECRET,
+  AGENT1_SECRET,
   INTERNAL_TEMPLATE,
   PUBLIC_SECRET,
   PUBLIC_TEMPLATE,
@@ -132,7 +133,7 @@ describe("POST /v1/invoke — exposure enforcement over HTTP", () => {
   it("INTERNAL credential + INTERNAL template + INTERNAL exposure => 200", async () => {
     const { model } = await boot();
     const res = await invoke(server!.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT1_SECRET,
       body: okBody(INTERNAL_TEMPLATE, "INTERNAL"),
     });
     expect(res.status).toBe(200);
@@ -153,7 +154,7 @@ describe("POST /v1/invoke — exposure enforcement over HTTP", () => {
   it("INTERNAL credential + PUBLIC template => 403, nothing recorded, model untouched", async () => {
     const { model, recorder, logger } = await boot();
     const res = await invoke(server!.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT1_SECRET,
       body: okBody(PUBLIC_TEMPLATE, "PUBLIC"),
     });
     expect(res.status).toBe(403);
@@ -202,7 +203,7 @@ describe("POST /v1/invoke — exposure enforcement over HTTP", () => {
   it("body exposure disagreeing with the credential => 403 even for an INTERNAL template", async () => {
     const { model } = await boot();
     const res = await invoke(server!.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT1_SECRET,
       body: okBody(INTERNAL_TEMPLATE, "PUBLIC"),
     });
     expect(res.status).toBe(403);
@@ -213,7 +214,7 @@ describe("POST /v1/invoke — exposure enforcement over HTTP", () => {
   it("a missing exposure falls back to the credential for an INTERNAL run", async () => {
     const { model } = await boot();
     const res = await invoke(server!.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT1_SECRET,
       body: okBody(INTERNAL_TEMPLATE),
     });
     expect(res.status).toBe(200);
@@ -223,7 +224,7 @@ describe("POST /v1/invoke — exposure enforcement over HTTP", () => {
   it("only RUNTIME_SECRET_INTERNAL configured => PUBLIC template 503, never a fallback", async () => {
     const { model, recorder } = await boot({ RUNTIME_SECRET_PUBLIC: undefined });
     const res = await invoke(server!.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT1_SECRET,
       body: okBody(PUBLIC_TEMPLATE, "PUBLIC"),
     });
     expect(res.status).toBe(503);
@@ -233,7 +234,7 @@ describe("POST /v1/invoke — exposure enforcement over HTTP", () => {
 
     // The INTERNAL side still works.
     const ok = await invoke(server!.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT1_SECRET,
       body: okBody(INTERNAL_TEMPLATE, "INTERNAL"),
     });
     expect(ok.status).toBe(200);
@@ -261,7 +262,7 @@ describe("POST /v1/invoke — exposure enforcement over HTTP", () => {
       { templateId: PUBLIC_TEMPLATE, exposure: "PUBLIC", toolPolicy: { shell: true }, context: {} },
     ];
     for (const body of attempts) {
-      const res = await invoke(server!.url, { bearer: INTERNAL_SECRET, body });
+      const res = await invoke(server!.url, { bearer: AGENT1_SECRET, body });
       expect([403, 400]).toContain(res.status);
     }
     expect(model.calls).toHaveLength(0);

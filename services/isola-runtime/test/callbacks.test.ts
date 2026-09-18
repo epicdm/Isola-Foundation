@@ -21,6 +21,7 @@ import { FileStateStore, InMemoryStateStore, type StateStore } from "../src/stat
 import {
   CapturingLogger,
   INTERNAL_SECRET,
+  AGENT7_SECRET,
   INTERNAL_TEMPLATE,
   OVERDUE_FIXTURE,
   RecordingRecorder,
@@ -103,7 +104,7 @@ const body = (overrides: Record<string, unknown> = {}) => ({
 describe("issue transition — the loop fix", () => {
   it("a successful run moves the issue to in_review", async () => {
     const { server, paperclip, logger } = await boot();
-    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body() });
+    const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body() });
 
     expect(res.status).toBe(200);
     expect(res.json["transitioned"]).toBe(true);
@@ -121,7 +122,7 @@ describe("issue transition — the loop fix", () => {
     // into two foreign keys pointing at a table only Paperclip populates.
     const { server, paperclip } = await boot();
     await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: body({ runIdIssuedBy: "paperclip" }),
     });
 
@@ -138,7 +139,7 @@ describe("issue transition — the loop fix", () => {
     // 2026-08-17, cost a customer an answer that had already been generated and
     // billed. Absence of `runIdIssuedBy` means "not issued" — the safe default.
     const { server, paperclip } = await boot();
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: body() });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: body() });
 
     expect(paperclip.calls.length).toBeGreaterThan(0);
     for (const call of paperclip.calls) {
@@ -152,7 +153,7 @@ describe("issue transition — the loop fix", () => {
     for (const claim of ["Paperclip", "paperclip ", true, 1, "gateway"]) {
       paperclip.calls.length = 0;
       await invoke(server.url, {
-        bearer: INTERNAL_SECRET,
+        bearer: AGENT7_SECRET,
         body: body({ runIdIssuedBy: claim }),
       });
       for (const call of paperclip.calls) {
@@ -165,7 +166,7 @@ describe("issue transition — the loop fix", () => {
     const model = StubModelClient.throwing(new ModelTimeoutError(60_000));
     const { server, paperclip, recorder } = await boot({ model });
 
-    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body() });
+    const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body() });
     expect(res.status).toBe(504);
     expect(res.json["issueStatus"]).toBe("blocked");
 
@@ -187,7 +188,7 @@ describe("issue transition — the loop fix", () => {
       new ModelProviderError("provider returned HTTP 500", 500),
     );
     const { server, paperclip, recorder } = await boot({ model });
-    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body() });
+    const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body() });
     expect(res.status).toBe(502);
     expect(paperclip.transitions[0]!.status).toBe("blocked");
     expect(renderOutcomeBody(recorder.outcomes[0]!)).toContain("MODEL_API_KEY");
@@ -195,7 +196,7 @@ describe("issue transition — the loop fix", () => {
 
   it("a successful run's comment carries no owner block", async () => {
     const { server, recorder } = await boot();
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: body() });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: body() });
     const comment = renderOutcomeBody(recorder.outcomes[0]!);
     expect(comment).toContain("the answer");
     expect(comment).not.toContain("**Owner:**");
@@ -217,7 +218,7 @@ describe("issue transition — the loop fix", () => {
         PAPERCLIP_FAILURE_OWNER: "the Isola duty operator",
       },
     });
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: body() });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: body() });
     expect(paperclip.transitions[0]!.status).toBe("todo");
     expect(renderOutcomeBody(recorder.outcomes[0]!)).toContain("the Isola duty operator");
   });
@@ -226,7 +227,7 @@ describe("issue transition — the loop fix", () => {
     const { server, paperclip } = await boot({
       env: { PAPERCLIP_SUCCESS_STATUS: "totally-not-a-status" },
     });
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: body() });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: body() });
     expect(paperclip.transitions[0]!.status).toBe("in_review");
   });
 
@@ -236,7 +237,7 @@ describe("issue transition — the loop fix", () => {
     const { PaperclipApiError } = await import("../src/errors.js");
     paperclip.transitionFailure = new PaperclipApiError("returned HTTP 500", 500, true);
 
-    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body() });
+    const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body() });
     expect(res.status).toBe(200);
     expect(res.json["ok"]).toBe(true);
     expect(res.json["transitioned"]).toBe(false);
@@ -248,7 +249,7 @@ describe("no issue context", () => {
   it("transitions nothing, guesses nothing, and still returns the model outcome", async () => {
     const { server, paperclip, logger } = await boot();
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: body({ context: { fixture: "overdue-invoices", invoices: [], tenantId: "8D3dp3z" } }),
     });
 
@@ -267,7 +268,7 @@ describe("no issue context", () => {
       model: StubModelClient.throwing(new ModelTimeoutError(1000)),
     });
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: body({ context: { nothing: "here", tenantId: "8D3dp3z" } }),
     });
     expect(res.status).toBe(504);
@@ -285,7 +286,7 @@ describe("no issue context", () => {
     ] as const) {
       const { server, paperclip } = await boot();
       await invoke(server.url, {
-        bearer: INTERNAL_SECRET,
+        bearer: AGENT7_SECRET,
         body: body({ context: { ...context, tenantId: "8D3dp3z" }, runId: `run-${label}` }),
       });
       expect(paperclip.transitions).toHaveLength(1);
@@ -296,7 +297,7 @@ describe("no issue context", () => {
   it("does not go fishing in an array of issues", async () => {
     const { server, paperclip } = await boot();
     await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: body({ context: { issues: [{ id: "I-9" }], tenantId: "8D3dp3z" } }),
     });
     expect(paperclip.transitions).toHaveLength(0);
@@ -307,9 +308,9 @@ describe("idempotency", () => {
   it("a replayed run id produces exactly one comment and one transition", async () => {
     const { server, model, recorder, paperclip, logger } = await boot();
 
-    const first = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body() });
-    const second = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body() });
-    const third = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body() });
+    const first = await invoke(server.url, { bearer: AGENT7_SECRET, body: body() });
+    const second = await invoke(server.url, { bearer: AGENT7_SECRET, body: body() });
+    const third = await invoke(server.url, { bearer: AGENT7_SECRET, body: body() });
 
     expect(first.status).toBe(200);
     // The replay returns the ORIGINAL result, not a fresh one.
@@ -330,8 +331,8 @@ describe("idempotency", () => {
     const { server, model, paperclip } = await boot({
       model: StubModelClient.throwing(new ModelTimeoutError(1000)),
     });
-    const first = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body() });
-    const second = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body() });
+    const first = await invoke(server.url, { bearer: AGENT7_SECRET, body: body() });
+    const second = await invoke(server.url, { bearer: AGENT7_SECRET, body: body() });
 
     expect(first.status).toBe(504);
     expect(second.status).toBe(504);
@@ -351,10 +352,10 @@ describe("idempotency", () => {
     });
     const { server, recorder, paperclip } = await boot({ model });
 
-    const inFlight = invoke(server.url, { bearer: INTERNAL_SECRET, body: body() });
+    const inFlight = invoke(server.url, { bearer: AGENT7_SECRET, body: body() });
     // Give the first request time to claim the idempotency record.
     await new Promise((resolve) => setTimeout(resolve, 25));
-    const duplicate = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body() });
+    const duplicate = await invoke(server.url, { bearer: AGENT7_SECRET, body: body() });
 
     expect(duplicate.status).toBe(200);
     expect(duplicate.json["outcome"]).toBe("duplicate_run_suppressed");
@@ -369,8 +370,8 @@ describe("idempotency", () => {
 
   it("distinct run ids are distinct runs", async () => {
     const { server, model, paperclip } = await boot();
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: body({ runId: "run-A" }) });
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: body({ runId: "run-B" }) });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: body({ runId: "run-A" }) });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: body({ runId: "run-B" }) });
     expect(model.calls).toHaveLength(2);
     expect(paperclip.transitions).toHaveLength(2);
   });
@@ -380,7 +381,7 @@ describe("idempotency", () => {
     const { server, model, paperclip } = await boot();
     for (let i = 0; i < 5; i += 1) {
       await invoke(server.url, {
-        bearer: INTERNAL_SECRET,
+        bearer: AGENT7_SECRET,
         body: body({ runId: undefined }),
       });
     }
@@ -399,7 +400,7 @@ describe("idempotency", () => {
       recorder,
     });
     const first = await invoke(firstBoot.server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: body(),
     });
     expect(first.status).toBe(200);
@@ -413,7 +414,7 @@ describe("idempotency", () => {
       recorder,
     });
     const replay = await invoke(secondBoot.server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: body(),
     });
 

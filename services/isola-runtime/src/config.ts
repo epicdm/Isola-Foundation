@@ -191,11 +191,14 @@ export interface RuntimeConfig {
   /**
    * Templates that require the caller's own credential to PROVE the
    * specific `agentId` it claims (`credentialAgentId` from auth.ts must
-   * equal `body.agentId` — see agent-caller-proof.ts). EMPTY by default (no
-   * template is gated) — an operator opts a template in explicitly via
-   * RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES. Mandatory, not opt-in,
-   * once a template IS in this set — same "no authorized-but-unprotected
-   * state" ruling PR #139 already applied to business-facts authorization.
+   * equal `body.agentId` — see agent-caller-proof.ts). ALWAYS contains
+   * MANDATORY_AGENT_CALLER_PROOF_TEMPLATE_IDS (the CCO) — hardcoded,
+   * unconditional, never configurable away — UNIONED with whatever an
+   * operator opts in via RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES for
+   * any other template. Mandatory, not opt-in, once a template IS in this
+   * set — same "no authorized-but-unprotected state" ruling PR #139 already
+   * applied to business-facts authorization, now also applied by owner
+   * ruling (2026-09-18) to the CCO specifically, unconditionally.
    */
   agentCallerProofRequiredTemplateIds: ReadonlySet<string>;
 }
@@ -224,15 +227,51 @@ export const DEFAULT_OUTBOX_SWEEP_MS = 60_000;
 /** The tighter of this and the template deadline wins, same convention as RUNTIME_MODEL_TIMEOUT_MS. */
 export const DEFAULT_AGENTOS_TIMEOUT_MS = 60_000;
 /**
- * EMPTY by default — an explicit operator opt-in, same "master switch off
- * unless named" shape as AGENTOS_ENABLED. Defaulting this to the
- * business-facts template would refuse Paperclip's OWN existing dispatch to
- * it (its adapterConfig sends no `callerProof` today — see
- * agent-caller-proof.ts) the moment this shipped, which is exactly the kind
- * of silent behaviour change this service's own conventions refuse to make.
- * See agent-caller-proof.ts.
+ * EMPTY by default for templates an operator opts in via
+ * RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES — same "master switch off
+ * unless named" shape as AGENTOS_ENABLED, for any FUTURE template this
+ * mechanism is extended to.
+ *
+ * `epic-staff-operations-coordinator@v1` (the CCO) is NOT covered by that
+ * opt-in shape any more — see MANDATORY_AGENT_CALLER_PROOF_TEMPLATE_IDS
+ * below and agent-caller-proof.ts's module doc for why the opt-in default
+ * was wrong for a template that is fed real Odoo business data.
  */
 export const DEFAULT_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES = "";
+
+/**
+ * OWNER RULING, 2026-09-18 (directive-isola-codex-review-gate-2026-09-18,
+ * relayed by Lane A: "Missing agent-specific proof must refuse before any
+ * private context or model invocation reaches the CCO — not a tolerated
+ * fallback, not something I get to soften ... Absolute requirement, no
+ * exception path"): `epic-staff-operations-coordinator@v1` is the ONE
+ * template this service feeds real, tenant-scoped Odoo business data to
+ * (business-briefing.ts, invoked as caller-supplied `context` — see
+ * agent-caller-proof.ts's own module doc). Its caller-proof requirement is
+ * UNCONDITIONAL, hardcoded, never removable by configuration — the exact
+ * correction PR #139 already made to the sibling PUBLIC-side mechanism
+ * (agentsRequiringCallerProof → unconditional for every agent in
+ * businessFactsMap, "no opt-in exception"). Unlike PR #139's per-AGENT
+ * scope, this is scoped per-TEMPLATE (the CCO is a fixed, singular
+ * INTERNAL template, not a set of agents an admin maps at runtime) —
+ * same principle, the shape that matches this service's own data model.
+ *
+ * THIS WAS PREVIOUSLY OPT-IN (empty by default, see the removed doc comment
+ * above this constant, kept in git history) with the deliberate rationale
+ * that defaulting it on would refuse Paperclip's OWN existing dispatch,
+ * whose adapterConfig carries no agent-bound secret today. The owner
+ * explicitly overruled that rationale for this template: an unprotected
+ * caller must never reach it, even if that caller is Paperclip's own
+ * current dispatch — the operator must configure
+ * RUNTIME_INTERNAL_AGENT_CALLER_SECRETS for this template before ANY
+ * caller (including Paperclip) can invoke it again. `bootWarnings` already
+ * surfaces this precisely (see below) once the set is non-empty with no
+ * secrets configured — that warning now fires unconditionally for this
+ * template, not only when an operator opts in.
+ */
+export const MANDATORY_AGENT_CALLER_PROOF_TEMPLATE_IDS: ReadonlySet<string> = Object.freeze(
+  new Set(["epic-staff-operations-coordinator@v1"]),
+);
 
 export type EnvRecord = Record<string, string | undefined>;
 
@@ -476,16 +515,22 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
     agentOsTenantId: str(env, "AGENTOS_TENANT_ID"),
     agentOsTimeoutMs: int(env, "AGENTOS_TIMEOUT_MS", DEFAULT_AGENTOS_TIMEOUT_MS),
 
+    // UNION, never a pure env-var read: MANDATORY_AGENT_CALLER_PROOF_TEMPLATE_IDS
+    // (the CCO) is always present regardless of what
+    // RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES says or omits — no
+    // config value can remove it. The env var can only ADD further
+    // templates on top, for the opt-in case any future template still uses.
     agentCallerProofRequiredTemplateIds: Object.freeze(
-      new Set(
-        (
+      new Set([
+        ...MANDATORY_AGENT_CALLER_PROOF_TEMPLATE_IDS,
+        ...(
           str(env, "RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES") ??
           DEFAULT_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES
         )
           .split(",")
           .map((s) => s.trim())
           .filter((s) => s.length > 0),
-      ),
+      ]),
     ),
   };
 }
@@ -700,7 +745,7 @@ export function bootWarnings(config: RuntimeConfig): string[] {
     Object.keys(config.internalAgentCallerSecrets).length === 0
   ) {
     warnings.push(
-      "RUNTIME_INTERNAL_AGENT_CALLER_SECRETS is unset while RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES names at least one template: every call to those templates will be refused with no_agent_bound_credential. This is the fail-closed default, not a bug — populate the map, keyed by the real paperclip_agent_id, when a caller besides Paperclip's own dispatch is ready to invoke them.",
+      `RUNTIME_INTERNAL_AGENT_CALLER_SECRETS is unset while ${[...config.agentCallerProofRequiredTemplateIds].join(", ")} require agent-bound proof (${[...MANDATORY_AGENT_CALLER_PROOF_TEMPLATE_IDS].join(", ")} unconditionally, by owner ruling; any further RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES entries by operator opt-in): every call to those templates, INCLUDING Paperclip's own existing dispatch, will be refused with no_agent_bound_credential. This is the fail-closed default, not a bug — populate the map, keyed by the real paperclip_agent_id, before any caller can invoke them.`,
     );
   }
   if (config.stateBackend === "file" && config.stateDir.startsWith("/tmp")) {

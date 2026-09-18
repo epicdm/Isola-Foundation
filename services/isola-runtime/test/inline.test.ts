@@ -41,6 +41,7 @@ import { outboxKey } from "../src/outbox.js";
 import {
   CapturingLogger,
   INTERNAL_SECRET,
+  AGENT7_SECRET,
   INTERNAL_TEMPLATE,
   OVERDUE_FIXTURE,
   RecordingRecorder,
@@ -243,7 +244,7 @@ describe("inline success", () => {
   it("returns exactly the persisted text, byte for byte", async () => {
     const { server, recorder, model } = await boot();
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
 
@@ -270,7 +271,7 @@ describe("inline success", () => {
   it("carries the full documented success shape", async () => {
     const { server } = await boot();
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
 
@@ -302,7 +303,7 @@ describe("inline success", () => {
   it("reports null token counts rather than zero when the provider reported none", async () => {
     const { server } = await boot({ model: modelReturning(ANSWER, null) });
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
     expect(res.json["completionState"]).toBe("completed");
@@ -316,7 +317,7 @@ describe("inline success", () => {
     // the same text the response carries.
     const { server, recorder } = await boot();
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
     const outcome = recorder.outcomes[0]!;
@@ -341,11 +342,11 @@ describe("a replayed inline request never runs the model again", () => {
     const { server, model, recorder, paperclip } = await boot();
 
     const first = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
     const replay = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
 
@@ -365,7 +366,7 @@ describe("a replayed inline request never runs the model again", () => {
     const store = new InMemoryStateStore();
     const first = await boot({ store });
     const original = await invoke(first.server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
     await first.server.close();
@@ -374,7 +375,7 @@ describe("a replayed inline request never runs the model again", () => {
     // A brand new runtime, a brand new model stub, the same durable store.
     const second = await boot({ store, model: modelReturning("A DIFFERENT ANSWER") });
     const replay = await invoke(second.server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
 
@@ -385,11 +386,11 @@ describe("a replayed inline request never runs the model again", () => {
 
   it("a non-inline run can be replayed inline, and still never re-runs", async () => {
     const { server, model } = await boot();
-    const plain = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    const plain = await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
     expect(plain.json["answerText"]).toBeUndefined();
 
     const replay = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
     expect(model.calls).toHaveLength(1);
@@ -399,8 +400,8 @@ describe("a replayed inline request never runs the model again", () => {
 
   it("an inline run replayed WITHOUT inline returns the original plain body", async () => {
     const { server, model } = await boot();
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: inlineBody("r1") });
-    const replay = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: inlineBody("r1") });
+    const replay = await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
 
     expect(model.calls).toHaveLength(1);
     expect(replay.status).toBe(200);
@@ -459,7 +460,7 @@ describe("a replayed inline request never runs the model again", () => {
 
     const { server, model } = await boot({ store });
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r-legacy"),
     });
 
@@ -486,11 +487,11 @@ describe("a replayed inline request never runs the model again", () => {
     });
     const { server } = await boot({ model });
 
-    const first = invoke(server.url, { bearer: INTERNAL_SECRET, body: inlineBody("r1") });
+    const first = invoke(server.url, { bearer: AGENT7_SECRET, body: inlineBody("r1") });
     // The duplicate has to arrive while the first is still inside the provider
     // call, which is what the gate guarantees.
     const duplicate = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
     release!();
@@ -517,7 +518,7 @@ describe("inline failures are structured, truthful and answerless", () => {
     const { server, model } = await boot({ recorder });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
 
@@ -538,9 +539,9 @@ describe("inline failures are structured, truthful and answerless", () => {
   it("a replay of a persistence failure stays a failure and yields no answer", async () => {
     const recorder = new RecordingRecorder(new RecorderError("write-back returned HTTP 502"));
     const { server, model } = await boot({ recorder });
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: inlineBody("r1") });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: inlineBody("r1") });
     const replay = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
     expect(model.calls).toHaveLength(1);
@@ -573,7 +574,7 @@ describe("inline failures are structured, truthful and answerless", () => {
     // ever ATTEMPTED. That is a deployment property, not a runtime fault.
     const { server, model } = await boot({ recorder: new NullRunRecorder() });
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
 
@@ -587,7 +588,7 @@ describe("inline failures are structured, truthful and answerless", () => {
   it("that non-persisted success states it was NOT recorded and says why", async () => {
     const { server } = await boot({ recorder: new NullRunRecorder() });
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
 
@@ -606,7 +607,7 @@ describe("inline failures are structured, truthful and answerless", () => {
     // simply never reports a successful write at all.
     const { server } = await boot();
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
 
@@ -622,9 +623,9 @@ describe("inline failures are structured, truthful and answerless", () => {
     // retained and an inline replay returns it — without a second model call
     // and without ever claiming it was persisted.
     const { server, model } = await boot({ recorder: new NullRunRecorder() });
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: inlineBody("r1") });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: inlineBody("r1") });
     const replay = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
 
@@ -645,7 +646,7 @@ describe("inline failures are structured, truthful and answerless", () => {
       model: modelReturning("   "),
     });
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
 
@@ -662,7 +663,7 @@ describe("inline failures are structured, truthful and answerless", () => {
       recorder: new RecordingRecorder(new RecorderError("write-back returned HTTP 502")),
     });
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
 
@@ -678,7 +679,7 @@ describe("inline failures are structured, truthful and answerless", () => {
       model: StubModelClient.throwing(new ModelTimeoutError(60_000)),
     });
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
     expect(res.status).toBe(504);
@@ -693,7 +694,7 @@ describe("inline failures are structured, truthful and answerless", () => {
       model: StubModelClient.throwing(new ModelProviderError("provider returned HTTP 500", 500)),
     });
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
     expect(res.status).toBe(502);
@@ -708,7 +709,7 @@ describe("inline failures are structured, truthful and answerless", () => {
       ),
     });
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
     expect(res.status).toBe(502);
@@ -720,7 +721,7 @@ describe("inline failures are structured, truthful and answerless", () => {
   it("internal error", async () => {
     const { server } = await boot({ model: StubModelClient.throwing(new TypeError("boom")) });
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
     expect(res.status).toBe(500);
@@ -734,7 +735,7 @@ describe("inline failures are structured, truthful and answerless", () => {
     paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 100 };
     const { server, model } = await boot({ paperclip });
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
     expect(res.status).toBe(402);
@@ -782,7 +783,7 @@ describe("inline failures are structured, truthful and answerless", () => {
     const { server, model } = await boot({ store, paperclip });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
     expect(res.status).toBe(503);
@@ -795,7 +796,7 @@ describe("inline failures are structured, truthful and answerless", () => {
     const { server, model } = await boot();
 
     const unknown = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1", { templateId: "no-such-template@v1" }),
     });
     expect(unknown.status).toBe(400);
@@ -804,7 +805,7 @@ describe("inline failures are structured, truthful and answerless", () => {
     expect(unknown.json["failureCategory"]).toBe("unknown_template");
 
     const mismatch = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r2", {
         templateId: "isola-ai-sales-front-desk-agent@v1",
         exposure: "PUBLIC",
@@ -845,7 +846,7 @@ describe("inline failures are structured, truthful and answerless", () => {
 
     for (const c of cases) {
       const res = await invoke(c.booted.server.url, {
-        bearer: INTERNAL_SECRET,
+        bearer: AGENT7_SECRET,
         body: c.body,
       });
       expect(res.json, c.label).toMatchObject({
@@ -869,7 +870,7 @@ describe("an unrecognised responseMode is a 400, never a silent downgrade", () =
     const { server, model, recorder } = await boot();
     for (const mode of ["INLINE", "streaming", "inline-v2", "", 7, true, {}, ["inline"]]) {
       const res = await invoke(server.url, {
-        bearer: INTERNAL_SECRET,
+        bearer: AGENT7_SECRET,
         body: body("r1", { responseMode: mode }),
       });
       expect(res.status, JSON.stringify(mode)).toBe(400);
@@ -887,9 +888,9 @@ describe("an unrecognised responseMode is a 400, never a silent downgrade", () =
 describe("the INTERNAL non-inline path is unchanged", () => {
   it("an absent responseMode and an explicit \"none\" produce the identical body shape", async () => {
     const { server } = await boot();
-    const absent = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    const absent = await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
     const none = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: body("r2", { responseMode: "none" }),
     });
 
@@ -923,7 +924,7 @@ describe("the INTERNAL non-inline path is unchanged", () => {
     const { server } = await boot({
       recorder: new RecordingRecorder(new RecorderError("write-back returned HTTP 502")),
     });
-    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
     expect(res.status).toBe(200);
     expect(res.json["ok"]).toBe(true);
     expect(res.json["outcome"]).toBe("ok");
@@ -941,7 +942,7 @@ describe("the INTERNAL non-inline path is unchanged", () => {
       ],
     ] as const) {
       const { server } = await boot({ model: StubModelClient.throwing(err) });
-      const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+      const res = await invoke(server.url, { bearer: AGENT7_SECRET, body: body("r1") });
       expect(res.status).toBe(status);
       expect(res.json["outcome"]).toBe(outcome);
       expect(res.json["completionState"]).toBeUndefined();
@@ -960,7 +961,7 @@ describe("answerText is never logged", () => {
     const { server, logger } = await boot({ model: modelReturning(answer) });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
     expect(res.json["answerText"]).toBe(answer);
@@ -980,9 +981,9 @@ describe("answerText is never logged", () => {
   it("nor from a replay, which is the path that reads the stored answer", async () => {
     const marker = "SENTINEL-REPLAY-ANSWER-4c81";
     const { server, logger } = await boot({ model: modelReturning(marker) });
-    await invoke(server.url, { bearer: INTERNAL_SECRET, body: inlineBody("r1") });
+    await invoke(server.url, { bearer: AGENT7_SECRET, body: inlineBody("r1") });
     const replay = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: inlineBody("r1"),
     });
     expect(replay.json["answerText"]).toBe(marker);

@@ -55,6 +55,7 @@ import { InMemoryStateStore, type StateStore } from "../src/state.js";
 import {
   CapturingLogger,
   INTERNAL_SECRET,
+  AGENT7_SECRET,
   INTERNAL_TEMPLATE,
   PUBLIC_SECRET,
   PUBLIC_TEMPLATE,
@@ -672,7 +673,7 @@ describe("RUNTIME_CONVERSATION_ISSUES=false", () => {
       agentKey: INTERNAL_AGENT_KEY,
     });
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",
@@ -692,7 +693,7 @@ describe("the INTERNAL issue-driven path is untouched", () => {
   async function runInternal(context: unknown) {
     const booted = await boot({ agentKey: INTERNAL_AGENT_KEY });
     const res = await invoke(booted.server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",

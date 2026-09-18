@@ -16,6 +16,7 @@ import { NullRunRecorder } from "../src/recorder.js";
 import {
   CapturingLogger,
   INTERNAL_SECRET,
+  AGENT7_SECRET,
   INTERNAL_TEMPLATE,
   OVERDUE_FIXTURE,
   RecordingRecorder,
@@ -61,7 +62,7 @@ describe("AgentOS routing over HTTP", () => {
     });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",
@@ -90,7 +91,7 @@ describe("AgentOS routing over HTTP", () => {
     });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",
@@ -126,7 +127,7 @@ describe("AgentOS routing over HTTP", () => {
     });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",
@@ -161,7 +162,7 @@ describe("AgentOS routing over HTTP", () => {
 
     const { tenantId: _dropped, ...fixtureWithoutTenant } = OVERDUE_FIXTURE;
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",
@@ -191,7 +192,7 @@ describe("AgentOS routing over HTTP", () => {
     });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",
@@ -222,7 +223,7 @@ describe("AgentOS routing over HTTP", () => {
     // reached, so this proves the SAME public-facing status code either way,
     // without asserting on which pre-flight check produced it.
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "PUBLIC",
@@ -246,7 +247,7 @@ describe("AgentOS routing over HTTP", () => {
     });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",
@@ -275,7 +276,7 @@ describe("AgentOS routing over HTTP", () => {
     server = await startServer({ config: envConfig(), modelClient: model, agentOsProvider: agentOs });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",
@@ -305,7 +306,7 @@ describe("AgentOS routing over HTTP", () => {
     });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",
@@ -339,7 +340,7 @@ describe("AGENTOS_ENABLED off: the eligible template takes the direct-model path
     });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",
@@ -365,7 +366,7 @@ describe("AGENTOS_ENABLED off: the eligible template takes the direct-model path
     });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",
@@ -411,7 +412,7 @@ describe("AgentOS answer + unconfigured recorder (the ratified case)", () => {
     });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",
@@ -450,7 +451,7 @@ describe("AgentOS answer + unconfigured recorder (the ratified case)", () => {
     });
 
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: {
         templateId: INTERNAL_TEMPLATE,
         exposure: "INTERNAL",
@@ -486,7 +487,7 @@ describe("Hermes (isola-internal-manager@v1) routing is completely unaffected", 
     // supplied and the request still is not refused, because
     // evaluateAgentOsEligibility returns not_applicable for this template id.
     const res = await invoke(server.url, {
-      bearer: INTERNAL_SECRET,
+      bearer: AGENT7_SECRET,
       body: {
         templateId: "isola-internal-manager@v1",
         exposure: "INTERNAL",
