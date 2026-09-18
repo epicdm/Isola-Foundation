@@ -214,6 +214,69 @@ export function getAgentToolsToken(): string | undefined {
   return process.env.ISOLA_AGENT_TOOLS_TOKEN;
 }
 
+// ── isola-portal agent-binding (governed read, reverse direction of tenant-mapping) ──
+// GET {PORTAL_BASE_URL}/api/isola/internal/agent-binding/ — the ONE place
+// Foundation may ask "which specific Paperclip agent is this tenant's
+// linked instance of a given template?" See isola-portal's
+// apps.isola_provisioning.internal_views.AgentBindingView. A DISTINCT
+// credential from ISOLA_AGENT_TOOLS_TOKEN and from FOUNDATION_INTERNAL_TOKEN
+// (the token isola-portal sends TO Foundation) — this is a third, separate
+// secret naming a fourth trust boundary, not a reuse of an existing one
+// under a new name. Genuinely unset in every environment as of 2026-09-18.
+
+export interface PortalAgentBindingConfig {
+  baseUrl: string;
+  token: string;
+}
+
+export function getPortalAgentBindingConfig(): PortalAgentBindingConfig | null {
+  const baseUrl = process.env.PORTAL_BASE_URL;
+  const token = process.env.PORTAL_TO_FOUNDATION_AGENT_BINDING_TOKEN;
+  if (!baseUrl || !token) return null;
+  return { baseUrl: baseUrl.replace(/\/+$/, ''), token };
+}
+
+// ── isola-runtime invocation (the CCO's actual backend) ───────────────────────
+// POST {RUNTIME_BASE_URL}/v1/invoke — services/isola-runtime. Foundation is a
+// THIRD authorized caller alongside Paperclip's own dispatch and
+// isola-gateway (see services/isola-runtime/src/app.ts's own comment on
+// `runIdIssuedBy`: "Two callers reach this endpoint with very different
+// ids" — Paperclip and isola-gateway; Foundation makes three, using the
+// gateway's own shape: it mints its own correlation id and never claims
+// `runIdIssuedBy: "paperclip"`).
+//
+// `internalCallerProof` is OPTIONAL and templates that do not require it
+// (every template except one, today — see services/isola-runtime/src/
+// agent-caller-proof.ts) ignore it entirely. It exists so the ONE
+// business-facts-enabled template can require MORE than the shared
+// exposure bearer once an operator populates
+// RUNTIME_AGENT_CALLER_PROOF_MAP on the runtime side with the SAME value
+// configured here — until then the runtime refuses every caller for that
+// template with `no_proof_configured_for_agent`, fail-closed.
+
+export interface IsolaRuntimeConfig {
+  baseUrl: string;
+  /** The INTERNAL-exposure shared bearer. Same trust class Paperclip's own
+   *  adapterConfig and isola-gateway already hold. */
+  internalBearer: string;
+  /** Per-agentId proof for the gated template, if this deployment has one
+   *  configured. `null` means none configured — the caller must expect
+   *  `no_proof_configured_for_agent` from a gated template until an
+   *  operator sets both sides. */
+  internalCallerProof: string | null;
+}
+
+export function getIsolaRuntimeConfig(): IsolaRuntimeConfig | null {
+  const baseUrl = process.env.ISOLA_RUNTIME_URL;
+  const internalBearer = process.env.ISOLA_RUNTIME_INTERNAL_BEARER;
+  if (!baseUrl || !internalBearer) return null;
+  return {
+    baseUrl: baseUrl.replace(/\/+$/, ''),
+    internalBearer,
+    internalCallerProof: process.env.ISOLA_RUNTIME_CCO_CALLER_PROOF || null,
+  };
+}
+
 // ── Setup checklist ───────────────────────────────────────────────────────────
 
 export interface SecretStatus {

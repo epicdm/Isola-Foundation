@@ -22,14 +22,24 @@ const TENANT = 'tenant-1';
 const AGENT_ID = 'agent-1';
 const SESSION = { effectiveTenantId: TENANT, user: { id: 'user-1' } };
 
-const MANAGER_GUARD = {
+const OWNER_GUARD = {
   ok: true,
+  authz: { level: 'owner', basis: 'membership', membershipRole: 'owner', canViewAudit: true, canViewConfiguration: true },
+};
+// requireWorkspaceAccess(session, 'owner') itself produces this shape for a
+// manager-level (Membership.role 'admin') caller — see authz.ts's own
+// levelSatisfies. Not a fixture invention: it is the real 403 the tightened
+// gate returns.
+const MANAGER_DENIED_GUARD = {
+  ok: false,
+  status: 403,
+  error: 'This view is available to workspace owners.',
   authz: { level: 'manager', basis: 'membership', membershipRole: 'admin', canViewAudit: false, canViewConfiguration: false },
 };
 const STAFF_DENIED_GUARD = {
   ok: false,
   status: 403,
-  error: 'You do not have access to this workspace.',
+  error: 'This view is available to workspace owners.',
   authz: { level: 'denied', basis: 'insufficient-role', membershipRole: 'staff', canViewAudit: false, canViewConfiguration: false },
 };
 const ELIGIBLE_AGENT = { agentId: AGENT_ID, tenantId: TENANT, name: 'CCO', clawithAgentId: 'clawith-1', clawithTenantId: 'ct-1', paperclipCompanyId: 'company-1', chatwootBindingModes: [] };
@@ -52,7 +62,7 @@ const BRIEFING = {
 beforeEach(() => {
   vi.clearAllMocks();
   getSessionMock.mockResolvedValue(SESSION);
-  requireWorkspaceAccessMock.mockResolvedValue(MANAGER_GUARD);
+  requireWorkspaceAccessMock.mockResolvedValue(OWNER_GUARD);
   resolveEligibilityMock.mockResolvedValue({ eligible: true, agent: ELIGIBLE_AGENT });
   getBusinessBriefingMock.mockResolvedValue(BRIEFING);
 });
@@ -70,6 +80,18 @@ describe('GET .../briefing — permission boundary', () => {
     const res = await get();
     expect(res.status).toBe(403);
     expect(getBusinessBriefingMock).not.toHaveBeenCalled();
+  });
+
+  it('REQUESTER AUTHORITY: 403 for a manager-level (admin) session — company filtering is not requester authorization, and this view now requires genuine tenant-owner authority', async () => {
+    requireWorkspaceAccessMock.mockResolvedValue(MANAGER_DENIED_GUARD);
+    const res = await get();
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error).toBe('This view is available to workspace owners.');
+    expect(getBusinessBriefingMock).not.toHaveBeenCalled();
+    // The guard call itself proves the STRICTER minimum was actually requested,
+    // not just that some guard happened to return ok:true elsewhere.
+    expect(requireWorkspaceAccessMock).toHaveBeenCalledWith(SESSION, 'owner');
   });
 
   it('404 when the agent does not belong to this tenant — never 403, stays indistinguishable from absent', async () => {
