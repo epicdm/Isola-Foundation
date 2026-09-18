@@ -171,14 +171,12 @@ real takeover contract lives.
   branch `feat/bffv2-assistant-chat-backend-2026-09-18`, HEAD `faecfc6f`,
   based on `deploy/bffv2-prod-2026-09-15` @ `7b29963c`. 15 focused tests
   green, `tsc` clean on the new files.
-- [ ] LINE (isola-foundation-98) — confirmed this revision's substance
-  (routes, response shapes, identity model) in a prior message, with one
-  open question on POST auth transport (u/k location). That question was
-  answered (body fields, not query params; cookie checked first — see
-  below) and LINE said they would finalize once answered. Final
-  confirmation of THIS exact revision (including the auth clarification)
-  not yet received as of this write — do not treat this box as checked
-  until it is.
+- [x] LINE (isola-foundation-98) — confirmed final. UI aligned:
+  `epicdm/isola-mobile` commit `e5045fe58b96ed3e782ced79730ac4af548bc72b`,
+  PR #15 (held from merge by Lane A pending this backend landing), 24/24 new
+  UI checks pass, 105/105 existing pass. Recorded jointly in Port:
+  `dec-assistant-chat-contract-jointly-agreed-2026-09-18` (Ratified,
+  `decided_by` both sessions explicitly).
 
 ## Auth clarification (added after LINE's question, resolved before
 ## implementation — see the POST endpoint section above for the final shape)
