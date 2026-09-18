@@ -123,12 +123,62 @@ merge/configuration/hire/deploy/live invocation/binding exists and no Agno
 involvement is proven"* — both still true of this exact HEAD; nothing in
 this session changed that.
 
+## CODEX REVIEW RECEIPT — added 2026-09-18, per directive-isola-codex-review-gate-2026-09-18
+
+Ran `codex exec --sandbox read-only` (codex-cli 0.154.0) against the bounded
+delta twice: once against `6415dc3..5b69daa` (author review), once as a
+re-review of the fix commit alone (`5b69daa..1d064eb`). Full transcripts in
+the session scratchpad; summarized here.
+
+**Author-review findings (3):**
+
+1. **CONFIRMED, matches my own finding above** — the opt-in caller-proof gap.
+   Not fixed by this pass: it needs an operator/config decision
+   (RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES + the boot-warning it
+   already triggers), not a code change. Still Lane A's to resolve, per the
+   section above.
+2. **High, NEW, FIXED this pass** — `resolveCcoAgentBinding` trusted a
+   `linked` portal response's `paperclip_agent_id` without checking it
+   matched the *requested* `paperclipAgentId`. Fixed at commit `1d064eb`
+   (`cco-agent-binding.ts`): a mismatch is now refused
+   (`linked_state_agent_id_mismatch`), same shape as the pre-existing
+   `linked_state_missing_ids` guard. 19/19 tests pass (1 new regression),
+   186/186 across `lib/workspace/` unaffected, tsc clean.
+3. **High, NEW, NOT FIXED — flagged for Lane A/owner** — `business-briefing.ts`'s
+   `resolveAuthorizedCompany` derives Odoo company scope from Foundation's
+   *stored* `binding.login`, not from the API key's own Odoo-proven identity.
+   Verified: Odoo JSON-2 (`engines/odoo.ts`) authenticates purely by
+   `Authorization: bearer <apiKey>` — `login` is never sent to Odoo and
+   nothing on Odoo's side verifies it names the apiKey's real owner. If
+   `binding.login` drifts or is wrong, company-scope authorization is
+   computed from a *different* Odoo user's row than the credential actually
+   belongs to. **No safe code-only fix exists** — re-confirmed on re-review:
+   the only purely code-side safe option is fail-closed/unavailable, not a
+   real fix; closing this properly needs a live-Odoo-verified "who does this
+   credential authenticate as" mechanism, which this session could not
+   safely design or test without live Odoo API access. Left open,
+   deliberately, rather than shipped as an unverified guess.
+
+**Re-review of the fix (commit `1d064eb`):** "No additional findings —
+finding #2 closed." Confirmed `askCco` only proceeds on a `linked` result
+and forwards `selected.agentId` (never a client-suppliable value) to both
+the runtime call and `bearerForAgent`; confirmed every caller collapses the
+new `linked_state_agent_id_mismatch` detail the same way as existing
+`unreachable` outcomes; confirmed finding #3's reasoning holds.
+
+**Net effect on this handoff's own status:** finding #1 (the fallback
+contradiction) is UNCHANGED by this pass — still Lane A's to resolve, as
+this file already said. Finding #3 is a second, independently-confirmed
+reason not to consider CCO ready to invoke live yet, beyond #1.
+
 ## PORT
 
-PORT: read isola-current-plan (v7.30, Active) for the standing CCO-parallel
-ruling and the no-merge/no-deploy constraint; read
+PORT: read isola-current-plan (v7.33, Active) for the codex-review-gate
+directive and the standing CCO-parallel/no-merge/no-deploy constraint; read
 `handover-agent-lane-pr139-mandatory-caller-proof-2026-09-17.md` for the
-PUBLIC-side precedent this contradiction repeats · wrote none (this file is
-a repo handoff artifact per the established `.checkpoint-out` convention,
-not a Port entity — Lane A's own review should record its verdict in Port
-against this branch/HEAD when it lands).
+PUBLIC-side precedent finding #1 repeats · wrote
+`ev-agent-lane-codex-review-pr142-2026-09-18` (this receipt) and the
+`cco-agent-binding.ts` fix at `1d064eb` (pushed,
+`feat/agent-lane-cco-business-briefing-2026-09-18`, PR #142, still
+unmerged/undeployed) — Lane A's own review should record its verdict in
+Port against this branch/HEAD when it lands.
