@@ -171,6 +171,59 @@ contradiction) is UNCHANGED by this pass — still Lane A's to resolve, as
 this file already said. Finding #3 is a second, independently-confirmed
 reason not to consider CCO ready to invoke live yet, beyond #1.
 
+## UPDATE — 2026-09-18, later same day: findings #1 and #2 CLOSED
+
+Owner ruling relayed by Lane A: caller-proof must be mandatory, absolute, no
+exception path — not a config decision for Lane A to soften. Fixed:
+
+- **Finding #1 (caller-proof opt-in gap) — CLOSED at `ee1fa99`.**
+  `MANDATORY_AGENT_CALLER_PROOF_TEMPLATE_IDS` (config.ts) hardcodes the CCO
+  template into the required set unconditionally — no env var can remove
+  it. This refuses Paperclip's own existing dispatch the moment it ships
+  (no agent-bound secret configured today) — the INTENDED consequence now,
+  not something to avoid. `RUNTIME_INTERNAL_AGENT_CALLER_SECRETS` must be
+  populated before ANY caller can invoke the CCO. 448/448 isola-runtime
+  tests pass (test harness updated to genuinely satisfy the new
+  requirement, not paper over it).
+- **Finding #2 (agent-id-mismatch trust gap) — CLOSED at `1d064eb`,
+  re-review confirmed.** (Unchanged from the earlier update above.)
+- **Finding #3 (Odoo identity/company-scope gap) — CLOSED at `27ca81f`,
+  one detail NOT live-verified, named plainly.** `resolveAuthorizedCompany`
+  now derives the res.users row from `res.users/context_get` (Odoo's own
+  bearer-derived identity mechanism, confirmed via Context7 docs), not
+  `binding.login`. `binding.login` is now a defense-in-depth check AGAINST
+  that resolved identity, never the selector. **Reconciliation of the
+  contradiction, as asked:** the earlier claim ("Foundation asserts
+  nothing... reads Odoo's own ACL for the credential") was TRUE of the
+  returned company value and FALSE of the row selector — the code never
+  changed, what changed was that this session read `engines/odoo.ts`'s
+  actual authentication transport for the first time and found it's
+  bearer-only, so `login` was never Odoo-verified. 0eb7fee's own 19 tests
+  mocked `json2Call` itself and could not have proven the selector was tied
+  to the real credential — they correctly tested the scoping LOGIC, which
+  was never the part that was wrong. **Not live-verified:** `context_get`'s
+  exact JSON response field name on saas-19.2 specifically — Context7
+  confirms the mechanism, not a concrete example body. Named as the precise
+  blocker; verification procedure prepared, not run:
+  `docs/isola/ODOO-CONTEXT-GET-LIVE-VERIFICATION-2026-09-18.md`. The code
+  fails CLOSED if the field name is wrong (refuses `uid` unless it's a
+  single positive integer), never open.
+
+Two full codex-cli review passes on the combined finding-#1+#3 diff (author
++ re-review): "No additional findings" both times — including an explicit
+check of whether Foundation building the Odoo briefing BEFORE the runtime's
+mandatory refusal creates a gap (it does not: the private context reaches
+the runtime's HTTP boundary on a request that then gets refused before any
+context rendering, model invocation, logging or persistence — the
+model-facing guarantee holds end to end).
+
+**CCO remains undeployed.** Nothing here authorizes a live invocation —
+`RUNTIME_INTERNAL_AGENT_CALLER_SECRETS` is still unpopulated in every
+environment, so the CCO currently refuses EVERY caller, which is the
+correct, fail-closed state until an operator explicitly provisions it.
+
+PORT: wrote `ev-agent-lane-cco-caller-proof-mandatory-and-odoo-identity-fix-2026-09-18`.
+
 ## PORT
 
 PORT: read isola-current-plan (v7.33, Active) for the codex-review-gate
