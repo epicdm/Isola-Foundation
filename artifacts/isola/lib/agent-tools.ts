@@ -56,7 +56,16 @@ export class GateBlockedError extends Error {
 const DESTRUCTIVE_METHODS = new Set(['unlink', 'reconcile', 'delete']);
 const HELD_MODELS = new Set(['account.payment']);
 
-function checkOdooPolicy(model: string, method: string): void {
+/**
+ * Exported so other governed, fixed-shape Odoo readers (e.g.
+ * lib/workspace/business-briefing.ts) can apply the SAME held/destructive
+ * checks for defense-in-depth symmetry, rather than each caller re-deciding
+ * its own policy. Every current caller only ever passes a hardcoded
+ * search_read against a non-held model, so this never actually blocks
+ * anything today — it exists so a future edit that widens a fixed query
+ * cannot silently drop the one check that would have caught it.
+ */
+export function checkOdooPolicy(model: string, method: string): void {
   const m = method.toLowerCase().trim();
   const mdl = model.toLowerCase().trim();
   if (HELD_MODELS.has(mdl)) {
