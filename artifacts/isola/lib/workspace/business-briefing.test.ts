@@ -35,14 +35,22 @@ const AUTHORIZED_COMPANY_ID = 1;
 
 /** The single-company `res.users` answer that makes a scope resolvable. Real
  *  fixtures should never need to touch this unless testing scope resolution
- *  itself — pass it through `json2Call`'s `res.users` branch. */
-const SCOPED_USER_ROW = { id: 42, company_id: [AUTHORIZED_COMPANY_ID, 'Company A'], company_ids: [AUTHORIZED_COMPANY_ID] };
+ *  itself — pass it through `json2Call`'s `res.users` branch. `login` matches
+ *  `BINDING.login` so the defense-in-depth cross-check passes by default. */
+const SCOPED_USER_ROW = { id: 42, login: BINDING.login, company_id: [AUTHORIZED_COMPANY_ID, 'Company A'], company_ids: [AUTHORIZED_COMPANY_ID] };
 
-/** Wraps a model-keyed responder with the standard scoped `res.users` answer
- *  so every existing fixture doesn't have to repeat it. */
+/** The `res.users/context_get` answer resolveBearerUserId reads — the
+ *  credential's OWN identity, never a Foundation-stored value. Matches
+ *  SCOPED_USER_ROW.id by default so the two calls agree. */
+const SCOPED_CONTEXT_GET = { uid: SCOPED_USER_ROW.id, lang: 'en_US', tz: 'UTC' };
+
+/** Wraps a model-keyed responder with the standard scoped `res.users`
+ *  answers (both `context_get` and `search_read`) so every existing fixture
+ *  doesn't have to repeat them. */
 function withScopedUser(byModel: (model: string) => unknown) {
-  return async (_config: unknown, model: string) => {
-    if (model === 'res.users') return [SCOPED_USER_ROW];
+  return async (_config: unknown, model: string, method: string) => {
+    if (model === 'res.users' && method === 'context_get') return SCOPED_CONTEXT_GET;
+    if (model === 'res.users' && method === 'search_read') return [SCOPED_USER_ROW];
     return byModel(model);
   };
 }
@@ -70,9 +78,10 @@ describe('getBusinessBriefing', () => {
 
   it('returns real rows with source links when Odoo answers, scoped to the tenant\'s own binding', async () => {
     findUniqueOdooBinding.mockResolvedValue(BINDING);
-    json2Call.mockImplementation(async (config: unknown, model: string) => {
+    json2Call.mockImplementation(async (config: unknown, model: string, method: string) => {
       expect((config as { url: string }).url).toBe(BINDING.url);
-      if (model === 'res.users') return [SCOPED_USER_ROW];
+      if (model === 'res.users' && method === 'context_get') return SCOPED_CONTEXT_GET;
+      if (model === 'res.users' && method === 'search_read') return [SCOPED_USER_ROW];
       if (model === 'account.move') {
         return [{ id: 9, name: 'INV/9', partner_id: [3, 'EPIC Customer'], amount_residual: 125.5, currency_id: [1, 'XCD'], invoice_date_due: '2026-08-01', company_id: [AUTHORIZED_COMPANY_ID, 'Company A'] }];
       }
@@ -102,14 +111,16 @@ describe('getBusinessBriefing', () => {
     expect(opportunities.state).toBe('ok');
     expect(opportunities.rows[0].label).toBe('Upgrade — EPIC Customer');
 
-    // CORRECTLY SCOPED: the resolved company was looked up via the binding's
-    // own credential (login), never asserted, and was applied as an explicit
-    // domain filter on every read — not just checked after the fact.
+    // CORRECTLY SCOPED: the resolved company was looked up via the BEARER
+    // TOKEN'S OWN identity (context_get, no id — never a Foundation-stored
+    // value), then applied as an explicit domain filter on every read — not
+    // just checked after the fact.
+    expect(json2Call).toHaveBeenCalledWith(expect.anything(), 'res.users', 'context_get', {}, expect.any(Number));
     expect(json2Call).toHaveBeenCalledWith(
       expect.anything(),
       'res.users',
       'search_read',
-      expect.objectContaining({ domain: [['login', '=', BINDING.login]] }),
+      expect.objectContaining({ domain: [['id', '=', SCOPED_USER_ROW.id]] }),
       expect.any(Number),
     );
     expect(json2Call).toHaveBeenCalledWith(
@@ -130,8 +141,9 @@ describe('getBusinessBriefing', () => {
 
   it('reports a section unavailable, not empty, when the Odoo read itself fails — one section failing does not sink the other', async () => {
     findUniqueOdooBinding.mockResolvedValue(BINDING);
-    json2Call.mockImplementation(async (_config: unknown, model: string) => {
-      if (model === 'res.users') return [SCOPED_USER_ROW];
+    json2Call.mockImplementation(async (_config: unknown, model: string, method: string) => {
+      if (model === 'res.users' && method === 'context_get') return SCOPED_CONTEXT_GET;
+      if (model === 'res.users' && method === 'search_read') return [SCOPED_USER_ROW];
       if (model === 'account.move') throw new Error('Odoo unreachable');
       return [];
     });
@@ -279,10 +291,11 @@ describe('getBusinessBriefing', () => {
       expect(json2Call).not.toHaveBeenCalled();
     });
 
-    it('refuses both sections when Odoo has no res.users row for the binding login (nothing to resolve)', async () => {
+    it('refuses both sections when Odoo has no res.users row for the bearer\'s resolved id (nothing to resolve)', async () => {
       findUniqueOdooBinding.mockResolvedValue(BINDING);
-      json2Call.mockImplementation(async (_config: unknown, model: string) => {
-        if (model === 'res.users') return [];
+      json2Call.mockImplementation(async (_config: unknown, model: string, method: string) => {
+        if (model === 'res.users' && method === 'context_get') return SCOPED_CONTEXT_GET;
+        if (model === 'res.users' && method === 'search_read') return [];
         return [{ id: 999 }]; // must never be reached
       });
 
@@ -291,10 +304,11 @@ describe('getBusinessBriefing', () => {
       expect(briefing.sections.every((s) => s.state === 'unavailable' && s.reason === 'odoo_company_scope_unresolvable')).toBe(true);
     });
 
-    it('refuses both sections when the login resolves to more than one res.users row (ambiguous identity)', async () => {
+    it('refuses both sections when the bearer\'s id resolves to more than one res.users row (ambiguous identity)', async () => {
       findUniqueOdooBinding.mockResolvedValue(BINDING);
-      json2Call.mockImplementation(async (_config: unknown, model: string) => {
-        if (model === 'res.users') return [SCOPED_USER_ROW, { ...SCOPED_USER_ROW, id: 43 }];
+      json2Call.mockImplementation(async (_config: unknown, model: string, method: string) => {
+        if (model === 'res.users' && method === 'context_get') return SCOPED_CONTEXT_GET;
+        if (model === 'res.users' && method === 'search_read') return [SCOPED_USER_ROW, { ...SCOPED_USER_ROW, id: 43 }];
         return [{ id: 999 }];
       });
 
@@ -305,8 +319,9 @@ describe('getBusinessBriefing', () => {
 
     it('refuses both sections when the credential is scoped to more than one company — cannot answer "which one is this tenant\'s own"', async () => {
       findUniqueOdooBinding.mockResolvedValue(BINDING);
-      json2Call.mockImplementation(async (_config: unknown, model: string) => {
-        if (model === 'res.users') return [{ id: 42, company_id: [1, 'Company A'], company_ids: [1, 2] }];
+      json2Call.mockImplementation(async (_config: unknown, model: string, method: string) => {
+        if (model === 'res.users' && method === 'context_get') return SCOPED_CONTEXT_GET;
+        if (model === 'res.users' && method === 'search_read') return [{ id: 42, login: BINDING.login, company_id: [1, 'Company A'], company_ids: [1, 2] }];
         return [{ id: 999 }];
       });
 
@@ -317,14 +332,79 @@ describe('getBusinessBriefing', () => {
 
     it('refuses both sections when the res.users lookup itself fails — never treated as "no restriction"', async () => {
       findUniqueOdooBinding.mockResolvedValue(BINDING);
-      json2Call.mockImplementation(async (_config: unknown, model: string) => {
-        if (model === 'res.users') throw new Error('Odoo unreachable');
+      json2Call.mockImplementation(async (_config: unknown, model: string, method: string) => {
+        if (model === 'res.users' && method === 'context_get') return SCOPED_CONTEXT_GET;
+        if (model === 'res.users' && method === 'search_read') throw new Error('Odoo unreachable');
         return [{ id: 999 }];
       });
 
       const briefing = await getBusinessBriefing(TENANT);
 
       expect(briefing.sections.every((s) => s.state === 'unavailable' && s.reason === 'odoo_company_scope_unresolvable')).toBe(true);
+    });
+
+    // ── CODEX FINDING regression tests (2026-09-18): the credential's OWN
+    //    identity now gates access, not a Foundation-stored field. ─────────
+    it('CODEX FIX — refuses when the bearer token cannot resolve an identity at all (context_get fails)', async () => {
+      findUniqueOdooBinding.mockResolvedValue(BINDING);
+      json2Call.mockImplementation(async (_config: unknown, model: string, method: string) => {
+        if (model === 'res.users' && method === 'context_get') throw new Error('Odoo unreachable');
+        return [{ id: 999 }]; // search_read must never be reached
+      });
+
+      const briefing = await getBusinessBriefing(TENANT);
+
+      expect(briefing.sections.every((s) => s.state === 'unavailable' && s.reason === 'odoo_company_scope_unresolvable')).toBe(true);
+      // The old vulnerable path (a direct search_read filtered by login) must never fire.
+      expect(json2Call).not.toHaveBeenCalledWith(expect.anything(), 'res.users', 'search_read', expect.anything(), expect.anything());
+    });
+
+    it('CODEX FIX — refuses a malformed context_get response instead of guessing at a field name', async () => {
+      findUniqueOdooBinding.mockResolvedValue(BINDING);
+      json2Call.mockImplementation(async (_config: unknown, model: string, method: string) => {
+        if (model === 'res.users' && method === 'context_get') return { user_id: 42 }; // wrong field name
+        return [{ id: 999 }];
+      });
+
+      const briefing = await getBusinessBriefing(TENANT);
+
+      expect(briefing.sections.every((s) => s.state === 'unavailable' && s.reason === 'odoo_company_scope_unresolvable')).toBe(true);
+    });
+
+    it('CODEX FIX — refuses when the bearer resolves to an identity whose OWN login disagrees with binding.login (drifted Foundation metadata, no longer silently trusted)', async () => {
+      findUniqueOdooBinding.mockResolvedValue(BINDING); // login: 'a@b.test'
+      json2Call.mockImplementation(async (_config: unknown, model: string, method: string) => {
+        if (model === 'res.users' && method === 'context_get') return { uid: 42 };
+        if (model === 'res.users' && method === 'search_read') return [{ id: 42, login: 'someone-else@example.test', company_id: [AUTHORIZED_COMPANY_ID, 'Company A'], company_ids: [AUTHORIZED_COMPANY_ID] }];
+        return [{ id: 999 }];
+      });
+
+      const briefing = await getBusinessBriefing(TENANT);
+
+      expect(briefing.sections.every((s) => s.state === 'unavailable' && s.reason === 'odoo_company_scope_unresolvable')).toBe(true);
+    });
+
+    it('CODEX FIX — the search_read that resolves company is filtered by the BEARER\'S OWN id, never by binding.login (closes the trust gap directly)', async () => {
+      findUniqueOdooBinding.mockResolvedValue(BINDING);
+      json2Call.mockImplementation(withScopedUser(() => []));
+
+      await getBusinessBriefing(TENANT);
+
+      expect(json2Call).toHaveBeenCalledWith(expect.anything(), 'res.users', 'context_get', {}, expect.any(Number));
+      expect(json2Call).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'res.users',
+        'search_read',
+        expect.objectContaining({ domain: expect.arrayContaining([['login', '=', BINDING.login]]) }),
+        expect.anything(),
+      );
+      expect(json2Call).toHaveBeenCalledWith(
+        expect.anything(),
+        'res.users',
+        'search_read',
+        expect.objectContaining({ domain: [['id', '=', SCOPED_USER_ROW.id]] }),
+        expect.any(Number),
+      );
     });
   });
 });

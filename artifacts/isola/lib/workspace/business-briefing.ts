@@ -43,7 +43,8 @@
  * see the Odoo authority rule that only `payment_state` is trustworthy and
  * currencies are never summed.
  *
- * COMPANY SCOPE — DERIVED FROM ODOO'S OWN ACL, NEVER ASSERTED BY FOUNDATION
+ * COMPANY SCOPE — DERIVED FROM THE BEARER TOKEN'S OWN ODOO IDENTITY, NEVER
+ * FROM A FOUNDATION-STORED FIELD
  * ---------------------------------------------------------------------------
  * `OdooBinding` names a DATABASE, not a company — a hosted_saas or
  * local_docker_clone instance can hold more than one `res.company`, and
@@ -55,19 +56,28 @@
  * tenant is not authorized for would sail through unchanged, because
  * self-consistency is not authorization.
  *
- * The fix resolves the tenant's AUTHORIZED company by querying Odoo's own
- * `res.users` record for the binding's credential (`login`) — the same
- * identity performing every other call here — and requires that credential
- * be scoped to EXACTLY ONE company (`company_ids` a singleton matching
- * `company_id`). This is Law 9's ceiling made concrete: "the ACL is the
- * ceiling ... intersected with the user's effective groups" — Foundation
- * asserts nothing about which company is authorized; it reads Odoo's own
- * answer for the credential the tenant already owns, LIVE, every call, never
- * cached (the same "resolve live, never cached" shape as the Paperclip
- * company-mapping fix in isola-portal PR #158). A binding with no `login`,
- * or whose credential is scoped to zero/more-than-one company, cannot prove
- * an authorized scope and is refused (`odoo_company_scope_unresolvable`) —
- * missing or ambiguous authorization is refused, never guessed.
+ * CORRECTED 2026-09-18 (Codex review finding — see `resolveAuthorizedCompany`'s
+ * own doc comment for the full reconciliation, quoted precisely rather than
+ * glossed over): the PRIOR fix here resolved the authorized company by
+ * querying `res.users` filtered by `binding.login` and called that "reading
+ * Odoo's own ACL for the credential" — but `login` is a Foundation-STORED
+ * field, never sent to Odoo as part of authentication (JSON-2 authenticates
+ * purely by bearer apiKey), so nothing ever verified it named the apiKey's
+ * real owner. The claim was true of the returned COMPANY VALUE (genuinely
+ * live) and false of the row SELECTOR (`login`, unverified). Now fixed: the
+ * res.users row is selected via `res.users/context_get` called with no id —
+ * Odoo's own documented mechanism for resolving which user a bearer token
+ * authenticates as, with NO Foundation-stored value in the selection at
+ * all. `binding.login`, when present, is now a defense-in-depth check
+ * AGAINST that resolved identity, never the selector. A credential scoped
+ * to zero/more-than-one company, or whose resolved identity's login
+ * disagrees with `binding.login`, cannot prove an authorized scope and is
+ * refused (`odoo_company_scope_unresolvable`) — missing, ambiguous or
+ * drifted authorization is refused, never guessed. See
+ * `docs/isola/ODOO-CONTEXT-GET-LIVE-VERIFICATION-2026-09-18.md` for the one
+ * live-Odoo detail this session could not verify itself (the exact
+ * `context_get` response field name) and the minimal procedure to confirm
+ * it.
  *
  * Once resolved, the authorized company id is applied TWICE: as an explicit
  * `company_id =` domain filter on every query (query-level scoping, primary
@@ -204,6 +214,7 @@ function withAuthorizedCompanyGuard<T extends { company_id: unknown }>(
 
 interface OdooUserRow {
   id: unknown;
+  login: unknown;
   company_id: unknown;
   company_ids: unknown;
 }
@@ -211,16 +222,87 @@ interface OdooUserRow {
 type CompanyScopeResult = { ok: true; companyId: number } | { ok: false };
 
 /**
+ * CORRECTED 2026-09-18 (Codex review finding, re-confirmed on re-review):
+ * the PRIOR version of this function selected the `res.users` row to trust
+ * via `domain: [['login', '=', login]]`, where `login` was `binding.login`
+ * — a Foundation-stored, nullable database field. That is exactly a
+ * Foundation-asserted value, not something Odoo's own authentication
+ * verifies: `engines/odoo.ts`'s JSON-2 transport authenticates purely via
+ * `Authorization: bearer <apiKey>` (confirmed by reading it directly) —
+ * `login` is never sent to Odoo as part of authentication, so nothing on
+ * Odoo's side ever checked that the stored `login` actually names the
+ * apiKey's real owner. If `binding.login` drifted or was simply wrong,
+ * company scope was computed from a DIFFERENT Odoo user's row than the one
+ * the credential actually authenticates as.
+ *
+ * RECONCILING THE EARLIER CLAIM (this module's own doc comment above, and
+ * Port evidence `evidence-agent-lane-cco-odoo-authorization-fix-and-
+ * integration-path-2026-09-18`, commit 0eb7fee): that entry said "Foundation
+ * asserts nothing ... it reads Odoo's own ACL for the credential." That is
+ * TRUE of the company_id VALUE returned (genuinely read live, not
+ * hardcoded) and FALSE of the row SELECTOR (`login`), which was exactly a
+ * Foundation-asserted value. The code did not change between 0eb7fee and
+ * this fix; what changed was verification depth — 0eb7fee's 19 tests mock
+ * `json2Call` itself, so they correctly prove "given res.users returns
+ * company X for this query, scoping narrows to X" but could never have
+ * proven the query's own SELECTOR was tied to the bearer's real identity,
+ * because nothing in the code attempted that binding at all. The 0eb7fee
+ * claim was broader than what either the code or its tests established.
+ *
+ * THE FIX: derive the res.users row from the CREDENTIAL ITSELF, via Odoo's
+ * own documented External API mechanism — `res.users/context_get` called
+ * with NO id, which Odoo resolves from the API key
+ * (developer/reference/external_api.html, "Migrating from XML-RPC/JSON-RPC
+ * > Common service": "It is still possible to retrieve the user's own ID by
+ * sending a JSON-2 request to res.users/context_get with no ID (the current
+ * user is extracted from the API key)."). `binding.login`, when present, is
+ * now a DEFENSE-IN-DEPTH cross-check against that resolved identity's own
+ * `login` field — never the primary selector — so this can only be
+ * STRICTER than the prior behaviour, never weaker: a binding with no login
+ * is still refused exactly as before, and a binding whose login now
+ * disagrees with the credential's real identity is a NEW refusal case the
+ * prior code could not detect at all.
+ *
+ * NOT LIVE-VERIFIED (named plainly, not glossed over): Context7's docs
+ * confirm the MECHANISM but not the exact JSON response field name for
+ * saas-19.2's JSON-2 transport specifically — this session had no live Odoo
+ * API credentials to confirm it against `epic-communications-inc.odoo.com`.
+ * `resolveBearerUserId` below is defensively strict for exactly this
+ * reason: anything other than a single positive-integer `uid` field in the
+ * response refuses rather than guesses. See
+ * `docs/isola/ODOO-CONTEXT-GET-LIVE-VERIFICATION-2026-09-18.md` for the
+ * minimal, read-only, one-call procedure a session WITH Odoo access should
+ * run once to confirm the field name (and to catch it immediately, fail
+ * closed, if it differs).
+ */
+async function resolveBearerUserId(config: OdooConfig): Promise<number | null> {
+  checkOdooPolicy('res.users', 'context_get');
+  let result: unknown;
+  try {
+    result = await json2Call(config, 'res.users', 'context_get', {}, 12000);
+  } catch {
+    return null;
+  }
+  if (typeof result !== 'object' || result === null) return null;
+  const uid = (result as { uid?: unknown }).uid;
+  return typeof uid === 'number' && Number.isInteger(uid) && uid > 0 ? uid : null;
+}
+
+/**
  * Resolves the ONE Odoo company this tenant's credential is authorized for,
- * by asking Odoo itself — never a Foundation-asserted value. Requires
- * `binding.login` (the human user the API key belongs to, per
- * `OdooBinding`'s own doc comment) and requires that user's `company_ids`
- * be a singleton equal to its `company_id`: a credential scoped to zero or
- * more than one company cannot answer "which one is this tenant's own", so
- * it is refused rather than guessed (missing/ambiguous authorization).
+ * by asking Odoo itself which user the BEARER TOKEN authenticates as
+ * (`resolveBearerUserId`, never a Foundation-stored value) and requiring
+ * that user's `company_ids` be a singleton equal to its `company_id`: a
+ * credential scoped to zero or more than one company cannot answer "which
+ * one is this tenant's own", so it is refused rather than guessed. See the
+ * doc comment above for the full reconciliation of why this replaces the
+ * prior `login`-selected lookup.
  */
 async function resolveAuthorizedCompany(config: OdooConfig, login: string | null | undefined): Promise<CompanyScopeResult> {
   if (!login || !login.trim()) return { ok: false };
+
+  const bearerUid = await resolveBearerUserId(config);
+  if (bearerUid === null) return { ok: false };
 
   checkOdooPolicy('res.users', 'search_read');
   let rows: OdooUserRow[];
@@ -229,7 +311,7 @@ async function resolveAuthorizedCompany(config: OdooConfig, login: string | null
       config,
       'res.users',
       'search_read',
-      { domain: [['login', '=', login]], fields: ['id', 'company_id', 'company_ids'], limit: 2 },
+      { domain: [['id', '=', bearerUid]], fields: ['id', 'login', 'company_id', 'company_ids'], limit: 2 },
       12000,
     )) as OdooUserRow[];
   } catch {
@@ -237,6 +319,14 @@ async function resolveAuthorizedCompany(config: OdooConfig, login: string | null
   }
 
   if (!rows || rows.length !== 1) return { ok: false };
+
+  // Defense-in-depth: Foundation's stored binding.login, if present, must
+  // agree with the identity the bearer token actually resolved to. A
+  // mismatch means Foundation's stored metadata has drifted from the
+  // credential it is attached to — exactly the condition this fix exists
+  // to stop trusting silently.
+  if (rows[0].login !== login) return { ok: false };
+
   const companyId = companyIdOf(rows[0].company_id);
   if (companyId === null) return { ok: false };
 
