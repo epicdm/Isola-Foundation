@@ -35,6 +35,7 @@ const REPLIED_RESULT = {
   text: 'Here is your briefing.',
   sources: ['https://epic.odoo.com/odoo/account.move/1'],
   correlationId: 'corr-1',
+  availableAgents: [] as const,
 };
 
 function post(body: unknown) {
@@ -89,6 +90,12 @@ describe('POST /api/workspace/cco/ask — request shape', () => {
     const res = await POST(req);
     expect(res.status).toBe(400);
   });
+
+  it('400 when agentId is supplied but empty -- never silently treated as "no selection"', async () => {
+    const res = await post({ message: 'hi', threadId: 't1', turnId: 'u1', agentId: '' });
+    expect(res.status).toBe(400);
+    expect(askCcoMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('POST /api/workspace/cco/ask — the honest path', () => {
@@ -101,13 +108,39 @@ describe('POST /api/workspace/cco/ask — the honest path', () => {
       message: 'How are receivables?',
       threadId: 'thread-1',
       turnId: 'turn-1',
+      paperclipAgentId: undefined,
     });
     expect(bodyOut).toEqual({
       state: 'replied',
       text: 'Here is your briefing.',
       sources: ['https://epic.odoo.com/odoo/account.move/1'],
       correlationId: 'corr-1',
+      availableAgents: [],
     });
+  });
+
+  it('RESOLVE THE SELECTED AGENT: a supplied agentId is passed through as paperclipAgentId -- the owner\'s own selection, never resolved by template alone', async () => {
+    await post({ message: 'x', threadId: 't1', turnId: 'u1', agentId: 'agent-real-42' });
+    expect(askCcoMock).toHaveBeenCalledWith(expect.objectContaining({ paperclipAgentId: 'agent-real-42' }));
+  });
+
+  it('GENUINELY UNDERSPECIFIED: an ambiguous_agent_selection_required result carries the real choices back, never a guess', async () => {
+    askCcoMock.mockResolvedValue({
+      state: 'blocked',
+      reason: 'ambiguous_agent_selection_required',
+      briefing: null,
+      text: null,
+      sources: [],
+      correlationId: null,
+      availableAgents: [
+        { paperclipAgentId: 'agent-a', paperclipCompanyId: 'co-a', displayName: 'Agent A' },
+        { paperclipAgentId: 'agent-b', paperclipCompanyId: 'co-b', displayName: 'Agent B' },
+      ],
+    });
+    const res = await post({ message: 'x', threadId: 't1', turnId: 'u1' });
+    const bodyOut = await res.json();
+    expect(bodyOut.state).toBe('blocked');
+    expect(bodyOut.availableAgents).toHaveLength(2);
   });
 
   it('audits every ask with the tenant, actor, correlation id and outcome state', async () => {
@@ -136,6 +169,7 @@ describe('POST /api/workspace/cco/ask — the honest path', () => {
       text: null,
       sources: [],
       correlationId: null,
+      availableAgents: [],
     });
     const res = await post({ message: 'x', threadId: 't1', turnId: 'u1' });
     const bodyOut = await res.json();

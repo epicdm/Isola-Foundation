@@ -23,10 +23,15 @@
  * backend from the CCO, which is a Paperclip-hired agent whose brain is
  * services/isola-runtime. There is no Foundation `Agent` row for the CCO
  * hire at all (verified: the Paperclip-hire flow lives entirely in
- * isola-portal's `IsolaAgentProvision`), so this route takes no `agentId`
- * path parameter — it is scoped by the session's tenant alone, and
- * `askCco`/`resolveCcoAgentBinding` resolve which specific hired agent that
- * tenant's CCO actually is.
+ * isola-portal's `IsolaAgentProvision`), so this route takes no PATH
+ * parameter — it is scoped by the session's tenant, plus an optional
+ * `agentId` BODY field naming the owner's SELECTED hired agent (its real
+ * `paperclip_agent_id` — see cco-agent-binding.ts's own docstring on why
+ * identity, not template matching, resolves it). Omitting it is only for a
+ * tenant with exactly one CCO agent (auto-selected) or a genuinely
+ * underspecified request the caller must resolve — see `askCco`'s
+ * `ambiguous_agent_selection_required` outcome, which carries the real
+ * choices back rather than guessing one.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -50,10 +55,11 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
-  const { message, threadId, turnId } = (body ?? {}) as {
+  const { message, threadId, turnId, agentId } = (body ?? {}) as {
     message?: unknown;
     threadId?: unknown;
     turnId?: unknown;
+    agentId?: unknown;
   };
   if (typeof message !== 'string' || message.trim() === '') {
     return NextResponse.json({ error: 'message is required' }, { status: 400 });
@@ -64,6 +70,9 @@ export async function POST(req: NextRequest) {
   if (typeof turnId !== 'string' || turnId.trim() === '') {
     return NextResponse.json({ error: 'turnId is required' }, { status: 400 });
   }
+  if (agentId !== undefined && (typeof agentId !== 'string' || agentId.trim() === '')) {
+    return NextResponse.json({ error: 'agentId, if supplied, must be a non-empty string' }, { status: 400 });
+  }
 
   const result = await askCco({
     // The SESSION tenant, never anything the caller could supply — same
@@ -72,6 +81,7 @@ export async function POST(req: NextRequest) {
     message: message.trim(),
     threadId: threadId.trim(),
     turnId: turnId.trim(),
+    paperclipAgentId: typeof agentId === 'string' ? agentId.trim() : undefined,
   });
 
   await audit({
@@ -94,5 +104,6 @@ export async function POST(req: NextRequest) {
     text: result.text,
     sources: result.sources,
     correlationId: result.correlationId,
+    availableAgents: result.availableAgents,
   });
 }

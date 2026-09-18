@@ -245,35 +245,77 @@ export function getPortalAgentBindingConfig(): PortalAgentBindingConfig | null {
 // gateway's own shape: it mints its own correlation id and never claims
 // `runIdIssuedBy: "paperclip"`).
 //
-// `internalCallerProof` is OPTIONAL and templates that do not require it
-// (every template except one, today — see services/isola-runtime/src/
-// agent-caller-proof.ts) ignore it entirely. It exists so the ONE
-// business-facts-enabled template can require MORE than the shared
-// exposure bearer once an operator populates
-// RUNTIME_AGENT_CALLER_PROOF_MAP on the runtime side with the SAME value
-// configured here — until then the runtime refuses every caller for that
-// template with `no_proof_configured_for_agent`, fail-closed.
+// THE PROOF IS THE BEARER ITSELF, NEVER A REQUEST-BODY FIELD. Reconciled
+// onto services/isola-runtime/src/auth.ts's own agent-bound-credential
+// mechanism (PR #139's `agentCallerSecrets`, extended on this branch with a
+// symmetric INTERNAL-exposure `internalAgentCallerSecrets` map) — there is
+// no separate "proof value" concept on either side. `agentBearerSecrets`
+// below is the FOUNDATION-SIDE mirror of the runtime's
+// `RUNTIME_INTERNAL_AGENT_CALLER_SECRETS`: keyed by the exact
+// `paperclip_agent_id` `resolveCcoAgentBinding` resolves, so the caller can
+// authenticate AS that specific agent when a secret exists for it.
+//
+// NO INSECURE FALLBACK: when no per-agent secret is configured for the
+// resolved agent, the call falls back to the plain shared `internalBearer`
+// — which is EXACTLY today's unprotected behaviour for every other INTERNAL
+// template, and which the runtime's own gate (agent-caller-proof.ts) will
+// itself refuse with `no_agent_bound_credential` for any template an
+// operator has opted into `RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES`.
+// Foundation never widens that refusal and never substitutes a value of its
+// own — the fallback is "use the credential that exists", not "invent a
+// bypass".
 
 export interface IsolaRuntimeConfig {
   baseUrl: string;
   /** The INTERNAL-exposure shared bearer. Same trust class Paperclip's own
-   *  adapterConfig and isola-gateway already hold. */
+   *  adapterConfig and isola-gateway already hold. Used only when no
+   *  per-agent secret below is configured for the resolved agent. */
   internalBearer: string;
-  /** Per-agentId proof for the gated template, if this deployment has one
-   *  configured. `null` means none configured — the caller must expect
-   *  `no_proof_configured_for_agent` from a gated template until an
-   *  operator sets both sides. */
-  internalCallerProof: string | null;
+  /** `paperclip_agent_id` -> the agent-bound secret THIS deployment holds
+   *  for it, mirroring the runtime's `RUNTIME_INTERNAL_AGENT_CALLER_SECRETS`
+   *  entry for the SAME agent id. Absent for an agent id means Foundation
+   *  authenticates as the plain shared bearer for that call — see the
+   *  module note on why that is not an insecure fallback. */
+  agentBearerSecrets: Readonly<Record<string, string>>;
+}
+
+/** The bearer Foundation should present for THIS specific resolved agent —
+ *  its own agent-bound secret if configured, else the shared INTERNAL
+ *  bearer. Never invents a value; never widens what the runtime would
+ *  accept. */
+export function bearerForAgent(config: IsolaRuntimeConfig, paperclipAgentId: string): string {
+  return config.agentBearerSecrets[paperclipAgentId] ?? config.internalBearer;
 }
 
 export function getIsolaRuntimeConfig(): IsolaRuntimeConfig | null {
   const baseUrl = process.env.ISOLA_RUNTIME_URL;
   const internalBearer = process.env.ISOLA_RUNTIME_INTERNAL_BEARER;
   if (!baseUrl || !internalBearer) return null;
+
+  let agentBearerSecrets: Record<string, string> = {};
+  const raw = process.env.ISOLA_RUNTIME_AGENT_BEARER_SECRETS;
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        for (const [agentId, secret] of Object.entries(parsed as Record<string, unknown>)) {
+          if (typeof secret === 'string' && secret.length > 0 && agentId.trim().length > 0) {
+            agentBearerSecrets[agentId.trim()] = secret;
+          }
+        }
+      }
+    } catch {
+      // Malformed value fails soft to "no per-agent secrets configured" —
+      // same discipline as parseInstructionsMap on the runtime side. Never
+      // silently redirects behaviour to somewhere unexpected.
+      agentBearerSecrets = {};
+    }
+  }
+
   return {
     baseUrl: baseUrl.replace(/\/+$/, ''),
     internalBearer,
-    internalCallerProof: process.env.ISOLA_RUNTIME_CCO_CALLER_PROOF || null,
+    agentBearerSecrets: Object.freeze(agentBearerSecrets),
   };
 }
 

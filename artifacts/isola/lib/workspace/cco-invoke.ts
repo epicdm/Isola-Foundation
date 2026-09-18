@@ -1,6 +1,7 @@
 /**
- * Owner request -> authorized Odoo briefing -> correct CCO invocation ->
- * sourced answer. The integrated path this module exists to assemble.
+ * Owner request -> owner-selected agent resolved precisely -> authorized
+ * Odoo briefing -> authenticated CCO invocation -> sourced answer. The
+ * integrated path this module exists to assemble.
  *
  * CALLER RESPONSIBILITIES (unchanged from the sibling GET .../briefing route)
  * -----------------------------------------------------------------------------
@@ -9,8 +10,22 @@
  * of responsibility `performStaffChatTurn` already uses. This module assumes
  * its caller already did both and passes in an authorized `tenantId`.
  *
- * THE THREE THINGS THIS MODULE VERIFIED, NOT ASSUMED, ABOUT THE RUNTIME CALL
- * ------------------------------------------------------------------------------
+ * AGENT SELECTION, NOT TEMPLATE MATCHING
+ * -------------------------------------------
+ * The owner selects a SPECIFIC hired agent — `input.paperclipAgentId`, when
+ * supplied, is resolved by identity via `resolveCcoAgentBinding` (never
+ * ambiguous: isola-portal enforces `paperclip_agent_id` globally unique).
+ * Two agents sharing the CCO template is ordinary, supported behaviour; this
+ * module never picks between them. When the caller has not yet made a
+ * selection (`paperclipAgentId` omitted — a genuinely underspecified
+ * request), `listCcoAgents` is consulted: zero candidates is `not_provisioned`,
+ * exactly one is auto-selected (the only option is not an ambiguity), and
+ * more than one is the ONE case this module reports `ambiguous` — a real
+ * choice the caller must make, carried back as `availableAgents` so a UI can
+ * present it, never guessed.
+ *
+ * THE THINGS THIS MODULE VERIFIED, NOT ASSUMED, ABOUT THE RUNTIME CALL
+ * --------------------------------------------------------------------------
  *  - `context.tenantId` is NEVER set. `epic-staff-operations-coordinator@v1`
  *    is AgentOS-gated to a single operator-configured tenant
  *    (agentos-allowlist.ts); a request's `context.tenantId` may only ECHO
@@ -33,12 +48,27 @@
  *    `resolveCcoAgentBinding` — not a placeholder — so budget bucketing and
  *    (on exhaustion) `pauseAgent` apply to the correct Paperclip agent.
  *
+ * AUTHENTICATED INVOCATION — THE PROOF IS THE BEARER, NEVER A BODY FIELD
+ * ---------------------------------------------------------------------------
+ * `bearerForAgent` (lib/engines.ts) presents the caller's OWN agent-bound
+ * secret for the resolved `paperclip_agent_id` when this deployment has one
+ * configured, mirroring isola-runtime's `RUNTIME_INTERNAL_AGENT_CALLER_SECRETS`
+ * — the SAME mechanism PR #139 built for PUBLIC-exposure business-facts
+ * agents, extended symmetrically to INTERNAL by this branch (see
+ * services/isola-runtime/src/agent-caller-proof.ts). There is no
+ * `callerProof` request field: proof of identity IS the credential
+ * presented, never something a request body could forge. When no per-agent
+ * secret is configured, the call presents the plain shared INTERNAL bearer
+ * — exactly today's behaviour for every other INTERNAL template, and the
+ * runtime's own gate (not this module) is what refuses that with
+ * `no_agent_bound_credential` for a template an operator has opted in.
+ *
  * DUPLICATE PROTECTION, TWO LAYERS
  * -----------------------------------
- * `runId` is DETERMINISTIC from `(tenantId, turnId)` — the same "same
- * turnId reproduces the same id" shape `buildStaffChatCorrelationId` already
- * uses. The runtime's OWN idempotency store (`buildIdempotencyKey`) keys on
- * `(companyId, agentId, runId, issueId, contextText)` and replays a
+ * `runId` is DETERMINISTIC from `(tenantId, threadId, turnId)` — the same
+ * "same turnId reproduces the same id" shape `buildStaffChatCorrelationId`
+ * already uses. The runtime's OWN idempotency store (`buildIdempotencyKey`)
+ * keys on `(companyId, agentId, runId, issueId, contextText)` and replays a
  * completed run's stored answer verbatim rather than calling the model
  * again — so a client retry with the same turnId is answered from the
  * store, not re-executed, on EITHER side.
@@ -55,26 +85,42 @@
  */
 
 import { getBusinessBriefing, type BusinessBriefing } from './business-briefing';
-import { CCO_TEMPLATE_ID, resolveCcoAgentBinding, type CcoAgentBindingOutcome } from './cco-agent-binding';
-import { getIsolaRuntimeConfig } from '@/lib/engines';
+import {
+  listCcoAgents,
+  resolveCcoAgentBinding,
+  type CcoAgentBindingOutcome,
+  type CcoAgentCatalogEntry,
+} from './cco-agent-binding';
+import { bearerForAgent, getIsolaRuntimeConfig } from '@/lib/engines';
 
-/** The isola-runtime registry id — DISTINCT from CCO_TEMPLATE_ID, which is
- *  isola-portal's own catalogue id for the same underlying agent. Never
- *  conflate the two: sending isola-portal's id to isola-runtime's
- *  `findTemplate()` resolves to nothing and 400s as `unknown_template`. */
+/** The isola-runtime registry id — DISTINCT from CCO_TEMPLATE_ID
+ *  (cco-agent-binding.ts), which is isola-portal's own catalogue id for the
+ *  same underlying agent. Never conflate the two: sending isola-portal's id
+ *  to isola-runtime's `findTemplate()` resolves to nothing and 400s as
+ *  `unknown_template`. */
 export const RUNTIME_TEMPLATE_ID = 'epic-staff-operations-coordinator@v1';
 
 const RUNTIME_REQUEST_TIMEOUT_MS = 55_000;
 
 export type CcoAskState = 'replied' | 'blocked' | 'unavailable' | 'timeout' | 'degraded';
 
+export type CcoAskBlockedReason =
+  | Exclude<CcoAgentBindingOutcome['outcome'], 'linked' | 'not_configured' | 'unreachable'>
+  | 'not_provisioned'
+  /** The genuinely underspecified case: no agent was selected and more than
+   *  one executable candidate exists. `availableAgents` carries the choice. */
+  | 'ambiguous_agent_selection_required';
+
 export interface CcoAskBlocked {
   state: 'blocked';
-  reason: Exclude<CcoAgentBindingOutcome['outcome'], 'linked'>;
+  reason: CcoAskBlockedReason;
   briefing: null;
   text: null;
   sources: [];
   correlationId: null;
+  /** Populated ONLY for `ambiguous_agent_selection_required` — the real
+   *  choices a caller (or UI) must pick from. Empty for every other reason. */
+  availableAgents: CcoAgentCatalogEntry[];
 }
 
 export interface CcoAskUnavailableOrDegraded {
@@ -84,6 +130,7 @@ export interface CcoAskUnavailableOrDegraded {
   text: null;
   sources: [];
   correlationId: string | null;
+  availableAgents: [];
 }
 
 export interface CcoAskReplied {
@@ -96,6 +143,7 @@ export interface CcoAskReplied {
    *  drops one. Never invented: exactly the briefing's own `sourceUrl`s. */
   sources: string[];
   correlationId: string;
+  availableAgents: [];
 }
 
 export type CcoAskResult = CcoAskBlocked | CcoAskUnavailableOrDegraded | CcoAskReplied;
@@ -115,6 +163,10 @@ export interface CcoAskInput {
    *  SAME turnId is what makes a client retry safe (replayed, never a
    *  second model call); a NEW turnId is a new question. */
   turnId: string;
+  /** The owner's SELECTED agent, by its real `paperclip_agent_id`. Omit only
+   *  when the caller genuinely has not made a selection yet — see
+   *  `listCcoAgents`/`ambiguous_agent_selection_required` above. */
+  paperclipAgentId?: string;
 }
 
 function briefingSourceLinks(briefing: BusinessBriefing): string[] {
@@ -136,6 +188,10 @@ function runIdFor(tenantId: string, threadId: string, turnId: string): string {
   return `cco-briefing:${tenantId}:${threadId}:${turnId}`;
 }
 
+function blocked(reason: CcoAskBlockedReason, availableAgents: CcoAgentCatalogEntry[] = []): CcoAskBlocked {
+  return { state: 'blocked', reason, briefing: null, text: null, sources: [], correlationId: null, availableAgents };
+}
+
 interface RuntimeInvokeBody {
   ok: boolean;
   outcome: string;
@@ -144,29 +200,72 @@ interface RuntimeInvokeBody {
   error?: unknown;
 }
 
-export async function askCco(input: CcoAskInput): Promise<CcoAskResult> {
-  const binding = await resolveCcoAgentBinding(input.tenantId);
-
-  if (binding.outcome !== 'linked') {
+/**
+ * Resolves WHICH agent this call runs as. Agent selection, never template
+ * matching: an explicit `paperclipAgentId` is resolved by identity; its
+ * absence falls back to the catalog ONLY to handle the single-option and
+ * genuinely-ambiguous cases, never to pick between real alternatives.
+ */
+async function resolveSelectedAgent(
+  tenantId: string,
+  paperclipAgentId: string | undefined,
+): Promise<{ kind: 'resolved'; agentId: string; companyId: string } | { kind: 'blocked'; result: CcoAskResult }> {
+  if (paperclipAgentId !== undefined && paperclipAgentId.length > 0) {
+    const binding = await resolveCcoAgentBinding(tenantId, paperclipAgentId);
+    if (binding.outcome === 'linked') {
+      return { kind: 'resolved', agentId: binding.paperclipAgentId, companyId: binding.paperclipCompanyId };
+    }
     if (binding.outcome === 'not_configured' || binding.outcome === 'unreachable') {
       return {
+        kind: 'blocked',
+        result: {
+          state: 'unavailable',
+          reason: `agent_binding_${binding.outcome}`,
+          briefing: null,
+          text: null,
+          sources: [],
+          correlationId: null,
+          availableAgents: [],
+        },
+      };
+    }
+    // tenant_not_mapped | not_found | not_ready
+    return { kind: 'blocked', result: blocked(binding.outcome) };
+  }
+
+  const catalog = await listCcoAgents(tenantId);
+  if (catalog.outcome === 'not_configured' || catalog.outcome === 'unreachable') {
+    return {
+      kind: 'blocked',
+      result: {
         state: 'unavailable',
-        reason: `agent_binding_${binding.outcome}`,
+        reason: `agent_catalog_${catalog.outcome}`,
         briefing: null,
         text: null,
         sources: [],
         correlationId: null,
-      };
-    }
-    return {
-      state: 'blocked',
-      reason: binding.outcome,
-      briefing: null,
-      text: null,
-      sources: [],
-      correlationId: null,
+        availableAgents: [],
+      },
     };
   }
+  if (catalog.outcome === 'tenant_not_mapped') {
+    return { kind: 'blocked', result: blocked('tenant_not_mapped') };
+  }
+  if (catalog.agents.length === 0) {
+    return { kind: 'blocked', result: blocked('not_provisioned') };
+  }
+  if (catalog.agents.length > 1) {
+    // THE ONLY genuinely underspecified case. Never guessed, never the
+    // first one picked -- the real choice is handed back.
+    return { kind: 'blocked', result: blocked('ambiguous_agent_selection_required', catalog.agents) };
+  }
+  const only = catalog.agents[0]!;
+  return { kind: 'resolved', agentId: only.paperclipAgentId, companyId: only.paperclipCompanyId };
+}
+
+export async function askCco(input: CcoAskInput): Promise<CcoAskResult> {
+  const selected = await resolveSelectedAgent(input.tenantId, input.paperclipAgentId);
+  if (selected.kind === 'blocked') return selected.result;
 
   const briefing = await getBusinessBriefing(input.tenantId);
 
@@ -179,6 +278,7 @@ export async function askCco(input: CcoAskInput): Promise<CcoAskResult> {
       text: null,
       sources: [],
       correlationId: null,
+      availableAgents: [],
     };
   }
 
@@ -186,14 +286,14 @@ export async function askCco(input: CcoAskInput): Promise<CcoAskResult> {
   const requestBody: Record<string, unknown> = {
     templateId: RUNTIME_TEMPLATE_ID,
     exposure: 'INTERNAL',
-    agentId: binding.paperclipAgentId,
+    agentId: selected.agentId,
     runId,
     // NEVER "paperclip" — Foundation did not issue this id through
     // Paperclip's own heartbeat mechanism. Absence is the safe default; see
     // app.ts's own comment on runIdIssuedBy.
     responseMode: 'inline',
     context: {
-      companyId: binding.paperclipCompanyId,
+      companyId: selected.companyId,
       conversationRef: conversationRefFor(input.tenantId, input.threadId),
       // DATA, never instruction — see this module's own docstring and
       // context.ts's buildUserMessage, which wraps this whole object in an
@@ -204,16 +304,16 @@ export async function askCco(input: CcoAskInput): Promise<CcoAskResult> {
       businessBriefing: briefing,
     },
   };
-  if (runtimeConfig.internalCallerProof !== null) {
-    requestBody.callerProof = runtimeConfig.internalCallerProof;
-  }
 
   let res: Response;
   try {
     res = await fetch(new URL('/v1/invoke', runtimeConfig.baseUrl), {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${runtimeConfig.internalBearer}`,
+        // The proof IS this bearer — the agent's own credential when this
+        // deployment holds one, else the plain shared bearer. Never a body
+        // field; see this module's own docstring.
+        Authorization: `Bearer ${bearerForAgent(runtimeConfig, selected.agentId)}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(requestBody),
@@ -228,6 +328,7 @@ export async function askCco(input: CcoAskInput): Promise<CcoAskResult> {
       text: null,
       sources: [],
       correlationId: null,
+      availableAgents: [],
     };
   }
 
@@ -235,7 +336,15 @@ export async function askCco(input: CcoAskInput): Promise<CcoAskResult> {
   try {
     body = (await res.json()) as RuntimeInvokeBody;
   } catch {
-    return { state: 'unavailable', reason: 'runtime_unreadable_response', briefing, text: null, sources: [], correlationId: null };
+    return {
+      state: 'unavailable',
+      reason: 'runtime_unreadable_response',
+      briefing,
+      text: null,
+      sources: [],
+      correlationId: null,
+      availableAgents: [],
+    };
   }
 
   const correlationId = typeof body.correlationId === 'string' ? body.correlationId : null;
@@ -246,18 +355,37 @@ export async function askCco(input: CcoAskInput): Promise<CcoAskResult> {
       // Should not happen when outcome is genuinely "ok" in inline mode
       // (see app.ts's own completionState derivation), but never fabricate
       // an answer if it does.
-      return { state: 'degraded', reason: 'ok_with_no_answer_text', briefing, text: null, sources: [], correlationId };
+      return {
+        state: 'degraded',
+        reason: 'ok_with_no_answer_text',
+        briefing,
+        text: null,
+        sources: [],
+        correlationId,
+        availableAgents: [],
+      };
     }
-    return { state: 'replied', reason: null, briefing, text, sources: briefingSourceLinks(briefing), correlationId: correlationId ?? runId };
+    return {
+      state: 'replied',
+      reason: null,
+      briefing,
+      text,
+      sources: briefingSourceLinks(briefing),
+      correlationId: correlationId ?? runId,
+      availableAgents: [],
+    };
   }
 
   if (body.outcome === 'model_timeout') {
-    return { state: 'timeout', reason: body.outcome, briefing, text: null, sources: [], correlationId };
+    return { state: 'timeout', reason: body.outcome, briefing, text: null, sources: [], correlationId, availableAgents: [] };
   }
 
   // CONFIGURATION-SHAPED, mirroring performStaffChatTurn's own
   // CONFIGURATION_KINDS discipline: these say nothing about the owner's
-  // message and must never be presented as though they do.
+  // message and must never be presented as though they do. This now
+  // includes `agent_caller_proof_required` — a Foundation-side wiring gap
+  // (a missing/wrong agent-bound bearer for THIS agent), never a fault in
+  // the owner's own question.
   const UNAVAILABLE_OUTCOMES = new Set([
     'unauthorized',
     'no_credential_configured',
@@ -274,11 +402,11 @@ export async function askCco(input: CcoAskInput): Promise<CcoAskResult> {
     'agent_caller_proof_required',
   ]);
   if (UNAVAILABLE_OUTCOMES.has(body.outcome)) {
-    return { state: 'unavailable', reason: body.outcome, briefing, text: null, sources: [], correlationId };
+    return { state: 'unavailable', reason: body.outcome, briefing, text: null, sources: [], correlationId, availableAgents: [] };
   }
 
   // provider_error, persistence_failed, internal_error, duplicate_run_suppressed
   // (the true in-flight-duplicate case) and anything not explicitly named
   // above: transient, "try again" framing — never claims nothing happened.
-  return { state: 'degraded', reason: body.outcome, briefing, text: null, sources: [], correlationId };
+  return { state: 'degraded', reason: body.outcome, briefing, text: null, sources: [], correlationId, availableAgents: [] };
 }
