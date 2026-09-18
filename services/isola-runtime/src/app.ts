@@ -44,6 +44,7 @@ import { createLogger, type Logger } from "./log.js";
 import { buildIdempotencyKey, MeteringService, type MeteringOptions } from "./metering.js";
 import { createOpenAiCompatibleClient, type ModelClient } from "./model.js";
 import { evaluateAgentOsEligibility } from "./agentos-allowlist.js";
+import { verifyAgentCallerProof } from "./agent-caller-proof.js";
 import { createAgentOsExecutionProvider } from "./agentos-execution-provider.js";
 import {
   createDirectModelExecutionProvider,
@@ -121,7 +122,13 @@ export type Outcome =
    */
   | "agentos_routing_refused"
   /** 503: the request is AgentOS-eligible but AGENTOS_BASE_URL/AGENTOS_SHARED_SECRET are unset. */
-  | "agentos_not_configured";
+  | "agentos_not_configured"
+  /**
+   * 403: this template requires an agent-specific caller proof (see
+   * agent-caller-proof.ts) and the request did not supply a valid one. The
+   * exposure-class bearer alone was not enough for this template.
+   */
+  | "agent_caller_proof_required";
 
 export interface AppDeps {
   config: RuntimeConfig;
@@ -291,6 +298,12 @@ export interface InvokeRequestShape {
    * 400 — see `parseResponseMode`.
    */
   responseMode: unknown;
+  /**
+   * The agent-specific proof required for templates in
+   * config.agentCallerProofRequiredTemplateIds — see agent-caller-proof.ts.
+   * Absent/ignored for every other template, exactly as today.
+   */
+  callerProof: unknown;
 }
 
 export function parseInvokeBody(raw: Buffer): InvokeRequestShape | null {
@@ -311,6 +324,7 @@ export function parseInvokeBody(raw: Buffer): InvokeRequestShape | null {
     runIdIssuedBy: body["runIdIssuedBy"],
     context: body["context"],
     responseMode: body["responseMode"],
+    callerProof: body["callerProof"],
   };
 }
 
@@ -888,6 +902,36 @@ export function createRuntime(deps: AppDeps): Runtime {
 
     // ---- authorised: do the work synchronously ----------------------------
     const exposure = decision.exposure;
+
+    // ---- agent-specific caller proof ---------------------------------------
+    // A gate on CALLER IDENTITY, checked before routing decides WHICH provider
+    // serves the template — see agent-caller-proof.ts. `not_required` is the
+    // exact unaffected behaviour every template other than the gated set has
+    // always had.
+    const callerProofResult = verifyAgentCallerProof({
+      templateId: template.id,
+      agentId,
+      suppliedProof: asString(body.callerProof),
+      requiredForTemplateIds: config.agentCallerProofRequiredTemplateIds,
+      proofByAgentId: config.agentCallerProofByAgentId,
+    });
+    if (callerProofResult.kind !== "not_required" && callerProofResult.kind !== "ok") {
+      finish(
+        403,
+        "agent_caller_proof_required",
+        { error: `agent caller proof: ${callerProofResult.kind}` },
+        {
+          agentId,
+          runId,
+          templateId: template.id,
+          templateExposure: template.exposure,
+          credentialExposure,
+          reason: callerProofResult.kind,
+        },
+        { completionState: "rejected", failureCategory: callerProofResult.kind },
+      );
+      return;
+    }
 
     // ---- AgentOS routing gate ----------------------------------------------
     // This is the FIRST tenant enforcement anywhere in this service.

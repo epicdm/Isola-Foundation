@@ -159,6 +159,21 @@ export interface RuntimeConfig {
    */
   agentOsTenantId: string | null;
   agentOsTimeoutMs: number;
+
+  // ---- agent-specific caller proof (see agent-caller-proof.ts) -----------
+  /**
+   * Templates that require a per-agent proof beyond the shared exposure
+   * bearer. EMPTY by default (no template is gated) — an operator opts a
+   * template in explicitly via RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES.
+   */
+  agentCallerProofRequiredTemplateIds: ReadonlySet<string>;
+  /**
+   * `agentId` -> expected proof value. OPERATOR-CONFIGURED, never derived
+   * from a request. Empty (the default, until an operator sets
+   * RUNTIME_AGENT_CALLER_PROOF_MAP) means every gated-template call is
+   * refused with `no_proof_configured_for_agent` — fails closed, not open.
+   */
+  agentCallerProofByAgentId: Readonly<Record<string, string>>;
 }
 
 export const DEFAULT_MODEL_BASE_URL = "https://api.deepseek.com";
@@ -184,6 +199,16 @@ export const DEFAULT_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 export const DEFAULT_OUTBOX_SWEEP_MS = 60_000;
 /** The tighter of this and the template deadline wins, same convention as RUNTIME_MODEL_TIMEOUT_MS. */
 export const DEFAULT_AGENTOS_TIMEOUT_MS = 60_000;
+/**
+ * EMPTY by default — an explicit operator opt-in, same "master switch off
+ * unless named" shape as AGENTOS_ENABLED. Defaulting this to the
+ * business-facts template would refuse Paperclip's OWN existing dispatch to
+ * it (its adapterConfig sends no `callerProof` today — see
+ * agent-caller-proof.ts) the moment this shipped, which is exactly the kind
+ * of silent behaviour change this service's own conventions refuse to make.
+ * See agent-caller-proof.ts.
+ */
+export const DEFAULT_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES = "";
 
 export type EnvRecord = Record<string, string | undefined>;
 
@@ -424,6 +449,24 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
     // something other than the operator.
     agentOsTenantId: str(env, "AGENTOS_TENANT_ID"),
     agentOsTimeoutMs: int(env, "AGENTOS_TIMEOUT_MS", DEFAULT_AGENTOS_TIMEOUT_MS),
+
+    agentCallerProofRequiredTemplateIds: Object.freeze(
+      new Set(
+        (
+          str(env, "RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES") ??
+          DEFAULT_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES
+        )
+          .split(",")
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0),
+      ),
+    ),
+    // Reuses PAPERCLIP_INSTRUCTIONS_MAP's own parser: same shape (a JSON
+    // object of string keys to string values), same fail-soft-to-empty
+    // behaviour on a malformed value.
+    agentCallerProofByAgentId: parseInstructionsMap(
+      str(env, "RUNTIME_AGENT_CALLER_PROOF_MAP"),
+    ),
   };
 }
 
@@ -586,6 +629,14 @@ export function bootWarnings(config: RuntimeConfig): string[] {
   if (config.stateBackend === "memory") {
     warnings.push(
       "RUNTIME_STATE_BACKEND is memory: idempotency records, the cost-event outbox and the sub-cent accumulator are lost on restart.",
+    );
+  }
+  if (
+    config.agentCallerProofRequiredTemplateIds.size > 0 &&
+    Object.keys(config.agentCallerProofByAgentId).length === 0
+  ) {
+    warnings.push(
+      "RUNTIME_AGENT_CALLER_PROOF_MAP is unset while RUNTIME_AGENT_CALLER_PROOF_REQUIRED_TEMPLATES names at least one template: every call to those templates will be refused with no_proof_configured_for_agent. This is the fail-closed default, not a bug — populate the map when a caller besides Paperclip's own dispatch is ready to invoke them.",
     );
   }
   if (config.stateBackend === "file" && config.stateDir.startsWith("/tmp")) {
