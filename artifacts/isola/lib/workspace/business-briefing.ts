@@ -42,6 +42,42 @@
  * ever computed across rows, because rows may be in different currencies —
  * see the Odoo authority rule that only `payment_state` is trustworthy and
  * currencies are never summed.
+ *
+ * COMPANY SCOPE — DERIVED FROM ODOO'S OWN ACL, NEVER ASSERTED BY FOUNDATION
+ * ---------------------------------------------------------------------------
+ * `OdooBinding` names a DATABASE, not a company — a hosted_saas or
+ * local_docker_clone instance can hold more than one `res.company`, and
+ * CLAUDE.md is explicit: "Do not assume an Odoo database binding grants
+ * access to every company in that database." An earlier version of this
+ * module only checked that all rows returned in one section shared the SAME
+ * company_id ("multi_company_records_in_one_binding") — that catches a
+ * blended read, but a read that comes back entirely from ONE company this
+ * tenant is not authorized for would sail through unchanged, because
+ * self-consistency is not authorization.
+ *
+ * The fix resolves the tenant's AUTHORIZED company by querying Odoo's own
+ * `res.users` record for the binding's credential (`login`) — the same
+ * identity performing every other call here — and requires that credential
+ * be scoped to EXACTLY ONE company (`company_ids` a singleton matching
+ * `company_id`). This is Law 9's ceiling made concrete: "the ACL is the
+ * ceiling ... intersected with the user's effective groups" — Foundation
+ * asserts nothing about which company is authorized; it reads Odoo's own
+ * answer for the credential the tenant already owns, LIVE, every call, never
+ * cached (the same "resolve live, never cached" shape as the Paperclip
+ * company-mapping fix in isola-portal PR #158). A binding with no `login`,
+ * or whose credential is scoped to zero/more-than-one company, cannot prove
+ * an authorized scope and is refused (`odoo_company_scope_unresolvable`) —
+ * missing or ambiguous authorization is refused, never guessed.
+ *
+ * Once resolved, the authorized company id is applied TWICE: as an explicit
+ * `company_id =` domain filter on every query (query-level scoping, primary
+ * defense) AND as a post-read check that every returned row's own
+ * `company_id` equals that same id (`unauthorized_company_records` if not —
+ * covers a single wrong company, a mix of authorized/unauthorized rows, and
+ * a company-less/`false` row, which can never be proven to belong to the
+ * authorized company and is therefore never rendered). Both together are
+ * defense-in-depth on top of Odoo's own record-rule ACL, which remains the
+ * primary control — see CLAUDE.md Law 9.
  */
 
 import { prisma } from '@/lib/prisma';
@@ -57,7 +93,8 @@ export type BriefingUnavailableReason =
   | 'no_odoo_connected_for_tenant'
   | 'odoo_binding_incomplete'
   | 'odoo_read_failed'
-  | 'multi_company_records_in_one_binding';
+  | 'odoo_company_scope_unresolvable'
+  | 'unauthorized_company_records';
 
 export interface BriefingRow {
   id: number;
@@ -125,14 +162,14 @@ function formatMoney(amount: unknown, currency: unknown): string {
 }
 
 const TOLERATED_FAILURE = Symbol('business-briefing-read-failure');
-const MULTI_COMPANY = Symbol('business-briefing-multi-company-in-one-binding');
+const UNAUTHORIZED_COMPANY = Symbol('business-briefing-unauthorized-company-records');
 
 function sectionFrom(
   id: BriefingSectionId,
-  result: BriefingRow[] | typeof TOLERATED_FAILURE | typeof MULTI_COMPANY,
+  result: BriefingRow[] | typeof TOLERATED_FAILURE | typeof UNAUTHORIZED_COMPANY,
 ): BriefingSection {
   if (result === TOLERATED_FAILURE) return unavailable(id, 'odoo_read_failed');
-  if (result === MULTI_COMPANY) return unavailable(id, 'multi_company_records_in_one_binding');
+  if (result === UNAUTHORIZED_COMPANY) return unavailable(id, 'unauthorized_company_records');
   return ok(id, result);
 }
 
@@ -142,24 +179,73 @@ function companyIdOf(value: unknown): number | null {
 }
 
 /**
- * RECORD SCOPE. An `OdooBinding` names one Odoo DATABASE, not one COMPANY —
- * a hosted_saas or local_docker_clone instance could in principle hold more
- * than one `res.company`. Odoo's own record rules already scope a
- * `search_read` to the API key's authorised companies (see CLAUDE.md's ACL
- * law: the ceiling is `ir.model.access` intersected with the user's
- * effective groups), so this is defense-in-depth, not the primary control —
- * but a briefing titled "this tenant's receivables" must never silently
- * blend two companies' records into one list. Every row's `company_id` is
- * checked; if more than one distinct company appears, the WHOLE section is
- * refused by name rather than rendered as if it were one company's data.
+ * RECORD SCOPE. Every row's own `company_id` must equal the AUTHORIZED
+ * company resolved for this tenant's credential (see the module docstring's
+ * "COMPANY SCOPE" section) — not merely agree with each other. This single
+ * check subsumes the three failure shapes the task set out to distinguish:
+ * a section entirely from one unauthorized company (no row equals
+ * `authorizedCompanyId`), a mix of authorized/unauthorized rows (`.every`
+ * fails on the unauthorized ones), and a company-less row (`company_id`
+ * false/None never equals a real id, so it can never be proven to belong to
+ * the authorized company and is treated as unauthorized, not silently
+ * included or silently dropped — the whole section is refused by name,
+ * consistent with this module's "never omit, report explicit
+ * unavailability" rule).
  */
-function withSingleCompanyGuard<T extends { company_id: unknown }>(
+function withAuthorizedCompanyGuard<T extends { company_id: unknown }>(
   rows: T[],
+  authorizedCompanyId: number,
   build: (rows: T[]) => BriefingRow[],
-): BriefingRow[] | typeof MULTI_COMPANY {
-  const companyIds = new Set(rows.map((r) => companyIdOf(r.company_id)).filter((id): id is number => id !== null));
-  if (companyIds.size > 1) return MULTI_COMPANY;
+): BriefingRow[] | typeof UNAUTHORIZED_COMPANY {
+  const allAuthorized = rows.every((r) => companyIdOf(r.company_id) === authorizedCompanyId);
+  if (!allAuthorized) return UNAUTHORIZED_COMPANY;
   return build(rows);
+}
+
+interface OdooUserRow {
+  id: unknown;
+  company_id: unknown;
+  company_ids: unknown;
+}
+
+type CompanyScopeResult = { ok: true; companyId: number } | { ok: false };
+
+/**
+ * Resolves the ONE Odoo company this tenant's credential is authorized for,
+ * by asking Odoo itself — never a Foundation-asserted value. Requires
+ * `binding.login` (the human user the API key belongs to, per
+ * `OdooBinding`'s own doc comment) and requires that user's `company_ids`
+ * be a singleton equal to its `company_id`: a credential scoped to zero or
+ * more than one company cannot answer "which one is this tenant's own", so
+ * it is refused rather than guessed (missing/ambiguous authorization).
+ */
+async function resolveAuthorizedCompany(config: OdooConfig, login: string | null | undefined): Promise<CompanyScopeResult> {
+  if (!login || !login.trim()) return { ok: false };
+
+  checkOdooPolicy('res.users', 'search_read');
+  let rows: OdooUserRow[];
+  try {
+    rows = (await json2Call(
+      config,
+      'res.users',
+      'search_read',
+      { domain: [['login', '=', login]], fields: ['id', 'company_id', 'company_ids'], limit: 2 },
+      12000,
+    )) as OdooUserRow[];
+  } catch {
+    return { ok: false };
+  }
+
+  if (!rows || rows.length !== 1) return { ok: false };
+  const companyId = companyIdOf(rows[0].company_id);
+  if (companyId === null) return { ok: false };
+
+  const allowedIds = Array.isArray(rows[0].company_ids)
+    ? rows[0].company_ids.filter((v): v is number => typeof v === 'number')
+    : [];
+  if (allowedIds.length !== 1 || allowedIds[0] !== companyId) return { ok: false };
+
+  return { ok: true, companyId };
 }
 
 interface AccountMoveRow {
@@ -172,7 +258,7 @@ interface AccountMoveRow {
   company_id: unknown;
 }
 
-async function readOverdueReceivables(config: OdooConfig): Promise<BriefingRow[] | typeof MULTI_COMPANY> {
+async function readOverdueReceivables(config: OdooConfig, authorizedCompanyId: number): Promise<BriefingRow[] | typeof UNAUTHORIZED_COMPANY> {
   checkOdooPolicy('account.move', 'search_read');
   const today = new Date().toISOString().slice(0, 10);
   const rows = (await json2Call(
@@ -185,6 +271,7 @@ async function readOverdueReceivables(config: OdooConfig): Promise<BriefingRow[]
         ['state', '=', 'posted'],
         ['payment_state', 'in', ['not_paid', 'partial']],
         ['invoice_date_due', '<', today],
+        ['company_id', '=', authorizedCompanyId],
       ],
       fields: ['id', 'name', 'partner_id', 'amount_residual', 'currency_id', 'invoice_date_due', 'company_id'],
       order: 'invoice_date_due asc',
@@ -193,7 +280,7 @@ async function readOverdueReceivables(config: OdooConfig): Promise<BriefingRow[]
     12000,
   )) as AccountMoveRow[];
 
-  return withSingleCompanyGuard(rows ?? [], (scoped) =>
+  return withAuthorizedCompanyGuard(rows ?? [], authorizedCompanyId, (scoped) =>
     scoped.map((row) => {
       const id = Number(row.id);
       const partner = displayName(row.partner_id);
@@ -217,7 +304,7 @@ interface CrmLeadRow {
   company_id: unknown;
 }
 
-async function readOpenOpportunities(config: OdooConfig): Promise<BriefingRow[] | typeof MULTI_COMPANY> {
+async function readOpenOpportunities(config: OdooConfig, authorizedCompanyId: number): Promise<BriefingRow[] | typeof UNAUTHORIZED_COMPANY> {
   checkOdooPolicy('crm.lead', 'search_read');
   const rows = (await json2Call(
     config,
@@ -227,6 +314,7 @@ async function readOpenOpportunities(config: OdooConfig): Promise<BriefingRow[] 
       domain: [
         ['active', '=', true],
         ['type', '=', 'opportunity'],
+        ['company_id', '=', authorizedCompanyId],
       ],
       fields: ['id', 'name', 'partner_id', 'expected_revenue', 'stage_id', 'date_deadline', 'company_id'],
       order: 'write_date desc',
@@ -235,7 +323,7 @@ async function readOpenOpportunities(config: OdooConfig): Promise<BriefingRow[] 
     12000,
   )) as CrmLeadRow[];
 
-  return withSingleCompanyGuard(rows ?? [], (scoped) =>
+  return withAuthorizedCompanyGuard(rows ?? [], authorizedCompanyId, (scoped) =>
     scoped.map((row) => {
       const id = Number(row.id);
       const partner = displayName(row.partner_id);
@@ -282,10 +370,23 @@ export async function getBusinessBriefing(tenantId: string): Promise<BusinessBri
     };
   }
 
+  const scope = await resolveAuthorizedCompany(config, binding.login);
+  if (!scope.ok) {
+    return {
+      tenantId,
+      generatedAt,
+      odooConnected: true,
+      sections: [
+        unavailable('overdue_receivables', 'odoo_company_scope_unresolvable'),
+        unavailable('open_opportunities', 'odoo_company_scope_unresolvable'),
+      ],
+    };
+  }
+
   const toleratedFailure = (): typeof TOLERATED_FAILURE => TOLERATED_FAILURE;
   const [overdue, opportunities] = await Promise.all([
-    readOverdueReceivables(config).catch(toleratedFailure),
-    readOpenOpportunities(config).catch(toleratedFailure),
+    readOverdueReceivables(config, scope.companyId).catch(toleratedFailure),
+    readOpenOpportunities(config, scope.companyId).catch(toleratedFailure),
   ]);
 
   return {

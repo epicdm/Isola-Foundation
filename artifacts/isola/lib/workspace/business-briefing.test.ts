@@ -31,6 +31,21 @@ import { getBusinessBriefing } from './business-briefing';
 
 const TENANT = 'tenant-1';
 const BINDING = { tenant_id: TENANT, url: 'https://epic.odoo.com', db: 'epic', login: 'a@b.test', api_key_enc: 'enc', instance_type: 'hosted_saas' };
+const AUTHORIZED_COMPANY_ID = 1;
+
+/** The single-company `res.users` answer that makes a scope resolvable. Real
+ *  fixtures should never need to touch this unless testing scope resolution
+ *  itself — pass it through `json2Call`'s `res.users` branch. */
+const SCOPED_USER_ROW = { id: 42, company_id: [AUTHORIZED_COMPANY_ID, 'Company A'], company_ids: [AUTHORIZED_COMPANY_ID] };
+
+/** Wraps a model-keyed responder with the standard scoped `res.users` answer
+ *  so every existing fixture doesn't have to repeat it. */
+function withScopedUser(byModel: (model: string) => unknown) {
+  return async (_config: unknown, model: string) => {
+    if (model === 'res.users') return [SCOPED_USER_ROW];
+    return byModel(model);
+  };
+}
 
 describe('getBusinessBriefing', () => {
   beforeEach(() => {
@@ -57,11 +72,12 @@ describe('getBusinessBriefing', () => {
     findUniqueOdooBinding.mockResolvedValue(BINDING);
     json2Call.mockImplementation(async (config: unknown, model: string) => {
       expect((config as { url: string }).url).toBe(BINDING.url);
+      if (model === 'res.users') return [SCOPED_USER_ROW];
       if (model === 'account.move') {
-        return [{ id: 9, name: 'INV/9', partner_id: [3, 'EPIC Customer'], amount_residual: 125.5, currency_id: [1, 'XCD'], invoice_date_due: '2026-08-01' }];
+        return [{ id: 9, name: 'INV/9', partner_id: [3, 'EPIC Customer'], amount_residual: 125.5, currency_id: [1, 'XCD'], invoice_date_due: '2026-08-01', company_id: [AUTHORIZED_COMPANY_ID, 'Company A'] }];
       }
       if (model === 'crm.lead') {
-        return [{ id: 10, name: 'Upgrade', partner_id: [3, 'EPIC Customer'], expected_revenue: 400, stage_id: [2, 'Qualified'], date_deadline: '2026-08-30' }];
+        return [{ id: 10, name: 'Upgrade', partner_id: [3, 'EPIC Customer'], expected_revenue: 400, stage_id: [2, 'Qualified'], date_deadline: '2026-08-30', company_id: [AUTHORIZED_COMPANY_ID, 'Company A'] }];
       }
       throw new Error(`unexpected model ${model}`);
     });
@@ -85,11 +101,37 @@ describe('getBusinessBriefing', () => {
     const opportunities = briefing.sections.find((s) => s.id === 'open_opportunities')!;
     expect(opportunities.state).toBe('ok');
     expect(opportunities.rows[0].label).toBe('Upgrade — EPIC Customer');
+
+    // CORRECTLY SCOPED: the resolved company was looked up via the binding's
+    // own credential (login), never asserted, and was applied as an explicit
+    // domain filter on every read — not just checked after the fact.
+    expect(json2Call).toHaveBeenCalledWith(
+      expect.anything(),
+      'res.users',
+      'search_read',
+      expect.objectContaining({ domain: [['login', '=', BINDING.login]] }),
+      expect.any(Number),
+    );
+    expect(json2Call).toHaveBeenCalledWith(
+      expect.anything(),
+      'account.move',
+      'search_read',
+      expect.objectContaining({ domain: expect.arrayContaining([['company_id', '=', AUTHORIZED_COMPANY_ID]]) }),
+      expect.any(Number),
+    );
+    expect(json2Call).toHaveBeenCalledWith(
+      expect.anything(),
+      'crm.lead',
+      'search_read',
+      expect.objectContaining({ domain: expect.arrayContaining([['company_id', '=', AUTHORIZED_COMPANY_ID]]) }),
+      expect.any(Number),
+    );
   });
 
   it('reports a section unavailable, not empty, when the Odoo read itself fails — one section failing does not sink the other', async () => {
     findUniqueOdooBinding.mockResolvedValue(BINDING);
     json2Call.mockImplementation(async (_config: unknown, model: string) => {
+      if (model === 'res.users') return [SCOPED_USER_ROW];
       if (model === 'account.move') throw new Error('Odoo unreachable');
       return [];
     });
@@ -109,10 +151,10 @@ describe('getBusinessBriefing', () => {
 
   it('never links to a non-https or self-declared-sandbox Odoo origin', async () => {
     findUniqueOdooBinding.mockResolvedValue({ ...BINDING, url: 'https://epic_sandbox.odoo.com' });
-    json2Call.mockImplementation(async (_config: unknown, model: string) => {
-      if (model === 'account.move') return [{ id: 1, name: 'INV/1', partner_id: [1, 'X'], amount_residual: 5, currency_id: [1, 'XCD'], invoice_date_due: '2026-08-01' }];
+    json2Call.mockImplementation(withScopedUser((model) => {
+      if (model === 'account.move') return [{ id: 1, name: 'INV/1', partner_id: [1, 'X'], amount_residual: 5, currency_id: [1, 'XCD'], invoice_date_due: '2026-08-01', company_id: [AUTHORIZED_COMPANY_ID, 'Company A'] }];
       return [];
-    });
+    }));
 
     const briefing = await getBusinessBriefing(TENANT);
     const overdue = briefing.sections.find((s) => s.id === 'overdue_receivables')!;
@@ -122,15 +164,15 @@ describe('getBusinessBriefing', () => {
 
   it('never sums residuals across rows/currencies — each row keeps its own currency in its own detail line', async () => {
     findUniqueOdooBinding.mockResolvedValue(BINDING);
-    json2Call.mockImplementation(async (_config: unknown, model: string) => {
+    json2Call.mockImplementation(withScopedUser((model) => {
       if (model === 'account.move') {
         return [
-          { id: 1, name: 'INV/1', partner_id: [1, 'A'], amount_residual: 100, currency_id: [1, 'XCD'], invoice_date_due: '2026-08-01' },
-          { id: 2, name: 'INV/2', partner_id: [2, 'B'], amount_residual: 40, currency_id: [2, 'USD'], invoice_date_due: '2026-08-02' },
+          { id: 1, name: 'INV/1', partner_id: [1, 'A'], amount_residual: 100, currency_id: [1, 'XCD'], invoice_date_due: '2026-08-01', company_id: [AUTHORIZED_COMPANY_ID, 'Company A'] },
+          { id: 2, name: 'INV/2', partner_id: [2, 'B'], amount_residual: 40, currency_id: [2, 'USD'], invoice_date_due: '2026-08-02', company_id: [AUTHORIZED_COMPANY_ID, 'Company A'] },
         ];
       }
       return [];
-    });
+    }));
 
     const briefing = await getBusinessBriefing(TENANT);
     const overdue = briefing.sections.find((s) => s.id === 'overdue_receivables')!;
@@ -140,18 +182,18 @@ describe('getBusinessBriefing', () => {
     ]);
   });
 
-  it('RECORD SCOPE: refuses a section outright (never a mixed rendering) when one binding somehow returns rows from more than one Odoo company', async () => {
+  it('MIXED AUTHORIZED/UNAUTHORIZED: refuses a section outright (never a partial or blended rendering) when some rows match the authorized company and others do not', async () => {
     findUniqueOdooBinding.mockResolvedValue(BINDING);
-    json2Call.mockImplementation(async (_config: unknown, model: string) => {
+    json2Call.mockImplementation(withScopedUser((model) => {
       if (model === 'account.move') {
         return [
-          { id: 1, name: 'INV/1', partner_id: [1, 'A'], amount_residual: 100, currency_id: [1, 'XCD'], invoice_date_due: '2026-08-01', company_id: [1, 'Company A'] },
+          { id: 1, name: 'INV/1', partner_id: [1, 'A'], amount_residual: 100, currency_id: [1, 'XCD'], invoice_date_due: '2026-08-01', company_id: [AUTHORIZED_COMPANY_ID, 'Company A'] },
           { id: 2, name: 'INV/2', partner_id: [2, 'B'], amount_residual: 40, currency_id: [1, 'XCD'], invoice_date_due: '2026-08-02', company_id: [2, 'Company B'] },
         ];
       }
-      // A single company is fine and must not be affected by the other section's ambiguity.
-      return [{ id: 9, name: 'Lead', partner_id: [1, 'A'], expected_revenue: 10, stage_id: [1, 'New'], date_deadline: null, company_id: [1, 'Company A'] }];
-    });
+      // The other section is unaffected — one section's unauthorized rows never sink the other.
+      return [{ id: 9, name: 'Lead', partner_id: [1, 'A'], expected_revenue: 10, stage_id: [1, 'New'], date_deadline: null, company_id: [AUTHORIZED_COMPANY_ID, 'Company A'] }];
+    }));
 
     const briefing = await getBusinessBriefing(TENANT);
 
@@ -159,22 +201,130 @@ describe('getBusinessBriefing', () => {
       id: 'overdue_receivables',
       title: 'Overdue receivables',
       state: 'unavailable',
-      reason: 'multi_company_records_in_one_binding',
+      reason: 'unauthorized_company_records',
       rows: [],
     });
     expect(briefing.sections.find((s) => s.id === 'open_opportunities')?.state).toBe('ok');
   });
 
-  it('a single company_id across all rows (the normal case) is unaffected by the record-scope guard', async () => {
+  it('ONE UNAUTHORIZED COMPANY ONLY: refuses a section whose rows are internally consistent but entirely belong to a company the tenant is not authorized for', async () => {
     findUniqueOdooBinding.mockResolvedValue(BINDING);
-    json2Call.mockImplementation(async (_config: unknown, model: string) => {
+    json2Call.mockImplementation(withScopedUser((model) => {
       if (model === 'account.move') {
-        return [{ id: 1, name: 'INV/1', partner_id: [1, 'A'], amount_residual: 100, currency_id: [1, 'XCD'], invoice_date_due: '2026-08-01', company_id: [1, 'Company A'] }];
+        // Every row agrees with every other row — the OLD self-consistency
+        // check would have passed this. All of them are Company B, and the
+        // tenant is authorized for Company A (id 1) only.
+        return [
+          { id: 1, name: 'INV/1', partner_id: [1, 'A'], amount_residual: 100, currency_id: [1, 'XCD'], invoice_date_due: '2026-08-01', company_id: [2, 'Company B'] },
+          { id: 2, name: 'INV/2', partner_id: [2, 'B'], amount_residual: 40, currency_id: [1, 'XCD'], invoice_date_due: '2026-08-02', company_id: [2, 'Company B'] },
+        ];
       }
       return [];
+    }));
+
+    const briefing = await getBusinessBriefing(TENANT);
+
+    expect(briefing.sections.find((s) => s.id === 'overdue_receivables')).toEqual({
+      id: 'overdue_receivables',
+      title: 'Overdue receivables',
+      state: 'unavailable',
+      reason: 'unauthorized_company_records',
+      rows: [],
     });
+  });
+
+  it('a company-less row (company_id false) can never be proven authorized and refuses the section, not silently dropped', async () => {
+    findUniqueOdooBinding.mockResolvedValue(BINDING);
+    json2Call.mockImplementation(withScopedUser((model) => {
+      if (model === 'crm.lead') {
+        return [{ id: 9, name: 'Lead', partner_id: [1, 'A'], expected_revenue: 10, stage_id: [1, 'New'], date_deadline: null, company_id: false }];
+      }
+      return [];
+    }));
+
+    const briefing = await getBusinessBriefing(TENANT);
+    expect(briefing.sections.find((s) => s.id === 'open_opportunities')).toEqual({
+      id: 'open_opportunities',
+      title: 'Open opportunities',
+      state: 'unavailable',
+      reason: 'unauthorized_company_records',
+      rows: [],
+    });
+  });
+
+  it('CORRECTLY SCOPED: rows that all match the resolved authorized company pass the guard', async () => {
+    findUniqueOdooBinding.mockResolvedValue(BINDING);
+    json2Call.mockImplementation(withScopedUser((model) => {
+      if (model === 'account.move') {
+        return [{ id: 1, name: 'INV/1', partner_id: [1, 'A'], amount_residual: 100, currency_id: [1, 'XCD'], invoice_date_due: '2026-08-01', company_id: [AUTHORIZED_COMPANY_ID, 'Company A'] }];
+      }
+      return [];
+    }));
 
     const briefing = await getBusinessBriefing(TENANT);
     expect(briefing.sections.find((s) => s.id === 'overdue_receivables')?.state).toBe('ok');
+  });
+
+  describe('MISSING OR AMBIGUOUS AUTHORIZATION', () => {
+    it('refuses both sections, without ever reading account.move/crm.lead, when the binding has no login to resolve a company from', async () => {
+      findUniqueOdooBinding.mockResolvedValue({ ...BINDING, login: null });
+
+      const briefing = await getBusinessBriefing(TENANT);
+
+      expect(briefing.odooConnected).toBe(true);
+      expect(briefing.sections).toEqual([
+        { id: 'overdue_receivables', title: 'Overdue receivables', state: 'unavailable', reason: 'odoo_company_scope_unresolvable', rows: [] },
+        { id: 'open_opportunities', title: 'Open opportunities', state: 'unavailable', reason: 'odoo_company_scope_unresolvable', rows: [] },
+      ]);
+      expect(json2Call).not.toHaveBeenCalled();
+    });
+
+    it('refuses both sections when Odoo has no res.users row for the binding login (nothing to resolve)', async () => {
+      findUniqueOdooBinding.mockResolvedValue(BINDING);
+      json2Call.mockImplementation(async (_config: unknown, model: string) => {
+        if (model === 'res.users') return [];
+        return [{ id: 999 }]; // must never be reached
+      });
+
+      const briefing = await getBusinessBriefing(TENANT);
+
+      expect(briefing.sections.every((s) => s.state === 'unavailable' && s.reason === 'odoo_company_scope_unresolvable')).toBe(true);
+    });
+
+    it('refuses both sections when the login resolves to more than one res.users row (ambiguous identity)', async () => {
+      findUniqueOdooBinding.mockResolvedValue(BINDING);
+      json2Call.mockImplementation(async (_config: unknown, model: string) => {
+        if (model === 'res.users') return [SCOPED_USER_ROW, { ...SCOPED_USER_ROW, id: 43 }];
+        return [{ id: 999 }];
+      });
+
+      const briefing = await getBusinessBriefing(TENANT);
+
+      expect(briefing.sections.every((s) => s.state === 'unavailable' && s.reason === 'odoo_company_scope_unresolvable')).toBe(true);
+    });
+
+    it('refuses both sections when the credential is scoped to more than one company — cannot answer "which one is this tenant\'s own"', async () => {
+      findUniqueOdooBinding.mockResolvedValue(BINDING);
+      json2Call.mockImplementation(async (_config: unknown, model: string) => {
+        if (model === 'res.users') return [{ id: 42, company_id: [1, 'Company A'], company_ids: [1, 2] }];
+        return [{ id: 999 }];
+      });
+
+      const briefing = await getBusinessBriefing(TENANT);
+
+      expect(briefing.sections.every((s) => s.state === 'unavailable' && s.reason === 'odoo_company_scope_unresolvable')).toBe(true);
+    });
+
+    it('refuses both sections when the res.users lookup itself fails — never treated as "no restriction"', async () => {
+      findUniqueOdooBinding.mockResolvedValue(BINDING);
+      json2Call.mockImplementation(async (_config: unknown, model: string) => {
+        if (model === 'res.users') throw new Error('Odoo unreachable');
+        return [{ id: 999 }];
+      });
+
+      const briefing = await getBusinessBriefing(TENANT);
+
+      expect(briefing.sections.every((s) => s.state === 'unavailable' && s.reason === 'odoo_company_scope_unresolvable')).toBe(true);
+    });
   });
 });
