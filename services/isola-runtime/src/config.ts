@@ -8,7 +8,7 @@ import { templateModelHosts } from "./registry.js";
 import type { RateOverrides } from "./money.js";
 import { DEFAULT_HANDOFF, type HandoffPolicy } from "./callbacks.js";
 import { isIssueStatus } from "./paperclip.js";
-import { parseInstructionsMap } from "./instructions.js";
+import { parseInstructionsMap, parseBusinessFactsMap } from "./instructions.js";
 import { DEFAULT_STATE_DIR } from "./state.js";
 
 export interface RuntimeConfig {
@@ -29,6 +29,16 @@ export interface RuntimeConfig {
    * NEXT configured the resolver behaves exactly as it did before.
    */
   secretsNext: Readonly<Record<Exposure, string | null>>;
+  /**
+   * `PAPERCLIP_AGENT_CALLER_SECRETS` — agent id -> a bearer secret unique to that
+   * agent. A caller presenting one proves it specifically represents that agent
+   * (`credentialAgentId` in auth.ts), which a shared PUBLIC secret cannot: the
+   * caller-to-agent binding an admin allowlist (`paperclipBusinessFactsMap`) alone
+   * does not provide. Absent (default `{}`) means no agent has a caller secret;
+   * every PUBLIC caller then resolves to `credentialAgentId: null`, exactly
+   * today's behaviour. Deliberately no rotation-grace `_NEXT` companion yet.
+   */
+  agentCallerSecrets: Readonly<Record<string, string>>;
   modelBaseUrl: string;
   modelApiKey: string | null;
   /** Env override for the model name; `null` means "use the template's model". */
@@ -52,6 +62,18 @@ export interface RuntimeConfig {
    * A template absent from this map keeps its compiled-in prompt.
    */
   paperclipInstructionsMap: Readonly<Record<string, string>>;
+  /**
+   * `PAPERCLIP_BUSINESS_FACTS_MAP` binds a Paperclip agent id to the ONE templateId
+   * that agent is authorized to run business-fact (BUSINESS.md) resolution under --
+   * inverted from `paperclipInstructionsMap` on purpose, because more than one agent
+   * can legitimately share a templateId (that is the whole reason this map exists),
+   * while a real Paperclip agent's own `adapterConfig` always names exactly one
+   * template. The invoke's claimed `agentId` is looked up here and CHECKED against
+   * the templateId actually being invoked -- an agent absent from this map, or
+   * present under a different templateId, gets no business facts. Absent (default
+   * `{}`) means no agent is authorized yet; this must never default open.
+   */
+  paperclipBusinessFactsMap: Readonly<Record<string, string>>;
   /**
    * Board-scoped token used ONLY to read instruction bundles. Deliberately not the
    * agent keys above: reading company configuration is a different authority from
@@ -269,6 +291,7 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
       INTERNAL: str(env, "RUNTIME_SECRET_INTERNAL_NEXT"),
       PUBLIC: str(env, "RUNTIME_SECRET_PUBLIC_NEXT"),
     }),
+    agentCallerSecrets: parseInstructionsMap(str(env, "PAPERCLIP_AGENT_CALLER_SECRETS")),
     modelBaseUrl,
     modelApiKey: str(env, "MODEL_API_KEY"),
     modelNameOverride: str(env, "MODEL_NAME"),
@@ -282,6 +305,7 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
     paperclipRecordPath: str(env, "PAPERCLIP_RECORD_PATH") ?? DEFAULT_RECORD_PATH,
     paperclipCompanyId: str(env, "PAPERCLIP_COMPANY_ID"),
     paperclipInstructionsMap: parseInstructionsMap(str(env, "PAPERCLIP_INSTRUCTIONS_MAP")),
+    paperclipBusinessFactsMap: parseBusinessFactsMap(str(env, "PAPERCLIP_BUSINESS_FACTS_MAP")),
     paperclipBoardToken: str(env, "PAPERCLIP_BOARD_TOKEN"),
     paperclipInstructionsTtlMs: int(
       env,
@@ -425,6 +449,37 @@ export function bootErrors(config: RuntimeConfig): string[] {
     }
   }
 
+  // ── AGENT-BOUND CREDENTIAL VALIDATION ─────────────────────────────────────
+  //
+  // The whole point of an agent-bound secret is that it, and only it, proves a
+  // caller represents that specific agent. A value that collides with anything
+  // else -- another agent's secret, or a shared exposure secret -- silently
+  // dissolves that proof exactly the way an INTERNAL/PUBLIC collision would, and
+  // must be refused at boot rather than discovered from a live business-facts
+  // leak.
+  const agentEntries = Object.entries(config.agentCallerSecrets);
+  for (let i = 0; i < agentEntries.length; i++) {
+    const [agentId, secret] = agentEntries[i] as [string, string];
+    if (secret === config.secrets.INTERNAL || secret === config.secretsNext.INTERNAL) {
+      errors.push(
+        `PAPERCLIP_AGENT_CALLER_SECRETS["${agentId}"] collides with an INTERNAL credential. One token would satisfy both, and the caller-to-agent binding would not exist.`,
+      );
+    }
+    if (secret === config.secrets.PUBLIC || secret === config.secretsNext.PUBLIC) {
+      errors.push(
+        `PAPERCLIP_AGENT_CALLER_SECRETS["${agentId}"] collides with the shared PUBLIC credential. Any PUBLIC caller could then claim this agent's identity.`,
+      );
+    }
+    for (let j = i + 1; j < agentEntries.length; j++) {
+      const [otherAgentId, otherSecret] = agentEntries[j] as [string, string];
+      if (secret === otherSecret) {
+        errors.push(
+          `PAPERCLIP_AGENT_CALLER_SECRETS["${agentId}"] and ["${otherAgentId}"] are identical. One token would satisfy both agent identities, and the caller-to-agent binding would not exist.`,
+        );
+      }
+    }
+  }
+
   return errors;
 }
 
@@ -462,6 +517,14 @@ export function bootWarnings(config: RuntimeConfig): string[] {
   if (config.paperclipCompanyId === null) {
     warnings.push(
       "PAPERCLIP_COMPANY_ID is unset and no run context supplies one: cost events cannot be addressed, so spend will not reach the Paperclip ledger.",
+    );
+  }
+  if (
+    Object.keys(config.paperclipBusinessFactsMap).length === 0 &&
+    Object.keys(config.paperclipInstructionsMap).length > 0
+  ) {
+    warnings.push(
+      "PAPERCLIP_BUSINESS_FACTS_MAP is unset: no agent is authorized for business-fact (BUSINESS.md) resolution, so every reply is persona-only. This is the safe default, not a defect -- set it deliberately, per agent id, to opt an agent in.",
     );
   }
   if (
