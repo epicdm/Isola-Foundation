@@ -61,6 +61,10 @@ services:
       ISOLA_360_SERVICE_ENABLED: "true"
       ISSUER_URL: ${ISSUER_URL}
       TENANT_MASTER_KEY: ${TENANT_MASTER_KEY}
+      # Foundation's first server-to-server read of bff-v2 (Customer 360
+      # Services tab). BASE_URL is not secret; the TOKEN arrives as a swarm
+      # secret, for the same reason ODOO_API_KEY does.
+      BFF_V2_INTERNAL_BASE_URL: https://bff.epic.dm
       # ODOO_API_KEY is NOT here on purpose, for the same reason.
       # CHATWOOT_SERVICE_TOKEN is NOT here on purpose, for the same reason --
       # arrives as a swarm secret, composed by entrypoint.sh.
@@ -77,6 +81,7 @@ services:
       - isola_360_service_token
       - isola_360_service_token_prod
       - chatwoot_service_token
+      - bff_v2_pl_operator_read_token
     networks:
       - internal
       - easypanel
@@ -133,3 +138,6 @@ secrets:
   chatwoot_service_token:
     external: true
     name: chatwoot_service_token_20260904
+  bff_v2_pl_operator_read_token:
+    external: true
+    name: bff_v2_pl_operator_read_token_20260920

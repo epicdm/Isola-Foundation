@@ -96,6 +96,20 @@ else
   log "WARNING: no chatwoot service token secret mounted; EPIC mirror bindings will fail closed (ChatwootCredentialRefError, non-fatal per lib/agent.ts)"
 fi
 
+# Foundation's first server-to-server read of bff-v2 (personal-line-services.ts,
+# xp-personal-line-operator-customer-management-slice2-2026-09-20). Same
+# mounted-secret shape as the tokens above: the value never appears in
+# stack.yml and is never disclosed by `docker service inspect`. Missing this
+# is non-fatal to boot -- readPersonalLineServices() fails closed per-call
+# (servicesAvailable: false), it does not crash the server.
+if [ -f /run/secrets/bff_v2_pl_operator_read_token ]; then
+  BFF_V2_PL_OPERATOR_READ_TOKEN="$(cat /run/secrets/bff_v2_pl_operator_read_token)"
+  export BFF_V2_PL_OPERATOR_READ_TOKEN
+  log "bff-v2 PL operator read token loaded from swarm secret (length ${#BFF_V2_PL_OPERATOR_READ_TOKEN}, value not logged)"
+else
+  log "WARNING: no bff-v2 PL operator read token secret mounted; Customer 360 Services tab will report unavailable (fail closed)"
+fi
+
 log "applying prisma migrations (migrate deploy -- never db push)"
 pnpm --filter @workspace/isola exec prisma migrate deploy
 
