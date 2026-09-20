@@ -92,7 +92,7 @@ STATE_FILE="/home/epicadmin/builds/.isola360-deploy-state"
 export ISSUER_URL="https://isola-360-auth.saas00.epic.dm/realms/isola"
 export TENANT_MASTER_KEY="$(cat /home/epicadmin/builds/.tenant_master_key)"
 
-: "${ODOO_URL:?ODOO_URL must be set in the calling environment before running this script. It no longer defaults to EPIC's production Odoo (epic-communications-inc.odoo.com) -- see def-odoo-binding-table-empty-shared-tenant-fallback-2026-08-30. Export the Odoo URL that THIS deploy target should actually use.}"
+: "${ODOO_URL:?ODOO_URL must be set in the calling environment before running this script. It no longer defaults to the EPIC production Odoo (epic-communications-inc.odoo.com) -- see def-odoo-binding-table-empty-shared-tenant-fallback-2026-08-30. Export the Odoo URL that THIS deploy target should actually use.}"
 : "${ODOO_DB:?ODOO_DB must be set in the calling environment before running this script -- same reasoning as ODOO_URL above.}"
 export ODOO_URL
 export ODOO_DB
