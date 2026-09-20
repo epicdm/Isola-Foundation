@@ -1,12 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const json2Call = vi.fn();
+const readPersonalLineServices = vi.fn();
 
 vi.mock('@/engines/odoo', () => ({
   json2Call: (...args: unknown[]) => json2Call(...args),
   // Unused by this projection directly, but lib/context/customer-sources.ts
   // (imported transitively for odooDeepLink) reads it at module scope.
   findCustomerByPhone: vi.fn(),
+}));
+
+// bff-v2, not Odoo -- mocked separately from json2Call, same reasoning
+// personal-line-services.test.ts gives for mocking `fetch` rather than this
+// module's own exports: this file's job is proving projectPartner() WIRES
+// the result correctly, not re-testing personal-line-services.ts's own
+// normalisation (that suite already covers it).
+vi.mock('./personal-line-services', () => ({
+  readPersonalLineServices: (...args: unknown[]) => readPersonalLineServices(...args),
 }));
 
 import { readCustomer360 } from './odoo-projection';
@@ -16,6 +26,8 @@ const config = { url: 'https://odoo.invalid', apiKey: 'not-used', db: 'test' };
 describe('Odoo Customer 360 projection', () => {
   beforeEach(() => {
     json2Call.mockReset();
+    readPersonalLineServices.mockReset();
+    readPersonalLineServices.mockResolvedValue({ available: true, services: [] });
   });
 
   it('pins every business read to the one matched partner', async () => {
@@ -108,6 +120,44 @@ describe('Odoo Customer 360 projection', () => {
     });
     const result = await readCustomer360(config, '+17670000000', { displayId: 1, currentRequest: null });
     expect(result?.openLoopsAvailable).toBe(true);
+  });
+
+  describe('Personal Line services (bff-v2, not Odoo)', () => {
+    beforeEach(() => {
+      json2Call.mockImplementation(async (_config: unknown, model: string) => {
+        if (model === 'res.partner') return [{ id: 42, name: 'C', email: null, phone: '+17670000000', city: null }];
+        return [];
+      });
+    });
+
+    it('keys the bff-v2 read on the SAME partner id the Odoo reads are pinned to', async () => {
+      await readCustomer360(config, '+17670000000', { displayId: 1, currentRequest: null });
+      expect(readPersonalLineServices).toHaveBeenCalledWith(42);
+    });
+
+    it('threads a real service list through into the snapshot', async () => {
+      readPersonalLineServices.mockResolvedValue({
+        available: true,
+        services: [{ kind: 'personal_line', did: '17678185063', sipRegistered: true, magnusUserAssigned: true, createdAt: null }],
+      });
+      const result = await readCustomer360(config, '+17670000000', { displayId: 1, currentRequest: null });
+      expect(result?.servicesAvailable).toBe(true);
+      expect(result?.services).toEqual([{ kind: 'personal_line', did: '17678185063', sipRegistered: true, magnusUserAssigned: true, createdAt: null }]);
+    });
+
+    it('reports servicesAvailable: false on a bff-v2 outage, never a fabricated empty-looking-healthy list', async () => {
+      readPersonalLineServices.mockResolvedValue({ available: false, services: [] });
+      const result = await readCustomer360(config, '+17670000000', { displayId: 1, currentRequest: null });
+      expect(result?.servicesAvailable).toBe(false);
+      expect(result?.services).toEqual([]);
+    });
+
+    it('a bff-v2 outage does not affect Odoo-sourced sections -- the two failure domains are independent', async () => {
+      readPersonalLineServices.mockResolvedValue({ available: false, services: [] });
+      const result = await readCustomer360(config, '+17670000000', { displayId: 1, currentRequest: null });
+      expect(result?.openLoopsAvailable).toBe(true);
+      expect(result?.followUpsAvailable).toBe(true);
+    });
   });
 
   it('does not misreport an Odoo outage as customer-not-found', async () => {

@@ -62,6 +62,8 @@ const armour: Customer360Snapshot = {
     { id: 9002, summary: 'Confirm TV subscription cancellation timing', dueDate: '2026-09-06', dueLabel: 'Tomorrow', assignee: null },
   ],
   followUpsAvailable: true,
+  services: [],
+  servicesAvailable: true,
   documents: [
     {
       id: 607,
