@@ -64,6 +64,39 @@ function safeOdooLink(baseUrl: string | undefined, model: string, recordId: numb
   return odooDeepLink(baseUrl, model, recordId);
 }
 
+/**
+ * FIX 2026-09-20 (Codex P1 on PR#144, discussion_r4057010114): Personal Line
+ * is a SINGLE-TENANT bff-v2 relationship -- one process-wide
+ * BFF_V2_INTERNAL_BASE_URL/BFF_V2_PL_OPERATOR_READ_TOKEN, scoped to EPIC's
+ * own LiteAccount table, never per-tenant. Isola-Foundation itself is
+ * multi-tenant (this file's own isAllowedOdooOrigin comment: "other tenants
+ * may have their own legitimate self-hosted or SaaS Odoo instances").
+ *
+ * Before this gate, `readPersonalLineServices(partnerId)` fired for EVERY
+ * tenant's customer lookup, keyed only on the Odoo-local, NOT globally
+ * unique `res.partner` id. A different tenant's operator opening their own
+ * customer whose numeric partner id happened to collide with an EPIC
+ * LiteAccount.odooPartnerId would receive that EPIC customer's real DID and
+ * SIP registration status -- a cross-tenant leak, not a hypothetical one:
+ * Odoo partner ids are small sequential integers, so a collision across two
+ * separate Odoo databases is an ordinary occurrence, not an edge case.
+ *
+ * The fix gates the call to the ONE Odoo instance Personal Line is actually
+ * bound to -- same shape as isAllowedOdooOrigin above, an allowlist of one
+ * trusted origin rather than a denylist, because unlike deep links (which
+ * merely need to avoid a KNOWN-bad origin) this call sends the tenant's
+ * customer id to a system that has no way to verify it owns that id at all.
+ */
+const PERSONAL_LINE_ODOO_ORIGIN = 'https://epic-communications-inc.odoo.com';
+function tenantOwnsPersonalLine(baseUrl: string | undefined): boolean {
+  if (!baseUrl) return false;
+  try {
+    return new URL(baseUrl).origin === new URL(PERSONAL_LINE_ODOO_ORIGIN).origin;
+  } catch {
+    return false;
+  }
+}
+
 /** Odoo returns a many2one as [id, "NAME"]; the currency NAME is the code. */
 function currencyCode(value: unknown): string | null {
   return displayName(value);
@@ -224,10 +257,15 @@ async function projectPartner(
       limit: 12,
     }, 12000).catch(() => TOLERATED_FAILURE) as Promise<Record<string, unknown>[] | typeof TOLERATED_FAILURE>,
     // NOT an Odoo read -- bff-v2, server-to-server, keyed on this same
-    // partnerId (LiteAccount.odooPartnerId). readPersonalLineServices()
+    // partnerId (LiteAccount.odooPartnerId). GATED to the one tenant
+    // Personal Line is actually bound to (tenantOwnsPersonalLine above) --
+    // a wrong-tenant caller never reaches the network call at all, rather
+    // than being trusted not to collide on partnerId. readPersonalLineServices()
     // never throws, so no .catch()/TOLERATED_FAILURE sentinel is needed
     // here; it reports its own availability in the resolved value.
-    readPersonalLineServices(partnerId),
+    tenantOwnsPersonalLine(config.url)
+      ? readPersonalLineServices(partnerId)
+      : Promise.resolve({ available: false, services: [] }),
   ]);
 
   // A tolerated failure is reported, never rendered as an empty result. The

@@ -123,6 +123,12 @@ describe('Odoo Customer 360 projection', () => {
   });
 
   describe('Personal Line services (bff-v2, not Odoo)', () => {
+    // Personal Line is a SINGLE-TENANT bff-v2 relationship, bound only to
+    // EPIC's own Odoo. This block's tests use EPIC's real origin
+    // deliberately -- the cross-tenant gate itself is proven separately
+    // below, against the shared `config` (a non-EPIC origin).
+    const epicConfig = { url: 'https://epic-communications-inc.odoo.com', apiKey: 'not-used', db: 'epic-communications-inc' };
+
     beforeEach(() => {
       json2Call.mockImplementation(async (_config: unknown, model: string) => {
         if (model === 'res.partner') return [{ id: 42, name: 'C', email: null, phone: '+17670000000', city: null }];
@@ -131,7 +137,7 @@ describe('Odoo Customer 360 projection', () => {
     });
 
     it('keys the bff-v2 read on the SAME partner id the Odoo reads are pinned to', async () => {
-      await readCustomer360(config, '+17670000000', { displayId: 1, currentRequest: null });
+      await readCustomer360(epicConfig, '+17670000000', { displayId: 1, currentRequest: null });
       expect(readPersonalLineServices).toHaveBeenCalledWith(42);
     });
 
@@ -140,23 +146,40 @@ describe('Odoo Customer 360 projection', () => {
         available: true,
         services: [{ kind: 'personal_line', did: '17678185063', sipRegistered: true, magnusUserAssigned: true, createdAt: null }],
       });
-      const result = await readCustomer360(config, '+17670000000', { displayId: 1, currentRequest: null });
+      const result = await readCustomer360(epicConfig, '+17670000000', { displayId: 1, currentRequest: null });
       expect(result?.servicesAvailable).toBe(true);
       expect(result?.services).toEqual([{ kind: 'personal_line', did: '17678185063', sipRegistered: true, magnusUserAssigned: true, createdAt: null }]);
     });
 
     it('reports servicesAvailable: false on a bff-v2 outage, never a fabricated empty-looking-healthy list', async () => {
       readPersonalLineServices.mockResolvedValue({ available: false, services: [] });
-      const result = await readCustomer360(config, '+17670000000', { displayId: 1, currentRequest: null });
+      const result = await readCustomer360(epicConfig, '+17670000000', { displayId: 1, currentRequest: null });
       expect(result?.servicesAvailable).toBe(false);
       expect(result?.services).toEqual([]);
     });
 
     it('a bff-v2 outage does not affect Odoo-sourced sections -- the two failure domains are independent', async () => {
       readPersonalLineServices.mockResolvedValue({ available: false, services: [] });
-      const result = await readCustomer360(config, '+17670000000', { displayId: 1, currentRequest: null });
+      const result = await readCustomer360(epicConfig, '+17670000000', { displayId: 1, currentRequest: null });
       expect(result?.openLoopsAvailable).toBe(true);
       expect(result?.followUpsAvailable).toBe(true);
+    });
+
+    it('SECURITY (Codex P1, discussion_r4057010114): a non-EPIC tenant NEVER reaches the bff-v2 call, even with a colliding partner id', async () => {
+      // config (module-level) is 'https://odoo.invalid' -- a different tenant's
+      // Odoo, whose partner #42 is a DIFFERENT, unrelated real person. Without
+      // the gate, this would return EPIC's real LiteAccount #42's DID and SIP
+      // registration status to that other tenant's operator.
+      const result = await readCustomer360(config, '+17670000000', { displayId: 1, currentRequest: null });
+      expect(readPersonalLineServices).not.toHaveBeenCalled();
+      expect(result?.servicesAvailable).toBe(false);
+      expect(result?.services).toEqual([]);
+    });
+
+    it('CONTROL: a sandbox-flagged EPIC-lookalike origin still does not open the gate (exact-origin match, not a substring/prefix check)', async () => {
+      const lookalike = { url: 'https://epic-communications-inc.odoo.com.evil.test', apiKey: 'x', db: 'x' };
+      await readCustomer360(lookalike, '+17670000000', { displayId: 1, currentRequest: null });
+      expect(readPersonalLineServices).not.toHaveBeenCalled();
     });
   });
 
