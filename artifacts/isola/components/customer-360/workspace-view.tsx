@@ -36,6 +36,7 @@ import { useState } from 'react';
 import type {
   Customer360FollowUp,
   Customer360ObjectDetail,
+  Customer360Service,
   Customer360Snapshot,
   Customer360Stage,
   Customer360TimelineEntry,
@@ -676,6 +677,67 @@ function NotBuiltPanel({ title, reason }: { title: string; reason: string }) {
   </section>;
 }
 
+/**
+ * Personal Line is the first real service kind (dec-customer-workspace-
+ * services-tab-and-6-tab-mapping-2026-09-20). `servicesAvailable` and an
+ * empty `services` array are NEVER conflated — same discipline as
+ * openLoopsAvailable/followUpsAvailable above: a bff-v2 outage must read as
+ * "could not check", never as "this customer has none". Registration
+ * (proven SIP calling status), wallet assignment and creation date are kept
+ * as separate labeled rows, never merged into one status word, so a reader
+ * is never left guessing which of the three a single claim is about.
+ */
+function ServicesPanel({ snapshot }: { snapshot: Customer360Snapshot }) {
+  const services = snapshot.services;
+  return <section className={styles.card}>
+    <div className={styles.sectionHead}>
+      <div><span className={styles.eyebrow}>Services</span><h2>Personal Line</h2></div>
+    </div>
+    {!snapshot.servicesAvailable
+      ? <div className={styles.unavailable}>
+          <strong>bff-v2 did not answer for services.</strong>
+          This is not a statement that this customer has none.
+        </div>
+      : services.length === 0
+        ? <div className={styles.empty}>
+            <p className={styles.emptyTitle}>No services</p>
+            <p>bff-v2 answered, and this customer holds no Personal Line.</p>
+          </div>
+        : <div className={styles.cardPad}>
+            {services.map((s: Customer360Service, i: number) => <div
+              key={s.did}
+              className={styles.summaryList}
+              style={i > 0 ? { marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border)' } : undefined}
+            >
+              <div className={styles.summaryRow}>
+                <span className={styles.summaryKey}>Personal Line</span>
+                <span className={styles.summaryValue}>{s.did}</span>
+              </div>
+              <div className={styles.summaryRow}>
+                <span className={styles.summaryKey}>Registration</span>
+                <span className={styles.summaryValue}>
+                  {s.sipRegistered === null
+                    ? 'Unknown — no SIP identity yet, or the check failed'
+                    : s.sipRegistered ? 'Registered' : 'Not registered'}
+                </span>
+              </div>
+              <div className={styles.summaryRow}>
+                <span className={styles.summaryKey}>Wallet</span>
+                <span className={styles.summaryValue}>{s.magnusUserAssigned ? 'Assigned' : 'Not assigned'}</span>
+              </div>
+              <div className={styles.summaryRow}>
+                <span className={styles.summaryKey}>Created</span>
+                <span className={styles.summaryValue}>
+                  {s.createdAt
+                    ? new Date(s.createdAt).toLocaleDateString('en-DM', { year: 'numeric', month: 'short', day: 'numeric' })
+                    : 'Unavailable'}
+                </span>
+              </div>
+            </div>)}
+          </div>}
+  </section>;
+}
+
 /** Real Odoo fields only. A field this customer's record does not have shows
  *  an honest placeholder, never a blank cell that reads as a loading state. */
 function AccountSummaryPanel({ snapshot }: { snapshot: Customer360Snapshot }) {
@@ -1083,10 +1145,7 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
         changed; only its tab moved.
       */}
       {!nested && tab === 'services' && <>
-        <NotBuiltPanel
-          title="Services"
-          reason="Real service instances (Personal Line first) are not read into this snapshot yet — that needs a container/contract change (Customer360Snapshot has no services field today). Quotations and orders below are shown meanwhile, unchanged from the prior Sales tab."
-        />
+        <ServicesPanel snapshot={snapshot} />
         <DocumentList
           title="Quotations and orders"
           note="Review the source record before sending anything."
