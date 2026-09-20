@@ -109,42 +109,50 @@ describe('timeline + follow-ups checkpoint (render only, no deploy)', () => {
     const rawCss = readFileSync(path.resolve(__dirname, '../components/customer-360/customer-360.module.css'), 'utf8')
 
     const noop = () => {}
-    const markup = renderToStaticMarkup(
-      <CustomerWorkspaceView
-        snapshot={armour}
-        tab="overview"
-        onTabChange={noop}
-        nested={null}
-        onOpenObject={noop}
-        onCloseObject={noop}
-        outcomeFor={() => undefined}
-        send={null}
-        onSendOpen={noop}
-        onSendConfirm={noop}
-        onSendClose={noop}
-        replyOpen={false}
-        onReplyOpen={noop}
-        onReplyClose={noop}
-        destinationLabel="conversation #15"
-        onBackToCustomers={noop}
-        onCreateFollowUp={noop}
-        creatingFollowUp={false}
-      />,
+    const commonProps = {
+      snapshot: armour,
+      onTabChange: noop,
+      nested: null,
+      onOpenObject: noop,
+      onCloseObject: noop,
+      outcomeFor: () => undefined,
+      send: null,
+      onSendOpen: noop,
+      onSendConfirm: noop,
+      onSendClose: noop,
+      replyOpen: false,
+      onReplyOpen: noop,
+      onReplyClose: noop,
+      destinationLabel: 'conversation #15',
+      onBackToCustomers: noop,
+      onCreateFollowUp: noop,
+      creatingFollowUp: false,
+    } as const
+
+    // Timeline and Follow-ups moved to separate tabs on 2026-09-20
+    // (dec-customer-workspace-services-tab-and-6-tab-mapping-2026-09-20):
+    // Timeline lives under 'conversations' now; Follow-ups stays under
+    // 'overview'. Two renders, not one, to check each honestly.
+    const overviewMarkup = renderToStaticMarkup(
+      <CustomerWorkspaceView {...commonProps} tab="overview" />,
+    )
+    const conversationsMarkup = renderToStaticMarkup(
+      <CustomerWorkspaceView {...commonProps} tab="conversations" />,
     )
 
-    expect(markup).toContain('Timeline')
-    expect(markup).toContain('Greetings EPIC') // real customer message
-    expect(markup).toContain('S00670') // real order, same stream
-    expect(markup).toContain('Calls are not shown') // honest, never faked
-    expect(markup).toContain('Today') // real dueLabel computation
-    expect(markup).toContain('Tomorrow')
+    expect(conversationsMarkup).toContain('Timeline')
+    expect(conversationsMarkup).toContain('Greetings EPIC') // real customer message
+    expect(conversationsMarkup).toContain('S00670') // real order, same stream
+    expect(conversationsMarkup).toContain('Calls are not shown') // honest, never faked
+    expect(overviewMarkup).toContain('Today') // real dueLabel computation
+    expect(overviewMarkup).toContain('Tomorrow')
 
     const css = inlinedCss(rawCss)
     const page = `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>Timeline + follow-ups checkpoint — 2026-09-05</title>
+<title>Timeline + follow-ups checkpoint — 2026-09-05 (tab split 2026-09-20)</title>
 <style>${css}</style>
 <style>
   body { margin: 0; background: #ddd; font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
@@ -153,8 +161,10 @@ describe('timeline + follow-ups checkpoint (render only, no deploy)', () => {
 </style>
 </head>
 <body>
-  <p class="caption">(4)+(5) Overview, Patricia Yvonne Armour (partner 163, conv #15) — real message content and real order (S00670), merged chronologically; honest "calls not shown" note; Follow-ups panel (illustrative rows, real Today/Tomorrow label computation).</p>
-  <div class="frame">${markup}</div>
+  <p class="caption">(4) Overview tab, Patricia Yvonne Armour (partner 163, conv #15) — Follow-ups panel (illustrative rows, real Today/Tomorrow label computation).</p>
+  <div class="frame">${overviewMarkup}</div>
+  <p class="caption">(5) Conversations tab, same customer — real message content and real order (S00670), merged chronologically; honest "calls not shown" note.</p>
+  <div class="frame">${conversationsMarkup}</div>
 </body>
 </html>`
 

@@ -181,7 +181,7 @@ describe('identity bar checkpoint (render only, no deploy)', () => {
     const nestedMarkup = renderToStaticMarkup(
       <CustomerWorkspaceView
         {...commonProps}
-        tab="sales"
+        tab="services"
         snapshot={armour}
         nested={{ target: { kind: 'quotation', id: 607, reference: 'S00670' }, phase: { kind: 'ready', detail: s00670Detail } }}
         replyOpen={false}
@@ -216,7 +216,7 @@ describe('identity bar checkpoint (render only, no deploy)', () => {
   <div class="frame">${armourMarkup}</div>
   <p class="caption">Illustrative only — proves tags/company render when present. Not this customer's real record.</p>
   <div class="frame">${taggedMarkup}</div>
-  <p class="caption">(b) S00670 opened as a NESTED record, Sales tab — real Odoo data via /api/isola-360/objects. Stage rail: Quotation (current) — the honest equivalent of "Draft" for a sale.order this codebase already derives from real state/invoice_status fields.</p>
+  <p class="caption">(b) S00670 opened as a NESTED record (the underlying tab value no longer changes what renders here — a nested object replaces the tab body) — real Odoo data via /api/isola-360/objects. Stage rail: Quotation (current) — the honest equivalent of "Draft" for a sale.order this codebase already derives from real state/invoice_status fields.</p>
   <div class="frame">${nestedMarkup}</div>
 </body>
 </html>`

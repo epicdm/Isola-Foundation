@@ -56,15 +56,28 @@ export interface WorkspaceDomain {
   entity?: { Cap?: string; lower?: string };
 }
 
-/** Base labels. Every tenant-facing string in this view resolves through here. */
+/**
+ * Base labels. Every tenant-facing string in this view resolves through here.
+ *
+ * TAB SET EXTENDED 2026-09-20 (dec-customer-workspace-services-tab-and-6-tab-
+ * mapping-2026-09-20, owner-confirmed): 'sales' and 'support' are RENAMED/
+ * RELOCATED, not deleted — 'support' becomes 'issues-and-work' (same open-
+ * loops content, broader name); 'sales' documents move into the new
+ * 'services' tab's own section rather than keeping a separate top-level nav
+ * entry, since Personal Line (the first real service) is not a quotation or
+ * order. 'conversations' and 'activity' are genuinely new. See each tab's
+ * render block below for what is real today vs an honest placeholder.
+ */
 const BASE_LABELS: Record<string, string> = {
   overview: 'Overview',
-  sales: 'Sales',
+  services: 'Services',
+  'issues-and-work': 'Issues & Work',
+  conversations: 'Conversations',
   billing: 'Billing',
-  support: 'Support',
+  activity: 'Activity',
 };
 
-export type WorkspaceTab = 'overview' | 'sales' | 'billing' | 'support';
+export type WorkspaceTab = 'overview' | 'services' | 'issues-and-work' | 'conversations' | 'billing' | 'activity';
 
 /** One object opened inside the customer. Null when the customer is the view. */
 export type NestedTarget = {
@@ -924,14 +937,18 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
 
   /** Undefined renders no badge at all. A "0" chip is noise; its absence says the same thing. */
   const counts: Partial<Record<WorkspaceTab, number>> = {
-    sales: salesDocs.length || undefined,
+    // 'services' has no real count yet — no snapshot field exists for it
+    // today (see the services tab's own render block). salesDocs still
+    // counts toward it since quotations/orders now render inside Services
+    // until a real service-kind count exists.
+    services: salesDocs.length || undefined,
     billing: invoiceDocs.length || undefined,
     // Only a successful read may produce a count. When Odoo did not answer we
     // show no badge rather than a zero that would read as "none exist".
-    support: snapshot.openLoopsAvailable ? loops.length || undefined : undefined,
+    'issues-and-work': snapshot.openLoopsAvailable ? loops.length || undefined : undefined,
   };
 
-  const TABS: WorkspaceTab[] = ['overview', 'sales', 'billing', 'support'];
+  const TABS: WorkspaceTab[] = ['overview', 'services', 'issues-and-work', 'conversations', 'billing', 'activity'];
 
   const checkedAt = new Date(snapshot.verifiedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const freshnessClass =
@@ -1043,31 +1060,39 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
           <OpenDealPanel snapshot={snapshot} />
           <section className={styles.card}>
             <div className={styles.sectionHead}>
-              <div><span className={styles.eyebrow}>{label(domain, 'sales')}</span><h2>Orders</h2></div>
+              <div><span className={styles.eyebrow}>{label(domain, 'services')}</span><h2>Orders</h2></div>
             </div>
             <div className={styles.cardPad}>
               <strong className={`${styles.tileValue} ${styles.tnum}`}>{salesDocs.length}</strong>
               <p className={styles.tileNote}>{salesDocs.length === 1 ? 'quotation or order' : 'quotations and orders'}</p>
-              <button type="button" className={styles.tileLink} onClick={() => onTabChange('sales')}>Review sales →</button>
+              <button type="button" className={styles.tileLink} onClick={() => onTabChange('services')}>Review services →</button>
             </div>
           </section>
         </div>
 
         <div className={styles.railCol}>
           <OwedCard snapshot={snapshot} />
-          <InlineConversationPanel destinationLabel={destinationLabel} />
         </div>
       </div>}
 
-      {!nested && tab === 'overview' && <div className={styles.timelineSection}>
-        <TimelineSection snapshot={snapshot} />
-      </div>}
-
-      {!nested && tab === 'sales' && <DocumentList
-        title="Quotations and orders"
-        note="Review the source record before sending anything."
-        empty="Odoo answered, and this customer has no quotations or orders."
-        items={salesDocs} outcomeFor={outcomeFor} onSend={onSendOpen} onOpen={onOpenObject} />}
+      {/*
+        SERVICES (new tab, 2026-09-20): quotations/orders relocate here from
+        the removed 'sales' tab, unchanged in behaviour — a customer's real
+        service instances (Personal Line first) belong here too, once a
+        container populates them. Nothing about salesDocs' own display logic
+        changed; only its tab moved.
+      */}
+      {!nested && tab === 'services' && <>
+        <NotBuiltPanel
+          title="Services"
+          reason="Real service instances (Personal Line first) are not read into this snapshot yet — that needs a container/contract change (Customer360Snapshot has no services field today). Quotations and orders below are shown meanwhile, unchanged from the prior Sales tab."
+        />
+        <DocumentList
+          title="Quotations and orders"
+          note="Review the source record before sending anything."
+          empty="Odoo answered, and this customer has no quotations or orders."
+          items={salesDocs} outcomeFor={outcomeFor} onSend={onSendOpen} onOpen={onOpenObject} />
+      </>}
 
       {!nested && tab === 'billing' && <DocumentList
         title="Invoices"
@@ -1075,7 +1100,30 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
         empty="Odoo answered, and this customer has no invoices."
         items={invoiceDocs} outcomeFor={outcomeFor} onSend={onSendOpen} onOpen={onOpenObject} />}
 
-      {!nested && tab === 'support' && <section className={styles.card}>
+      {/*
+        CONVERSATIONS (new tab, 2026-09-20): relocated from Overview, unchanged
+        content — the merged message/order/invoice timeline and the inline-
+        thread placeholder both belong to "conversations" more than to a
+        general Overview, and Overview was already getting crowded.
+      */}
+      {!nested && tab === 'conversations' && <>
+        <InlineConversationPanel destinationLabel={destinationLabel} />
+        <div className={styles.timelineSection}>
+          <TimelineSection snapshot={snapshot} />
+        </div>
+      </>}
+
+      {/*
+        ACTIVITY (new tab, 2026-09-20): no real audit/event-log source exists
+        in this snapshot yet — honest placeholder, same NotBuiltPanel idiom
+        used elsewhere in this file, not a fabricated feed.
+      */}
+      {!nested && tab === 'activity' && <NotBuiltPanel
+        title="Activity"
+        reason="An audit/event log (who changed what, when) needs a real source this workspace does not read yet. Follow-ups and the conversation timeline (see Overview and Conversations) are the closest real signal available today."
+      />}
+
+      {!nested && tab === 'issues-and-work' && <section className={styles.card}>
         <div className={styles.sectionHead}>
           <div><span className={styles.eyebrow}>Close the loop</span><h2>Open customer work</h2></div>
           <p>Review before creating a duplicate.</p>
