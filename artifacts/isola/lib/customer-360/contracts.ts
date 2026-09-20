@@ -52,6 +52,32 @@ export interface Customer360Loop {
   odooLink: string | null;
 }
 
+/**
+ * One real service instance a customer holds. Personal Line is the only
+ * `kind` today; the union exists so a second service type is an addition,
+ * not a rename. Fields are exactly what bff-v2's own `/customer-360/services`
+ * route reports -- LIVE-OBSERVED (registration, Magnus presence), never
+ * Portal's own `activation_state` bookkeeping, which that route's own build
+ * notes record as sometimes stale. No `odooLink` -- this is not an Odoo
+ * record, and no `liteAccountId` -- that join key must never leave bff-v2
+ * (the same rule isola-portal's own operator screen enforces on this exact
+ * field, doubly, after it leaked once).
+ */
+export interface Customer360Service {
+  kind: 'personal_line';
+  /** The real-world identifier this service is keyed on. Also this array's
+   *  React key upstream -- stable and never fabricated, unlike a synthetic id. */
+  did: string;
+  /** `null` when there is no SIP identity to check yet, or the registration
+   *  read itself failed -- never a fabricated true/false. */
+  sipRegistered: boolean | null;
+  /** A Magnus user (and therefore a wallet, even if $0) exists for this
+   *  account -- presence only, never a balance signal. See the route's own
+   *  naming note: this is deliberately NOT called `hasWallet`. */
+  magnusUserAssigned: boolean;
+  createdAt: string | null;
+}
+
 export interface Customer360Snapshot {
   verifiedAt: string;
   freshness: Freshness;
@@ -131,6 +157,17 @@ export interface Customer360Snapshot {
    *  shape as openLoopsAvailable — see followUpsAvailable. */
   followUps: Customer360FollowUp[];
   followUpsAvailable: boolean;
+  /**
+   * Real service instances this customer holds -- Personal Line is the
+   * first kind (dec-customer-workspace-services-tab-and-6-tab-mapping-
+   * 2026-09-20). Lives on bff-v2, not Foundation, keyed on
+   * LiteAccount.odooPartnerId (ev-agent-lane-customer-liteaccount-linkage-
+   * source-proven-2026-09-20) -- same cross-system-boundary shape as calls,
+   * and the same tolerated-failure discipline as openLoops/followUps: a
+   * bff-v2 outage must render as unavailable, never as "no services".
+   */
+  services: Customer360Service[];
+  servicesAvailable: boolean;
   /**
    * Messages, orders and invoices already read for this snapshot, merged
    * into one chronological stream — no second Odoo/Chatwoot call. Calls are

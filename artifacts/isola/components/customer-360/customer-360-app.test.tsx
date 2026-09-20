@@ -31,6 +31,8 @@ const baseSnapshot = (over: Partial<Customer360Snapshot> = {}): Customer360Snaps
   lifetimeValue: [],
   followUps: [],
   followUpsAvailable: true,
+  services: [],
+  servicesAvailable: true,
   timeline: [],
   timelineCallsNote: 'Calls are not shown: Magnus CDR data lives on bff-v2, not Foundation, and no server-to-server read path exists yet.',
   documents: [],

@@ -1,6 +1,7 @@
 import { json2Call, type OdooConfig, type OdooCustomer } from '@/engines/odoo';
 import { odooDeepLink } from '@/lib/context/customer-sources';
 import { createOdooRecordSystem } from '@/lib/governed/executors/odoo-record-system';
+import { readPersonalLineServices } from './personal-line-services';
 import type {
   Customer360Balance,
   Customer360Document,
@@ -177,7 +178,7 @@ async function projectPartner(
 ): Promise<Customer360Snapshot> {
   const partnerId = partner.id;
 
-  const [sales, invoices, opportunitiesRaw, tasksRaw, ticketsRaw, followUpsRaw] = await Promise.all([
+  const [sales, invoices, opportunitiesRaw, tasksRaw, ticketsRaw, followUpsRaw, servicesResult] = await Promise.all([
     json2Call(config, 'sale.order', 'search_read', {
       domain: [['partner_id', '=', partnerId]],
       fields: ['id', 'name', 'state', 'amount_total', 'currency_id', 'date_order'],
@@ -222,6 +223,11 @@ async function projectPartner(
       order: 'date_deadline asc',
       limit: 12,
     }, 12000).catch(() => TOLERATED_FAILURE) as Promise<Record<string, unknown>[] | typeof TOLERATED_FAILURE>,
+    // NOT an Odoo read -- bff-v2, server-to-server, keyed on this same
+    // partnerId (LiteAccount.odooPartnerId). readPersonalLineServices()
+    // never throws, so no .catch()/TOLERATED_FAILURE sentinel is needed
+    // here; it reports its own availability in the resolved value.
+    readPersonalLineServices(partnerId),
   ]);
 
   // A tolerated failure is reported, never rendered as an empty result. The
@@ -395,6 +401,8 @@ async function projectPartner(
     recommendedAction: recommendedAction(documents, partner.name),
     followUps,
     followUpsAvailable,
+    services: servicesResult.services,
+    servicesAvailable: servicesResult.available,
     timeline,
     timelineCallsNote: CALLS_NOT_CONNECTED_NOTE,
   };
