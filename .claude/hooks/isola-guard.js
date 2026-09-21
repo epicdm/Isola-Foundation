@@ -232,10 +232,11 @@ function evaluate(inp) {
     if (blocked || unparseable) {
       deny(
         'easypanel-secret-dump-procedure',
-        'listProjectsAndServices (epic-portal/EasyPanel) returns full plaintext secrets ' +
-          '(encryption keys, JWT secrets, DB/Redis/MariaDB passwords) for every service on the ' +
-          'instance, with no redaction and no per-project scoping. Reclassified P0 twice this session ' +
-          '(see defect-easypanel-listprojectsandservices-second-secret-dump-2026-08-10) — blocked ' +
+        'This epic-portal/EasyPanel procedure returns full plaintext secrets. listProjectsAndServices ' +
+          'dumps every service (defect-easypanel-listprojectsandservices-second-secret-dump-2026-08-10); ' +
+          'inspectAppService and the whole inspect*Service family, inspectProject and getEnv return the ' +
+          'same shape for one service — proven 2026-09-21 when inspectAppService on isola-lumen-api-prod ' +
+          'put a Django secret key, DB/Redis passwords and ~12 API tokens into a transcript. Blocked ' +
           'outright rather than relied on as a remembered rule.' +
           (unparseable
             ? ' This specific payload could not be safely inspected (malformed or too deeply nested) — ' +

@@ -1069,6 +1069,88 @@ const cases = [
       tool_input: { command: 'curl -s "https://portal.saas00.epic.dm/api/trpc/projects.listProjectsAndServices?batch=1"' },
     },
   },
+  // --- EASYPANEL inspect*Service FAMILY (2026-09-21: inspectAppService dumped a prod env) ---
+  {
+    name: 'epic-portal execute_query inspectAppService is BLOCKED (the 2026-09-21 door)',
+    expect: BLOCK,
+    contains: 'easypanel-secret-dump-procedure',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'inspectAppService', input: { projectName: 'isola', serviceName: 'isola-lumen-api-prod' } },
+    },
+  },
+  {
+    name: 'epic-portal inspectPostgresService (listed sibling) is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-secret-dump-procedure',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'inspectPostgresService', input: { projectName: 'isola', serviceName: 'db' } },
+    },
+  },
+  {
+    // Not in the explicit set — proves the FAMILY rule fires, not just the list.
+    name: 'an UNLISTED inspect<X>Service name is BLOCKED by the family rule',
+    expect: BLOCK,
+    contains: 'easypanel-secret-dump-procedure',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'services.wordpress.inspectWordpressService', input: { projectName: 'x', serviceName: 'y' } },
+    },
+  },
+  {
+    name: 'epic-portal inspectProject and getEnv are BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-secret-dump-procedure',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'inspectProject', input: { projectName: 'isola' } },
+    },
+  },
+  {
+    name: 'epic-portal getEnv (Traefik env file) is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-secret-dump-procedure',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'getEnv', input: {} },
+    },
+  },
+  {
+    name: 'raw REST-style /api/rpc/services/app/inspectAppService path is BLOCKED',
+    expect: BLOCK,
+    contains: 'easypanel-secret-dump-procedure',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'curl -s https://portal.saas00.epic.dm/api/rpc/services/app/inspectAppService -d \'{"projectName":"isola","serviceName":"isola-lumen-api-prod"}\'' },
+    },
+  },
+  {
+    // CONTROL: name-adjacent, non-secret-bearing per-service reads must stay
+    // allowed, or the family rule is just a blanket ban on epic-portal reads.
+    name: 'CONTROL: epic-portal getServiceError (name-adjacent, no secrets) is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'getServiceError', input: { projectName: 'isola', serviceName: 'isola-lumen-api-prod' } },
+    },
+  },
+  {
+    name: 'CONTROL: epic-portal getMetricsServiceStats is ALLOWED (ends in "Stats", not "Service")',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__epic-portal__execute_query',
+      tool_input: { procedure: 'getMetricsServiceStats', input: { projectName: 'isola', serviceName: 'isola-lumen-api-prod' } },
+    },
+  },
   {
     // Same design rule as "prose mentioning the Graph host is still not gated":
     // describing the blocked path/procedure (a commit message, a doc) is not
