@@ -30,6 +30,7 @@ import type { Customer360Response, Customer360Snapshot } from '@/lib/customer-36
 import type { SendOutcome } from '@/lib/customer-360/send-badge';
 import {
   CustomerWorkspaceView,
+  type LifecyclePhase,
   type NestedPhase,
   type NestedTarget,
   type SendPhase,
@@ -89,6 +90,11 @@ export function Customer360App() {
   */
   const [nested, setNested] = useState<NestedTarget | null>(null);
   const [nestedPhase, setNestedPhase] = useState<NestedPhase>({ kind: 'loading' });
+  /** A Personal Line's onboarding checklist, opened on demand from its row in
+   *  the Services tab. `did`, never liteAccountId — see LifecyclePhase's own
+   *  header in workspace-view.tsx for why this is not the `nested` mechanism. */
+  const [lifecycleDid, setLifecycleDid] = useState<string | null>(null);
+  const [lifecyclePhase, setLifecyclePhase] = useState<LifecyclePhase>({ kind: 'loading' });
   const [sendDoc, setSendDoc] = useState<Document | null>(null);
   const [sendPhase, setSendPhase] = useState<SendPhase>({ kind: 'previewing' });
   const inFlight = useRef(false);
@@ -163,6 +169,31 @@ export function Customer360App() {
       });
     return () => { live = false; };
   }, [nested, phase]);
+
+  /** Fetch a Personal Line's onboarding checklist. Server-side, this route
+   *  resolves did -> liteAccountId and calls bff-v2's service-detail itself
+   *  (resolve-action-target + service-detail, both isolav2) -- the browser
+   *  only ever sees `did` and the already-safe lifecycle section back. */
+  useEffect(() => {
+    if (!lifecycleDid || phase.kind !== 'ready') return;
+    let live = true;
+    setLifecyclePhase({ kind: 'loading' });
+    fetch('/api/isola-360/lifecycle', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ hint: phase.hint, did: lifecycleDid }),
+    })
+      .then(async (response) => {
+        const result = await response.json();
+        if (!live) return;
+        if (result?.state === 'ready') setLifecyclePhase({ kind: 'ready', lifecycle: result.lifecycle });
+        else setLifecyclePhase({ kind: 'message', text: result?.message ?? 'This checklist could not be read.' });
+      })
+      .catch(() => {
+        if (live) setLifecyclePhase({ kind: 'message', text: 'This checklist could not be reached, so nothing is shown for it.' });
+      });
+    return () => { live = false; };
+  }, [lifecycleDid, phase]);
 
   /** Preview the exact text, server-composed, the moment the dialog opens. */
   useEffect(() => {
@@ -248,6 +279,9 @@ export function Customer360App() {
     nested={nested ? { target: nested, phase: nestedPhase } : null}
     onOpenObject={setNested}
     onCloseObject={() => setNested(null)}
+    lifecycleDrillDown={lifecycleDid ? { did: lifecycleDid, phase: lifecyclePhase } : null}
+    onOpenLifecycle={setLifecycleDid}
+    onCloseLifecycle={() => setLifecycleDid(null)}
     outcomeFor={(doc) => sent[documentKey(hint, doc)]}
     send={sendDoc ? { doc: sendDoc, phase: sendPhase } : null}
     onSendOpen={setSendDoc}

@@ -41,6 +41,9 @@ import type {
   Customer360Stage,
   Customer360TimelineEntry,
   DetailAvailability,
+  LifecycleMilestones,
+  Milestone,
+  MilestoneStatus,
 } from '@/lib/customer-360/contracts';
 import { sendBadgeText, type SendOutcome } from '@/lib/customer-360/send-badge';
 import styles from './customer-360.module.css';
@@ -92,6 +95,26 @@ export type NestedPhase =
   | { kind: 'ready'; detail: Customer360ObjectDetail }
   | { kind: 'message'; text: string };
 
+/**
+ * A Personal Line's onboarding checklist, opened on demand from its row in
+ * the Services tab. NOT the `nested`/`NestedTarget` mechanism above — that
+ * one is closed over Odoo object kinds (`quotation | order | invoice |
+ * ticket`) and `Customer360ObjectDetail`'s Odoo-shaped fields (odooLink,
+ * paymentState, ...), none of which a Personal Line has. Forcing this into
+ * that shape would be exactly the kind of guess `detailKindFor`'s own
+ * comment already warns against for a record type with no validated spec —
+ * a Personal Line has one here, so it gets its own small, parallel state
+ * instead of stretching an unrelated one.
+ *
+ * Keyed by `did`, the same stable, real-world identifier `Customer360Service`
+ * itself is keyed on — never a synthetic id, and never liteAccountId, which
+ * must not exist on this side of the fetch at all (the container's job).
+ */
+export type LifecyclePhase =
+  | { kind: 'loading' }
+  | { kind: 'ready'; lifecycle: LifecycleMilestones }
+  | { kind: 'message'; text: string };
+
 export type SendPhase =
   | { kind: 'previewing' }
   | { kind: 'reviewing'; body: string; fingerprint: string }
@@ -115,6 +138,17 @@ export interface WorkspaceViewProps {
   nested: { target: NestedTarget; phase: NestedPhase } | null;
   onOpenObject: (target: NestedTarget) => void;
   onCloseObject: () => void;
+
+  /**
+   * A Personal Line's onboarding checklist, opened on demand from its row in
+   * the Services tab. Keyed by `did`, not `NestedTarget` — see
+   * `LifecyclePhase`'s own header. `undefined` for a `did` with no drill-down
+   * open (distinguishing "no service was clicked" from `null`, which
+   * `LifecycleChecklist` already uses for "opened, but no checklist to show").
+   */
+  lifecycleDrillDown: { did: string; phase: LifecyclePhase } | null;
+  onOpenLifecycle: (did: string) => void;
+  onCloseLifecycle: () => void;
 
   /**
    * The outcome of a previous send for one document, if any.
@@ -687,7 +721,14 @@ function NotBuiltPanel({ title, reason }: { title: string; reason: string }) {
  * as separate labeled rows, never merged into one status word, so a reader
  * is never left guessing which of the three a single claim is about.
  */
-function ServicesPanel({ snapshot }: { snapshot: Customer360Snapshot }) {
+function ServicesPanel({
+  snapshot, lifecycleDrillDown, onOpenLifecycle, onCloseLifecycle,
+}: {
+  snapshot: Customer360Snapshot;
+  lifecycleDrillDown: { did: string; phase: LifecyclePhase } | null;
+  onOpenLifecycle: (did: string) => void;
+  onCloseLifecycle: () => void;
+}) {
   const services = snapshot.services;
   return <section className={styles.card}>
     <div className={styles.sectionHead}>
@@ -733,9 +774,99 @@ function ServicesPanel({ snapshot }: { snapshot: Customer360Snapshot }) {
                     : 'Unavailable'}
                 </span>
               </div>
+              <LifecycleChecklist
+                did={s.did}
+                drillDown={lifecycleDrillDown?.did === s.did ? lifecycleDrillDown : null}
+                onOpen={() => onOpenLifecycle(s.did)}
+                onClose={onCloseLifecycle}
+              />
             </div>)}
           </div>}
   </section>;
+}
+
+/**
+ * Onboarding/lifecycle checklist (owner baseline, 2026-09-20: onboarding
+ * status is CONTEXT for the concierge's continuing relationship with a
+ * customer, not a standalone deliverable — so it renders INSIDE this same
+ * service card, never as its own tab or panel).
+ *
+ * ON DEMAND, NOT ON LOAD (dec-... 2026-09-21 design reconciliation with
+ * AGENT lane): the six-milestone derivation is expensive enough
+ * (AgentActivity, call history, plan subscription reads) that computing it
+ * for every service on every Services-tab open would cost N× that for
+ * however many lines a customer holds. This card starts collapsed with a
+ * single toggle; the fetch only happens once an operator actually asks.
+ */
+function LifecycleChecklist({
+  did, drillDown, onOpen, onClose,
+}: {
+  did: string;
+  drillDown: { did: string; phase: LifecyclePhase } | null;
+  onOpen: () => void;
+  onClose: () => void;
+}) {
+  if (!drillDown) {
+    return <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+      <button type="button" className={styles.secondaryBtn} onClick={onOpen}>
+        View onboarding status
+      </button>
+    </div>;
+  }
+
+  const { phase } = drillDown;
+
+  return <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+    <div className={styles.sectionHead} style={{ marginBottom: phase.kind === 'ready' ? 6 : 0 }}>
+      <div className={styles.eyebrow}>Onboarding</div>
+      <button type="button" className={styles.secondaryBtn} onClick={onClose}>Hide</button>
+    </div>
+    {phase.kind === 'loading' && <p className={styles.copyHint}>Checking…</p>}
+    {phase.kind === 'message' && <div className={styles.unavailable}>
+      <strong>Could not be determined right now.</strong>
+      {phase.text}
+    </div>}
+    {phase.kind === 'ready' && <LifecycleRows lifecycle={phase.lifecycle} />}
+  </div>;
+}
+
+function LifecycleRows({ lifecycle }: { lifecycle: LifecycleMilestones }) {
+  const rows: Array<{ label: string; milestone: Milestone }> = [
+    { label: 'Signed up', milestone: lifecycle.signup },
+    { label: 'Number assigned', milestone: lifecycle.number_assigned },
+    { label: 'Calling app registered', milestone: lifecycle.sip_registered },
+    { label: 'First confirmation or call', milestone: lifecycle.first_confirmation_or_call },
+    { label: 'Trial or plan active', milestone: lifecycle.trial_or_plan_active },
+    { label: 'Linked to Odoo customer', milestone: lifecycle.odoo_linked },
+  ];
+  return <ul className={styles.listRows}>
+    {rows.map((r) => <li key={r.label} className={styles.listRow}>
+      <div className={styles.listRowMain}>
+        <div className={styles.listRowTitle}>{r.label}</div>
+        {(r.milestone.failureReason || r.milestone.nextAction) && <div className={styles.rowMeta}>
+          {r.milestone.failureReason ?? r.milestone.nextAction}
+        </div>}
+      </div>
+      <span className={milestoneStateClass(r.milestone.status)}>{milestoneStateLabel(r.milestone.status)}</span>
+    </li>)}
+  </ul>;
+}
+
+/** Wording a customer-relationship reader recognizes at a glance — never the
+ *  raw enum value, same "the word is the label" idiom `.state`'s own CSS
+ *  comment states for every other status chip in this file. */
+function milestoneStateLabel(status: MilestoneStatus): string {
+  if (status === 'done') return 'Done';
+  if (status === 'pending') return 'Not yet';
+  if (status === 'blocked') return 'Blocked';
+  return 'Unknown';
+}
+
+function milestoneStateClass(status: MilestoneStatus): string {
+  if (status === 'done') return `${styles.state} ${styles.stateOk}`;
+  if (status === 'blocked') return `${styles.state} ${styles.stateDanger}`;
+  if (status === 'unknown') return `${styles.state} ${styles.stateWarn}`;
+  return styles.state;
 }
 
 /** Real Odoo fields only. A field this customer's record does not have shows
@@ -979,6 +1110,7 @@ function DocumentList({ title, note, empty, items, outcomeFor, onSend, onOpen }:
 export function CustomerWorkspaceView(props: WorkspaceViewProps) {
   const {
     snapshot, tab, onTabChange, nested, onOpenObject, onCloseObject,
+    lifecycleDrillDown, onOpenLifecycle, onCloseLifecycle,
     outcomeFor, send, onSendOpen, onSendConfirm, onSendClose,
     replyOpen, onReplyOpen, onReplyClose, replyPrefill, destinationLabel, domain,
     onBackToCustomers, onCreateFollowUp, creatingFollowUp,
@@ -999,11 +1131,14 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
 
   /** Undefined renders no badge at all. A "0" chip is noise; its absence says the same thing. */
   const counts: Partial<Record<WorkspaceTab, number>> = {
-    // 'services' has no real count yet — no snapshot field exists for it
-    // today (see the services tab's own render block). salesDocs still
-    // counts toward it since quotations/orders now render inside Services
-    // until a real service-kind count exists.
-    services: salesDocs.length || undefined,
+    // Real service instances (Personal Line first) plus quotations/orders,
+    // which render inside this same tab. Services is counted only when
+    // bff-v2 actually answered -- same "only a successful read produces a
+    // count" rule 'issues-and-work' below already applies, so a bff-v2
+    // outage never understates as "just the sales docs" nor overstates as
+    // "definitely none". Sales docs still count on their own when services
+    // itself is unavailable, since that read did succeed.
+    services: salesDocs.length + (snapshot.servicesAvailable ? snapshot.services.length : 0) || undefined,
     billing: invoiceDocs.length || undefined,
     // Only a successful read may produce a count. When Odoo did not answer we
     // show no badge rather than a zero that would read as "none exist".
@@ -1145,7 +1280,12 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
         changed; only its tab moved.
       */}
       {!nested && tab === 'services' && <>
-        <ServicesPanel snapshot={snapshot} />
+        <ServicesPanel
+          snapshot={snapshot}
+          lifecycleDrillDown={lifecycleDrillDown}
+          onOpenLifecycle={onOpenLifecycle}
+          onCloseLifecycle={onCloseLifecycle}
+        />
         <DocumentList
           title="Quotations and orders"
           note="Review the source record before sending anything."

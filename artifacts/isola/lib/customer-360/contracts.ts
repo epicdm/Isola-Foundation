@@ -76,6 +76,46 @@ export interface Customer360Service {
    *  naming note: this is deliberately NOT called `hasWallet`. */
   magnusUserAssigned: boolean;
   createdAt: string | null;
+  /**
+   * Onboarding/lifecycle status (owner baseline, 2026-09-20: onboarding
+   * status is CONTEXT for the concierge's continuing relationship with the
+   * customer, not a standalone deliverable). Mirrors isolav2's
+   * `personal-line-lifecycle.ts` shape exactly -- same authoritative
+   * derivation service-detail's own `lifecycle` section already computes,
+   * never a second state machine here.
+   *
+   * OPTIONAL AND NULLABLE ON PURPOSE: undefined when the read this came
+   * from predates lifecycle being wired in (forward-compatible with the
+   * currently-deployed `/customer-360/services`, which does not send this
+   * field yet); `null` when the derivation genuinely could not run. Either
+   * way the panel must render "not available" honestly, never a guessed
+   * checklist.
+   */
+  lifecycle?: LifecycleMilestones | null;
+}
+
+export type MilestoneStatus = 'done' | 'pending' | 'blocked' | 'unknown';
+
+/** Mirrors isolav2's `Milestone` (app/lib/personal-line-lifecycle.ts)
+ *  exactly -- see that file for the full status-meaning rules. */
+export interface Milestone {
+  status: MilestoneStatus;
+  evidenceAt: string | null;
+  failureReason: string | null;
+  nextAction: string | null;
+}
+
+/** Mirrors isolav2's `LifecycleMilestones` exactly. Six fixed milestones,
+ *  not an array -- the set is closed and each one has a distinct meaning,
+ *  the same reasoning `Customer360Snapshot`'s other named fields already
+ *  follow rather than a generic list. */
+export interface LifecycleMilestones {
+  signup: Milestone;
+  number_assigned: Milestone;
+  sip_registered: Milestone;
+  first_confirmation_or_call: Milestone;
+  trial_or_plan_active: Milestone;
+  odoo_linked: Milestone;
 }
 
 export interface Customer360Snapshot {
