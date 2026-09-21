@@ -200,6 +200,19 @@ export interface WorkspaceViewProps {
   onBackToCustomers?: () => void;
 
   /**
+   * The reverse of the Personal Lines list → customer → Services → line loop
+   * (owner, 2026-09-20: "and the reverse navigation"). Same rule as
+   * `onBackToCustomers`: rendered only when the container has a Personal
+   * Lines surface to send it to. The Chatwoot container has none; the portal
+   * container does, and it owns the routing — the view never builds a URL.
+   * `onOpenPersonalLine` receives the row's `did`, the only identifier the
+   * Services snapshot carries (never a liteAccountId — see
+   * def-personal-line-service-detail-leaks-bffv2-join-key-2026-09-19).
+   */
+  onOpenPersonalLines?: () => void;
+  onOpenPersonalLine?: (did: string) => void;
+
+  /**
    * "Create follow-up task" — a real mail.activity write, not a toast. The
    * view supplies no note text or due date: the container computes
    * "Follow up — {name}" / tomorrow's real date, matching the design's own
@@ -722,17 +735,24 @@ function NotBuiltPanel({ title, reason }: { title: string; reason: string }) {
  * is never left guessing which of the three a single claim is about.
  */
 function ServicesPanel({
-  snapshot, lifecycleDrillDown, onOpenLifecycle, onCloseLifecycle,
+  snapshot, lifecycleDrillDown, onOpenLifecycle, onCloseLifecycle, onOpenPersonalLines, onOpenPersonalLine,
 }: {
   snapshot: Customer360Snapshot;
   lifecycleDrillDown: { did: string; phase: LifecyclePhase } | null;
   onOpenLifecycle: (did: string) => void;
   onCloseLifecycle: () => void;
+  onOpenPersonalLines?: () => void;
+  onOpenPersonalLine?: (did: string) => void;
 }) {
   const services = snapshot.services;
   return <section className={styles.card}>
     <div className={styles.sectionHead}>
       <div><span className={styles.eyebrow}>Services</span><h2>Personal Line</h2></div>
+      {onOpenPersonalLines && (
+        <button type="button" className={styles.backLink} onClick={onOpenPersonalLines} data-reverse-nav="personal-lines">
+          Personal Lines <span aria-hidden="true">→</span>
+        </button>
+      )}
     </div>
     {!snapshot.servicesAvailable
       ? <div className={styles.unavailable}>
@@ -774,6 +794,19 @@ function ServicesPanel({
                     : 'Unavailable'}
                 </span>
               </div>
+              {onOpenPersonalLine && (
+                <div className={styles.rowActions}>
+                  <button
+                    type="button"
+                    className={styles.secondaryBtn}
+                    onClick={() => onOpenPersonalLine(s.did)}
+                    data-reverse-nav="personal-line"
+                    data-did={s.did}
+                  >
+                    Open in Personal Lines
+                  </button>
+                </div>
+              )}
               <LifecycleChecklist
                 did={s.did}
                 drillDown={lifecycleDrillDown?.did === s.did ? lifecycleDrillDown : null}
@@ -1113,7 +1146,7 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
     lifecycleDrillDown, onOpenLifecycle, onCloseLifecycle,
     outcomeFor, send, onSendOpen, onSendConfirm, onSendClose,
     replyOpen, onReplyOpen, onReplyClose, replyPrefill, destinationLabel, domain,
-    onBackToCustomers, onCreateFollowUp, creatingFollowUp,
+    onBackToCustomers, onOpenPersonalLines, onOpenPersonalLine, onCreateFollowUp, creatingFollowUp,
   } = props;
 
   /**
@@ -1285,6 +1318,8 @@ export function CustomerWorkspaceView(props: WorkspaceViewProps) {
           lifecycleDrillDown={lifecycleDrillDown}
           onOpenLifecycle={onOpenLifecycle}
           onCloseLifecycle={onCloseLifecycle}
+          onOpenPersonalLines={onOpenPersonalLines}
+          onOpenPersonalLine={onOpenPersonalLine}
         />
         <DocumentList
           title="Quotations and orders"
