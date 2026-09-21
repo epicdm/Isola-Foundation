@@ -449,7 +449,39 @@ const SECRET_DUMP_RE = new RegExp(
  * listPorts, listMounts, getComposeDockerServices, getMonitorTableData —
  * none of these return secret material.
  */
-const EASYPANEL_BLOCKED_PROCEDURES = new Set(['listProjectsAndServices']);
+const EASYPANEL_BLOCKED_PROCEDURES = new Set([
+  'listProjectsAndServices',
+  // 2026-09-21: inspectAppService on isola-lumen-api-prod returned that service's
+  // FULL plaintext env block (Django secret key, DB and Redis passwords, ~12 API
+  // tokens) into a lane's transcript while it was only looking up app configs.
+  // Same defect as the line above, a different door — the 2026-08-10 fix named
+  // ONE procedure and nothing else, so the sibling that returns the same shape
+  // walked straight through (§2.21: enumerate every copy of the thing you fix).
+  // The whole inspect*Service family returns "configuration" of a service, and
+  // for app/compose/database services that configuration IS the env/passwords.
+  'inspectAppService',
+  'inspectComposeService',
+  'inspectPostgresService',
+  'inspectMySQLService',
+  'inspectMariaDBService',
+  'inspectMongoService',
+  'inspectRedisService',
+  'inspectBoxService',
+  // inspectProject returns "a project with its services and resolved domain
+  // configuration" — the per-project slice of listProjectsAndServices' shape.
+  'inspectProject',
+  // getEnv returns the raw Traefik environment file (DNS/ACME provider tokens).
+  'getEnv',
+]);
+
+/**
+ * Family rule alongside the explicit set: any epic-portal procedure named
+ * inspect<Something>Service is treated as secret-bearing even if it is not
+ * listed above (a service type added to EasyPanel later must not become a
+ * fresh unlisted door). getServiceError / getServiceNotes / getServiceDomain /
+ * getMetricsServiceStats do NOT match this shape and stay allowed.
+ */
+const EASYPANEL_BLOCKED_PROCEDURE_RE = /(^|[./])inspect[A-Za-z0-9]*Service$/;
 
 /** Tool-name prefix used by every epic-portal MCP wrapper (query/mutation/destructive). */
 const EASYPANEL_MCP_TOOL_RE = /^mcp__epic-portal__execute_/;
@@ -485,6 +517,7 @@ function matchesBlockedEasyPanelProcedureName(name) {
       return true;
     }
   }
+  if (EASYPANEL_BLOCKED_PROCEDURE_RE.test(name)) return true;
   return false;
 }
 
@@ -547,6 +580,10 @@ function isBlockedEasyPanelCall(toolName, toolInput, cmd) {
     for (const name of EASYPANEL_BLOCKED_PROCEDURES) {
       if (cmd.includes(name)) return true;
     }
+    // Family rule on the raw path too: /api/rpc/services/app/inspectAppService,
+    // /api/trpc/services.postgres.inspectPostgresService, or the name inside a
+    // JSON-RPC body. Word-bounded so prose in an unrelated curl cannot match.
+    if (/\binspect[A-Za-z0-9]*Service\b/.test(cmd)) return true;
   }
   return false;
 }
@@ -734,6 +771,7 @@ module.exports = {
   SECRET_DUMP_RE,
   CREDENTIAL_SURFACE_RE,
   EASYPANEL_BLOCKED_PROCEDURES,
+  EASYPANEL_BLOCKED_PROCEDURE_RE,
   EASYPANEL_MCP_TOOL_RE,
   EASYPANEL_RAW_ENDPOINT_RE,
   EASYPANEL_RAW_PATH_RE,
