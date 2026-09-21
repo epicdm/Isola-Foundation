@@ -90,11 +90,20 @@ export function Customer360App() {
   */
   const [nested, setNested] = useState<NestedTarget | null>(null);
   const [nestedPhase, setNestedPhase] = useState<NestedPhase>({ kind: 'loading' });
-  /** A Personal Line's onboarding checklist, opened on demand from its row in
-   *  the Services tab. `did`, never liteAccountId — see LifecyclePhase's own
-   *  header in workspace-view.tsx for why this is not the `nested` mechanism. */
-  const [lifecycleDid, setLifecycleDid] = useState<string | null>(null);
-  const [lifecyclePhase, setLifecyclePhase] = useState<LifecyclePhase>({ kind: 'loading' });
+  /**
+   * A Personal Line's onboarding checklist, opened on demand from its row in
+   * the Services tab. `did`, never liteAccountId — see LifecyclePhase's own
+   * header in workspace-view.tsx for why this is not the `nested` mechanism.
+   *
+   * did AND phase held in ONE state object, not two separate ones (unlike
+   * `nested`/`nestedPhase` above, which get away with it because `nested`
+   * itself is only ever set together with a fresh fetch starting). Two
+   * separate `useState`s here let a render happen with the NEW did but the
+   * OLD phase still in place — switching from service A's open checklist to
+   * service B's would flash A's data under B's row for one paint, before the
+   * effect below caught up. One state, set atomically, closes that window.
+   */
+  const [lifecycleDrillDown, setLifecycleDrillDown] = useState<{ did: string; phase: LifecyclePhase } | null>(null);
   const [sendDoc, setSendDoc] = useState<Document | null>(null);
   const [sendPhase, setSendPhase] = useState<SendPhase>({ kind: 'previewing' });
   const inFlight = useRef(false);
@@ -170,30 +179,41 @@ export function Customer360App() {
     return () => { live = false; };
   }, [nested, phase]);
 
-  /** Fetch a Personal Line's onboarding checklist. Server-side, this route
-   *  resolves did -> liteAccountId and calls bff-v2's service-detail itself
-   *  (resolve-action-target + service-detail, both isolav2) -- the browser
-   *  only ever sees `did` and the already-safe lifecycle section back. */
+  /**
+   * Fetch a Personal Line's onboarding checklist. Server-side, this route
+   * resolves did -> liteAccountId and calls bff-v2's service-detail itself
+   * (resolve-action-target + service-detail, both isolav2) -- the browser
+   * only ever sees `did` and the already-safe lifecycle section back.
+   *
+   * `live` guards against a stale response landing after `did` changed
+   * again; the `prev?.did === did` check in each setter guards the SAME
+   * case from the other direction -- belt and braces, since either one
+   * alone is enough but neither is free to verify by inspection alone.
+   */
   useEffect(() => {
-    if (!lifecycleDid || phase.kind !== 'ready') return;
+    const did = lifecycleDrillDown?.did;
+    if (!did || phase.kind !== 'ready') return;
     let live = true;
-    setLifecyclePhase({ kind: 'loading' });
     fetch('/api/isola-360/lifecycle', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ hint: phase.hint, did: lifecycleDid }),
+      body: JSON.stringify({ hint: phase.hint, did }),
     })
       .then(async (response) => {
         const result = await response.json();
         if (!live) return;
-        if (result?.state === 'ready') setLifecyclePhase({ kind: 'ready', lifecycle: result.lifecycle });
-        else setLifecyclePhase({ kind: 'message', text: result?.message ?? 'This checklist could not be read.' });
+        const newPhase: LifecyclePhase = result?.state === 'ready'
+          ? { kind: 'ready', lifecycle: result.lifecycle }
+          : { kind: 'message', text: result?.message ?? 'This checklist could not be read.' };
+        setLifecycleDrillDown((prev) => (prev?.did === did ? { did, phase: newPhase } : prev));
       })
       .catch(() => {
-        if (live) setLifecyclePhase({ kind: 'message', text: 'This checklist could not be reached, so nothing is shown for it.' });
+        if (!live) return;
+        const newPhase: LifecyclePhase = { kind: 'message', text: 'This checklist could not be reached, so nothing is shown for it.' };
+        setLifecycleDrillDown((prev) => (prev?.did === did ? { did, phase: newPhase } : prev));
       });
     return () => { live = false; };
-  }, [lifecycleDid, phase]);
+  }, [lifecycleDrillDown?.did, phase]);
 
   /** Preview the exact text, server-composed, the moment the dialog opens. */
   useEffect(() => {
@@ -279,9 +299,9 @@ export function Customer360App() {
     nested={nested ? { target: nested, phase: nestedPhase } : null}
     onOpenObject={setNested}
     onCloseObject={() => setNested(null)}
-    lifecycleDrillDown={lifecycleDid ? { did: lifecycleDid, phase: lifecyclePhase } : null}
-    onOpenLifecycle={setLifecycleDid}
-    onCloseLifecycle={() => setLifecycleDid(null)}
+    lifecycleDrillDown={lifecycleDrillDown}
+    onOpenLifecycle={(did) => setLifecycleDrillDown({ did, phase: { kind: 'loading' } })}
+    onCloseLifecycle={() => setLifecycleDrillDown(null)}
     outcomeFor={(doc) => sent[documentKey(hint, doc)]}
     send={sendDoc ? { doc: sendDoc, phase: sendPhase } : null}
     onSendOpen={setSendDoc}

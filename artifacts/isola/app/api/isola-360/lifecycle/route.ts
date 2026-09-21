@@ -63,35 +63,22 @@ export async function POST(req: NextRequest) {
     })
   }
 
+  let snapshot: Awaited<ReturnType<typeof readCustomer360>>
   try {
     const config = await resolveOdooConfigForTenant(tenantId)
-    const snapshot = await readCustomer360(config, conversation.customer_phone, {
+    snapshot = await readCustomer360(config, conversation.customer_phone, {
       displayId: hint.conversationDisplayIdHint,
       currentRequest: null,
     })
-    if (!snapshot) {
-      return NextResponse.json<LifecycleResponse>({
-        state: 'not-found',
-        message: 'No Odoo customer matched this conversation.',
-      })
-    }
-
-    // Ownership, proven against the customer's own snapshot — never trust
-    // the caller's did alone. Same "not yours and does not exist collapse
-    // into one wording" rule the objects route applies, so an unauthorised
-    // caller cannot use this to learn which numbers are real Personal Lines.
-    const owned = snapshot.services.some((s) => s.did === did)
-    if (!owned) {
-      return NextResponse.json<LifecycleResponse>({
-        state: 'not-found',
-        message: 'That Personal Line is not available on this customer.',
-      })
-    }
-
-    const result = await resolveAndReadLifecycle(did)
-    return NextResponse.json<LifecycleResponse>(result)
   } catch {
     // Odoo failing is reported as a failure, never as an empty checklist.
+    // Scoped to ONLY the Odoo read -- resolveAndReadLifecycle (a bff-v2
+    // call, not Odoo) is deliberately OUTSIDE this try/catch below, so an
+    // unrelated bff-v2 failure is never misreported as "Odoo is not
+    // answering" (it also never throws itself; every path inside it
+    // already returns a LifecycleReadResult, so this catch would never
+    // legitimately fire for it anyway -- the separation is about not
+    // MISLABELING a failure's source, not about needing a second catch).
     return NextResponse.json<LifecycleResponse>(
       {
         state: 'unavailable',
@@ -100,4 +87,47 @@ export async function POST(req: NextRequest) {
       { status: 503 },
     )
   }
+
+  if (!snapshot) {
+    return NextResponse.json<LifecycleResponse>({
+      state: 'not-found',
+      message: 'No Odoo customer matched this conversation.',
+    })
+  }
+
+  // bff-v2 not answering must read as 'unavailable', never as 'not-found' --
+  // an outage on the ownership check must not be presented as "this
+  // Personal Line does not exist" (PR144 review, isola-foundation-5c +
+  // Codex, 2026-09-21: this check was missing entirely; every service
+  // lookup during a bff-v2 outage fell through to the ownership check
+  // below, which an empty `services` array always fails, misreporting a
+  // "could not check" as a "does not exist").
+  if (!snapshot.servicesAvailable) {
+    return NextResponse.json<LifecycleResponse>(
+      {
+        state: 'unavailable',
+        message: 'bff-v2 did not answer for this customer’s services, so this checklist could not be opened.',
+      },
+      { status: 503 },
+    )
+  }
+
+  // Ownership, proven against the customer's own snapshot — never trust
+  // the caller's did alone. Same "not yours and does not exist collapse
+  // into one wording" rule the objects route applies, so an unauthorised
+  // caller cannot use this to learn which numbers are real Personal Lines.
+  const owned = snapshot.services.some((s) => s.did === did)
+  if (!owned) {
+    return NextResponse.json<LifecycleResponse>({
+      state: 'not-found',
+      message: 'That Personal Line is not available on this customer.',
+    })
+  }
+
+  // Deliberately OUTSIDE the Odoo try/catch above — this never throws (every
+  // internal failure path already resolves to a LifecycleReadResult), and
+  // keeping it out means a bff-v2 problem can never be mislabeled as Odoo
+  // being unreachable.
+  const result = await resolveAndReadLifecycle(did)
+  return NextResponse.json<LifecycleResponse>(result)
 }

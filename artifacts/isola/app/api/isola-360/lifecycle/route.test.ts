@@ -79,6 +79,7 @@ beforeEach(() => {
   readCustomer360Mock.mockResolvedValue({
     customer: { id: 163, name: 'Patricia Armour' },
     services: [{ kind: 'personal_line', did: OURS_DID, sipRegistered: true, magnusUserAssigned: true, createdAt: null }],
+    servicesAvailable: true,
   })
   resolveAndReadLifecycleMock.mockResolvedValue({ state: 'ready', lifecycle: FULL_LIFECYCLE })
 })
@@ -108,10 +109,25 @@ describe('a did is a locator, never an authorisation', () => {
   it('gives the SAME wording for "not yours" and "does not exist"', async () => {
     const notOurs = await (await POST(request({ hint, did: THEIRS_DID }))).json()
 
-    readCustomer360Mock.mockResolvedValue({ customer: { id: 163, name: 'Patricia Armour' }, services: [] })
+    readCustomer360Mock.mockResolvedValue({ customer: { id: 163, name: 'Patricia Armour' }, services: [], servicesAvailable: true })
     const missing = await (await POST(request({ hint, did: OURS_DID }))).json()
 
     expect(notOurs.message).toBe(missing.message)
+  })
+
+  it('reports UNAVAILABLE, never "not-found", when bff-v2 itself did not answer for this customer’s services — an outage must never be presented as "this Personal Line does not exist"', async () => {
+    // THE ACTUAL BUG: an empty services array always fails the ownership
+    // check below, so without this gate a bff-v2 outage was silently
+    // misreported as "that Personal Line is not available on this
+    // customer" — indistinguishable from a genuine cross-customer probe.
+    readCustomer360Mock.mockResolvedValue({ customer: { id: 163, name: 'Patricia Armour' }, services: [], servicesAvailable: false })
+    const res = await POST(request({ hint, did: OURS_DID }))
+    const body = await res.json()
+
+    expect(res.status).toBe(503)
+    expect(body.state).toBe('unavailable')
+    expect(body.state).not.toBe('not-found')
+    expect(resolveAndReadLifecycleMock).not.toHaveBeenCalled()
   })
 })
 
