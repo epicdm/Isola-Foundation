@@ -318,7 +318,16 @@ const SECRET_FILE_RE = new RegExp(
       // structure first", which is why the answer is a deny with a projection
       // in the remedy, not a wrap.
       '[a-z0-9_.-]*bindings(_v[0-9]+)?',
-      '[a-z0-9_.-]*_secrets?(\\.[a-z0-9]+)?',
+      // The extension is matched EXCEPT for documentation formats. Writing
+      // ABOUT secrets is not holding one, and on 2026-09-22 this very
+      // alternative — added hours earlier in the same change — blocked a lane
+      // from reading its own notes file named `..._exported_secrets.md`. That
+      // is a guard binding to VOCABULARY rather than to an operation
+      // (CLAUDE.md §2.27c), and the estate's rule is to report it rather than
+      // rename the document to get through. A doc that genuinely pastes a
+      // credential is still covered: it falls to the redaction wrap, which
+      // rewrites values, instead of a flat deny that hides the prose too.
+      '[a-z0-9_.-]*_secrets?(\\.(?!md$|markdown$|txt$|rst$|adoc$)[a-z0-9]+)?',
     ].join('|') +
     ')$',
   'i'

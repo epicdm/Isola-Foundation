@@ -152,6 +152,40 @@ const cases = [
     },
   },
   {
+    // REGRESSION, 2026-09-22, introduced and caught the same day. The
+    // `_secrets?` alternative added to SECRET_FILE_RE hours earlier also
+    // matched DOCUMENTATION about secrets: a lane was blocked from reading its
+    // own notes file named `..._exported_secrets.md`. Writing ABOUT a secret is
+    // not holding one. A guard that fires on vocabulary rather than on an
+    // operation is the failure CLAUDE.md §2.27c names, and the rule is to
+    // report it rather than rename the document to get through.
+    name: 'REGRESSION: reading DOCUMENTATION about secrets (.md) is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Read',
+      tool_input: { file_path: '/home/u/memory/reference_printenv_exported_secrets.md' },
+    },
+  },
+  {
+    name: 'CONTROL: a REAL secret store with a data extension is still BLOCKED',
+    expect: BLOCK,
+    payload: {
+      session_id: SID,
+      tool_name: 'Read',
+      tool_input: { file_path: '/opt/isola/isola_gw_secrets.json' },
+    },
+  },
+  {
+    name: 'CONTROL: a real store with NO extension is still BLOCKED',
+    expect: BLOCK,
+    payload: {
+      session_id: SID,
+      tool_name: 'Read',
+      tool_input: { file_path: '/opt/isola/app_secrets' },
+    },
+  },
+  {
     name: 'naming the projector in a commit MESSAGE does not launder a raw read',
     expect: BLOCK,
     contains: 'orchestrator-secret-store-read',
