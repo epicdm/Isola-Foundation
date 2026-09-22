@@ -133,7 +133,20 @@ const RULES = [
     // it every position inside a long identifier is a candidate start and the
     // lazy prefix scan goes quadratic (the adversarial-input test caught it at
     // 14.8 s on a 100k-char run).
-    re: /(?<![A-Za-z0-9_.-])(["']?)([A-Za-z0-9_.-]*?(secret|password|passwd|pwd|token|api_?key|access_?key|private_?key|signing_?key|client_?secret|credential|bearer)[A-Za-z0-9_.-]*)\1(\s*[:=]\s*)(?:"(?!\$\{?[A-Za-z_])(?!%[A-Za-z_])([^"\r\n]{4,})"|'(?!\$\{?[A-Za-z_])(?!%[A-Za-z_])([^'\r\n]{4,})'|(?!\$\{?[A-Za-z_])(?!%[A-Za-z_])([^\s"',;}\]]{4,}))/gi,
+    //
+    // ESCAPED QUOTES INSIDE THE VALUE, found in review 2026-09-22 and it is a
+    // real leak, not a cosmetic one. The quoted alternatives used to be
+    // `[^"\r\n]{4,}`, which treats the FIRST quote as the terminator even when
+    // it is escaped. So `{"agentBotSecret":"abc\"TAIL"}` redacted only up to the
+    // escape and emitted `"[REDACTED:secret]"TAIL"` — leaking the suffix AND
+    // producing invalid JSON. A redactor that leaks the tail of the secret it
+    // just labelled is worse than none, because the label says it was handled.
+    //
+    // Each alternative now consumes escape sequences before it will accept a
+    // closing quote. `(?:\\.|[^"\\\r\n])` stays linear: the two branches are
+    // mutually exclusive on their first character, so there is no ambiguity to
+    // backtrack over — the adversarial-input test in this suite is the control.
+    re: /(?<![A-Za-z0-9_.-])(["']?)([A-Za-z0-9_.-]*?(secret|password|passwd|pwd|token|api_?key|access_?key|private_?key|signing_?key|client_?secret|credential|bearer)[A-Za-z0-9_.-]*)\1(\s*[:=]\s*)(?:"(?!\$\{?[A-Za-z_])(?!%[A-Za-z_])((?:\\.|[^"\\\r\n]){4,})"|'(?!\$\{?[A-Za-z_])(?!%[A-Za-z_])((?:\\.|[^'\\\r\n]){4,})'|(?!\$\{?[A-Za-z_])(?!%[A-Za-z_])([^\s"',;}\]]{4,}))/gi,
     replace: (_m, q, key, kw, sep, dq, sq, bare) => {
       const label = '[REDACTED:' + kw.toLowerCase() + ']';
       const value = dq != null ? '"' + label + '"' : sq != null ? "'" + label + "'" : label;

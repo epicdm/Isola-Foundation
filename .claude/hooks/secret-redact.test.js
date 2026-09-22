@@ -271,3 +271,38 @@ test('REVIEW: no catastrophic backtracking on adversarial input', () => {
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
   assert.ok(ms < 5000, 'redaction took ' + Math.round(ms) + 'ms — possible backtracking');
 });
+
+// ESCAPED QUOTE INSIDE A CREDENTIAL VALUE — P1 found in review of PR #147,
+// 2026-09-22. The quoted-value alternatives stopped at the first `"` even when
+// it was escaped, so the tail of the secret survived AND the output was invalid
+// JSON: {"agentBotSecret":"abc\"TAIL"} became
+// {"agentBotSecret":"[REDACTED:secret]"TAIL"}. A redactor that leaks the end of
+// the value it just labelled is worse than none, because the label asserts the
+// value was handled.
+//
+// String.raw throughout, and deliberately so. The first version of these tests
+// failed against a CORRECT implementation because the escaping in the TEST was
+// wrong — the fixture never contained the backslash it claimed to, and two
+// layers of shell quoting ate it. Verify the harness before believing it about
+// the system.
+test('an escaped quote inside a JSON credential value does not leak the suffix', () => {
+  const input = String.raw`{"agentBotSecret":"abc\"VISIBLE_SUFFIX"}`;
+  assert.ok(input.includes('\\"'), 'FIXTURE GUARD: the input must really contain an escaped quote');
+  const out = redact(input);
+  assert.ok(!out.includes('VISIBLE_SUFFIX'), 'suffix leaked: ' + out);
+  assert.ok(out.includes('[REDACTED:secret]'), 'value should still be labelled: ' + out);
+});
+
+test('an escaped quote in a single-quoted value does not leak the suffix', () => {
+  const input = String.raw`password: 'abc\'TAIL_SQ'`;
+  assert.ok(input.includes("\\'"), 'FIXTURE GUARD: the input must really contain an escaped quote');
+  const out = redact(input);
+  assert.ok(!out.includes('TAIL_SQ'), 'single-quoted suffix leaked: ' + out);
+  assert.ok(out.includes('[REDACTED:password]'), 'value should still be labelled: ' + out);
+});
+
+test('POSITIVE CONTROL: an ordinary quoted credential is still redacted', () => {
+  const out = redact(String.raw`{"agentBotSecret":"plainvalue1234"}`);
+  assert.ok(!out.includes('plainvalue1234'), 'control: ordinary value leaked: ' + out);
+  assert.ok(out.includes('[REDACTED:secret]'));
+});
