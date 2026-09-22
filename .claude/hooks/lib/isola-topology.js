@@ -374,6 +374,46 @@ const SECRET_PATH_TOKEN =
  */
 const CREDENTIAL_SURFACE_RE = new RegExp(
   [
+    // `docker inspect` / `docker service inspect` print a service's FULL env,
+    // which on this estate is where injected credentials live. Added
+    // 2026-09-22 after it printed a live HASHID_FIELD_SALT into a lane's
+    // transcript — the third credential exposure of the day.
+    //
+    // The guard ALREADY blocked epic-portal's `inspect*Service` API family,
+    // which does the same job through a different door. The CLI door was left
+    // open. That is CLAUDE.md §2.21 exactly: a remediation applied to one copy
+    // of a thing while an identical copy sits untouched is a moved problem, not
+    // a fixed one — and the copy nobody enumerated is the one with no owner
+    // watching it.
+    //
+    // Wrapped, not denied, on purpose: inspecting a service is ordinary and
+    // often necessary investigation (it is how the crash-loop above was
+    // diagnosed). What must not happen is the VALUES reaching the transcript.
+    // Denying it outright would push the work into some unguarded shape.
+    // ANCHORED TO A COMMAND POSITION, not to the mere appearance of the words.
+    // The first version of this line matched anywhere in the command text, and
+    // within two minutes it blocked a `grep -E 'docker inspect|...'` that ran
+    // the SELFTEST — a search for the phrase is not an invocation of it. That
+    // was the fourth guard false-positive of 2026-09-22 and the third authored
+    // by me, all the same root cause: matching what text LOOKS like instead of
+    // what is being DONE (CLAUDE.md §2.27c).
+    //
+    // So `docker` must sit at the start, after a separator (`;` `&&` `||` `|`
+    // newline, subshell) or directly after `sudo`. Inside a quoted pattern it
+    // is preceded by a quote, which is not a command position, so it no longer
+    // matches. Same discipline the build rule already uses.
+    // SUBCOMMANDS LIMITED TO THE ONES THAT ACTUALLY PRINT ENV. The first
+    // version also swept in `docker secret inspect` and `docker config
+    // inspect`, and the user-home hook's own suite failed — correctly. Those
+    // two were DELIBERATELY allowed there: `docker secret inspect` prints
+    // METADATA ONLY (id, name, timestamps), never the secret payload, which is
+    // the whole point of Docker's secret API. I had widened the pattern on the
+    // shape of the words without checking what the subcommands do.
+    //
+    // That cross-hook test did exactly its job — it protected a decision
+    // somebody actually made (CLAUDE.md §2.28) against a careless widening,
+    // and it is the reason this line is three words shorter than it was.
+    '(?:^|[;&|(\\n]|\\bsudo\\b)\\s*docker\\s+(?:service\\s+|container\\s+)?inspect\\b',
     // A git remote URL can embed user:token@host.
     '\\bgit\\s+(remote\\s+(-v|show|get-url)|config\\b[^\\n|;&]*\\b(url|remote\\.))',
     '[\\\\/]\\.git[\\\\/]config\\b',

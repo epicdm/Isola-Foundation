@@ -186,6 +186,41 @@ const cases = [
     },
   },
   {
+    // 2026-09-22, the THIRD credential exposure of the day. A `docker inspect`
+    // printed a live HASHID_FIELD_SALT into a lane transcript. The guard
+    // already blocked epic-portal's `inspect*Service` API family — the same
+    // job through a different door — and nobody had enumerated the CLI door.
+    // Wrapped rather than denied: inspecting a service is legitimate
+    // investigation, it just must not carry VALUES into the transcript.
+    name: 'docker inspect is redacted (the surface that leaked on 2026-09-22)',
+    expect: BLOCK,
+    contains: 'credential-surface-redact',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'docker inspect isola-lumen' },
+    },
+  },
+  {
+    name: 'docker service inspect is redacted too (swarm variant)',
+    expect: BLOCK,
+    contains: 'credential-surface-redact',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'sudo docker service inspect isola_isola-lumen' },
+    },
+  },
+  {
+    name: 'CONTROL: docker ps / service ls report STATE not env, and stay ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'sudo docker service ls --format "{{.Name}} {{.Replicas}}"' },
+    },
+  },
+  {
     name: 'naming the projector in a commit MESSAGE does not launder a raw read',
     expect: BLOCK,
     contains: 'orchestrator-secret-store-read',
