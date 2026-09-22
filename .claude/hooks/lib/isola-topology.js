@@ -308,10 +308,30 @@ const SECRET_FILE_RE = new RegExp(
       'auth\\.json',
       '\\.credentials\\.json',
       'service-account.*\\.json',
+      // ORCHESTRATOR SECRET STORES, added 2026-09-22 after the second exposure
+      // of the same file in one day. `/run/secrets/gateway_bindings` and
+      // `isola_gw_bindings_v8` carry inline `agentBotSecret`/`agentBotAccessToken`
+      // values, and matched NOTHING above: no extension, not `.env`-shaped. The
+      // existing rules key on file SHAPE, and a Swarm/Compose secret has no
+      // shape — its secrecy comes from WHERE IT LIVES, which is why the path
+      // rule below exists too. Both exposures came from "I just need to see the
+      // structure first", which is why the answer is a deny with a projection
+      // in the remedy, not a wrap.
+      '[a-z0-9_.-]*bindings(_v[0-9]+)?',
+      '[a-z0-9_.-]*_secrets?(\\.[a-z0-9]+)?',
     ].join('|') +
     ')$',
   'i'
 );
+
+/**
+ * A SECRET BY LOCATION, NOT BY NAME. Anything under a container/orchestrator
+ * secret mount is a credential whatever it is called — `/run/secrets/<x>`
+ * (Docker/Swarm), `/var/run/secrets/<x>` (Kubernetes). Enumerated separately
+ * from SECRET_FILE_RE because that regex anchors on the FILENAME and these
+ * files are deliberately named like ordinary config.
+ */
+const SECRET_STORE_PATH_RE = /(^|[\s'"`=])\/(?:var\/)?run\/secrets\/[^\s'"`;|&]*/i;
 const SECRET_FILE_EXEMPT_RE = /\.(example|sample|template|dist)$|\.example\.|\.sample\./i;
 
 /** Commands that would dump an environment or print a secret file to stdout. */
@@ -614,10 +634,40 @@ const TOOL_CLASSES = {
   ]),
 };
 
+/**
+ * A NAMED SET IS A LIST OF THE SERVERS SOMEONE HAPPENED TO KNOW ABOUT.
+ *
+ * Measured 2026-09-22: the sets above name only the `ssh-deepseek` MCP server,
+ * so every command issued through `mcp__host03__remote-ssh` classified as
+ * 'other' and was NEVER INSPECTED — not for secret reads, not for
+ * build-in-live-checkout, not for destructive shapes. The whole exec rule set
+ * was absent on a second production host for as long as that server existed.
+ * It surfaced because a `docker exec … cat /run/secrets/…` on host03 put two
+ * live agent-bot credentials in a transcript and nothing stopped it; the read
+ * was the symptom, the ungoverned server was the defect.
+ *
+ * Matching by SHAPE closes the class rather than one instance: any MCP server
+ * exposing an ssh-ish tool is governed the moment it appears, including one
+ * added tomorrow. The failure direction is deliberate — an unrecognised
+ * `mcp__*__remote-ssh` is treated as EXEC, which means MORE inspection, never
+ * less. Same family as §2.21 (enumerate every copy) applied to tool surfaces.
+ */
+const MCP_EXEC_TOOL_RE = /^mcp__[A-Za-z0-9_.-]+__(remote-ssh|ssh-exec|ssh-command|exec)$/;
+const MCP_WRITE_TOOL_RE = /^mcp__[A-Za-z0-9_.-]+__(ssh-edit-block|ssh-write-chunk|ssh-write-file)$/;
+const MCP_READ_TOOL_RE = /^mcp__[A-Za-z0-9_.-]+__(ssh-read-lines|ssh-search-code|ssh-read-file)$/;
+
 function classifyTool(toolName) {
   if (TOOL_CLASSES.exec.has(toolName)) return 'exec';
   if (TOOL_CLASSES.write.has(toolName)) return 'write';
   if (TOOL_CLASSES.read.has(toolName)) return 'read';
+  // Shape-matched MCP transports, checked AFTER the explicit sets so a named
+  // tool keeps its declared class. Write/read are matched before exec so a
+  // narrower tool is not promoted to exec by accident.
+  if (typeof toolName === 'string') {
+    if (MCP_WRITE_TOOL_RE.test(toolName)) return 'write';
+    if (MCP_READ_TOOL_RE.test(toolName)) return 'read';
+    if (MCP_EXEC_TOOL_RE.test(toolName)) return 'exec';
+  }
   return 'other'; // Task*, Schedule*, Port MCP, Agent, Skill, WebFetch, Artifact...
 }
 
@@ -768,8 +818,12 @@ module.exports = {
   META_HOST_RE,
   LEGACY_REFERENCE_RE,
   SECRET_FILE_RE,
+  SECRET_STORE_PATH_RE,
   SECRET_DUMP_RE,
   CREDENTIAL_SURFACE_RE,
+  MCP_EXEC_TOOL_RE,
+  MCP_WRITE_TOOL_RE,
+  MCP_READ_TOOL_RE,
   EASYPANEL_BLOCKED_PROCEDURES,
   EASYPANEL_BLOCKED_PROCEDURE_RE,
   EASYPANEL_MCP_TOOL_RE,
