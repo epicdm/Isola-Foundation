@@ -1,0 +1,42 @@
+name: hooks-selftest
+
+# Why this exists (2026-09-22). The enforcement layer in .claude/hooks drifted
+# into two lineages for weeks: main carried seven hook fixes the working branches
+# lacked, and the working branches carried fifteen main lacked. Nothing verified
+# main's hooks, so nobody noticed -- including a live bypass on main where a real
+# build chained after a `git -c ... commit` was not refused. The hooks only run
+# where they are checked out; a guard that nothing tests on the trunk is a guard
+# the next clone inherits unverified.
+#
+# Runs on EVERY pull request that touches the hooks, whatever its base branch,
+# because the drift came from hook fixes landing on feature branches.
+
+on:
+  pull_request:
+    paths:
+      - '.claude/hooks/**'
+      - '.github/workflows/hooks-selftest.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.claude/hooks/**'
+      - '.github/workflows/hooks-selftest.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # The per-machine user-home hook (~/.claude/hooks/enforce-safety.js) does
+      # not exist on a CI runner; selftest reports it as NOT INSTALLED and does
+      # not count that as a pass. Everything in THIS repository is verified.
+      - name: Run the project hook self-test
+        run: node .claude/hooks/selftest.js
