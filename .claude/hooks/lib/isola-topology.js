@@ -862,6 +862,40 @@ function isProseFile(p) {
  */
 const SHELL_EXPANDS = /\$\(|`/;
 
+/**
+ * End of the shell command that starts at `from`: the first `;`, `&`, `|` or
+ * newline that is NOT inside quotes. Quote-aware on purpose -- a naive search
+ * splits a PR body like "fix: cd x && build" in half. An unterminated quote runs
+ * to the end of the string (the shell would not execute such a line anyway).
+ */
+function commandSegmentEnd(s, from) {
+  // The dangerous direction is believing we are INSIDE quotes when the shell is
+  // outside: that runs the segment on into the next command and masks it. Each
+  // branch below closes one way that happened (all red-tested 2026-09-22):
+  //   \" outside quotes is an escaped literal, not an opening quote;
+  //   $'...' is ANSI-C quoting, where \' does NOT close;
+  //   a # starting a word begins a comment, whose quotes are literal.
+  let q = null; // '"' | "'" | "$'"
+  for (let i = from; i < s.length; i++) {
+    const c = s[i];
+    if (q === '"' || q === "$'") {
+      if (c === '\\') { i++; continue; }
+      if ((q === '"' && c === '"') || (q === "$'" && c === "'")) q = null;
+      continue;
+    }
+    if (q === "'") { if (c === "'") q = null; continue; }
+    if (c === '\\') { i++; continue; }
+    if (c === '$' && s[i + 1] === "'") { q = "$'"; i++; continue; }
+    if (c === '"' || c === "'") { q = c; continue; }
+    if (c === '#' && (i === from || /\s/.test(s[i - 1]))) {
+      const eol = s.indexOf('\n', i);
+      return eol < 0 ? s.length : eol;
+    }
+    if (c === ';' || c === '&' || c === '|' || c === '\n') return i;
+  }
+  return s.length;
+}
+
 function extractNarrativeText(cmd) {
   const s = String(cmd || '');
   // Git accepts GLOBAL OPTIONS between `git` and the subcommand, and this
@@ -996,6 +1030,11 @@ function extractNarrativeText(cmd) {
   }
 
   if (isGhTextLike) {
+    // SCOPED to the gh command itself (fourth fail-open, 2026-09-22): run over the
+    // whole string, these patterns masked a LATER command's quoted -t/-b argument,
+    // e.g. `gh pr create --title x; ssh host -t '<destructive>'`.
+    const ghStart = /\bgh\s+(pr|issue)\s+(create|edit|comment)\b/.exec(s).index;
+    const ghSeg = s.slice(ghStart, commandSegmentEnd(s, ghStart));
     // --body/-b and --title/-t, quoted. `gh` accepts `--flag value` and
     // `--flag=value`; the short forms take a space, never `=`.
     // Double-quoted forms are EXPANDABLE: bash runs $(...) and backticks inside
@@ -1009,9 +1048,9 @@ function extractNarrativeText(cmd) {
       { re: /-t\s+"((?:[^"\\]|\\.)*)"/g, expandable: true },         { re: /-t\s+'((?:[^'\\]|\\.)*)'/g, expandable: false },
     ]) {
       let m;
-      while ((m = re.exec(s))) {
+      while ((m = re.exec(ghSeg))) {
         if (expandable && SHELL_EXPANDS.test(m[1])) continue; // it runs; leave it visible
-        const start = m.index + m[0].indexOf(m[1]);
+        const start = ghStart + m.index + m[0].indexOf(m[1]);
         spans.push([start, start + m[1].length]);
       }
     }

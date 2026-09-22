@@ -453,6 +453,52 @@ const cases = [
     payload: { session_id: SID, tool_name: 'Bash',
       tool_input: { command: "gh pr create --body 'docs: never run $(cat /run/secrets/gateway_bindings)'" } },
   },
+  // --- gh narrative masking must stay inside the gh command (fourth fail-open,
+  // 2026-09-22): run over the whole string it masked a LATER command's quoted
+  // -t/-b argument, and ssh -t takes the remote command as exactly that.
+  {
+    name: 'gh masking does not reach across ; into another command (destructive BLOCKED)',
+    expect: BLOCK,
+    contains: 'recursive-force-remove-system-path',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: "gh pr create --title x; ssh deepseek -t '" + t('r', 'm -rf') + ' /opt/' + 'bff-v2' + "'" } },
+  },
+  {
+    name: 'gh masking does not reach across && into another command',
+    expect: BLOCK,
+    contains: 'recursive-force-remove-system-path',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: "gh pr create --title x && ssh deepseek -t '" + t('r', 'm -rf') + ' /opt/' + 'bff-v2' + "'" } },
+  },
+  {
+    name: 'gh masking does not reach across a pipe into another command',
+    expect: BLOCK,
+    contains: 'recursive-force-remove-system-path',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: "gh pr create --title x | ssh deepseek -t '" + t('r', 'm -rf') + ' /opt/' + 'bff-v2' + "'" } },
+  },
+  // The segment scanner must never believe it is inside quotes while the shell is
+  // outside them: that extends the gh segment into the NEXT command and masks it.
+  {
+    name: "scanner: an ESCAPED quote outside quotes does not open a quote",
+    expect: BLOCK,
+    contains: 'recursive-force-remove-system-path',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: "gh pr create --title x\\\"; ssh deepseek -t '" + t('r', 'm -rf') + ' /opt/' + 'bff-v2' + "'" } },
+  },
+  {
+    name: "scanner: bash $'...' quoting with an escaped quote does not desync",
+    expect: BLOCK,
+    contains: 'recursive-force-remove-system-path',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: "gh pr create --title $'a\\'' ; ssh deepseek -t '" + t('r', 'm -rf') + ' /opt/' + 'bff-v2' + "'" } },
+  },
+  {
+    name: "scanner: a quote inside a # comment does not open a quote",
+    expect: BLOCK,
+    contains: 'recursive-force-remove-system-path',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: "gh pr create --title x # \"\nssh deepseek -t '" + t('r', 'm -rf') + ' /opt/' + 'bff-v2' + "'" } },
+  },
+  {
+    name: 'CONTROL: a ; and a newline INSIDE a quoted gh --body do not end the segment (still masked)',
+    expect: PASS,
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: 'gh pr create --title "fix" --body "first line; cd /opt/' + 'bff-v2 && npm run build\nsecond line"' } },
+  },
   {
     name: 'CONTROL: the SAME text in a QUOTED heredoc is inert prose and is ALLOWED',
     expect: PASS,
