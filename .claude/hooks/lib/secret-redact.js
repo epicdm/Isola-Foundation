@@ -106,6 +106,55 @@ const RULES = [
   { name: 'sendgrid-key', re: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g },
 
   {
+    // PROPERTY-NAME RULE 2026-09-22 — redact by PROPERTY, not by shape.
+    // Real exposure the same night: a gateway bindings store read through this
+    // pipe printed two `agentBotSecret` / `agentBotAccessToken` values in the
+    // clear. Two of four entries happened to be long hex and were caught by
+    // `long-hex`; the other two were short mixed-alnum and matched NO shape
+    // rule. The `assignment` rule below could not help either: it anchors the
+    // keyword with `\b`, and a camelCase key (`agentBotSecret`) has no word
+    // boundary before "Secret"; a JSON-quoted key (`"agentBotSecret": "…"`)
+    // also carries a closing quote between key and colon that the rule never
+    // skips. So the only thing standing between a short opaque secret and the
+    // transcript was luck about its shape. This rule keys on the NAME: any
+    // property whose name CONTAINS a credential keyword — quoted or bare,
+    // camelCase or snake_case, JSON, YAML or env — has its value redacted
+    // regardless of what the value looks like. Runs before `assignment` so the
+    // label is the keyword. Env-var references are still preserved. The value
+    // alternation handles a quoted value with spaces (previously a miss) and
+    // stops at JSON delimiters for a bare one. Over-redaction of a non-secret
+    // whose name merely contains "token" (tokenCount) is accepted only when the
+    // value is 4+ chars — the failure direction is towards redaction.
+    name: 'property',
+    // The env-reference guard sits INSIDE each value alternative: a quoted
+    // reference (`"$BOT_SECRET"`) must survive too, and a guard placed before
+    // the opening quote never sees the `$`.
+    // The leading lookbehind anchors the key at a non-key character: without
+    // it every position inside a long identifier is a candidate start and the
+    // lazy prefix scan goes quadratic (the adversarial-input test caught it at
+    // 14.8 s on a 100k-char run).
+    //
+    // ESCAPED QUOTES INSIDE THE VALUE, found in review 2026-09-22 and it is a
+    // real leak, not a cosmetic one. The quoted alternatives used to be
+    // `[^"\r\n]{4,}`, which treats the FIRST quote as the terminator even when
+    // it is escaped. So `{"agentBotSecret":"abc\"TAIL"}` redacted only up to the
+    // escape and emitted `"[REDACTED:secret]"TAIL"` — leaking the suffix AND
+    // producing invalid JSON. A redactor that leaks the tail of the secret it
+    // just labelled is worse than none, because the label says it was handled.
+    //
+    // Each alternative now consumes escape sequences before it will accept a
+    // closing quote. `(?:\\.|[^"\\\r\n])` stays linear: the two branches are
+    // mutually exclusive on their first character, so there is no ambiguity to
+    // backtrack over — the adversarial-input test in this suite is the control.
+    re: /(?<![A-Za-z0-9_.-])(["']?)([A-Za-z0-9_.-]*?(secret|password|passwd|pwd|token|api_?key|access_?key|private_?key|signing_?key|client_?secret|credential|bearer)[A-Za-z0-9_.-]*)\1(\s*[:=]\s*)(?:"(?!\$\{?[A-Za-z_])(?!%[A-Za-z_])((?:\\.|[^"\\\r\n]){4,})"|'(?!\$\{?[A-Za-z_])(?!%[A-Za-z_])((?:\\.|[^'\\\r\n]){4,})'|(?!\$\{?[A-Za-z_])(?!%[A-Za-z_])([^\s"',;}\]]{4,}))/gi,
+    replace: (_m, q, key, kw, sep, dq, sq, bare) => {
+      const label = '[REDACTED:' + kw.toLowerCase() + ']';
+      const value = dq != null ? '"' + label + '"' : sq != null ? "'" + label + "'" : label;
+      return q + key + q + sep + value;
+    },
+  },
+
+  {
     // KEY NAMES: `[A-Z0-9_]*` prefix and suffix are load-bearing. Without them
     // `\b(secret)` never matches AWS_SECRET_ACCESS_KEY, because `_` is a word
     // character so there is no boundary before SECRET. That miss was found by
