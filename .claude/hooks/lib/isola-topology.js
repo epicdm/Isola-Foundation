@@ -998,14 +998,19 @@ function extractNarrativeText(cmd) {
   if (isGhTextLike) {
     // --body/-b and --title/-t, quoted. `gh` accepts `--flag value` and
     // `--flag=value`; the short forms take a space, never `=`.
-    for (const re of [
-      /--body[=\s]+"((?:[^"\\]|\\.)*)"/g, /--body[=\s]+'((?:[^'\\]|\\.)*)'/g,
-      /-b\s+"((?:[^"\\]|\\.)*)"/g,        /-b\s+'((?:[^'\\]|\\.)*)'/g,
-      /--title[=\s]+"((?:[^"\\]|\\.)*)"/g, /--title[=\s]+'((?:[^'\\]|\\.)*)'/g,
-      /-t\s+"((?:[^"\\]|\\.)*)"/g,        /-t\s+'((?:[^'\\]|\\.)*)'/g,
+    // Double-quoted forms are EXPANDABLE: bash runs $(...) and backticks inside
+    // them before gh receives the argument. Codex re-review of PR #149 showed
+    // \`gh pr create --body "$(cat /run/secrets/x)"\` had its secret read masked --
+    // the third copy of the same fail-open, after git -m and the heredoc.
+    for (const { re, expandable } of [
+      { re: /--body[=\s]+"((?:[^"\\]|\\.)*)"/g, expandable: true },  { re: /--body[=\s]+'((?:[^'\\]|\\.)*)'/g, expandable: false },
+      { re: /-b\s+"((?:[^"\\]|\\.)*)"/g, expandable: true },         { re: /-b\s+'((?:[^'\\]|\\.)*)'/g, expandable: false },
+      { re: /--title[=\s]+"((?:[^"\\]|\\.)*)"/g, expandable: true }, { re: /--title[=\s]+'((?:[^'\\]|\\.)*)'/g, expandable: false },
+      { re: /-t\s+"((?:[^"\\]|\\.)*)"/g, expandable: true },         { re: /-t\s+'((?:[^'\\]|\\.)*)'/g, expandable: false },
     ]) {
       let m;
       while ((m = re.exec(s))) {
+        if (expandable && SHELL_EXPANDS.test(m[1])) continue; // it runs; leave it visible
         const start = m.index + m[0].indexOf(m[1]);
         spans.push([start, start + m[1].length]);
       }
