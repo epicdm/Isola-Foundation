@@ -381,6 +381,65 @@ const cases = [
       },
     },
   },
+  // --- SHELL EXPANSION INSIDE A HEREDOC MESSAGE (Codex P1 on PR #149, 2026-09-22).
+  // An UNQUOTED delimiter (<<EOF) makes the shell run $(...) and backticks in the
+  // body BEFORE git reads it. Masking that body as narrative hides a live
+  // operation. A QUOTED delimiter (<<'EOF') disables expansion, so the same text
+  // there is inert prose and may be masked. Each BLOCK below has that control.
+  {
+    name: 'UNQUOTED heredoc: $(...) in a commit message body is NOT masked (real secret read BLOCKED)',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: ['git commit -q -F - <<EOF', 'chore: x', '$(cat /run/secrets/gateway_bindings)', 'EOF'].join('\n') },
+    },
+  },
+  {
+    name: 'UNQUOTED heredoc: a backtick substitution is NOT masked either',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: ['git commit -q -F - <<EOF', 'chore: x', '`cat /run/secrets/gateway_bindings`', 'EOF'].join('\n') },
+    },
+  },
+  {
+    // Quotes inside a heredoc body are literal characters, so a single-quoted
+    // --message in an UNQUOTED heredoc still expands. It must not be masked by the
+    // -m pattern that runs over the extended segment.
+    name: 'UNQUOTED heredoc: a single-quoted --message inside the body does not launder $(...)',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: ['git commit -q -F - <<EOF', "--message '$(cat /run/secrets/gateway_bindings)'", 'EOF'].join('\n') },
+    },
+  },
+  {
+    // Pre-existing on main: the double-quoted -m check looked only for $(, but a
+    // backtick executes inside double quotes too. Found while fixing the heredoc P1.
+    name: 'a BACKTICK inside a double-quoted -m message is NOT masked (real secret read BLOCKED)',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'git commit -m "chore: `cat /run/secrets/gateway_bindings`"' },
+    },
+  },
+  {
+    name: 'CONTROL: the SAME text in a QUOTED heredoc is inert prose and is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: ["git commit -q -F - <<'EOF'", 'docs: never run $(cat /run/secrets/gateway_bindings)', 'EOF'].join('\n') },
+    },
+  },
   {
     // Same control, but for the -c form specifically: widening the
     // PRECONDITION must not widen the EXEMPTION. The message is still

@@ -854,6 +854,14 @@ function isProseFile(p) {
  * the caller still scans the surrounding command with those spans masked, so
  * a real operation chained after the narrative field is unaffected.
  */
+/**
+ * Text in which a POSIX shell performs COMMAND substitution before the target
+ * program sees it: $(...) and backticks. Narrative text matching this is
+ * never masked, because it is not narrative -- it runs. ${VAR} is excluded on
+ * purpose: parameter expansion substitutes a value but executes nothing.
+ */
+const SHELL_EXPANDS = /\$\(|`/;
+
 function extractNarrativeText(cmd) {
   const s = String(cmd || '');
   // Git accepts GLOBAL OPTIONS between `git` and the subcommand, and this
@@ -916,8 +924,15 @@ function extractNarrativeText(cmd) {
     // `git commit -m x; psql -F - <<EOF ... EOF` still leaves psql visible.
     const heredocOp = /-F\s+-\s*<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*$/.exec(s.slice(gitStart, segEnd));
     if (heredocOp) {
-      const closeAt = new RegExp('\\r?\\n' + heredocOp[2] + '\\b').exec(s.slice(segEnd));
-      if (closeAt) segEnd = segEnd + closeAt.index + closeAt[0].length;
+      // Close on a line that IS the delimiter (leading tabs allowed for <<-), as
+      // the shell does -- not on any line merely starting with it.
+      const closeAt = new RegExp('\\r?\\n\\t*' + heredocOp[2] + '\\r?(?=\\n|$)').exec(s.slice(segEnd));
+      // An UNQUOTED delimiter lets the shell run $(...) and backticks in the body
+      // before git reads it (Codex P1, PR #149). Such a body is never absorbed into
+      // the segment, so no pattern that runs over the segment can mask it.
+      const quotedDelim = heredocOp[1] === "'" || heredocOp[1] === '"';
+      const body = closeAt ? s.slice(segEnd, segEnd + closeAt.index) : '';
+      if (closeAt && (quotedDelim || !SHELL_EXPANDS.test(body))) segEnd = segEnd + closeAt.index + closeAt[0].length;
     }
     const segment = s.slice(gitStart, segEnd);
 
@@ -926,8 +941,10 @@ function extractNarrativeText(cmd) {
      * Scoped to `segment` (see above) so a heredoc belonging to a DIFFERENT
      * command chained after `git commit` is never mistaken for the message.
      */
-    const here = /-F\s+-\s*<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\2\b/.exec(segment);
-    if (here) {
+    const here = /-F\s+-\s*<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\r?\n([\s\S]*?)\r?\n\t*\2\r?(?=\n|$)/.exec(segment);
+    // Mask only a body the shell will NOT execute: a quoted delimiter disables
+    // expansion; an unquoted one is masked only if it has no $(...) or backtick.
+    if (here && (here[1] === "'" || here[1] === '"' || !SHELL_EXPANDS.test(here[3]))) {
       const bodyStart = gitStart + here.index + here[0].indexOf(here[3], here[0].indexOf('\n'));
       spans.push([bodyStart, bodyStart + here[3].length]);
     }
@@ -971,7 +988,7 @@ function extractNarrativeText(cmd) {
     for (const { re, expandable } of MSG_PATTERNS) {
       let m;
       while ((m = re.exec(segment))) {
-        if (expandable && /\$\(/.test(m[1])) continue; // leave the subexpression visible
+        if (expandable && SHELL_EXPANDS.test(m[1])) continue; // leave the subexpression visible
         const start = gitStart + m.index + m[0].indexOf(m[1]);
         spans.push([start, start + m[1].length]);
       }
