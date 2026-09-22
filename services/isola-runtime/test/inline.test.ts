@@ -620,7 +620,7 @@ describe("inline failures are structured, truthful and answerless", () => {
 
   it("budget exhausted — the provider was never called", async () => {
     const paperclip = new StubPaperclipApi();
-    paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 100 };
+    paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 100, status: "idle" };
     const { server, model } = await boot({ paperclip });
     const res = await invoke(server.url, {
       bearer: INTERNAL_SECRET,

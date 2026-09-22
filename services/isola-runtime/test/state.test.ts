@@ -238,6 +238,8 @@ describe("file store durability", () => {
     expect(state.accumulators["a"]!.microcents).toBe(0);
     expect(state.reservations["r"]!.microcents).toBe(10);
     expect(state.budgets["b"]!.budgetMonthlyCents).toBe(100);
+    // A stored row from before `status` existed reads back as null, not a crash.
+    expect(state.budgets["b"]!.status).toBeNull();
     expect(state.alerts["z"]!.alertedPct).toBe(80);
   });
 

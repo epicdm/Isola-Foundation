@@ -1146,6 +1146,65 @@ export function createRuntime(deps: AppDeps): Runtime {
         return;
       }
 
+      if (pre.kind === "agent_not_runnable") {
+        // The provider is NOT called. Nothing is spent on this run. Same
+        // "refused before the provider is touched" shape as budget_exhausted,
+        // on Paperclip's own status rather than the ledger.
+        await postNoticeComment({
+          api: paperclipApi,
+          issueId,
+          body: `This agent is not runnable right now (status: ${pre.status ?? "unknown"}) — no model call was made.`,
+          call,
+          logger,
+          correlationId,
+          outcome: "agent_not_runnable",
+        });
+        logger.error({
+          event: "invoke",
+          correlationId,
+          runId,
+          agentId,
+          templateId: template.id,
+          outcome: "agent_not_runnable",
+          durationMs: now() - startedAt,
+          httpStatus: 403,
+          agentStatus: pre.status,
+          providerCalled: false,
+          ...(responseMode === "inline"
+            ? { responseMode, completionState: "agent_not_runnable" }
+            : {}),
+        });
+        if (responseMode === "inline") {
+          sendJson(
+            res,
+            403,
+            correlationId,
+            inlineFailureBody({
+              outcome: "agent_not_runnable",
+              completionState: "agent_not_runnable",
+              failureCategory: `agent status is ${pre.status ?? "unknown"}, not runnable; the model provider was not called`,
+              runId,
+              recorded: false,
+              recorderError: null,
+              transitioned: false,
+              issueStatus: null,
+              replay: false,
+              usage: noUsage(now() - startedAt),
+              extra: { agentStatus: pre.status },
+            }),
+          );
+          return;
+        }
+        sendJson(res, 403, correlationId, {
+          ok: false,
+          outcome: "agent_not_runnable",
+          error: `agent status is ${pre.status ?? "unknown"}, not runnable; the model provider was not called`,
+          agentStatus: pre.status,
+          durationMs: now() - startedAt,
+        });
+        return;
+      }
+
       reservationId = pre.reservationId;
 
       if (pre.alert && pre.verdict.kind !== "unlimited") {

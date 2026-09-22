@@ -235,7 +235,38 @@ export type PreflightResult =
       usedPct: number;
       budgetCents: number;
       pause: boolean;
+    }
+  | {
+      /**
+       * Paperclip's own status for this agent is known and is not one this
+       * runtime treats as runnable (an operator pause, most often). No
+       * reservation is created and the provider is never called — this is the
+       * SAME "before the provider is touched" guarantee `exhausted` already
+       * gives, on a different signal.
+       */
+      kind: "agent_not_runnable";
+      status: string | null;
     };
+
+/**
+ * The ONLY status this runtime will call the provider for. Everything else —
+ * "paused", "error", "terminated", an unrecognised future value — is
+ * non-runnable, ALLOWLIST style: no normalisation, no coercion, on purpose
+ * (same shape as isola-gateway's ROUTABLE_LIFECYCLE). A status this runtime
+ * has never seen before must fail closed, not be assumed safe.
+ *
+ * `status === null` (the fetch never carried a status at all — an old cached
+ * row, or a Paperclip response shape this runtime could not read) is treated
+ * as RUNNABLE, deliberately not as paused: this gate exists to make an
+ * operator's pause effective, not to invent a new refusal for agents whose
+ * status this runtime simply has no visibility into.
+ */
+const RUNNABLE_STATUSES = new Set(["idle"]);
+
+export function isAgentRunnable(status: string | null): boolean {
+  if (status === null) return true;
+  return RUNNABLE_STATUSES.has(status);
+}
 
 export interface SettleArgs {
   reservationId: string | null;
@@ -418,7 +449,14 @@ export class MeteringService {
     agentId: string,
     exposure: string,
     runId: string | null,
-  ): Promise<{ budgetCents: number | null; spentCents: number; known: boolean }> {
+  ): Promise<{
+    budgetCents: number | null;
+    spentCents: number;
+    /** Paperclip's own agent status, threaded through every branch — see
+     *  state.ts's BudgetSnapshot.status for what `null` means here. */
+    status: string | null;
+    known: boolean;
+  }> {
     const state = await this.d.store.read();
     const cached = state.budgets[agentId];
     const nowMs = this.d.now();
@@ -426,6 +464,7 @@ export class MeteringService {
       return {
         budgetCents: cached.budgetMonthlyCents,
         spentCents: cached.spentMonthlyCents,
+        status: cached.status,
         known: true,
       };
     }
@@ -436,9 +475,10 @@ export class MeteringService {
         ? {
             budgetCents: cached.budgetMonthlyCents,
             spentCents: cached.spentMonthlyCents,
+            status: cached.status,
             known: true,
           }
-        : { budgetCents: null, spentCents: 0, known: false };
+        : { budgetCents: null, spentCents: 0, status: null, known: false };
     }
 
     try {
@@ -448,12 +488,14 @@ export class MeteringService {
           agentId,
           budgetMonthlyCents: fresh.budgetMonthlyCents,
           spentMonthlyCents: fresh.spentMonthlyCents,
+          status: fresh.status,
           fetchedAtMs: this.d.now(),
         };
       });
       return {
         budgetCents: fresh.budgetMonthlyCents,
         spentCents: fresh.spentMonthlyCents,
+        status: fresh.status,
         known: true,
       };
     } catch (err) {
@@ -471,9 +513,10 @@ export class MeteringService {
         ? {
             budgetCents: cached.budgetMonthlyCents,
             spentCents: cached.spentMonthlyCents,
+            status: cached.status,
             known: true,
           }
-        : { budgetCents: null, spentCents: 0, known: false };
+        : { budgetCents: null, spentCents: 0, status: null, known: false };
     }
   }
 
@@ -516,6 +559,17 @@ export class MeteringService {
     );
     const agentId = args.agentId;
     const companyId = args.companyId ?? this.d.options.companyIdDefault ?? "";
+
+    // Paperclip's own status, checked BEFORE budget arithmetic and before any
+    // reservation exists — a paused agent is refused here on its very next
+    // preflight (including the next call of an already-in-progress, multi-call
+    // run), never by budget math it has not exceeded. This is what makes
+    // `POST /api/agents/{id}/pause` actually stop further model calls; before
+    // this gate, `getAgentBudget` fetched status from Paperclip and discarded
+    // it, so nothing downstream ever saw it.
+    if (!isAgentRunnable(snapshot.status)) {
+      return { kind: "agent_not_runnable", status: snapshot.status };
+    }
 
     return this.d.store.transact((draft) => {
       const nowMs = this.d.now();

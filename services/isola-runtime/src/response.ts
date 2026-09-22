@@ -63,6 +63,7 @@ export const COMPLETION_STATES = [
   "invalid_output",
   "persistence_failed",
   "budget_exhausted",
+  "agent_not_runnable",
   "internal_error",
   "duplicate_in_flight",
   "rejected",

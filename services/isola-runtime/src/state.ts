@@ -173,6 +173,16 @@ export interface BudgetSnapshot {
   agentId: string;
   budgetMonthlyCents: number | null;
   spentMonthlyCents: number;
+  /**
+   * Paperclip's own agent status ("idle" | "paused" | "error" | "terminated" |
+   * ...), cached alongside budget so an operator's pause is visible to the SAME
+   * pre-flight check that already runs before every provider call — see
+   * metering.ts's RUNNABLE_STATUSES gate. `null` means the cached fetch never
+   * carried a status at all (an older row written before this field existed, or
+   * a Paperclip response shape this runtime could not read) — absence is never
+   * treated as "paused", only a recognised non-runnable value is.
+   */
+  status: string | null;
   fetchedAtMs: number;
 }
 
@@ -387,6 +397,7 @@ export function sanitiseState(parsed: unknown): RuntimeState {
         budgetMonthlyCents:
           typeof v["budgetMonthlyCents"] === "number" ? v["budgetMonthlyCents"] : null,
         spentMonthlyCents: Math.max(0, num(v["spentMonthlyCents"], 0)),
+        status: typeof v["status"] === "string" ? v["status"] : null,
         fetchedAtMs: num(v["fetchedAtMs"], 0),
       };
     }),

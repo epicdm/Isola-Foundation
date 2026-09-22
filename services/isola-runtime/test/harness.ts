@@ -149,7 +149,7 @@ export interface RecordedCall {
 
 export class StubPaperclipApi implements PaperclipApi {
   readonly calls: RecordedCall[] = [];
-  budget: AgentBudget = { budgetMonthlyCents: null, spentMonthlyCents: 0 };
+  budget: AgentBudget = { budgetMonthlyCents: null, spentMonthlyCents: 0, status: "idle" };
 
   /** Queue of failures, consumed one per cost-event delivery attempt. */
   costEventFailures: Array<PaperclipApiError | null> = [];

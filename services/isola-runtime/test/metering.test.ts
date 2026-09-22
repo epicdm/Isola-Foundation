@@ -341,7 +341,7 @@ describe("never fabricate cost", () => {
 describe("budget thresholds", () => {
   it("fires the 80% alert once per crossing, not once per run", async () => {
     const paperclip = new StubPaperclipApi();
-    paperclip.budget = { budgetMonthlyCents: 10_000, spentMonthlyCents: 8_000 };
+    paperclip.budget = { budgetMonthlyCents: 10_000, spentMonthlyCents: 8_000, status: "idle" };
     const { server, logger } = await boot({ paperclip });
 
     for (const runId of ["r1", "r2", "r3"]) {
@@ -362,7 +362,7 @@ describe("budget thresholds", () => {
 
   it("does not alert below the threshold", async () => {
     const paperclip = new StubPaperclipApi();
-    paperclip.budget = { budgetMonthlyCents: 10_000, spentMonthlyCents: 100 };
+    paperclip.budget = { budgetMonthlyCents: 10_000, spentMonthlyCents: 100, status: "idle" };
     const { server, logger } = await boot({ paperclip });
     await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
     expect(logger.withOutcome("budget_alert")).toHaveLength(0);
@@ -380,7 +380,7 @@ describe("budget thresholds", () => {
   it("SABOTAGE: no Paperclip budget + spend past the FALLBACK ceiling => 402, provider untouched", async () => {
     const paperclip = new StubPaperclipApi();
     // No ceiling from Paperclip, and prior spend already past the fallback.
-    paperclip.budget = { budgetMonthlyCents: null, spentMonthlyCents: 50 };
+    paperclip.budget = { budgetMonthlyCents: null, spentMonthlyCents: 50, status: "idle" };
     const { server, model, logger } = await boot({
       paperclip,
       env: { RUNTIME_BUDGET_FALLBACK_CENTS: "10" },
@@ -400,7 +400,7 @@ describe("budget thresholds", () => {
     // that refused everything — which is the failure mode the owner's ruling
     // exists to avoid ("no agent starts refusing on deploy").
     const paperclip = new StubPaperclipApi();
-    paperclip.budget = { budgetMonthlyCents: null, spentMonthlyCents: 1 };
+    paperclip.budget = { budgetMonthlyCents: null, spentMonthlyCents: 1, status: "idle" };
     const { server, model } = await boot({
       paperclip,
       env: { RUNTIME_BUDGET_FALLBACK_CENTS: "5000" },
@@ -414,7 +414,7 @@ describe("budget thresholds", () => {
 
   it("rejects at 100% BEFORE calling the provider, and pauses the employee", async () => {
     const paperclip = new StubPaperclipApi();
-    paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 100 };
+    paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 100, status: "idle" };
     const { server, model, logger } = await boot({ paperclip });
 
     const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
@@ -444,7 +444,7 @@ describe("budget thresholds", () => {
 
   it("pauses once per period, not once per rejected run", async () => {
     const paperclip = new StubPaperclipApi();
-    paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 100 };
+    paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 100, status: "idle" };
     const { server, model } = await boot({ paperclip });
     for (const runId of ["r1", "r2", "r3"]) {
       const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body(runId) });
@@ -456,7 +456,7 @@ describe("budget thresholds", () => {
 
   it("a rejected run is retryable later — the claim is released, not finalized", async () => {
     const paperclip = new StubPaperclipApi();
-    paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 100 };
+    paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 100, status: "idle" };
     const { server, model, store, clock } = await boot({ paperclip });
 
     expect((await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") })).status).toBe(402);
@@ -465,7 +465,7 @@ describe("budget thresholds", () => {
 
     // Budget raised. The cached ledger snapshot has to expire first — until it
     // does, the runtime keeps failing closed on the figure it last read.
-    paperclip.budget = { budgetMonthlyCents: 100_000, spentMonthlyCents: 100 };
+    paperclip.budget = { budgetMonthlyCents: 100_000, spentMonthlyCents: 100, status: "idle" };
     expect((await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") })).status).toBe(402);
     clock.ms += 60_000;
 
@@ -486,7 +486,7 @@ describe("budget thresholds", () => {
 
   it("RUNTIME_BUDGET_ENFORCEMENT=off skips the ledger read entirely", async () => {
     const paperclip = new StubPaperclipApi();
-    paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 100 };
+    paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 100, status: "idle" };
     const { server, model } = await boot({
       paperclip,
       env: { RUNTIME_BUDGET_ENFORCEMENT: "off" },
@@ -503,7 +503,7 @@ describe("reservations", () => {
     // 40 cents. With a 100 cent budget exactly two runs fit; the third must be
     // rejected before it reaches the provider.
     const paperclip = new StubPaperclipApi();
-    paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 0 };
+    paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 0, status: "idle" };
 
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => {
@@ -551,7 +551,7 @@ describe("reservations", () => {
 
   it("releases the reservation once the run settles, so the next run fits", async () => {
     const paperclip = new StubPaperclipApi();
-    paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 0 };
+    paperclip.budget = { budgetMonthlyCents: 100, spentMonthlyCents: 0, status: "idle" };
     const { server, store } = await boot({
       paperclip,
       env: {
@@ -893,5 +893,117 @@ describe("budget arithmetic", () => {
     });
     expect(nextMonth.alert).toBe(true);
     expect(nextMonth.pause).toBe(true);
+  });
+});
+
+/**
+ * Owner's acceptance test: "pausing an agent must stop further model calls,
+ * including work already running." Before this gate, `getAgentBudget` fetched
+ * Paperclip's own agent status on every preflight and discarded it — an
+ * operator's `POST /api/agents/{id}/pause` had zero effect on this runtime's
+ * decision to keep calling the model. This section proves the fix is real,
+ * that it does not become a new blanket refusal, and that it fires on the
+ * ALLOWLIST ("idle" only), not on a single hardcoded "paused" string.
+ */
+describe("agent status gate — pause actually stops the next call", () => {
+  it("SABOTAGE: a paused agent is refused before the provider is touched, budget notwithstanding", async () => {
+    const paperclip = new StubPaperclipApi();
+    // Budget is wide open — the refusal must come from status, not money.
+    paperclip.budget = { budgetMonthlyCents: 100_000, spentMonthlyCents: 0, status: "paused" };
+    const { server, model, logger } = await boot({ paperclip });
+
+    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+
+    expect(res.status).toBe(403);
+    expect(res.json["outcome"]).toBe("agent_not_runnable");
+    expect(res.json["agentStatus"]).toBe("paused");
+    // THE ASSERTION THAT MATTERS: no reservation, no spend, no model call.
+    expect(model.calls).toHaveLength(0);
+
+    const line = logger.withOutcome("agent_not_runnable")[0]!;
+    expect(line["providerCalled"]).toBe(false);
+    expect(line["httpStatus"]).toBe(403);
+    expect(line["agentStatus"]).toBe("paused");
+
+    const comment = paperclip.comments.find((c) => String(c.body).includes("not runnable"));
+    expect(comment).toBeDefined();
+  });
+
+  it("POSITIVE CONTROL: the identical budget with status idle still runs", async () => {
+    // Without this, the sabotage test above would pass just as well against a
+    // runtime that refused every request — the exact failure mode the
+    // fallback-ceiling positive control above exists to rule out, applied to
+    // this new gate.
+    const paperclip = new StubPaperclipApi();
+    paperclip.budget = { budgetMonthlyCents: 100_000, spentMonthlyCents: 0, status: "idle" };
+    const { server, model } = await boot({ paperclip });
+
+    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+
+    expect(res.status).toBe(200);
+    expect(model.calls).toHaveLength(1);
+  });
+
+  it.each(["error", "terminated", "some-future-status-this-runtime-has-never-seen"])(
+    "ALLOWLIST, not a hardcoded string: status %s also refuses",
+    async (status) => {
+      const paperclip = new StubPaperclipApi();
+      paperclip.budget = { budgetMonthlyCents: 100_000, spentMonthlyCents: 0, status };
+      const { server, model } = await boot({ paperclip });
+
+      const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+
+      expect(res.status).toBe(403);
+      expect(res.json["outcome"]).toBe("agent_not_runnable");
+      expect(res.json["agentStatus"]).toBe(status);
+      expect(model.calls).toHaveLength(0);
+    },
+  );
+
+  it("a status this runtime never read (fetch failed, no cache) does NOT block — absence is not treated as paused", async () => {
+    // budgetFailure forces getAgentBudget to throw, and there is no cached
+    // snapshot to fall back on — budgetSnapshot() returns status: null,
+    // known: false, exactly the state a brand-new agent starts in.
+    const paperclip = new StubPaperclipApi();
+    paperclip.budgetFailure = new PaperclipApiError("budget read failed", 500, false);
+    const { server, model } = await boot({ paperclip });
+
+    const res = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+
+    // Falls through to the SAME fallback-ceiling budget logic tested above —
+    // this test only proves the status gate itself did not fire on null.
+    expect(res.status).not.toBe(403);
+    expect(model.calls).toHaveLength(1);
+  });
+
+  it("a SECOND call after Paperclip reports the agent paused is refused, even though the first succeeded", async () => {
+    // This is the "work already in flight" shape of the acceptance test: two
+    // separate /v1/invoke calls for the same agent, the second arriving after
+    // an operator paused it between the two. The cache TTL is set to 0 so the
+    // second call re-fetches rather than reusing the first call's snapshot.
+    const paperclip = new StubPaperclipApi();
+    paperclip.budget = { budgetMonthlyCents: 100_000, spentMonthlyCents: 0, status: "idle" };
+    const { server, model } = await boot({
+      paperclip,
+      env: { RUNTIME_BUDGET_REFRESH_MS: "0" },
+    });
+
+    const first = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r1") });
+    expect(first.status).toBe(200);
+    expect(model.calls).toHaveLength(1);
+
+    // The operator pauses the agent between the two calls — the SAME action
+    // this runtime's own pauseAgent() takes on budget exhaustion, just fired
+    // by a human this time.
+    paperclip.budget = { ...paperclip.budget, status: "paused" };
+
+    const second = await invoke(server.url, { bearer: INTERNAL_SECRET, body: body("r2") });
+    expect(second.status).toBe(403);
+    expect(second.json["outcome"]).toBe("agent_not_runnable");
+    // THE ASSERTION THAT MATTERS: the run already in flight completed (it is
+    // not retroactively cancelled — that is a real limitation, not claimed
+    // otherwise), but the FURTHER call the operator's pause was meant to stop
+    // never reached the model.
+    expect(model.calls).toHaveLength(1);
   });
 });

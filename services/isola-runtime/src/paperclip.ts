@@ -91,6 +91,9 @@ export interface PaperclipCall {
 export interface AgentBudget {
   budgetMonthlyCents: number | null;
   spentMonthlyCents: number;
+  /** Paperclip's own agent status, read from the SAME payload this call already
+   *  fetches. `null` when the payload carried no readable status field. */
+  status: string | null;
 }
 
 export interface PaperclipApi {
@@ -305,6 +308,7 @@ export class HttpPaperclipApi implements PaperclipApi {
     return {
       budgetMonthlyCents: numberOrNull(inner["budgetMonthlyCents"]),
       spentMonthlyCents: numberOrNull(inner["spentMonthlyCents"]) ?? 0,
+      status: typeof inner["status"] === "string" ? inner["status"] : null,
     };
   }
 
