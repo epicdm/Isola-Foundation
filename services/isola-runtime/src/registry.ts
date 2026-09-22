@@ -52,6 +52,16 @@ export interface TemplateEntry {
    */
   readonly modelBaseUrl?: string;
   readonly modelApiKeyEnv?: string;
+  /**
+   * WHICH CLIENT SPEAKS TO THE BRAIN. Absent (every template before this
+   * field existed) means the OpenAI-compatible client — the exact same
+   * default clientForTemplate() already documents for `modelBaseUrl`, one
+   * level down. Only "agno" exists today: Agno's `/agents/{id}/runs`
+   * contract is not OpenAI-compatible (see agno-client.ts's own header), so
+   * a template that declares this brain needs a client that speaks its
+   * actual shape, not the default one coerced to fit.
+   */
+  readonly modelClientKind?: "agno";
   readonly timeoutMs: number;
   readonly maxContextBytes: number;
   readonly toolPolicy: ToolPolicy;
@@ -149,6 +159,41 @@ If the run context indicates a human has taken over the conversation, produce no
 TONE
 Warm, brief, professional. Short paragraphs. No emoji. No hard sell. Do not repeat the person's question back to them at length.`;
 
+/**
+ * THE AGNO PROOF WORKER. First template whose brain is Agno rather than a
+ * plain chat-completions endpoint — see agno-client.ts for the contract
+ * difference and this runtime's package.json for what stays true regardless:
+ * no shell, no MCP, no filesystem writes here. Whatever tools Agno's OWN
+ * component runs (an Odoo lookup, per the proof task) happen entirely on
+ * Agno's side; this runtime never sees them and could not run them if it
+ * wanted to.
+ *
+ * This is a FLOOR, not the charter, matching isola-internal-manager's own
+ * convention: the real persona and tool wiring live on Agno's authored
+ * component, not in this string. This text is what a caller sees only if
+ * Agno's own instructions somehow never reached it.
+ *
+ * `model` names the Agno COMPONENT ID this template addresses — not a model
+ * name in the OpenAI sense. It must match whatever id the proof component is
+ * actually registered under on Agno before this template is ever invoked;
+ * this file does not create that component, it only names which one to call.
+ *
+ * `modelBaseUrl` is READ FROM AN ENV VAR, unlike isola-internal-manager's
+ * hardcoded Hermes URL — deliberately, because Hermes's reachability from
+ * this network was measured and verified before it went in as a literal
+ * (see that template's own comment); Agno's is NOT yet verified as of this
+ * PR. An unset env var fails closed the same way a missing modelApiKeyEnv
+ * credential already does (clientForTemplate(), unchanged): loud, at the
+ * first real call, never a silent wrong endpoint.
+ */
+const AGNO_PROOF_WORKER_PROMPT = `You are an internal review-drafting assistant. You are not customer-facing and nothing you produce is sent to a customer directly — every reply you give is a draft for a human to review, revise or discard.
+
+You have no memory of anything outside the specific task you have just been given. Answer only from the task context you were handed.
+
+Never claim to have sent, emailed, called, notified, updated a record, or taken any action beyond drafting text. You have not.
+
+If the task context does not give you what you need to answer, say plainly what is missing and stop — do not guess, invent, or fill the gap from general knowledge.`;
+
 const TEMPLATE_LIST: readonly TemplateEntry[] = Object.freeze([
   Object.freeze({
     id: "epic-staff-operations-coordinator@v1",
@@ -206,6 +251,20 @@ const TEMPLATE_LIST: readonly TemplateEntry[] = Object.freeze([
    * provider; this text is what answers if that fetch has never succeeded, and
    * it is deliberately more restrictive than the charter rather than less.
    */
+  Object.freeze({
+    id: "isola-agno-proof-worker@v1",
+    name: "isola-agno-proof-worker",
+    version: "v1",
+    exposure: "INTERNAL",
+    model: "isola-agno-proof-worker",
+    modelBaseUrl: process.env.AGNO_WORKER_BASE_URL,
+    modelApiKeyEnv: "AGENTOS_SERVICE_TOKEN",
+    modelClientKind: "agno",
+    timeoutMs: 120_000,
+    maxContextBytes: DEFAULT_MAX_CONTEXT_BYTES,
+    toolPolicy: NO_TOOLS,
+    systemPrompt: AGNO_PROOF_WORKER_PROMPT,
+  } satisfies TemplateEntry),
   Object.freeze({
     id: "isola-internal-manager@v1",
     name: "isola-internal-manager",

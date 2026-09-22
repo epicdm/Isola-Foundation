@@ -21,6 +21,15 @@ export interface ModelRequest {
   model: string;
   messages: ChatMessage[];
   timeoutMs: number;
+  /**
+   * OPTIONAL, and read by nothing in this file. The OpenAI-compatible client
+   * below never touches either field — this is exactly what makes adding them
+   * additive rather than a change to every existing template's dispatch. They
+   * exist for a brain whose OWN contract needs a stable subject and a scoped
+   * conversation (see agno-client.ts) rather than a single stateless prompt.
+   */
+  sessionId?: string | null;
+  userId?: string | null;
 }
 
 /**

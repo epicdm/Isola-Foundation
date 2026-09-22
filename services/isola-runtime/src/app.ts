@@ -47,6 +47,7 @@ import {
 import { createLogger, type Logger } from "./log.js";
 import { buildIdempotencyKey, MeteringService, type MeteringOptions } from "./metering.js";
 import { createOpenAiCompatibleClient, type ModelClient } from "./model.js";
+import { createAgnoClient } from "./agno-client.js";
 import type { TokenUsage } from "./money.js";
 import { createPaperclipApi, type PaperclipApi, type PaperclipCall } from "./paperclip.js";
 import {
@@ -388,6 +389,36 @@ export function createRuntime(deps: AppDeps): Runtime {
    */
   const overrideClients = new Map<string, ModelClient>();
   const clientForTemplate = (template: TemplateEntry): ModelClient => {
+    // AGNO-BRAINED TEMPLATES, CHECKED FIRST AND SEPARATELY. A template that
+    // declares modelClientKind: "agno" must NEVER fall through to the
+    // process-wide default client, even if its env-sourced modelBaseUrl
+    // happens to be unset — that would be the exact silent-wrong-brain defect
+    // this function already exists to prevent, just reached from a different
+    // direction (a missing env var rather than a missing credential). Every
+    // template that predates this field has modelClientKind === undefined and
+    // takes the unchanged branch below, byte for byte.
+    if (template.modelClientKind === "agno") {
+      const base = template.modelBaseUrl;
+      if (base === undefined || base.trim().length === 0) {
+        throw new ModelProviderError(
+          `template ${template.id} requires an agno modelBaseUrl but none is configured`,
+        );
+      }
+      const cacheKey = `agno:${base}`;
+      const cached = overrideClients.get(cacheKey);
+      if (cached !== undefined) return cached;
+      const keyEnv = template.modelApiKeyEnv;
+      const apiKey = keyEnv === undefined ? null : (process.env[keyEnv] ?? null);
+      if (apiKey === null) {
+        throw new ModelProviderError(
+          `template ${template.id} declares modelBaseUrl but ${keyEnv ?? "no credential"} is unset`,
+        );
+      }
+      const made = createAgnoClient({ baseUrl: base, apiKey, safeFetch });
+      overrideClients.set(cacheKey, made);
+      return made;
+    }
+
     const base = template.modelBaseUrl;
     if (base === undefined) return modelClient;
     const cached = overrideClients.get(base);
@@ -1265,6 +1296,13 @@ export function createRuntime(deps: AppDeps): Runtime {
             { role: "system", content: resolvedPrompt.prompt },
             { role: "user", content: userMessage },
           ],
+          // Read by nothing but agno-client.ts (see model.ts's own comment on
+          // these two fields) — scoped to the Paperclip issue when this run
+          // has one, so a multi-turn task keeps one Agno session rather than
+          // opening a fresh one per invoke; a run with no issue yet falls
+          // back to its own run id rather than sending no session at all.
+          sessionId: issueId ?? runId,
+          userId: agentId,
         });
         brainMs = now() - tBrainStart;
         status = "succeeded";

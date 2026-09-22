@@ -14,6 +14,7 @@ describe("registry shape", () => {
     expect(allTemplates().map((t) => t.id)).toEqual([
       "epic-staff-operations-coordinator@v1",
       "isola-ai-sales-front-desk-agent@v1",
+      "isola-agno-proof-worker@v1",
       "isola-internal-manager@v1",
     ]);
     expect(healthTemplateSummary()).toEqual([
@@ -23,6 +24,7 @@ describe("registry shape", () => {
         exposure: "INTERNAL",
       },
       { id: "isola-ai-sales-front-desk-agent@v1", version: "v1", exposure: "PUBLIC" },
+      { id: "isola-agno-proof-worker@v1", version: "v1", exposure: "INTERNAL" },
       { id: "isola-internal-manager@v1", version: "v1", exposure: "INTERNAL" },
     ]);
   });
@@ -55,9 +57,20 @@ describe("registry shape", () => {
    * THE "6737 AND 3742 ARE UNTOUCHED" GUARANTEE, stated as a property of the
    * registry rather than as a hope. A template that declares no brain must be
    * byte-identical to what it was before the menu existed.
+   *
+   * Filtered on modelClientKind too, not modelBaseUrl alone: the agno
+   * template's env-sourced modelBaseUrl is undefined in any environment that
+   * has not set AGNO_WORKER_BASE_URL (every test run, and any deployment
+   * before it is configured) — modelBaseUrl alone cannot tell "deliberately
+   * no override" from "an override whose env var happens to be unset right
+   * now". clientForTemplate() in app.ts makes the same distinction at
+   * runtime (checks modelClientKind first); this test asserts the registry
+   * data itself carries what that check depends on.
    */
   it("a template that declares NO brain keeps the exact previous defaults", () => {
-    const inherited = allTemplates().filter((t) => t.modelBaseUrl === undefined);
+    const inherited = allTemplates().filter(
+      (t) => t.modelBaseUrl === undefined && t.modelClientKind === undefined,
+    );
     expect(inherited.length, "the pre-existing templates must still inherit").toBeGreaterThan(0);
     for (const t of inherited) {
       expect(t.model, t.id).toBe("deepseek-chat");
@@ -68,17 +81,46 @@ describe("registry shape", () => {
     const ids = inherited.map((t) => t.id);
     expect(ids).toContain("isola-ai-sales-front-desk-agent@v1");
     expect(ids).toContain("epic-staff-operations-coordinator@v1");
+    // The new brain-declaring templates must NOT be in it, regardless of
+    // whether their own env var happens to be set in this environment.
+    expect(ids).not.toContain("isola-internal-manager@v1");
+    expect(ids).not.toContain("isola-agno-proof-worker@v1");
   });
 
   it("a template that DOES declare a brain names its credential by env var, never inline", () => {
-    const overridden = allTemplates().filter((t) => t.modelBaseUrl !== undefined);
-    expect(overridden.map((t) => t.id)).toEqual(["isola-internal-manager@v1"]);
+    const overridden = allTemplates().filter(
+      (t) => t.modelBaseUrl !== undefined || t.modelClientKind !== undefined,
+    );
+    expect(overridden.map((t) => t.id)).toEqual([
+      "isola-agno-proof-worker@v1",
+      "isola-internal-manager@v1",
+    ]);
     for (const t of overridden) {
       expect(t.modelApiKeyEnv, "a template is checked into git — no inline secret").toBeTruthy();
       // Nothing that looks like a credential may appear in a template.
       const blob = JSON.stringify(t);
       expect(blob).not.toMatch(/Bearer\s+\S+/);
       expect(blob).not.toMatch(/[A-Za-z0-9_\-]{32,}/);
+    }
+  });
+
+  it("the agno template names its own client kind, distinct from the OpenAI-compatible default", () => {
+    const agno = allTemplates().find((t) => t.id === "isola-agno-proof-worker@v1")!;
+    expect(agno.modelClientKind).toBe("agno");
+    expect(agno.modelApiKeyEnv).toBe("AGENTOS_SERVICE_TOKEN");
+    expect(agno.exposure).toBe("INTERNAL");
+    expect(agno.toolPolicy).toEqual({
+      shell: false,
+      filesystem: false,
+      web: false,
+      mcp: false,
+      customTools: false,
+    });
+    // No other template declares this kind — it is additive, not a pattern
+    // every future brain-declaring template is assumed to follow.
+    const others = allTemplates().filter((t) => t.id !== "isola-agno-proof-worker@v1");
+    for (const t of others) {
+      expect(t.modelClientKind, t.id).toBeUndefined();
     }
   });
 

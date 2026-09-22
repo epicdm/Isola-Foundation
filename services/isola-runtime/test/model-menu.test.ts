@@ -14,13 +14,18 @@
  */
 import { describe, expect, it, vi } from "vitest";
 
+import { createAgnoClient } from "../src/agno-client.js";
 import { createOpenAiCompatibleClient } from "../src/model.js";
 import { allTemplates, findTemplate } from "../src/registry.js";
 
 /**
- * Mirrors app.ts's selection rule exactly. Kept here rather than importing the
- * whole server so the property can be exercised in isolation; the shape is
- * asserted against the real registry, so a template drifting from it fails.
+ * Mirrors app.ts's selection rule exactly, INCLUDING the modelClientKind
+ * check that must run BEFORE the "no override" guarantee — an agno template
+ * must never fall through to the default client just because its env-sourced
+ * modelBaseUrl happens to be unset in this environment (see the agno-branded
+ * describe block below). Kept here rather than importing the whole server so
+ * the property can be exercised in isolation; the shape is asserted against
+ * the real registry, so a template drifting from it fails.
  */
 function makeSelector(safeFetch: typeof fetch, defaultBase: string, defaultKey: string | null) {
   const base = createOpenAiCompatibleClient({
@@ -28,11 +33,27 @@ function makeSelector(safeFetch: typeof fetch, defaultBase: string, defaultKey: 
     apiKey: defaultKey,
     safeFetch: safeFetch as never,
   });
-  const cache = new Map<string, ReturnType<typeof createOpenAiCompatibleClient>>();
+  const cache = new Map<string, unknown>();
   return {
     base,
     pick(templateId: string) {
       const t = findTemplate(templateId)!;
+      if (t.modelClientKind === "agno") {
+        const override = t.modelBaseUrl;
+        if (override === undefined || override.trim().length === 0) {
+          throw new Error(`template ${t.id} requires an agno modelBaseUrl but none is configured`);
+        }
+        const key = `agno:${override}`;
+        const hit = cache.get(key);
+        if (hit) return hit;
+        const made = createAgnoClient({
+          baseUrl: override,
+          apiKey: "test-key",
+          safeFetch: safeFetch as never,
+        });
+        cache.set(key, made);
+        return made;
+      }
       const override = t.modelBaseUrl;
       if (override === undefined) return base; // <-- THE GUARANTEE
       const hit = cache.get(override);
@@ -85,7 +106,12 @@ describe("ABSENT OVERRIDE = BYTE-IDENTICAL CURRENT BEHAVIOUR", () => {
   it("EVERY inherited template behaves this way — not just the two named above", async () => {
     // A template added later that forgets to declare a brain must also inherit,
     // rather than this test passing because it only checked the ones it knew.
-    for (const t of allTemplates().filter((x) => x.modelBaseUrl === undefined)) {
+    // Filtered on modelClientKind too: the agno template's modelBaseUrl is
+    // ALSO undefined in this environment (its env var is unset here), but it
+    // does not inherit — see the dedicated describe block below for why.
+    for (const t of allTemplates().filter(
+      (x) => x.modelBaseUrl === undefined && x.modelClientKind === undefined,
+    )) {
       const { f, calls } = recordingFetch();
       const sel = makeSelector(f as never, "https://api.deepseek.com", "default-key");
       expect(sel.pick(t.id), t.id).toBe(sel.base);
@@ -110,6 +136,58 @@ describe("a declared brain is actually used", () => {
     const { f } = recordingFetch();
     const sel = makeSelector(f as never, "https://api.deepseek.com", "k");
     expect(sel.pick("isola-internal-manager@v1")).toBe(sel.pick("isola-internal-manager@v1"));
+  });
+});
+
+describe("the agno-brained template never silently inherits the default client", () => {
+  /**
+   * The exact trap the "6737 and 3742 are untouched" test above guards
+   * against, from the OTHER direction: a template that DOES declare a brain
+   * must not fall back to it just because its own configuration is
+   * incomplete. `t.modelBaseUrl` is undefined here (AGNO_WORKER_BASE_URL is
+   * unset in this test environment) — the OLD selector shape (before this
+   * file's modelClientKind check existed) would have read that as "no
+   * override" and silently sent the run to the default DeepSeek client.
+   */
+  it("an unconfigured agno base URL throws rather than falling back to the default", () => {
+    const { f } = recordingFetch();
+    const sel = makeSelector(f as never, "https://api.deepseek.com", "k");
+    expect(() => sel.pick("isola-agno-proof-worker@v1")).toThrow(
+      /requires an agno modelBaseUrl/,
+    );
+  });
+
+  it("with a base URL configured, it goes to Agno's own endpoint, not DeepSeek's", async () => {
+    const template = findTemplate("isola-agno-proof-worker@v1")!;
+    const configuredBaseUrl = "http://isola-agno-s1-agentos:3000";
+    // Exercises the client construction directly (mirrors what
+    // clientForTemplate() does once AGNO_WORKER_BASE_URL is set) rather than
+    // reaching into the registry module's own env-read state.
+    const client = createAgnoClient({
+      baseUrl: configuredBaseUrl,
+      apiKey: "test-key",
+      safeFetch: (async (url: string, init: RequestInit) => {
+        expect(url).toBe(`${configuredBaseUrl}/agents/${template.model}/runs`);
+        expect((init.headers as Record<string, string>)?.["authorization"]).toBe(
+          "Bearer test-key",
+        );
+        expect((init.headers as Record<string, string>)?.["content-type"]).toBe(
+          "application/x-www-form-urlencoded",
+        );
+        return new Response(
+          JSON.stringify({ status: "COMPLETED", content: "ok", run_id: "r1" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }) as never,
+    });
+    const res = await client.complete({
+      model: template.model,
+      timeoutMs: 5000,
+      messages: [{ role: "user", content: "hi" }],
+      sessionId: "session-1",
+      userId: "user-1",
+    });
+    expect(res.content).toBe("ok");
   });
 });
 
