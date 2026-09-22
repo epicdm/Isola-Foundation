@@ -59,6 +59,181 @@ const GRAPH = 'https://graph.facebook.com/v23.0/';
 const FAKE_TOKEN = t('EA', 'A', 'b3xY7qLm2Nv9Kd4Rt6Wz8Ps1Hj5Gf0Cx', 'Qa7Ue2Ir');
 
 const cases = [
+  // --- UNGOVERNED MCP SSH SERVERS, and the secret store they exposed -------
+  // Both defects measured 2026-09-22. Every case here FAILS on the code as it
+  // stood that morning, which is the point of writing them.
+  {
+    name: 'SECOND MCP ssh server: build inside /opt/bff-v2 via mcp__host03__remote-ssh is BLOCKED',
+    expect: BLOCK,
+    contains: 'build-in-live-checkout',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__host03__remote-ssh',
+      tool_input: { command: 'cd /opt/bff-v2 && npm run build' },
+    },
+  },
+  {
+    name: 'an MCP ssh server nobody has named yet is governed too (shape, not list)',
+    expect: BLOCK,
+    contains: 'build-in-live-checkout',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__some-future-host__remote-ssh',
+      tool_input: { command: 'cd /opt/isola-runtime && npm run build' },
+    },
+  },
+  {
+    name: 'reading /run/secrets via the host03 server is BLOCKED (the actual 2026-09-22 exposure)',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__host03__remote-ssh',
+      tool_input: { command: 'docker exec abc123 cat /run/secrets/gateway_bindings | head -c 200' },
+    },
+  },
+  {
+    name: 'the same read over plain Bash is BLOCKED (the rule is the path, not the transport)',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'cat /run/secrets/gateway_bindings' },
+    },
+  },
+  {
+    name: 'a Kubernetes secret mount is BLOCKED as well',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'cat /var/run/secrets/kubernetes.io/serviceaccount/token' },
+    },
+  },
+  {
+    name: 'CONTROL: an ordinary /run path that is NOT a secret mount is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'cat /run/nginx.pid' },
+    },
+  },
+  {
+    name: 'CONTROL: a non-ssh MCP tool is still class "other" and is not command-scanned',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__claude_ai_Port_IO__upsert_entity',
+      tool_input: {
+        blueprintIdentifier: 'defect',
+        entity: { identifier: 'd1', properties: { description: 'records that cat /run/secrets/x leaked' } },
+      },
+    },
+  },
+  {
+    // THE REMEDY MUST ACTUALLY WORK. The first version of rule 1a printed a
+    // remedy command containing /run/secrets/<store>, which the rule then
+    // matched and denied — a refusal whose only escape it also refuses. A peer
+    // lane hit that dead end within the hour. This case is the positive control
+    // that the documented way through is real, and it is the one that would go
+    // red if anyone tightens the path rule without updating the projector.
+    name: 'CONTROL: the SAME read piped through the projector is ALLOWED (the remedy is real)',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__host03__remote-ssh',
+      tool_input: {
+        command:
+          'docker exec abc123 cat /run/secrets/gateway_bindings | node .claude/hooks/lib/secret-store-project.js',
+      },
+    },
+  },
+  {
+    // REGRESSION, 2026-09-22, introduced and caught the same day. The
+    // `_secrets?` alternative added to SECRET_FILE_RE hours earlier also
+    // matched DOCUMENTATION about secrets: a lane was blocked from reading its
+    // own notes file named `..._exported_secrets.md`. Writing ABOUT a secret is
+    // not holding one. A guard that fires on vocabulary rather than on an
+    // operation is the failure CLAUDE.md §2.27c names, and the rule is to
+    // report it rather than rename the document to get through.
+    name: 'REGRESSION: reading DOCUMENTATION about secrets (.md) is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Read',
+      tool_input: { file_path: '/home/u/memory/reference_printenv_exported_secrets.md' },
+    },
+  },
+  {
+    name: 'CONTROL: a REAL secret store with a data extension is still BLOCKED',
+    expect: BLOCK,
+    payload: {
+      session_id: SID,
+      tool_name: 'Read',
+      tool_input: { file_path: '/opt/isola/isola_gw_secrets.json' },
+    },
+  },
+  {
+    name: 'CONTROL: a real store with NO extension is still BLOCKED',
+    expect: BLOCK,
+    payload: {
+      session_id: SID,
+      tool_name: 'Read',
+      tool_input: { file_path: '/opt/isola/app_secrets' },
+    },
+  },
+  {
+    // 2026-09-22, the THIRD credential exposure of the day. A `docker inspect`
+    // printed a live HASHID_FIELD_SALT into a lane transcript. The guard
+    // already blocked epic-portal's `inspect*Service` API family — the same
+    // job through a different door — and nobody had enumerated the CLI door.
+    // Wrapped rather than denied: inspecting a service is legitimate
+    // investigation, it just must not carry VALUES into the transcript.
+    name: 'docker inspect is redacted (the surface that leaked on 2026-09-22)',
+    expect: BLOCK,
+    contains: 'credential-surface-redact',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'docker inspect isola-lumen' },
+    },
+  },
+  {
+    name: 'docker service inspect is redacted too (swarm variant)',
+    expect: BLOCK,
+    contains: 'credential-surface-redact',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'sudo docker service inspect isola_isola-lumen' },
+    },
+  },
+  {
+    name: 'CONTROL: docker ps / service ls report STATE not env, and stay ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'sudo docker service ls --format "{{.Name}} {{.Replicas}}"' },
+    },
+  },
+  {
+    name: 'naming the projector in a commit MESSAGE does not launder a raw read',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command:
+          'git commit -m "use secret-store-project.js from now on" && cat /run/secrets/gateway_bindings',
+      },
+    },
+  },
+
   // --- THE R5A RULE -------------------------------------------------------
   {
     name: 'build inside /opt/bff-v2 (remote) is BLOCKED',
@@ -1062,6 +1237,64 @@ try {
 // found is printed — a number nobody can mistake for coverage they did not get.
 const os = require('os');
 const fsm = require('fs');
+
+// --- PROJECT-LOCAL SUITES ------------------------------------------------
+// 2026-09-22. The block below discovers the USER-HOME suites, and its own
+// comment explains why: naming one file meant running 39 of 188 checks while
+// printing "all checks passed". That lesson was applied one level down and not
+// here — this file's OWN directory holds `secret-redact.test.js` and
+// `meta-graph-policy.test.js`, and nothing ran either of them. CLAUDE.md §7
+// tells every lane to verify the project hooks with `node selftest.js`, so the
+// redactor that failed on 2026-09-22 had a suite that the documented
+// verification command never fired. Same defect, third occurrence, one level up.
+//
+// Derived from the directory for the same reason as below: a remembered list
+// goes stale the moment someone adds a suite, and it goes stale silently.
+let localSuiteFailed = 0;
+let localSuiteCount = 0;
+try {
+  const localSuites = fsm.readdirSync(__dirname)
+    .filter((f) => /\.test\.js$/.test(f))
+    .sort();
+  localSuiteCount = localSuites.length;
+  if (localSuites.length) {
+    console.log('\n--- project hook suites in ' + __dirname + ' (' + localSuites.length + ' found)');
+    for (const f of localSuites) {
+      const r = spawnSync(process.execPath, [path.join(__dirname, f)], { encoding: 'utf8' });
+      const out = (r.stdout || '') + (r.stderr || '');
+      // Two summary shapes live here: the hand-rolled suites print
+      // "N passed, M failed"; node:test prints "ℹ pass N" / "ℹ fail N" on
+      // separate lines. Exit status is the authority either way, but the count
+      // must be VISIBLE — "(no summary line)" beside a PASS is indistinguishable
+      // from a suite that ran zero assertions and exited 0, which is the exact
+      // shape CLAUDE.md §2.11 and §2.19 warn about. Both suites were printing
+      // that until this was fixed; they were in fact running 95 and 28 checks.
+      const lines = out.split('\n');
+      const counts = lines
+        .map((l) => l.match(/(?:^|\s)(pass|fail)\s+(\d+)\s*$/))
+        .filter(Boolean)
+        .map((m) => m[1] + ' ' + m[2]);
+      const summary =
+        (counts.length ? counts.join(', ') : null) ||
+        lines.filter((l) => /passed,|FAILURE/.test(l)).pop() ||
+        '(no summary line — suite printed no count)';
+      const bad = r.status !== 0;
+      if (bad) localSuiteFailed = 1;
+      console.log((bad ? '  FAIL  ' : '  PASS  ') + f.padEnd(44) + summary.trim());
+      if (bad && out.trim()) console.log(out.trim().split('\n').map((l) => '        ' + l).join('\n'));
+    }
+  } else {
+    // Not a pass. This file is the project's verification entry point; if it
+    // finds no suite beside it, say so rather than printing a clean tally.
+    console.log('\n--- project hook suites: NONE FOUND in ' + __dirname);
+    console.log('  NOT RUN  no *.test.js beside selftest.js — nothing here was verified.');
+  }
+} catch (e) {
+  localSuiteFailed = 1;
+  console.log('  FAIL  could not run the project hook suites: ' + (e && e.message));
+}
+failed += localSuiteFailed;
+
 const homeHookDir = path.join(os.homedir(), '.claude', 'hooks');
 let homeHookFailed = 0;
 try {
@@ -1095,5 +1328,17 @@ try {
 }
 failed += homeHookFailed;
 
-console.log('\n' + (failed ? failed + ' FAILURE(S)' : 'all ' + (cases.length + stopCases.length) + ' checks passed'));
+// The tally names what it actually covers. "all N checks passed" without the
+// suite counts is the same over-claim this file already made twice: a number
+// the reader maps onto coverage they did not get.
+console.log(
+  '\n' +
+    (failed
+      ? failed + ' FAILURE(S)'
+      : 'all ' +
+        (cases.length + stopCases.length) +
+        ' inline checks passed, plus ' +
+        localSuiteCount +
+        ' project suite(s) and the user-home suites listed above')
+);
 process.exit(failed ? 1 : 0);

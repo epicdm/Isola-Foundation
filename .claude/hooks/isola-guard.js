@@ -327,7 +327,9 @@ function evaluate(inp) {
   // ---------------------------------------------------------------- exec
   const cmd = String(ti.command || ti.script || '');
   const host = ti.host ? String(ti.host) : '';
-  const remote = !!host || tool === 'mcp__ssh-deepseek__remote-ssh';
+  // Shape-matched, not name-matched: `mcp__host03__remote-ssh` was invisible to
+  // this check (and to classifyTool) until 2026-09-22 — see MCP_EXEC_TOOL_RE.
+  const remote = !!host || T.MCP_EXEC_TOOL_RE.test(tool);
   if (!cmd) allow('exec tool=' + tool + ' (no command)');
 
   // 0. PROSE IS NOT EXECUTION.
@@ -376,6 +378,63 @@ function evaluate(inp) {
         '`grep -o "^[A-Z_][A-Z0-9_]*=" .env` or `cut -c1-4`. Never echo a full secret.\n' +
         'If the command is long or quotes other commands, PUT IT IN A FILE and run the file — ' +
         'escaping it inline is what produces the next false positive.'
+    );
+  }
+
+  // 1a. ORCHESTRATOR SECRET STORES — denied outright, not wrapped.
+  //
+  // Measured twice in one day, 2026-09-22, on the SAME file. Both times the
+  // shape was "I need to see the structure before I can extract names safely",
+  // and both times the bytes were in the transcript before the structure was
+  // known — which is the whole trap: you cannot learn a secret file's shape
+  // without reading it. The first read went through the mandated redactor and
+  // still leaked, because the redactor matched value SHAPES and the secrets
+  // were short mixed-alnum values on camelCase keys (fixed separately in
+  // secret-redact.js). The second was a bare `docker exec … cat … | head -c 200`.
+  //
+  // Wrapping through the redactor is NOT offered here, unlike rule 1b. The
+  // redactor is a last line for output that unexpectedly contains a secret; a
+  // Swarm/K8s secret mount contains nothing else, so a wrap would be a licence
+  // to open it and would fail the moment a value takes an unmatched shape —
+  // exactly what happened. The remedy is a positive-allowlist projection that
+  // never emits an unknown key, so a secret field added tomorrow is still
+  // never printed.
+  // The way through is a MECHANISM, not a sentence. The first version of this
+  // rule printed a remedy command that itself contained /run/secrets/<store>,
+  // so the rule denied its own remedy; a peer lane hit that dead end within the
+  // hour and correctly refused to reword around it. A refusal that names a
+  // remedy it also refuses is a wall, not a fail-closed control (CLAUDE.md
+  // §2.26: a fail-closed rule needs a mechanism to fail with).
+  //
+  // Checked by literal substring against scanTarget — the same laundering-proof
+  // target the other rules use — so a projector mentioned only inside a commit
+  // message does not unlock a real read.
+  const projector = path.join(__dirname, 'lib', 'secret-store-project.js');
+  const projected = scanTarget.includes('secret-store-project.js');
+  if (T.SECRET_STORE_PATH_RE.test(scanTarget) && !projected) {
+    deny(
+      'orchestrator-secret-store-read',
+      'This reads a container/orchestrator secret mount (/run/secrets or ' +
+        '/var/run/secrets). Everything under those paths is a credential by ' +
+        'location, whatever the file is called — `gateway_bindings` carries ' +
+        'inline agentBotSecret/agentBotAccessToken values and looks like ordinary ' +
+        'config. Two live credential pairs reached a transcript this way on ' +
+        '2026-09-22, the second time after the first had already been reported.',
+      'do not open the store raw. Pipe it through the projector in the SAME ' +
+        'command — it emits a POSITIVE allowlist, so a secret field added to the ' +
+        'store tomorrow is still never printed, and it lists the NAMES of every ' +
+        'key it dropped:\n\n' +
+        '  <your read of the store> | node ' + JSON.stringify(projector) + '\n\n' +
+        'Example — which Paperclip agent is bound to an inbox:\n\n' +
+        '  docker exec <task> cat <the store path> | node ' +
+        JSON.stringify(projector) + '\n\n' +
+        'It prints agentId, tenantId, chatwootInboxId, chatwootAccountId, ' +
+        'phoneNumberId, wabaId, status and exposure. For a field outside that ' +
+        'set, add it deliberately with `--allow <key>` — never widen to a dump. ' +
+        'Key names matching secret/token/auth/key/password and similar can never ' +
+        'be projected at all; the projector reports a refused --allow rather than ' +
+        'silently ignoring it. Key NAMES and presence are always readable; ' +
+        'values are not.'
     );
   }
 

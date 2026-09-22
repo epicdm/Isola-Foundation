@@ -308,10 +308,39 @@ const SECRET_FILE_RE = new RegExp(
       'auth\\.json',
       '\\.credentials\\.json',
       'service-account.*\\.json',
+      // ORCHESTRATOR SECRET STORES, added 2026-09-22 after the second exposure
+      // of the same file in one day. `/run/secrets/gateway_bindings` and
+      // `isola_gw_bindings_v8` carry inline `agentBotSecret`/`agentBotAccessToken`
+      // values, and matched NOTHING above: no extension, not `.env`-shaped. The
+      // existing rules key on file SHAPE, and a Swarm/Compose secret has no
+      // shape — its secrecy comes from WHERE IT LIVES, which is why the path
+      // rule below exists too. Both exposures came from "I just need to see the
+      // structure first", which is why the answer is a deny with a projection
+      // in the remedy, not a wrap.
+      '[a-z0-9_.-]*bindings(_v[0-9]+)?',
+      // The extension is matched EXCEPT for documentation formats. Writing
+      // ABOUT secrets is not holding one, and on 2026-09-22 this very
+      // alternative — added hours earlier in the same change — blocked a lane
+      // from reading its own notes file named `..._exported_secrets.md`. That
+      // is a guard binding to VOCABULARY rather than to an operation
+      // (CLAUDE.md §2.27c), and the estate's rule is to report it rather than
+      // rename the document to get through. A doc that genuinely pastes a
+      // credential is still covered: it falls to the redaction wrap, which
+      // rewrites values, instead of a flat deny that hides the prose too.
+      '[a-z0-9_.-]*_secrets?(\\.(?!md$|markdown$|txt$|rst$|adoc$)[a-z0-9]+)?',
     ].join('|') +
     ')$',
   'i'
 );
+
+/**
+ * A SECRET BY LOCATION, NOT BY NAME. Anything under a container/orchestrator
+ * secret mount is a credential whatever it is called — `/run/secrets/<x>`
+ * (Docker/Swarm), `/var/run/secrets/<x>` (Kubernetes). Enumerated separately
+ * from SECRET_FILE_RE because that regex anchors on the FILENAME and these
+ * files are deliberately named like ordinary config.
+ */
+const SECRET_STORE_PATH_RE = /(^|[\s'"`=])\/(?:var\/)?run\/secrets\/[^\s'"`;|&]*/i;
 const SECRET_FILE_EXEMPT_RE = /\.(example|sample|template|dist)$|\.example\.|\.sample\./i;
 
 /** Commands that would dump an environment or print a secret file to stdout. */
@@ -345,6 +374,46 @@ const SECRET_PATH_TOKEN =
  */
 const CREDENTIAL_SURFACE_RE = new RegExp(
   [
+    // `docker inspect` / `docker service inspect` print a service's FULL env,
+    // which on this estate is where injected credentials live. Added
+    // 2026-09-22 after it printed a live HASHID_FIELD_SALT into a lane's
+    // transcript — the third credential exposure of the day.
+    //
+    // The guard ALREADY blocked epic-portal's `inspect*Service` API family,
+    // which does the same job through a different door. The CLI door was left
+    // open. That is CLAUDE.md §2.21 exactly: a remediation applied to one copy
+    // of a thing while an identical copy sits untouched is a moved problem, not
+    // a fixed one — and the copy nobody enumerated is the one with no owner
+    // watching it.
+    //
+    // Wrapped, not denied, on purpose: inspecting a service is ordinary and
+    // often necessary investigation (it is how the crash-loop above was
+    // diagnosed). What must not happen is the VALUES reaching the transcript.
+    // Denying it outright would push the work into some unguarded shape.
+    // ANCHORED TO A COMMAND POSITION, not to the mere appearance of the words.
+    // The first version of this line matched anywhere in the command text, and
+    // within two minutes it blocked a `grep -E 'docker inspect|...'` that ran
+    // the SELFTEST — a search for the phrase is not an invocation of it. That
+    // was the fourth guard false-positive of 2026-09-22 and the third authored
+    // by me, all the same root cause: matching what text LOOKS like instead of
+    // what is being DONE (CLAUDE.md §2.27c).
+    //
+    // So `docker` must sit at the start, after a separator (`;` `&&` `||` `|`
+    // newline, subshell) or directly after `sudo`. Inside a quoted pattern it
+    // is preceded by a quote, which is not a command position, so it no longer
+    // matches. Same discipline the build rule already uses.
+    // SUBCOMMANDS LIMITED TO THE ONES THAT ACTUALLY PRINT ENV. The first
+    // version also swept in `docker secret inspect` and `docker config
+    // inspect`, and the user-home hook's own suite failed — correctly. Those
+    // two were DELIBERATELY allowed there: `docker secret inspect` prints
+    // METADATA ONLY (id, name, timestamps), never the secret payload, which is
+    // the whole point of Docker's secret API. I had widened the pattern on the
+    // shape of the words without checking what the subcommands do.
+    //
+    // That cross-hook test did exactly its job — it protected a decision
+    // somebody actually made (CLAUDE.md §2.28) against a careless widening,
+    // and it is the reason this line is three words shorter than it was.
+    '(?:^|[;&|(\\n]|\\bsudo\\b)\\s*docker\\s+(?:service\\s+|container\\s+)?inspect\\b',
     // A git remote URL can embed user:token@host.
     '\\bgit\\s+(remote\\s+(-v|show|get-url)|config\\b[^\\n|;&]*\\b(url|remote\\.))',
     '[\\\\/]\\.git[\\\\/]config\\b',
@@ -614,10 +683,40 @@ const TOOL_CLASSES = {
   ]),
 };
 
+/**
+ * A NAMED SET IS A LIST OF THE SERVERS SOMEONE HAPPENED TO KNOW ABOUT.
+ *
+ * Measured 2026-09-22: the sets above name only the `ssh-deepseek` MCP server,
+ * so every command issued through `mcp__host03__remote-ssh` classified as
+ * 'other' and was NEVER INSPECTED — not for secret reads, not for
+ * build-in-live-checkout, not for destructive shapes. The whole exec rule set
+ * was absent on a second production host for as long as that server existed.
+ * It surfaced because a `docker exec … cat /run/secrets/…` on host03 put two
+ * live agent-bot credentials in a transcript and nothing stopped it; the read
+ * was the symptom, the ungoverned server was the defect.
+ *
+ * Matching by SHAPE closes the class rather than one instance: any MCP server
+ * exposing an ssh-ish tool is governed the moment it appears, including one
+ * added tomorrow. The failure direction is deliberate — an unrecognised
+ * `mcp__*__remote-ssh` is treated as EXEC, which means MORE inspection, never
+ * less. Same family as §2.21 (enumerate every copy) applied to tool surfaces.
+ */
+const MCP_EXEC_TOOL_RE = /^mcp__[A-Za-z0-9_.-]+__(remote-ssh|ssh-exec|ssh-command|exec)$/;
+const MCP_WRITE_TOOL_RE = /^mcp__[A-Za-z0-9_.-]+__(ssh-edit-block|ssh-write-chunk|ssh-write-file)$/;
+const MCP_READ_TOOL_RE = /^mcp__[A-Za-z0-9_.-]+__(ssh-read-lines|ssh-search-code|ssh-read-file)$/;
+
 function classifyTool(toolName) {
   if (TOOL_CLASSES.exec.has(toolName)) return 'exec';
   if (TOOL_CLASSES.write.has(toolName)) return 'write';
   if (TOOL_CLASSES.read.has(toolName)) return 'read';
+  // Shape-matched MCP transports, checked AFTER the explicit sets so a named
+  // tool keeps its declared class. Write/read are matched before exec so a
+  // narrower tool is not promoted to exec by accident.
+  if (typeof toolName === 'string') {
+    if (MCP_WRITE_TOOL_RE.test(toolName)) return 'write';
+    if (MCP_READ_TOOL_RE.test(toolName)) return 'read';
+    if (MCP_EXEC_TOOL_RE.test(toolName)) return 'exec';
+  }
   return 'other'; // Task*, Schedule*, Port MCP, Agent, Skill, WebFetch, Artifact...
 }
 
@@ -768,8 +867,12 @@ module.exports = {
   META_HOST_RE,
   LEGACY_REFERENCE_RE,
   SECRET_FILE_RE,
+  SECRET_STORE_PATH_RE,
   SECRET_DUMP_RE,
   CREDENTIAL_SURFACE_RE,
+  MCP_EXEC_TOOL_RE,
+  MCP_WRITE_TOOL_RE,
+  MCP_READ_TOOL_RE,
   EASYPANEL_BLOCKED_PROCEDURES,
   EASYPANEL_BLOCKED_PROCEDURE_RE,
   EASYPANEL_MCP_TOOL_RE,
