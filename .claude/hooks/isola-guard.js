@@ -232,10 +232,11 @@ function evaluate(inp) {
     if (blocked || unparseable) {
       deny(
         'easypanel-secret-dump-procedure',
-        'listProjectsAndServices (epic-portal/EasyPanel) returns full plaintext secrets ' +
-          '(encryption keys, JWT secrets, DB/Redis/MariaDB passwords) for every service on the ' +
-          'instance, with no redaction and no per-project scoping. Reclassified P0 twice this session ' +
-          '(see defect-easypanel-listprojectsandservices-second-secret-dump-2026-08-10) — blocked ' +
+        'This epic-portal/EasyPanel procedure returns full plaintext secrets. listProjectsAndServices ' +
+          'dumps every service (defect-easypanel-listprojectsandservices-second-secret-dump-2026-08-10); ' +
+          'inspectAppService and the whole inspect*Service family, inspectProject and getEnv return the ' +
+          'same shape for one service — proven 2026-09-21 when inspectAppService on isola-lumen-api-prod ' +
+          'put a Django secret key, DB/Redis passwords and ~12 API tokens into a transcript. Blocked ' +
           'outright rather than relied on as a remembered rule.' +
           (unparseable
             ? ' This specific payload could not be safely inspected (malformed or too deeply nested) — ' +
@@ -361,7 +362,9 @@ function evaluate(inp) {
   // ---------------------------------------------------------------- exec
   const cmd = String(ti.command || ti.script || '');
   const host = ti.host ? String(ti.host) : '';
-  const remote = !!host || tool === 'mcp__ssh-deepseek__remote-ssh';
+  // Shape-matched, not name-matched: `mcp__host03__remote-ssh` was invisible to
+  // this check (and to classifyTool) until 2026-09-22 — see MCP_EXEC_TOOL_RE.
+  const remote = !!host || T.MCP_EXEC_TOOL_RE.test(tool);
   if (!cmd) allow('exec tool=' + tool + ' (no command)');
 
   // 0. PROSE IS NOT EXECUTION.
@@ -432,6 +435,63 @@ function evaluate(inp) {
     );
   }
 
+  // 1a. ORCHESTRATOR SECRET STORES — denied outright, not wrapped.
+  //
+  // Measured twice in one day, 2026-09-22, on the SAME file. Both times the
+  // shape was "I need to see the structure before I can extract names safely",
+  // and both times the bytes were in the transcript before the structure was
+  // known — which is the whole trap: you cannot learn a secret file's shape
+  // without reading it. The first read went through the mandated redactor and
+  // still leaked, because the redactor matched value SHAPES and the secrets
+  // were short mixed-alnum values on camelCase keys (fixed separately in
+  // secret-redact.js). The second was a bare `docker exec … cat … | head -c 200`.
+  //
+  // Wrapping through the redactor is NOT offered here, unlike rule 1b. The
+  // redactor is a last line for output that unexpectedly contains a secret; a
+  // Swarm/K8s secret mount contains nothing else, so a wrap would be a licence
+  // to open it and would fail the moment a value takes an unmatched shape —
+  // exactly what happened. The remedy is a positive-allowlist projection that
+  // never emits an unknown key, so a secret field added tomorrow is still
+  // never printed.
+  // The way through is a MECHANISM, not a sentence. The first version of this
+  // rule printed a remedy command that itself contained /run/secrets/<store>,
+  // so the rule denied its own remedy; a peer lane hit that dead end within the
+  // hour and correctly refused to reword around it. A refusal that names a
+  // remedy it also refuses is a wall, not a fail-closed control (CLAUDE.md
+  // §2.26: a fail-closed rule needs a mechanism to fail with).
+  //
+  // Checked by literal substring against scanTarget — the same laundering-proof
+  // target the other rules use — so a projector mentioned only inside a commit
+  // message does not unlock a real read.
+  const projector = path.join(__dirname, 'lib', 'secret-store-project.js');
+  const projected = scanTarget.includes('secret-store-project.js');
+  if (T.SECRET_STORE_PATH_RE.test(scanTarget) && !projected) {
+    deny(
+      'orchestrator-secret-store-read',
+      'This reads a container/orchestrator secret mount (/run/secrets or ' +
+        '/var/run/secrets). Everything under those paths is a credential by ' +
+        'location, whatever the file is called — `gateway_bindings` carries ' +
+        'inline agentBotSecret/agentBotAccessToken values and looks like ordinary ' +
+        'config. Two live credential pairs reached a transcript this way on ' +
+        '2026-09-22, the second time after the first had already been reported.',
+      'do not open the store raw. Pipe it through the projector in the SAME ' +
+        'command — it emits a POSITIVE allowlist, so a secret field added to the ' +
+        'store tomorrow is still never printed, and it lists the NAMES of every ' +
+        'key it dropped:\n\n' +
+        '  <your read of the store> | node ' + JSON.stringify(projector) + '\n\n' +
+        'Example — which Paperclip agent is bound to an inbox:\n\n' +
+        '  docker exec <task> cat <the store path> | node ' +
+        JSON.stringify(projector) + '\n\n' +
+        'It prints agentId, tenantId, chatwootInboxId, chatwootAccountId, ' +
+        'phoneNumberId, wabaId, status and exposure. For a field outside that ' +
+        'set, add it deliberately with `--allow <key>` — never widen to a dump. ' +
+        'Key names matching secret/token/auth/key/password and similar can never ' +
+        'be projected at all; the projector reports a refused --allow rather than ' +
+        'silently ignoring it. Key NAMES and presence are always readable; ' +
+        'values are not.'
+    );
+  }
+
   // 1b. Credential-bearing surface: allow the read, redact its output.
   //
   // Ordered AFTER the secret-dump deny on purpose. A `.env` or private key is
@@ -476,13 +536,33 @@ function evaluate(inp) {
 
   // 3. THE R5A RULE — no builds inside a canonical live checkout.
   //
-  // scanTarget, not cmd — fixed 2026-09-06. Was scanning raw cmd, so a `gh pr
-  // create --body` narrating a build-command fix (quoting `next build` next
-  // to `/opt/bff-v2` to EXPLAIN the two) was judged as if it ran that build.
-  // Same "describing is not performing" principle section 2 already applies
-  // for destructive shapes, now applied here too — see the section-0 comment
-  // above for the root-cause fix (extractNarrativeText covers gh pr/issue
-  // body/title, not just git commit messages).
+  // scanTarget, not cmd — for exactly the reason rule 2 above already gives.
+  // A commit message that RECORDS where a build was measured ("next build
+  // EXIT=0 ... pid 2503174, /opt/bff-v2") is a ledger entry, not a build.
+  //
+  // Measured 2026-09-09: this rule refused a command that was `rm`, `git add`,
+  // `git commit -F -` and `git status` — no build anywhere in it — because the
+  // heredoc body carried both "next build" and "/opt/bff-v2". The machinery to
+  // prevent that ALREADY EXISTED in this file (extractCommitMessage + maskSpans,
+  // consumed as scanTarget) and was wired into rules 1 and 2 and not into this
+  // one. CLAUDE.md §2.21: a remediation applied to one copy while an identical
+  // omission sits in the next rule is a moved problem, not a fix.
+  //
+  // THIS DOES NOT RELAX THE RULE. maskSpans() blanks the message BY OFFSET, so
+  // a real build command sitting outside the message on the same line is still
+  // present in scanTarget and still refused — proven by the selftest case
+  // "a real build chained AFTER a commit message is still BLOCKED".
+  //
+  // The specific harm of the old shape: it penalised exactly the commit
+  // messages this estate most wants — the ones naming the substrate, the pid
+  // and the path. A lane that learns to avoid that vocabulary writes worse
+  // evidence, which is the failure CLAUDE.md §7 forbids rewording around.
+  //
+  // Independently fixed on main 2026-09-06 as well, for the gh pr/issue case:
+  // a `gh pr create --body` narrating a build fix was judged as if it ran
+  // the build. extractNarrativeText covers gh pr/issue body and title, not
+  // just git commit messages. Both lineages reached the same fix; this
+  // comment is the merge of the two, not a choice between them.
   if (T.BUILD_COMMAND_RE.test(scanTarget)) {
     const live = T.matchLiveCheckout(scanTarget);
     if (live && !T.isSafeBuildLocation(scanTarget)) {
