@@ -416,6 +416,122 @@ const SECRET_FILE_RE = new RegExp(
 const SECRET_STORE_PATH_RE = /(^|[\s'"`=])\/(?:var\/)?run\/secrets\/[^\s'"`;|&]*/i;
 const SECRET_FILE_EXEMPT_RE = /\.(example|sample|template|dist)$|\.example\.|\.sample\./i;
 
+/**
+ * SETTING A SECRET-FILE PATH IS NOT READING THE SECRET.
+ *
+ * Measured 2026-09-23: rule 1a (orchestrator-secret-store-read) denied
+ *   docker service update --secret-add source=x,target=principal_signing_key \
+ *     --env-add PRINCIPAL_SIGNING_KEY_FILE=/run/secrets/principal_signing_key svc
+ * That command tells a service where ITS OWN secret will be mounted; nothing in
+ * it opens the file, and no byte of it can reach the transcript. It is the only
+ * way to wire a `_FILE` secret into a running Swarm service, so denying it left
+ * a governed deploy with no path at all (CLAUDE.md §2.26: a refusal needs a
+ * mechanism, and §2.27c: guards bind to operations, not vocabulary).
+ *
+ * THE EXEMPTION IS A PARSE, NOT A SCAN, AND IT FAILS CLOSED. Codex review of
+ * the first version (PR #152) broke a token-scanning design five ways:
+ *   echo $(docker service update --env-add K_FILE=… svc; cat<…)
+ *   docker service update --env-add K_FILE=… svc$(cat<…)
+ *   --container-label-add leak=$(cat<…), and --health-cmd running curl with
+ *   ${IFS} separators, which is code execution inside the container.
+ * Denylisting shapes cannot keep up with a shell. So the command must now BE
+ * one exact shape, character by character:
+ *   [ssh <-o Opt=val | -q | -T>… user@host '<INNER>']  or  <INNER>
+ *   INNER = [sudo] docker service update <ALLOWED FLAG>… <service-name>
+ * - INNER may contain only [A-Za-z0-9_.,:=@/+-] and spaces: no $, backtick,
+ *   quote, <, >, ;, &, |, parentheses, backslash, glob or newline, so no
+ *   substitution, redirection, chaining or expansion exists.
+ * - Every flag is from an allowlist of INERT update flags (PATH_SETTING_FLAGS).
+ *   There is no --image, --health-cmd, --args, --entrypoint, --mount,
+ *   --config-add, --container-label-add, --env-file or --log-*: each of them
+ *   runs code or exposes files with the secret mounted.
+ * - `--secret-add` must be source=<name>,target=<plain-name>; a target that is
+ *   a path is refused.
+ * - `--env-add` must be NAME_FILE=<secret mount>/<plain-name>, and nothing
+ *   else; at least one is required.
+ * OUT OF SCOPE, deliberately: which secret is attached to which service.
+ * `--secret-add source=<any>,target=<name>` without a path is already allowed,
+ * because rule 1a never governed it; this exemption neither widens nor
+ * narrows that.
+ * Anything that does not parse is NOT exempt and keeps the original deny.
+ */
+const PATH_SETTING_SAFE_CHARS_RE = /^[A-Za-z0-9_.,:=@\/+ -]+$/;
+// ssh -o keys are an ALLOWLIST: ProxyCommand, LocalCommand (with
+// PermitLocalCommand), KnownHostsCommand and friends EXECUTE programs, so an
+// arbitrary key would turn the wrapper itself into a code path (Codex #152).
+const PATH_SETTING_SSH_RE =
+  /^ssh((?:\s+(?:-o\s+(?:BatchMode|ConnectTimeout|StrictHostKeyChecking|ServerAliveInterval|ServerAliveCountMax)=[A-Za-z0-9-]+|-[qT]))*)\s+[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+\s+'([^']*)'\s*$/;
+const SECRET_MOUNT_VALUE_RE = /^\/(?:var\/)?run\/secrets\/[A-Za-z0-9_.-]+$/;
+const PLAIN_NAME_RE = /^[A-Za-z0-9_.-]+$/;
+const DURATION_RE = /^[0-9]+(ms|s|m|h)?$/;
+// flag -> validator of its value (null = the flag takes no value)
+// NO --image. Codex review (#152, second round): a new image is new code
+// running with the secret mounted, so it can exfiltrate what this command
+// wires in. An image rollout is a separate `docker service update --image …`
+// that carries no secret path and is not governed by rule 1a at all.
+const PATH_SETTING_FLAGS = {
+  '--secret-add': (v) => /^source=[A-Za-z0-9_.-]+,target=[A-Za-z0-9_.-]+$/.test(v),
+  '--secret-rm': (v) => PLAIN_NAME_RE.test(v),
+  '--env-rm': (v) => /^[A-Z][A-Z0-9_]*$/.test(v),
+  // ONLY `NAME_FILE=<secret mount>/<plain-name>`. Any other env value is
+  // refused, however plain: Codex (#152 r3) showed `CURL_DATA=@/run/secrets/k`
+  // is a read in the hands of a curl-style consumer. A plain env change needs
+  // no exemption, because it carries no secret path.
+  '--env-add': (v) => {
+    const m = /^([A-Z][A-Z0-9_]*_FILE)=(.*)$/.exec(v);
+    return !!m && SECRET_MOUNT_VALUE_RE.test(m[2]);
+  },
+  '--update-failure-action': (v) => /^(pause|continue|rollback)$/.test(v),
+  '--update-monitor': (v) => DURATION_RE.test(v),
+  '--update-delay': (v) => DURATION_RE.test(v),
+  '--update-parallelism': (v) => /^[0-9]+$/.test(v),
+  '--update-order': (v) => /^(start-first|stop-first)$/.test(v),
+  '--quiet': null,
+  '-q': null,
+  '--detach': null,
+  '-d': null,
+  '--with-registry-auth': null,
+};
+
+/**
+ * True only when `cmd` is exactly the permitted Swarm path-setting shape above.
+ * Pure predicate: no I/O, exported for the selftest.
+ */
+function isSecretPathSettingOnly(cmd) {
+  let inner = String(cmd || '').trim();
+  const ssh = PATH_SETTING_SSH_RE.exec(inner);
+  if (ssh) inner = ssh[2].trim();
+  else if (/^ssh\b/.test(inner)) return false;
+  if (!PATH_SETTING_SAFE_CHARS_RE.test(inner)) return false;
+  const tok = inner.split(/ +/);
+  let i = 0;
+  if (tok[i] === 'sudo') i++;
+  if (tok[i] !== 'docker' || tok[i + 1] !== 'service' || tok[i + 2] !== 'update') return false;
+  const rest = tok.slice(i + 3);
+  const service = rest.pop();
+  if (!service || !PLAIN_NAME_RE.test(service) || service.startsWith('-')) return false;
+  let fileSettings = 0;
+  for (let k = 0; k < rest.length; k++) {
+    let flag = rest[k];
+    let value;
+    const eq = flag.indexOf('=');
+    if (flag.startsWith('--') && eq > 0) {
+      value = flag.slice(eq + 1);
+      flag = flag.slice(0, eq);
+    }
+    if (!Object.prototype.hasOwnProperty.call(PATH_SETTING_FLAGS, flag)) return false;
+    const check = PATH_SETTING_FLAGS[flag];
+    if (check === null) {
+      if (value !== undefined) return false;
+      continue;
+    }
+    if (value === undefined) value = rest[++k];
+    if (value === undefined || !check(value)) return false;
+    if (flag === '--env-add' && /_FILE=/.test(value)) fileSettings++;
+  }
+  return fileSettings > 0;
+}
+
 /** Commands that would dump an environment or print a secret file to stdout. */
 /**
  * A secret-bearing FILE reference, as opposed to an identifier that merely
@@ -1114,6 +1230,7 @@ module.exports = {
   LEGACY_REFERENCE_RE,
   SECRET_FILE_RE,
   SECRET_STORE_PATH_RE,
+  isSecretPathSettingOnly,
   SECRET_DUMP_RE,
   CREDENTIAL_SURFACE_RE,
   MCP_EXEC_TOOL_RE,
