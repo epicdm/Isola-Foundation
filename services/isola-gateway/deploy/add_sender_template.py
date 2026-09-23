@@ -476,8 +476,11 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
             except Refused:
                 now = None
             if now is None:
+                # Existence unknown: try removal by the known name anyway.
                 report["created"] = a.new_secret
-                report["cleanup"] = "secret create failed and its existence could not be checked; check and remove it by hand"
+                _remove_new_secret(runner, a.new_secret, report)
+                if report.get("created"):
+                    report["cleanup"] = "secret create failed; existence unknown and removal failed; check and remove it by hand"
             elif a.new_secret in now:
                 report["created"] = a.new_secret
                 _remove_new_secret(runner, a.new_secret, report)
@@ -490,6 +493,11 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
         # Second compare-and-swap, closing the gap the secret create opened.
         if service_state(runner, a.service) != initial_state:
             _remove_new_secret(runner, a.new_secret, report)
+            if report.get("created"):
+                # Could not remove it: it may already be referenced by a
+                # concurrent change. Do NOT mark handled; the safety net will
+                # observe, roll back if it is mounted, and prove the original.
+                raise Refused("the service changed while the new secret was being created, and the new secret could not be removed")
             report["handled"] = True
             raise Refused("the service changed while the new secret was being created; nothing was swapped, re-run")
         swap =["docker", "service", "update", "--quiet", "--image", pinned,
