@@ -318,6 +318,20 @@ const cases = [
       tool_input: { command: 'docker service update --env-add K_FILE=/run/secrets/k --env-add LOG_LEVEL=debug svc' } },
   },
   {
+    name: 'BLOCKED (Codex #152): an executable ssh -o key (ProxyCommand) around a valid path-setting',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: { session_id: SID, tool_name: 'Bash',
+      tool_input: { command: "ssh -o ProxyCommand=nc u@h 'sudo docker service update --env-add K_FILE=/run/secrets/k svc'" } },
+  },
+  {
+    name: 'BLOCKED (Codex #152): PermitLocalCommand + LocalCommand around a valid path-setting',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: { session_id: SID, tool_name: 'Bash',
+      tool_input: { command: "ssh -o PermitLocalCommand=yes -o LocalCommand=leak.sh u@h 'sudo docker service update --env-add K_FILE=/run/secrets/k svc'" } },
+  },
+  {
     name: 'BLOCKED: a --health-cmd with no substitution at all is still not an allowed flag',
     expect: BLOCK,
     contains: 'orchestrator-secret-store-read',

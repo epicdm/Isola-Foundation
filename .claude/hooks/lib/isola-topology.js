@@ -456,8 +456,11 @@ const SECRET_FILE_EXEMPT_RE = /\.(example|sample|template|dist)$|\.example\.|\.s
  * Anything that does not parse is NOT exempt and keeps the original deny.
  */
 const PATH_SETTING_SAFE_CHARS_RE = /^[A-Za-z0-9_.,:=@\/+ -]+$/;
+// ssh -o keys are an ALLOWLIST: ProxyCommand, LocalCommand (with
+// PermitLocalCommand), KnownHostsCommand and friends EXECUTE programs, so an
+// arbitrary key would turn the wrapper itself into a code path (Codex #152).
 const PATH_SETTING_SSH_RE =
-  /^ssh((?:\s+(?:-o\s+[A-Za-z]+=[A-Za-z0-9._-]+|-[qT]))*)\s+[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+\s+'([^']*)'\s*$/;
+  /^ssh((?:\s+(?:-o\s+(?:BatchMode|ConnectTimeout|StrictHostKeyChecking|ServerAliveInterval|ServerAliveCountMax)=[A-Za-z0-9-]+|-[qT]))*)\s+[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+\s+'([^']*)'\s*$/;
 const SECRET_MOUNT_VALUE_RE = /^\/(?:var\/)?run\/secrets\/[A-Za-z0-9_.-]+$/;
 const PLAIN_NAME_RE = /^[A-Za-z0-9_.-]+$/;
 const DURATION_RE = /^[0-9]+(ms|s|m|h)?$/;
