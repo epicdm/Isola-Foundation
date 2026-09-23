@@ -137,16 +137,24 @@ describe("the principal on the runtime request", () => {
       parsePrincipal(raw: unknown): { kind: string; claim?: unknown };
       verifyPrincipal(
         claim: unknown,
-        args: { key: string | null; runId: string | null; nowSec: number },
+        args: { key: string | null; runId: string | null; nowSec: number; context: unknown },
       ): { kind: string; reason?: string };
     };
-    const { runtime } = await deliver({ senderPhone: OWNER });
+    // Text chosen to stress the canonical form: quotes, backslashes, a newline,
+    // non-ASCII, an emoji, U+2028, and markup.
+    const { runtime } = await deliver({
+      senderPhone: OWNER,
+      content: 'Say "hi" \\ to Ana —\nnaïve 🙂   </script> 1.50e3',
+    });
     expect(runtime.requests).toHaveLength(1);
     const request = runtime.requests[0]!;
     const parsed = rt.parsePrincipal(request.principal);
     expect(parsed.kind).toBe("ok");
     const nowSec = Math.floor(Date.now() / 1000);
-    const args = { key: SIGNING_KEY, runId: request.runId, nowSec };
+    // The context AS THE RUNTIME RECEIVES IT: serialised onto the wire and
+    // parsed back — which is exactly what the canonicalisation must survive.
+    const wireContext: unknown = JSON.parse(JSON.stringify(request.context));
+    const args = { key: SIGNING_KEY, runId: request.runId, nowSec, context: wireContext };
     expect(rt.verifyPrincipal(parsed.claim, args)).toEqual({
       kind: "verified",
       principal: {
@@ -165,6 +173,13 @@ describe("the principal on the runtime request", () => {
     );
     const edited = rt.parsePrincipal({ ...request.principal, senderE164: `+${STAFF_DIGITS}` });
     expect(rt.verifyPrincipal(edited.claim, args).kind).toBe("unverified");
+    // …and with the text altered, the context binding refuses it.
+    const altered = JSON.parse(JSON.stringify(request.context)) as Record<string, unknown>;
+    (altered["message"] as Record<string, unknown>)["content"] = "something else entirely";
+    expect(rt.verifyPrincipal(parsed.claim, { ...args, context: altered })).toEqual({
+      kind: "unverified",
+      reason: "context_mismatch",
+    });
   });
 
   it("with no signing key and no sender-routed binding, no principal is sent at all", async () => {

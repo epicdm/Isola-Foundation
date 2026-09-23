@@ -14,9 +14,11 @@
  *   a caller's assertion, and any holder of that credential could name the
  *   owner. So the gateway signs it with HMAC-SHA256 under PRINCIPAL_SIGNING_KEY,
  *   a key held ONLY by that gateway and this service. The signature covers
- *   every identity field, an `issuedAt` (unix seconds) and a `nonce` that must
- *   equal the invoke's `runId`, so a signed principal cannot be edited, kept
- *   for later, or moved onto another run.
+ *   every identity field, an `issuedAt` (unix seconds), a `nonce` that must
+ *   equal the invoke's `runId`, and `contextSha256` — the hash of the exact
+ *   canonical context (see `canonicalContext`) — so a signed principal cannot
+ *   be edited, kept for later, moved onto another run, or attached to other
+ *   text. Each nonce is accepted once per process (`PrincipalReplayGuard`).
  *
  *   An unsigned, badly signed, stale or mis-bound principal is UNVERIFIED:
  *     - a template that `requiresPrincipal` refuses it (400 principal_unverified);
@@ -29,7 +31,7 @@
  *       they could from a plain hash of a ~10^10 space. Stable per person.
  *     - header `X-Isola-Principal-Channel`: the channel name.
  */
-import { createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
 
 export interface VerifiedPrincipal {
   channel: "whatsapp";
@@ -42,7 +44,32 @@ export interface VerifiedPrincipal {
 export interface PrincipalClaim extends VerifiedPrincipal {
   issuedAt: number | null;
   nonce: string | null;
+  /** sha256 (hex) of `canonicalContext(context)` — binds the principal to the text. */
+  contextSha256: string | null;
   signature: string | null;
+}
+
+/**
+ * THE ONE CANONICAL FORM OF THE RUN CONTEXT, shared by signer and verifier.
+ *
+ * `JSON.stringify` of the context value (absent -> `null`). The gateway signs
+ * over this of the object it sends; the runtime recomputes it from the object
+ * it PARSED. For JSON data the two are byte-identical (stringify→parse→stringify
+ * is a fixed point: key order is preserved, numbers and escapes re-serialise
+ * the same), and the text the runtime renders to the model
+ * (`renderContext`, pretty-printed) is a pure function of the same value — so
+ * a principal signed for one message cannot be attached to another.
+ *
+ * The gateway carries a byte-for-byte copy of this function;
+ * `services/isola-gateway/test/verified-principal.test.ts` signs on the
+ * gateway and verifies here to hold the two together.
+ */
+export function canonicalContext(context: unknown): string {
+  return JSON.stringify(context === undefined ? null : context);
+}
+
+export function contextSha256(context: unknown): string {
+  return createHash("sha256").update(canonicalContext(context), "utf8").digest("hex");
 }
 
 export type PrincipalParse =
@@ -54,7 +81,13 @@ export type PrincipalVerification =
   | { kind: "verified"; principal: VerifiedPrincipal }
   | {
       kind: "unverified";
-      reason: "unsigned" | "bad_signature" | "stale" | "nonce_mismatch" | "no_key";
+      reason:
+        | "unsigned"
+        | "bad_signature"
+        | "stale"
+        | "nonce_mismatch"
+        | "context_mismatch"
+        | "no_key";
     };
 
 const E164 = /^\+[1-9]\d{6,14}$/;
@@ -67,6 +100,7 @@ const KEYS = [
   "bindingKey",
   "issuedAt",
   "nonce",
+  "contextSha256",
   "signature",
 ] as const;
 
@@ -113,6 +147,10 @@ export function parsePrincipal(raw: unknown): PrincipalParse {
   if (nonce !== undefined && (typeof nonce !== "string" || nonce.length === 0 || nonce.length > 256)) {
     return { kind: "invalid", reason: "principal.nonce must be a non-empty string when present" };
   }
+  const ctxHash = record["contextSha256"];
+  if (ctxHash !== undefined && (typeof ctxHash !== "string" || !HEX_SHA256.test(ctxHash))) {
+    return { kind: "invalid", reason: "principal.contextSha256 must be 64 lowercase hex chars when present" };
+  }
   const signature = record["signature"];
   if (signature !== undefined && (typeof signature !== "string" || !HEX_SHA256.test(signature))) {
     return { kind: "invalid", reason: "principal.signature must be 64 lowercase hex chars when present" };
@@ -126,6 +164,7 @@ export function parsePrincipal(raw: unknown): PrincipalParse {
       bindingKey,
       issuedAt: typeof issuedAt === "number" ? issuedAt : null,
       nonce: typeof nonce === "string" ? nonce : null,
+      contextSha256: typeof ctxHash === "string" ? ctxHash : null,
       signature: typeof signature === "string" ? signature : null,
     },
   };
@@ -136,9 +175,13 @@ export function parsePrincipal(raw: unknown): PrincipalParse {
  * (E.164, the binding key and the fixed literals cannot; the nonce is checked
  * below), so no two distinct claims share a canonical form.
  */
-export function canonicalPrincipal(
-  p: VerifiedPrincipal & { issuedAt: number; nonce: string },
-): string {
+export type SignableFields = VerifiedPrincipal & {
+  issuedAt: number;
+  nonce: string;
+  contextSha256: string;
+};
+
+export function canonicalPrincipal(p: SignableFields): string {
   return [
     PRINCIPAL_SIGNATURE_VERSION,
     p.channel,
@@ -147,31 +190,40 @@ export function canonicalPrincipal(
     p.bindingKey,
     String(p.issuedAt),
     p.nonce,
+    p.contextSha256,
   ].join("\n");
 }
 
-export function signPrincipal(
-  key: string,
-  p: VerifiedPrincipal & { issuedAt: number; nonce: string },
-): string {
+export function signPrincipal(key: string, p: SignableFields): string {
   return createHmac("sha256", key).update(canonicalPrincipal(p), "utf8").digest("hex");
 }
 
 /**
  * Authenticate a parsed claim. `runId` is the invoke's own run id, which the
- * claim's nonce must equal. `nowSec` is injected for testability.
+ * claim's nonce must equal; `context` is the run context AS RECEIVED, whose
+ * canonical hash the claim must carry. `nowSec` is injected for testability.
  */
 export function verifyPrincipal(
   claim: PrincipalClaim,
-  args: { key: string | null; runId: string | null; nowSec: number },
+  args: { key: string | null; runId: string | null; nowSec: number; context: unknown },
 ): PrincipalVerification {
   if (args.key === null) return { kind: "unverified", reason: "no_key" };
-  if (claim.signature === null || claim.issuedAt === null || claim.nonce === null) {
+  if (
+    claim.signature === null ||
+    claim.issuedAt === null ||
+    claim.nonce === null ||
+    claim.contextSha256 === null
+  ) {
     return { kind: "unverified", reason: "unsigned" };
   }
   if (claim.nonce.includes("\n")) return { kind: "unverified", reason: "bad_signature" };
   const expected = Buffer.from(
-    signPrincipal(args.key, { ...claim, issuedAt: claim.issuedAt, nonce: claim.nonce }),
+    signPrincipal(args.key, {
+      ...claim,
+      issuedAt: claim.issuedAt,
+      nonce: claim.nonce,
+      contextSha256: claim.contextSha256,
+    }),
     "hex",
   );
   const presented = Buffer.from(claim.signature, "hex");
@@ -187,6 +239,11 @@ export function verifyPrincipal(
   }
   if (args.runId === null || claim.nonce !== args.runId) {
     return { kind: "unverified", reason: "nonce_mismatch" };
+  }
+  // The signed hash must be of THIS context: the same signed principal with
+  // altered text is a different request, not the one the gateway vouched for.
+  if (contextSha256(args.context) !== claim.contextSha256) {
+    return { kind: "unverified", reason: "context_mismatch" };
   }
   return {
     kind: "verified",
@@ -224,3 +281,48 @@ export function principalUserId(principal: VerifiedPrincipal, userKey: Buffer): 
 }
 
 export const PRINCIPAL_CHANNEL_HEADER = "X-Isola-Principal-Channel";
+
+/**
+ * ONE ACCEPTANCE PER NONCE.
+ *
+ * A signed principal is bound to its run id and its context, but within the
+ * freshness window the IDENTICAL request could still be sent twice by anyone
+ * who observed it. This remembers every nonce (= run id) accepted in the last
+ * `ttlMs` and refuses a second acceptance (`principal_replayed`).
+ *
+ * PER-PROCESS, deliberately and with a stated bound. The set lives in memory:
+ * a restart or a second replica does not share it. The exposure that leaves is
+ * bounded by the freshness window — a captured principal is useless after
+ * PRINCIPAL_MAX_AGE_SEC whether or not this set survived — so a restart opens
+ * at most one window's worth of replay for requests captured just before it.
+ *
+ * BOUNDED. At most `maxEntries` nonces are held. Expired entries are pruned on
+ * insert; if the set is still full, the new principal is REFUSED rather than an
+ * unexpired nonce forgotten (forgetting would re-open a replay). The default
+ * cap (10,000 per 120s ≈ 83 owner-principal requests per second) is far above
+ * the realistic rate of one person's WhatsApp line.
+ */
+export class PrincipalReplayGuard {
+  private readonly seen = new Map<string, number>();
+
+  constructor(
+    private readonly ttlMs: number = PRINCIPAL_MAX_AGE_SEC * 1000,
+    private readonly maxEntries: number = 10_000,
+  ) {}
+
+  /** Records the nonce if it is new. `replayed`: accepted before; `full`: at capacity. */
+  accept(nonce: string, nowMs: number): "accepted" | "replayed" | "full" {
+    const until = this.seen.get(nonce);
+    if (until !== undefined && until > nowMs) return "replayed";
+    if (this.seen.size >= this.maxEntries) {
+      for (const [n, expiry] of this.seen) if (expiry <= nowMs) this.seen.delete(n);
+      if (this.seen.size >= this.maxEntries) return "full";
+    }
+    this.seen.set(nonce, nowMs + this.ttlMs);
+    return "accepted";
+  }
+
+  get size(): number {
+    return this.seen.size;
+  }
+}

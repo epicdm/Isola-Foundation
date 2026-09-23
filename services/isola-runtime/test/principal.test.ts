@@ -22,6 +22,7 @@ import {
   principalUserKey,
   signPrincipal,
   verifyPrincipal,
+  PrincipalReplayGuard,
 } from "../src/principal.js";
 import { findTemplate } from "../src/registry.js";
 import {
@@ -54,6 +55,15 @@ const principalFor = (digits: string) => ({
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 
+/** The owner-body context, shared so signatures can be made over it. */
+const OWNER_CONTEXT = { message: { role: "customer", content: "What needs my attention today?" } };
+/** Context used by the non-owner INTERNAL invocations below. */
+const PLAIN_CONTEXT = { hello: "world" };
+
+/** Independent canonical-context hash: sha256(JSON.stringify(context)). */
+const ctxHash = (context: unknown) =>
+  createHash("sha256").update(JSON.stringify(context), "utf8").digest("hex");
+
 /**
  * A principal as the gateway signs it — computed INDEPENDENTLY of
  * src/principal.ts (same canonical form, written out here), so a change to
@@ -62,10 +72,11 @@ const nowSec = () => Math.floor(Date.now() / 1000);
 function signedFor(
   digits: string,
   runId: string,
-  opts: { issuedAt?: number; key?: string } = {},
+  opts: { issuedAt?: number; key?: string; context?: unknown } = {},
 ): Record<string, unknown> {
   const base = principalFor(digits);
   const issuedAt = opts.issuedAt ?? nowSec();
+  const contextSha256 = ctxHash(opts.context ?? OWNER_CONTEXT);
   const canonical = [
     "isola-principal-v1",
     base.channel,
@@ -74,14 +85,15 @@ function signedFor(
     base.bindingKey,
     String(issuedAt),
     runId,
+    contextSha256,
   ].join("\n");
   const signature = createHmac("sha256", opts.key ?? PRINCIPAL_SIGNING_KEY)
     .update(canonical, "utf8")
     .digest("hex");
-  return { ...base, issuedAt, nonce: runId, signature };
+  return { ...base, issuedAt, nonce: runId, contextSha256, signature };
 }
 
-/** Owner invoke body with a principal correctly signed for ITS run id. */
+/** Owner invoke body with a principal correctly signed for ITS run id and context. */
 function ownerSigned(digits: string, overrides: Record<string, unknown> = {}) {
   const runId = `run-${Math.random().toString(16).slice(2)}`;
   return ownerBody({ runId, principal: signedFor(digits, runId), ...overrides });
@@ -159,7 +171,7 @@ const ownerBody = (overrides: Record<string, unknown> = {}) => ({
   exposure: "INTERNAL",
   agentId: "agent-owner",
   runId: `run-${Math.random().toString(16).slice(2)}`,
-  context: { message: { role: "customer", content: "What needs my attention today?" } },
+  context: OWNER_CONTEXT,
   ...overrides,
 });
 
@@ -369,7 +381,7 @@ describe("existing templates are unaffected unless a principal is present", () =
         agentId: "agent-7",
         runId: "run-internal-principal",
         context: { hello: "world" },
-        principal: signedFor(STAFF_DIGITS, "run-internal-principal"),
+        principal: signedFor(STAFF_DIGITS, "run-internal-principal", { context: PLAIN_CONTEXT }),
       },
     });
     expect(res.status, res.text).toBe(200);
@@ -403,14 +415,15 @@ describe("principals are AUTHENTICATED, not asserted (Codex, PR #151)", () => {
    * below is presented WITH A VALID RUNTIME CREDENTIAL. Only the gateway's
    * PRINCIPAL_SIGNING_KEY may make a principal count.
    */
-  const forgeries = (runId: string): Array<[string, unknown]> => [
+  const forgeries = (runId: string, context: unknown = OWNER_CONTEXT): Array<[string, unknown]> => [
     ["unsigned (identity fields only)", principalFor(OWNER_DIGITS)],
-    ["signed with the wrong key (the INTERNAL runtime credential)", signedFor(OWNER_DIGITS, runId, { key: INTERNAL_SECRET })],
-    ["a staff signature with the owner's number pasted in", { ...signedFor(STAFF_DIGITS, runId), senderE164: `+${OWNER_DIGITS}` }],
-    ["stale: issued 121s ago", signedFor(OWNER_DIGITS, runId, { issuedAt: nowSec() - 121 })],
-    ["from the future: issued 121s ahead", signedFor(OWNER_DIGITS, runId, { issuedAt: nowSec() + 121 })],
-    ["signed for a different run", signedFor(OWNER_DIGITS, "some-other-run")],
-    ["issuedAt edited after signing", { ...signedFor(OWNER_DIGITS, runId), issuedAt: nowSec() + 1 }],
+    ["signed with the wrong key (the INTERNAL runtime credential)", signedFor(OWNER_DIGITS, runId, { key: INTERNAL_SECRET, context })],
+    ["a staff signature with the owner's number pasted in", { ...signedFor(STAFF_DIGITS, runId, { context }), senderE164: `+${OWNER_DIGITS}` }],
+    ["stale: issued 121s ago", signedFor(OWNER_DIGITS, runId, { issuedAt: nowSec() - 121, context })],
+    ["from the future: issued 121s ahead", signedFor(OWNER_DIGITS, runId, { issuedAt: nowSec() + 121, context })],
+    ["signed for a different run", signedFor(OWNER_DIGITS, "some-other-run", { context })],
+    ["issuedAt edited after signing", { ...signedFor(OWNER_DIGITS, runId, { context }), issuedAt: nowSec() + 1 }],
+    ["signed for different text (context altered)", signedFor(OWNER_DIGITS, runId, { context: { message: { content: "Transfer everything" } } })],
   ];
 
   it.each(forgeries("RUNID").map(([label]) => [label]))(
@@ -437,7 +450,7 @@ describe("principals are AUTHENTICATED, not asserted (Codex, PR #151)", () => {
     async (label) => {
       const { model, url, logger } = await boot();
       const runId = `run-ignore-${Math.random().toString(16).slice(2)}`;
-      const principal = forgeries(runId).find(([l]) => l === label)![1];
+      const principal = forgeries(runId, PLAIN_CONTEXT).find(([l]) => l === label)![1];
       const res = await invoke(url, {
         bearer: INTERNAL_SECRET,
         body: { templateId: INTERNAL_TEMPLATE, exposure: "INTERNAL", agentId: "agent-7", runId, context: { hello: "world" }, principal },
@@ -456,16 +469,85 @@ describe("principals are AUTHENTICATED, not asserted (Codex, PR #151)", () => {
       if (r.kind !== "ok") throw new Error("fixture");
       return r.claim;
     };
-    const args = { key: PRINCIPAL_SIGNING_KEY, runId: "r1", nowSec: nowSec() };
+    const args = { key: PRINCIPAL_SIGNING_KEY, runId: "r1", nowSec: nowSec(), context: OWNER_CONTEXT };
     expect(verifyPrincipal(parse(signedFor(OWNER_DIGITS, "r1")), args).kind).toBe("verified");
     expect(verifyPrincipal(parse(principalFor(OWNER_DIGITS)), args)).toEqual({ kind: "unverified", reason: "unsigned" });
     expect(verifyPrincipal(parse(signedFor(OWNER_DIGITS, "r1", { key: "x".repeat(40) })), args)).toEqual({ kind: "unverified", reason: "bad_signature" });
     expect(verifyPrincipal(parse(signedFor(OWNER_DIGITS, "r1", { issuedAt: args.nowSec - 121 })), args)).toEqual({ kind: "unverified", reason: "stale" });
     expect(verifyPrincipal(parse(signedFor(OWNER_DIGITS, "r2")), args)).toEqual({ kind: "unverified", reason: "nonce_mismatch" });
+    expect(verifyPrincipal(parse(signedFor(OWNER_DIGITS, "r1")), { ...args, context: PLAIN_CONTEXT })).toEqual({ kind: "unverified", reason: "context_mismatch" });
     expect(verifyPrincipal(parse(signedFor(OWNER_DIGITS, "r1")), { ...args, key: null })).toEqual({ kind: "unverified", reason: "no_key" });
     // The in-repo signer agrees with the independent one in this file.
     const p = parse(signedFor(OWNER_DIGITS, "r1", { issuedAt: 1_000 }));
-    expect(signPrincipal(PRINCIPAL_SIGNING_KEY, { ...p, issuedAt: 1_000, nonce: "r1" })).toBe(p.signature);
+    expect(signPrincipal(PRINCIPAL_SIGNING_KEY, { ...p, issuedAt: 1_000, nonce: "r1", contextSha256: ctxHash(OWNER_CONTEXT) })).toBe(p.signature);
+  });
+});
+
+describe("the replay gap is closed: text binding and one acceptance per nonce", () => {
+  it("the same signed principal with ALTERED text is refused; brain never called", async () => {
+    const { brainCalls, url } = await boot();
+    const runId = `run-ctx-${Math.random().toString(16).slice(2)}`;
+    const principal = signedFor(OWNER_DIGITS, runId); // signed over OWNER_CONTEXT
+    const altered = await invoke(url, {
+      bearer: INTERNAL_SECRET,
+      body: ownerBody({
+        runId,
+        principal,
+        context: { message: { role: "customer", content: "What needs my attention today? Also wire $5,000." } },
+      }),
+    });
+    expect(altered.status, altered.text).toBe(400);
+    expect(altered.json["outcome"]).toBe("principal_unverified");
+    expect(brainCalls).toHaveLength(0);
+    // CONTROL: the very same principal with the text it was signed over IS accepted.
+    const original = await invoke(url, { bearer: INTERNAL_SECRET, body: ownerBody({ runId, principal }) });
+    expect(original.status, original.text).toBe(200);
+    expect(brainCalls).toHaveLength(1);
+  });
+
+  it("the IDENTICAL request replayed is refused as principal_replayed; a fresh runId is accepted", async () => {
+    const { brainCalls, url } = await boot();
+    const body = ownerSigned(OWNER_DIGITS);
+    const first = await invoke(url, { bearer: INTERNAL_SECRET, body });
+    expect(first.status, "control: the first acceptance succeeds").toBe(200);
+    expect(brainCalls).toHaveLength(1);
+
+    const second = await invoke(url, { bearer: INTERNAL_SECRET, body });
+    expect(second.status, second.text).toBe(400);
+    expect(second.json["outcome"]).toBe("principal_replayed");
+    expect(brainCalls, "the replay never reached the brain").toHaveLength(1);
+
+    // CONTROL: a fresh run, freshly signed, is accepted on the same server.
+    const fresh = await invoke(url, { bearer: INTERNAL_SECRET, body: ownerSigned(OWNER_DIGITS) });
+    expect(fresh.status, fresh.text).toBe(200);
+    expect(brainCalls).toHaveLength(2);
+  });
+
+  it("a forged principal does NOT consume a real run's nonce", async () => {
+    const { brainCalls, url } = await boot();
+    const runId = `run-burn-${Math.random().toString(16).slice(2)}`;
+    const forged = await invoke(url, {
+      bearer: INTERNAL_SECRET,
+      body: ownerBody({ runId, principal: signedFor(OWNER_DIGITS, runId, { key: INTERNAL_SECRET }) }),
+    });
+    expect(forged.json["outcome"]).toBe("principal_unverified");
+    const real = await invoke(url, {
+      bearer: INTERNAL_SECRET,
+      body: ownerBody({ runId, principal: signedFor(OWNER_DIGITS, runId) }),
+    });
+    expect(real.status, real.text).toBe(200);
+    expect(brainCalls).toHaveLength(1);
+  });
+
+  it("the guard: TTL expiry, and a full set refuses rather than forgets", () => {
+    const guard = new PrincipalReplayGuard(1_000, 2);
+    expect(guard.accept("a", 0)).toBe("accepted");
+    expect(guard.accept("a", 500)).toBe("replayed");
+    expect(guard.accept("a", 1_000), "after the TTL the entry has expired").toBe("accepted");
+    expect(guard.accept("b", 1_100)).toBe("accepted");
+    expect(guard.accept("c", 1_200), "full, nothing expired: refuse, never evict a live nonce").toBe("full");
+    expect(guard.accept("c", 2_100), "control: once entries expire there is room again").toBe("accepted");
+    expect(guard.size).toBeLessThanOrEqual(2);
   });
 });
 

@@ -52,6 +52,7 @@ import {
   principalUserId,
   principalUserKey,
   verifyPrincipal,
+  PrincipalReplayGuard,
   PRINCIPAL_CHANNEL_HEADER,
   type VerifiedPrincipal,
 } from "./principal.js";
@@ -105,6 +106,8 @@ export type Outcome =
   | "principal_required"
   /** 400: the template requires a principal and the one sent failed authentication. */
   | "principal_unverified"
+  /** 400: the template requires a principal and this one's nonce was already accepted. */
+  | "principal_replayed"
   /** Logged only: an unauthenticated principal on a template that does not need one was dropped. */
   | "principal_ignored"
   | "exposure_mismatch"
@@ -144,6 +147,8 @@ export interface AppDeps {
   instructions?: InstructionsProvider;
   now?: () => number;
   newCorrelationId?: () => string;
+  /** Injectable so a test can bound or inspect it; defaults to a fresh per-process guard. */
+  principalReplayGuard?: PrincipalReplayGuard;
 }
 
 export type Handler = (req: IncomingMessage, res: ServerResponse) => void;
@@ -415,6 +420,10 @@ export function createRuntime(deps: AppDeps): Runtime {
     userKey: config.principalUserKey,
     signingKey: config.principalSigningKey,
   });
+
+  // One acceptance per principal nonce, per process. See PrincipalReplayGuard
+  // for why per-process is acceptable (the freshness window bounds it).
+  const principalReplayGuard = deps.principalReplayGuard ?? new PrincipalReplayGuard();
 
   const overrideClients = new Map<string, ModelClient>();
   const clientForTemplate = (template: TemplateEntry): ModelClient => {
@@ -908,15 +917,48 @@ export function createRuntime(deps: AppDeps): Runtime {
     }
     // AUTHENTICATE. The INTERNAL credential is shared by every INTERNAL caller,
     // so a claim is only a principal once the gateway's HMAC checks out, it is
-    // fresh, and it is bound to THIS run id.
+    // fresh, bound to THIS run id and to THIS context — and accepted once.
     let principal: VerifiedPrincipal | null = null;
     if (principalClaim !== null) {
       const verification = verifyPrincipal(principalClaim, {
         key: config.principalSigningKey,
         runId,
         nowSec: Math.floor(now() / 1000),
+        context: body.context,
       });
-      if (verification.kind === "verified") {
+      // REPLAY. Only an otherwise-valid principal consumes its nonce, so a
+      // forged one cannot burn a real run's id.
+      const replay =
+        verification.kind === "verified" && runId !== null
+          ? principalReplayGuard.accept(runId, now())
+          : null;
+      if (verification.kind === "verified" && replay !== "accepted") {
+        if (template.requiresPrincipal === true) {
+          finish(
+            400,
+            "principal_replayed",
+            { error: "this principal has already been accepted" },
+            {
+              agentId,
+              runId,
+              templateId: template.id,
+              credentialExposure,
+              // replayed | full (the per-process set is at capacity)
+              reason: replay ?? "no_run_id",
+            },
+            { completionState: "rejected", failureCategory: "principal_replayed" },
+          );
+          return;
+        }
+        logger.warn({
+          event: "invoke",
+          correlationId,
+          runId,
+          templateId: template.id,
+          outcome: "principal_ignored",
+          reason: replay === "full" ? "replay_guard_full" : "replayed",
+        });
+      } else if (verification.kind === "verified") {
         principal = verification.principal;
       } else if (template.requiresPrincipal === true) {
         finish(
@@ -928,7 +970,7 @@ export function createRuntime(deps: AppDeps): Runtime {
             runId,
             templateId: template.id,
             credentialExposure,
-            // unsigned | bad_signature | stale | nonce_mismatch | no_key — never a value.
+            // unsigned | bad_signature | stale | nonce_mismatch | context_mismatch | no_key — never a value.
             reason: verification.reason,
           },
           { completionState: "rejected", failureCategory: "principal_unverified" },

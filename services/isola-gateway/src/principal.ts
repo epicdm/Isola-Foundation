@@ -23,7 +23,7 @@
  * PUBLIC BINDINGS NEVER CARRY A PRINCIPAL. `checkSender` admits everyone on a
  * PUBLIC line, so an "allowed" there verifies nothing about who is speaking.
  */
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 
 import { checkSender, normalisePhone, type AllowlistBinding } from "./allowlist.js";
 
@@ -60,16 +60,34 @@ export interface VerifiedPrincipal {
 export interface SignedPrincipal extends VerifiedPrincipal {
   issuedAt: number;
   nonce: string;
+  /** sha256 of `canonicalContext(context)` for the context sent on the SAME invoke. */
+  contextSha256: string;
   signature: string;
 }
 
 export const PRINCIPAL_SIGNATURE_VERSION = "isola-principal-v1";
 
+/**
+ * The canonical form of the run context: `JSON.stringify` of the value (absent
+ * -> null). A byte-for-byte copy of `canonicalContext` in
+ * services/isola-runtime/src/principal.ts, which recomputes it from the
+ * context it parses; stringify→parse→stringify is a fixed point for JSON data.
+ * The cross-check test signs here and verifies there.
+ */
+export function canonicalContext(context: unknown): string {
+  return JSON.stringify(context === undefined ? null : context);
+}
+
+export function contextSha256(context: unknown): string {
+  return createHash("sha256").update(canonicalContext(context), "utf8").digest("hex");
+}
+
 export function signPrincipal(
   key: string,
   principal: VerifiedPrincipal,
-  args: { issuedAt: number; nonce: string },
+  args: { issuedAt: number; nonce: string; context: unknown },
 ): SignedPrincipal {
+  const ctxHash = contextSha256(args.context);
   const canonical = [
     PRINCIPAL_SIGNATURE_VERSION,
     principal.channel,
@@ -78,6 +96,7 @@ export function signPrincipal(
     principal.bindingKey,
     String(args.issuedAt),
     args.nonce,
+    ctxHash,
   ].join("\n");
   return {
     channel: principal.channel,
@@ -86,6 +105,7 @@ export function signPrincipal(
     bindingKey: principal.bindingKey,
     issuedAt: args.issuedAt,
     nonce: args.nonce,
+    contextSha256: ctxHash,
     signature: createHmac("sha256", key).update(canonical, "utf8").digest("hex"),
   };
 }

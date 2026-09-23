@@ -629,6 +629,10 @@ export async function processDelivery(
   // the ordinary failure path — private note, escalation to a human.
   const principalUnverifiable = principal === null && binding.senderTemplates !== undefined;
 
+  // Built once: the SAME object is sent and signed over, so the hash in the
+  // principal is of exactly the context the runtime receives.
+  const runtimeContext = buildRuntimeContext(binding, payload, history);
+
   const result: AgentRuntimeResult = principalUnverifiable
     ? {
         text: null,
@@ -645,8 +649,8 @@ export async function processDelivery(
         exposure: binding.exposure,
         agentId: binding.paperclipAgentId,
         runId,
-        context: buildRuntimeContext(binding, payload, history),
-        // SIGNED, bound to this run id and to now. With no signing key nothing
+        context: runtimeContext,
+        // SIGNED, bound to this run id, this context and now. With no signing key nothing
         // is sent: an unsigned principal is only an assertion, which the
         // runtime would ignore anyway (and refuse for the owner template).
         ...(principal === null || deps.config.principalSigningKey === null
@@ -655,6 +659,7 @@ export async function processDelivery(
               principal: signPrincipal(deps.config.principalSigningKey, principal, {
                 issuedAt: Math.floor(deps.now() / 1000),
                 nonce: runId,
+                context: runtimeContext,
               }),
             }),
       });

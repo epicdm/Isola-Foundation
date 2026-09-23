@@ -95,6 +95,7 @@ describe("what the gateway sends", () => {
       bindingKey: "2/10",
       issuedAt: 1_700_000_000,
       nonce: REQUEST.runId,
+      contextSha256: "0".repeat(64),
       signature: "0".repeat(64),
     };
     await runtime.invoke({ ...REQUEST, exposure: "INTERNAL", principal });
