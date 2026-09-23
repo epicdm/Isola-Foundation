@@ -69,7 +69,7 @@ onboarding only" condition.
 | Day Pass — EC$5, 24h | `offer-personal-line-day-pass-2026-09-02` | Managed pilot, price Ratified | `agent_recommendable` still reads false in Port — decision says this should now read "recommendable contextually"; flagging as a pending Port housekeeping item, not mine to flip |
 | Week Pass — **EC$15**, 7d | `offer-personal-line-week-pass-2026-09-02` | **Price corrected 2026-09-23** — Lane A measured the live catalogue (`lite_plans`, what checkout actually charges, control: recent debits of -5) as EC$15, matching the original pricing decision, NOT the EC$18 the `epic_offer` entity records. Quoting the live price per Lane A's instruction; same `agent_recommendable` flag note applies |
 | 30-Day — EC$35/30d | `offer-personal-line-30d-2026-09-02` | Managed pilot, price Ratified | Matches both sources — no conflict here |
-| ~~Plus — EC$60/30d~~ **HELD** | `offer-personal-line-plus-2026-09-02` | **Do not quote a price or a name for this tier yet.** Live catalogue charges EC$55, not EC$60 — but the tier's own name ("Unlimited+") and its Dominica-allowance framing are the subject of the unresolved unlimited-vs-Blocked-claim conflict (checkpoint 10, item 1), now with the owner. Holding this row entirely — no price, no name, no copy — until that answer lands. |
+| Top tier — **EC$55/30 days, 200 US-CAN min** (price restored, name still held) | `offer-personal-line-plus-2026-09-02` | Price confirmed 2026-09-23 by the Senior PM: `dec-personal-line-launch-pricing-and-pay-rail-2026-09-02` (Ratified) explicitly supersedes `dec-personal-line-commercial-ladder-recommendation-2026-09-02` (the EC$18/EC$60 source); Port's `epic_offer` entity reconciled to EC$55, history preserved. **Still held: the tier's customer-facing NAME** ("Unlimited+" vs. my proposed "Plus") and **all Dominica-allowance wording** ("unlimited," "fair use") — `mc-personal-line-unlimited-dominica-calling-2026-09-02` remains Blocked, and that's a separate decision still in front of the owner (checkpoint 10, item 1). Do not publish a name or any Dominica-minutes claim for this row yet. |
 
 **Deliberately excluded from this ad**, per dispatch scope: `offer-personal-line-trial-7d-15min-2026-09-02`
 (the older Personal Line trial — a different product from the held free-callback, per LINE's own
@@ -85,11 +85,16 @@ went to the Senior PM as owner of those `epic_offer` entities — not mine to ch
 this lane until Lane A reports the gates cleared**, at which point: re-verify the destination and the 0001
 intro line live, then owner approves publication and spend.
 
-**Same-day correction:** Lane A measured the live catalogue and confirmed it matches
-`dec-personal-line-launch-pricing-and-pay-rail-2026-09-02` (Day Pass EC$5, Week Pass EC$15, 30-Day EC$35,
-top tier EC$55), not the `epic_offer` entities this package originally quoted (EC$18, EC$60). Corrected
-Week Pass to EC$15 above. The top tier ("Plus"/"Unlimited+") is held entirely — no price, no name — until
-the owner rules on the unlimited-vs-Blocked-claim conflict (checkpoint 10). Nothing in this package is
+**Same-day correction (round 2), Senior PM:** the prices themselves were never actually in question —
+`dec-personal-line-launch-pricing-and-pay-rail-2026-09-02` explicitly supersedes the EC$18/EC$60 source
+(`dec-personal-line-commercial-ladder-recommendation-2026-09-02`), and Port's `epic_offer` entities have now
+been reconciled (Week Pass → EC$15, top tier → EC$55, history preserved). Top-tier **price** restored above
+(EC$55/30d, 200 US-CAN min). Still separately held: the top tier's **name** ("Unlimited+" vs. my proposed
+"Plus") and **all Dominica-allowance wording**, pending the owner's ruling on the unlimited-vs-Blocked-claim
+conflict — a distinct decision the Senior PM is preparing. Also holding **any US/Canada overage-rate
+wording** (the $/min charged beyond included minutes): the Day Pass's live rate (EC$0.99/min) disagrees
+with the ratified EC$0.25/min and is being verified as a charging discrepancy — this package doesn't state
+an overage rate anywhere currently, and shouldn't gain one until that's resolved. Nothing in this package is
 publishable in the meantime regardless.
 
 ## 5. Remaining approvals and gates — none of them mine to clear
