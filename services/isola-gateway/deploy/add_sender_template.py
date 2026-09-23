@@ -51,7 +51,9 @@ from typing import Callable, Sequence
 
 SECRET_MOUNT_DIR = "/run/secrets/"
 MOUNT_TARGET = "gateway_bindings"
-NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+# No leading '-': a name that starts with one would be read by the docker CLI
+# as an option (e.g. --help), not as the object it names.
+NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 TEMPLATE_RE = re.compile(r"^[a-z0-9-]+@v[0-9]+$")
 
 Runner = Callable[[Sequence[str], bytes | None], bytes]
@@ -381,7 +383,17 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
         report["created"] = a.new_secret
         report["rollback_command"] = (f"sudo docker service update --secret-rm {a.new_secret} "
                                       f"--secret-add source={current},target={MOUNT_TARGET} {a.service}")
-        swap = ["docker", "service", "update", "--quiet", "--secret-rm", current,
+        # Second compare-and-swap, closing the gap the secret create opened.
+        if service_state(runner, a.service) != initial_state:
+            _remove_new_secret(runner, a.new_secret, report)
+            raise Refused("the service changed while the new secret was being created; nothing was swapped, re-run")
+        # The swap also PINS the validated image, so the new bytes can only go
+        # live under the parser that validated them. Swarm's CLI has no
+        # compare-and-swap on the spec version, so after the re-check above the
+        # pin is a no-op in every case except a concurrent redeploy in the
+        # final milliseconds, where it keeps the service consistent.
+        swap = ["docker", "service", "update", "--quiet", "--image", image,
+                "--secret-rm", current,
                 "--secret-add", f"source={a.new_secret},target={MOUNT_TARGET}",
                 "--update-failure-action", "rollback", "--update-monitor", "30s", a.service]
         try:

@@ -278,6 +278,14 @@ class MainTests(unittest.TestCase):
         self.assertNotIn("isola_gwint_bindings_v6", fake.stores)
         self.assertFalse(any(c[:3] == ["docker", "secret", "create"] for c in fake.calls))
 
+    def test_the_swap_pins_the_validated_image(self):
+        fake = FakeDocker(store(PUBLIC, INTERNAL))
+        code, rep, _ = run_main(fake, ["--apply"])
+        self.assertEqual(code, 0, rep)
+        swaps = [c for c in fake.calls if c[:3] == ["docker", "service", "update"]]
+        self.assertEqual(len(swaps), 1)
+        self.assertEqual(swaps[0][swaps[0].index("--image") + 1], "isola-gateway:vsp-da9a8df")
+
     def test_a_swap_that_applies_but_exits_nonzero_is_judged_by_observed_state(self):
         fake = FakeDocker(store(PUBLIC, INTERNAL), fail_after_apply=True)
         code, rep, _ = run_main(fake, ["--apply"])
@@ -331,13 +339,19 @@ class MainTests(unittest.TestCase):
         self.assertNotIn("555 2222", text)
 
     def test_refuses_bad_argument_shapes(self):
-        for bad in (["--sender-last4", "12a4"], ["--template", "x y"], ["--new-secret", "a;b"]):
+        for bad in (["--sender-last4", "12a4"], ["--template", "x y"], ["--new-secret", "a;b"],
+                    ["--new-secret", "--help"], ["--service", "-x"]):
             args = list(ARGS)
             i = args.index(bad[0])
             args[i + 1] = bad[1]
             buf = io.StringIO()
             with redirect_stdout(buf):
-                code = T.main(args, runner=FakeDocker(store(INTERNAL)), sleep=lambda s: None)
+                fake = FakeDocker(store(INTERNAL))
+                try:
+                    code = T.main(args, runner=fake, sleep=lambda s: None)
+                except SystemExit as e:  # argparse refuses an option-shaped value itself
+                    code = e.code
+                self.assertFalse(any(c[:3] == ["docker", "secret", "create"] for c in fake.calls), bad)
             self.assertEqual(code, 2, bad)
 
 
