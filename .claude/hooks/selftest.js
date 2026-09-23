@@ -151,6 +151,118 @@ const cases = [
       },
     },
   },
+  // ── SETTING A SECRET-FILE PATH IS NOT READING THE SECRET (2026-09-23) ──
+  // The #151 runtime deploy was denied for `--env-add X_FILE=/run/secrets/x`,
+  // which configures where a service's own secret is mounted and reads
+  // nothing. The PASS cases are the permitted path-setting; every BLOCK case
+  // below keeps that same path-setting and adds exactly one way to READ, so a
+  // regression that widens the exemption goes red here.
+  {
+    name: 'PERMITTED: docker service update that only sets *_FILE secret paths is ALLOWED (the #151 deploy)',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: {
+        command:
+          "ssh -o BatchMode=yes epicadmin@66.118.37.110 'sudo docker service update --image isola-runtime:vsp-da9a8df " +
+          '--secret-add source=isola_principal_signing_key_v1,target=principal_signing_key ' +
+          '--secret-add source=isola_rt_hermes_owner_key_v1,target=hermes_owner_api_key ' +
+          '--env-add PRINCIPAL_SIGNING_KEY_FILE=/run/secrets/principal_signing_key ' +
+          '--env-add HERMES_OWNER_API_KEY_FILE=/run/secrets/hermes_owner_api_key ' +
+          "--update-failure-action rollback --update-monitor 30s isolart_runtime'",
+      },
+    },
+  },
+  {
+    name: 'PERMITTED: the same path-setting over the host03 MCP server, --env-add=form, is ALLOWED',
+    expect: PASS,
+    payload: {
+      session_id: SID,
+      tool_name: 'mcp__host03__remote-ssh',
+      tool_input: { command: 'sudo docker service update --env-add=PRINCIPAL_SIGNING_KEY_FILE=/run/secrets/principal_signing_key isolagwint_gateway' },
+    },
+  },
+  {
+    name: 'BLOCKED: path-setting followed by a cat of the same secret',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'docker service update --env-add K_FILE=/run/secrets/k svc; cat /run/secrets/k' },
+    },
+  },
+  {
+    name: 'BLOCKED: path-setting then a docker exec that dereferences $K_FILE (no literal path to match)',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: "docker service update --env-add K_FILE=/run/secrets/k svc && docker exec c sh -c 'cat $K_FILE'" },
+    },
+  },
+  {
+    name: 'BLOCKED: docker run with -e/--env-add style path + a command prints the secret',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'docker run --rm --env-add K_FILE=/run/secrets/k img sh -c "head -c 99 /run/secrets/k"' },
+    },
+  },
+  {
+    name: 'BLOCKED: path-setting on docker service CREATE (its command runs and its logs return)',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'docker service create --env-add K_FILE=/run/secrets/k img' },
+    },
+  },
+  {
+    name: 'BLOCKED: path-setting with --args, which would make the service print the file',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'docker service update --env-add K_FILE=/run/secrets/k --args "cat /run/secrets/k" svc' },
+    },
+  },
+  {
+    name: 'BLOCKED: path-setting followed by docker service logs (the read-back channel)',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'docker service update --env-add K_FILE=/run/secrets/k svc && docker service logs svc' },
+    },
+  },
+  {
+    name: 'BLOCKED: a secret path as a --secret-add target or bare arg is not the permitted --env-add form',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'docker service update --secret-add source=a,target=/run/secrets/k svc' },
+    },
+  },
+  {
+    name: 'BLOCKED: env var name without the _FILE suffix is a value, not a path-setting',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: {
+      session_id: SID,
+      tool_name: 'Bash',
+      tool_input: { command: 'docker service update --env-add K=/run/secrets/k svc' },
+    },
+  },
   {
     // REGRESSION, 2026-09-22, introduced and caught the same day. The
     // `_secrets?` alternative added to SECRET_FILE_RE hours earlier also

@@ -416,6 +416,68 @@ const SECRET_FILE_RE = new RegExp(
 const SECRET_STORE_PATH_RE = /(^|[\s'"`=])\/(?:var\/)?run\/secrets\/[^\s'"`;|&]*/i;
 const SECRET_FILE_EXEMPT_RE = /\.(example|sample|template|dist)$|\.example\.|\.sample\./i;
 
+/**
+ * SETTING A SECRET-FILE PATH IS NOT READING THE SECRET.
+ *
+ * Measured 2026-09-23: rule 1a (orchestrator-secret-store-read) denied
+ *   docker service update --secret-add source=x,target=principal_signing_key \
+ *     --env-add PRINCIPAL_SIGNING_KEY_FILE=/run/secrets/principal_signing_key svc
+ * That command tells a service where ITS OWN secret will be mounted; nothing in
+ * it opens the file, and no byte of it can reach the transcript. It is the only
+ * way to wire a `_FILE` secret into a running Swarm service, so denying it left
+ * a governed deploy with no path at all (CLAUDE.md §2.26: a refusal needs a
+ * mechanism, and §2.27c: guards bind to operations, not vocabulary).
+ *
+ * The exemption is deliberately narrow. It holds ONLY when ALL of these are true:
+ *   1. every secret-store path in the command is the VALUE of an
+ *      `--env-add NAME_FILE=/run/secrets/<plain-name>` flag, and removing those
+ *      flags leaves no secret-store path anywhere;
+ *   2. each statement carrying such a flag is a `docker service update`
+ *      (optionally under sudo), the one verb that configures and never executes
+ *      a command whose output returns to the caller;
+ *   3. the command as a whole contains no read-capable verb or surface
+ *      (cat/head/tail/less/more/strings/od/xxd/base64/grep/sed/awk/printenv/env,
+ *      docker exec/run/create/cp/logs, docker service create/logs, kubectl,
+ *      /proc/…/environ, --args/--entrypoint/--command/--mount/--config-add),
+ *      and no `$NAME_FILE` reference that a later statement could dereference.
+ * Anything else keeps the original deny. A path-setting mixed with a read is
+ * still a read.
+ */
+const SECRET_PATH_SETTING_RE =
+  /--env-add(?:=|\s+)(["']?)[A-Z][A-Z0-9_]*_FILE=\/(?:var\/)?run\/secrets\/[A-Za-z0-9_.-]+\1(?=[\s;|&)]|$)/g;
+const SECRET_PATH_SETTING_VERB_RE = /(^|[\s'"(])(?:sudo\s+(?:-\S+\s+)*)?docker\s+service\s+update\b/;
+const SECRET_READ_CAPABLE_RE = new RegExp(
+  [
+    '(^|[\\s;|&(\'"`])(?:cat|head|tail|less|more|strings|od|xxd|hexdump|base64|grep|egrep|sed|awk|printenv|env|tee|dd|cp|scp|rsync|curl|wget|nc)(?=\\s|$)',
+    '\\bdocker\\s+(?:exec|run|create|cp|logs|inspect|container|compose)\\b',
+    '\\bdocker\\s+service\\s+(?:create|logs|inspect|ps)\\b',
+    '\\bkubectl\\b',
+    '/proc/[^\\s]*environ',
+    '(^|\\s)--(?:args|entrypoint|command|mount|mount-add|config-add|hostname|label-add)\\b',
+    '\\$\\{?[A-Z][A-Z0-9_]*_FILE\\b',
+  ].join('|')
+);
+
+/**
+ * True only when `cmd` is a pure Swarm path-setting as defined above. Pure
+ * predicate: no I/O, exported for the selftest.
+ */
+function isSecretPathSettingOnly(cmd) {
+  const text = String(cmd || '');
+  const matches = text.match(SECRET_PATH_SETTING_RE);
+  if (!matches) return false;
+  if (SECRET_STORE_PATH_RE.test(text.replace(SECRET_PATH_SETTING_RE, ' '))) return false;
+  if (SECRET_READ_CAPABLE_RE.test(text)) return false;
+  // Every statement that sets a path must itself be a `docker service update`.
+  const statements = text.split(/;|&&|\|\||\||\n/);
+  for (const s of statements) {
+    SECRET_PATH_SETTING_RE.lastIndex = 0;
+    if (SECRET_PATH_SETTING_RE.test(s) && !SECRET_PATH_SETTING_VERB_RE.test(s)) return false;
+  }
+  SECRET_PATH_SETTING_RE.lastIndex = 0;
+  return true;
+}
+
 /** Commands that would dump an environment or print a secret file to stdout. */
 /**
  * A secret-bearing FILE reference, as opposed to an identifier that merely
@@ -1114,6 +1176,7 @@ module.exports = {
   LEGACY_REFERENCE_RE,
   SECRET_FILE_RE,
   SECRET_STORE_PATH_RE,
+  isSecretPathSettingOnly,
   SECRET_DUMP_RE,
   CREDENTIAL_SURFACE_RE,
   MCP_EXEC_TOOL_RE,

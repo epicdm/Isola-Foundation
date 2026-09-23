@@ -465,7 +465,12 @@ function evaluate(inp) {
   // message does not unlock a real read.
   const projector = path.join(__dirname, 'lib', 'secret-store-project.js');
   const projected = scanTarget.includes('secret-store-project.js');
-  if (T.SECRET_STORE_PATH_RE.test(scanTarget) && !projected) {
+  // A Swarm `--env-add NAME_FILE=/run/secrets/<name>` only POINTS a service at
+  // its own secret; it opens nothing. isSecretPathSettingOnly() is the narrow,
+  // tested exemption for that and nothing else: any read-capable verb or any
+  // other secret path in the same command keeps the deny (2026-09-23).
+  const pathSettingOnly = T.isSecretPathSettingOnly(scanTarget);
+  if (T.SECRET_STORE_PATH_RE.test(scanTarget) && !projected && !pathSettingOnly) {
     deny(
       'orchestrator-secret-store-read',
       'This reads a container/orchestrator secret mount (/run/secrets or ' +
