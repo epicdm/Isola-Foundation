@@ -270,7 +270,12 @@ VALIDATOR_JS = (
     "console.log(JSON.stringify({ok:r.ok,count:r.ok?r.bindings.length:0,"
     "errorCount:errs.length,senderTemplatesErrors:errs.filter(e=>e.includes('\"senderTemplates\"')).length,"
     "senderTemplateCounts:r.ok?r.bindings.map(b=>Object.keys(b.senderTemplates??{}).length):[],"
-    "targetCarriesTemplate:tv.length===1&&tv[0]===process.env.T_TPL}))});"
+    "targetCarriesTemplate:tv.length===1&&tv[0]===process.env.T_TPL,"
+    # The KEY, too: exactly one, ending in the chosen last four, and equal
+    # (as digits) to one of the binding's parsed allowedSenders. Boolean only.
+    "targetKeyIsSelectedSender:(()=>{if(!r.ok||!r.bindings[i])return false;const ks=Object.keys(r.bindings[i].senderTemplates??{});"
+    "const d=x=>String(x).replace(/[^0-9]/g,'');return ks.length===1&&d(ks[0]).endsWith(process.env.T_LAST4)&&"
+    "(r.bindings[i].allowedSenders||[]).some(a=>d(a)===d(ks[0]));})()}))});"
 )
 
 
@@ -305,9 +310,9 @@ def service_image(runner: Runner, service: str) -> str:
     return image
 
 
-def validate(runner: Runner, image: str, raw: bytes, target_index: int, template: str) -> dict:
+def validate(runner: Runner, image: str, raw: bytes, target_index: int, template: str, last4: str = "") -> dict:
     out = runner(["docker", "run", "--rm", "-i", "--network", "none",
-                  "-e", f"T_IDX={int(target_index)}", "-e", f"T_TPL={template}",
+                  "-e", f"T_IDX={int(target_index)}", "-e", f"T_TPL={template}", "-e", f"T_LAST4={last4}",
                   "--entrypoint", "node", image, "--input-type=module", "-e", VALIDATOR_JS], raw)
     return json.loads(out)
 
@@ -402,11 +407,11 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
             raise Refused("the running task's image id differs from what the service tag resolves to; refusing")
         report["validator_image"] = image + " (the image the service runs, validated by immutable id)"
         t = structure["target_index"]
-        before = validate(runner, validated_id, raw, t, a.template)
-        after = validate(runner, validated_id, new_raw, t, a.template)
+        before = validate(runner, validated_id, raw, t, a.template, a.sender_last4)
+        after = validate(runner, validated_id, new_raw, t, a.template, a.sender_last4)
         keep = ("ok", "count", "errorCount", "senderTemplatesErrors", "senderTemplateCounts")
         report["validator_original"] = {k: before.get(k) for k in keep}
-        report["validator_new"] = {k: after.get(k) for k in keep + ("targetCarriesTemplate",)}
+        report["validator_new"] = {k: after.get(k) for k in keep + ("targetCarriesTemplate", "targetKeyIsSelectedSender")}
         if not before.get("ok"):
             raise Refused("CONTROL FAILED: the gateway parser rejects the ORIGINAL store, so its verdict on the new one means nothing")
         if not after.get("ok") or after.get("count") != before.get("count"):
@@ -416,7 +421,8 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
         if len(expected_counts) != before["count"]:
             raise Refused("the parser did not report per-binding senderTemplates counts")
         expected_counts[t] += 1
-        if after.get("senderTemplateCounts") != expected_counts or after.get("targetCarriesTemplate") is not True:
+        if (after.get("senderTemplateCounts") != expected_counts or after.get("targetCarriesTemplate") is not True
+                or after.get("targetKeyIsSelectedSender") is not True):
             raise Refused("the parsed senderTemplates do not land on exactly the target binding with the requested template")
         if not a.apply:
             report["result"] = "DRY RUN OK: nothing created or changed"

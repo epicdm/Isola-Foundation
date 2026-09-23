@@ -130,6 +130,7 @@ class FakeDocker:
         self.retag_on_swap = False  # the tag resolves to a DIFFERENT image once swapped
         self.tags = {}
         self.nodes = 1
+        self.key_ok = True  # False simulates a parser that re-keys senderTemplates
         self.secrets = list(secrets)
         self.validator_ok = validator_ok
         self.calls = []
@@ -170,11 +171,13 @@ class FakeDocker:
             data = json.loads(stdin)
             if not self.validator_ok:
                 return json.dumps({"ok": False, "count": 0, "errorCount": 1, "senderTemplatesErrors": 0}).encode()
-            env = dict(x.split("=", 1) for x in a if x.startswith(("T_IDX=", "T_TPL=")))
+            env = dict(x.split("=", 1) for x in a if x.startswith(("T_IDX=", "T_TPL=", "T_LAST4=")))
             tv = list(data[int(env["T_IDX"])].get("senderTemplates", {}).values())
+            tk = list(data[int(env["T_IDX"])].get("senderTemplates", {}).keys())
             return json.dumps({"ok": True, "count": len(data), "errorCount": 0, "senderTemplatesErrors": 0,
                                "senderTemplateCounts": [len(b.get("senderTemplates", {})) for b in data],
-                               "targetCarriesTemplate": len(tv) == 1 and tv[0] == env["T_TPL"]}).encode()
+                               "targetCarriesTemplate": len(tv) == 1 and tv[0] == env["T_TPL"],
+                               "targetKeyIsSelectedSender": self.key_ok and len(tk) == 1 and T.digits(tk[0]).endswith(env["T_LAST4"])}).encode()
         if a[:3] == ["docker", "secret", "ls"]:
             if self.redeploy_during_validation:  # another deploy lands between validate and write
                 self.image, self.version = "isola-gateway:someone-elses-build", self.version + 1
@@ -373,6 +376,14 @@ class MainTests(unittest.TestCase):
         rep = json.loads(buf.getvalue())
         self.assertEqual(code, 2)
         self.assertIn("exactly 1 running task", rep["refused"])
+
+    def test_a_parser_that_rekeys_the_sender_refuses_before_any_write(self):
+        fake = FakeDocker(store(PUBLIC, INTERNAL))
+        fake.key_ok = False
+        code, rep, _ = run_main(fake, ["--apply"])
+        self.assertEqual(code, 2)
+        self.assertFalse(rep["validator_new"]["targetKeyIsSelectedSender"])
+        self.assertFalse(any(c[:3] == ["docker", "secret", "create"] for c in fake.calls))
 
     def test_the_validator_joins_bytes_before_decoding(self):
         self.assertIn("Buffer.concat", T.VALIDATOR_JS)
