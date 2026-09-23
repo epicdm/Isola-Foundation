@@ -37,7 +37,7 @@ import { DELIVERY_ACTION, deliveryRef, type LedgerIdentity } from "./deliveryref
 import type { Failpoint } from "./failpoint.js";
 import type { Ledger, SqlClient } from "./ledger.js";
 import type { Logger } from "./log.js";
-import type { AgentRuntime } from "./runtime.js";
+import type { AgentRuntime, AgentRuntimeResult } from "./runtime.js";
 import { selectTemplateId, type VerifiedPrincipal } from "./principal.js";
 import {
   isReasonCode,
@@ -118,6 +118,8 @@ export const FAILURE_EXPLANATIONS: Readonly<Record<string, string>> = Object.fre
     "a duplicate of a run that is still executing; the original run owns the answer",
   rejected:
     "the AI runtime refused this invocation before calling the model, for a reason other than budget",
+  principal_unverifiable:
+    "this line routes by verified sender and the sender could not be re-verified (typically a delivery resumed after a restart); the model was not called",
   exposure_mismatch:
     "the AI runtime refused this invocation: the credential is not authorised for this template's exposure class",
   unauthorized: "the AI runtime rejected this gateway's credential",
@@ -219,8 +221,8 @@ export interface DeliveryJob {
    * The verified sender, set by the webhook path ONLY after the INTERNAL
    * allowlist admitted them (src/principal.ts). Absent on PUBLIC deliveries
    * and on deliveries the recovery sweeper resumes — recovery cannot re-verify
-   * a sender, so a resumed delivery is served by the binding's default
-   * template, never by a per-sender override.
+   * a sender, so a resumed delivery is never served by a per-sender override;
+   * on a binding that HAS overrides it is escalated instead of answered.
    */
   principal?: VerifiedPrincipal | null;
 }
@@ -617,17 +619,35 @@ export async function processDelivery(
     });
   }
 
-  const result = await deps.runtime.invoke({
-    templateId,
-    // THE BINDING'S exposure, not a constant. A hardcoded "PUBLIC" here made
-    // every INTERNAL invocation fail closed with 403 exposure_mismatch — see
-    // the note on AgentRuntimeRequest.exposure in runtime.ts.
-    exposure: binding.exposure,
-    agentId: binding.paperclipAgentId,
-    runId,
-    context: buildRuntimeContext(binding, payload, history),
-    ...(principal === null ? {} : { principal }),
-  });
+  // A BINDING THAT ROUTES BY SENDER DOES NOT ANSWER AN UNVERIFIED ONE.
+  //
+  // On such a binding "who is this?" decides which brain — and which person's
+  // memory — the message goes to. With no verified principal (in practice: a
+  // delivery the recovery sweeper resumed, which cannot re-verify a sender)
+  // the default template is NOT a safe fallback: it would file the owner's
+  // words in the staff brain. So the brain is not called; the delivery takes
+  // the ordinary failure path — private note, escalation to a human.
+  const principalUnverifiable = principal === null && binding.senderTemplates !== undefined;
+
+  const result: AgentRuntimeResult = principalUnverifiable
+    ? {
+        text: null,
+        outcome: "principal_unverifiable",
+        correlationId: runId,
+        completionState: null,
+        contractVersion: null,
+      }
+    : await deps.runtime.invoke({
+        templateId,
+        // THE BINDING'S exposure, not a constant. A hardcoded "PUBLIC" here made
+        // every INTERNAL invocation fail closed with 403 exposure_mismatch — see
+        // the note on AgentRuntimeRequest.exposure in runtime.ts.
+        exposure: binding.exposure,
+        agentId: binding.paperclipAgentId,
+        runId,
+        context: buildRuntimeContext(binding, payload, history),
+        ...(principal === null ? {} : { principal }),
+      });
 
   // `result.outcome` has already been derived from the runtime's structured
   // `completionState` where it supplied one (see src/runtime.ts), so

@@ -430,8 +430,10 @@ export function createSweeper(deps: RecoveryDeps): Sweeper {
         resumingHandoff || verdict.action === "handoff" ? classifyNoText(payload) : null,
       // NO PRINCIPAL, deliberately. `rebuildPayload` carries no sender phone,
       // so a resumed delivery cannot be re-verified — and an identity that was
-      // not verified on THIS attempt is not carried from a previous one. The
-      // binding's default template answers; a per-sender override never does.
+      // not verified on THIS attempt is not carried from a previous one. On a
+      // binding with `senderTemplates` the pipeline therefore does NOT call the
+      // model and escalates (`principal_unverifiable`); on any other binding the
+      // default template answers exactly as before.
       principal: null,
     };
 

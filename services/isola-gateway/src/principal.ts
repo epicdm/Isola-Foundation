@@ -82,10 +82,10 @@ export function derivePrincipal(
  * Which template serves this delivery.
  *
  * The binding's `senderTemplates` entry for the VERIFIED sender, or the
- * binding's default `templateId`. With no principal — a PUBLIC line, or a
- * delivery resumed by the recovery sweeper, which cannot re-verify a sender —
- * the answer is always the default, i.e. the LEAST specific scope. Absence of
- * identity can never select an owner template.
+ * binding's default `templateId`. With no principal the answer is always the
+ * default: absence of identity can never select an override. (The pipeline
+ * additionally refuses to call the model at all when a binding HAS overrides
+ * and there is no principal — see `principal_unverifiable` in pipeline.ts.)
  */
 export function selectTemplateId(
   binding: { templateId: string; senderTemplates?: Readonly<Record<string, string>> },

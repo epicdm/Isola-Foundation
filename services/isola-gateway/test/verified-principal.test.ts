@@ -13,13 +13,27 @@
 import { describe, expect, it } from "vitest";
 
 import { bootErrors, loadConfig, type GatewayConfig } from "../src/config.js";
-import { parseBindings, redactBinding } from "../src/bindings.js";
-import { derivePrincipal, selectTemplateId } from "../src/principal.js";
+import { parseBindings, redactBinding, type Binding } from "../src/bindings.js";
+import { bindingIdentity } from "../src/deliveryref.js";
+import { DISARMED } from "../src/failpoint.js";
+import { processDelivery, type DeliveryJob, type PipelineDeps } from "../src/pipeline.js";
+import {
+  derivePrincipal,
+  selectTemplateId,
+  type VerifiedPrincipal,
+} from "../src/principal.js";
 import { KNOWN_INTERNAL_TEMPLATE_IDS } from "../src/templates.js";
+import { parseWebhookPayload } from "../src/webhook.js";
 import {
   ACCOUNT_ID,
   BASE_ENV,
+  CapturingLogger,
+  CONVERSATION_DISPLAY_ID,
+  envConfig,
+  FakeLedger,
   INBOX_ID,
+  InMemoryOwnershipGate,
+  StubChatwootApi,
   makeBinding,
   messageCreatedPayload,
   postWebhook,
@@ -169,7 +183,7 @@ describe("per-sender template routing", () => {
     expect(runtime.requests[0]?.templateId).toBe(DEFAULT_TEMPLATE);
   });
 
-  it("no principal (a recovered delivery) always gets the default, never the override", () => {
+  it("selectTemplateId: no principal never selects an override", () => {
     const [binding] = (parseBindings(JSON.stringify([rawInternalBinding()])) as {
       ok: true;
       bindings: ReturnType<typeof makeBinding>[];
@@ -179,6 +193,96 @@ describe("per-sender template routing", () => {
     });
     expect(selectTemplateId(binding!, null)).toBe(DEFAULT_TEMPLATE);
     expect(selectTemplateId(binding!, undefined)).toBe(DEFAULT_TEMPLATE);
+  });
+});
+
+describe("a resumed delivery (no principal) on a sender-routed binding", () => {
+  /**
+   * The recovery sweeper rebuilds a payload with no sender phone, so it cannot
+   * re-verify who wrote. On a binding that routes BY sender, the default
+   * template is not a safe fallback — it would put the owner's words in the
+   * staff brain — so the model must not be called at all.
+   */
+  function job(binding: Binding, principal: VerifiedPrincipal | null): DeliveryJob {
+    return {
+      correlationId: "corr-resume",
+      deliveryId: null,
+      identity: {
+        tenantId: binding.tenantId,
+        bindingId: bindingIdentity(binding),
+        chatwootAccountId: ACCOUNT_ID,
+        chatwootInboxId: INBOX_ID,
+        eventId: "delivery:resume-1",
+      },
+      digest: "digest-resume-1",
+      binding,
+      payload: parseWebhookPayload(Buffer.from(JSON.stringify(messageCreatedPayload())))!,
+      conversationId: CONVERSATION_DISPLAY_ID,
+      startedAtMs: 0,
+      resumed: true,
+      mode: "answer",
+      classification: null,
+      principal,
+    };
+  }
+
+  function deps(): { deps: PipelineDeps; runtime: StubAgentRuntime; chatwoot: StubChatwootApi } {
+    const runtime = StubAgentRuntime.answering("Answer.");
+    const chatwoot = new StubChatwootApi();
+    return {
+      runtime,
+      chatwoot,
+      deps: {
+        config: envConfig(),
+        chatwoot,
+        runtime,
+        logger: new CapturingLogger().logger,
+        ledger: new FakeLedger(),
+        ownership: new InMemoryOwnershipGate(),
+        failpoint: DISARMED,
+        now: () => 0,
+      },
+    };
+  }
+
+  const parsed = (raw: Record<string, unknown>): Binding => {
+    const result = parseBindings(JSON.stringify([raw]));
+    if (!result.ok) throw new Error(`fixture: ${result.errors.join("; ")}`);
+    return result.bindings[0]!;
+  };
+
+  it("does NOT call the model; escalates to a human with a private note", async () => {
+    const { deps: d, runtime, chatwoot } = deps();
+    const result = await processDelivery(d, job(parsed(rawInternalBinding()), null));
+    expect(runtime.requests, "no brain — neither the owner's nor the staff one").toEqual([]);
+    expect(chatwoot.customerMessages).toHaveLength(0);
+    expect(result.runtimeOutcome).toBe("principal_unverifiable");
+    expect(chatwoot.privateNotes.map((n) => n.content).join("\n")).toContain(
+      "principal_unverifiable",
+    );
+  });
+
+  it("CONTROL: the same resumed job WITH a principal is answered by the override", async () => {
+    const { deps: d, runtime } = deps();
+    const principal: VerifiedPrincipal = {
+      channel: "whatsapp",
+      senderE164: `+${OWNER_DIGITS}`,
+      verifiedBy: "gateway-allowlist",
+      bindingKey: `${ACCOUNT_ID}/${INBOX_ID}`,
+    };
+    await processDelivery(d, job(parsed(rawInternalBinding()), principal));
+    expect(runtime.requests).toHaveLength(1);
+    expect(runtime.requests[0]?.templateId).toBe(OWNER_TEMPLATE);
+  });
+
+  it("a binding WITHOUT senderTemplates keeps today's behaviour on recovery", async () => {
+    const raw = rawInternalBinding();
+    delete raw["senderTemplates"];
+    const { deps: d, runtime } = deps();
+    await processDelivery(d, job(parsed(raw), null));
+    expect(runtime.requests).toHaveLength(1);
+    expect(runtime.requests[0]?.templateId).toBe(DEFAULT_TEMPLATE);
+    expect(runtime.requests[0]?.principal).toBeUndefined();
   });
 });
 
