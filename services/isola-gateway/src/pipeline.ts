@@ -653,7 +653,15 @@ export async function processDelivery(
         // SIGNED, bound to this run id, this context and now. With no signing key nothing
         // is sent: an unsigned principal is only an assertion, which the
         // runtime would ignore anyway (and refuse for the owner template).
-        ...(principal === null || deps.config.principalSigningKey === null
+        //
+        // AND ONLY ON A BINDING THAT ROUTES BY SENDER. A binding without
+        // `senderTemplates` sends exactly the request it sent before this
+        // feature existed — byte for byte, for every staff member — so landing
+        // this change (or the signing key) alters nothing until an operator
+        // opts a binding in. Proven in test/verified-principal.test.ts.
+        ...(principal === null ||
+        deps.config.principalSigningKey === null ||
+        binding.senderTemplates === undefined
           ? {}
           : {
               principal: signPrincipal(deps.config.principalSigningKey, principal, {

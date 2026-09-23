@@ -23,6 +23,8 @@ import {
   type VerifiedPrincipal,
 } from "../src/principal.js";
 import { KNOWN_INTERNAL_TEMPLATE_IDS } from "../src/templates.js";
+import { createSafeFetch } from "../src/egress.js";
+import { HttpAgentRuntime } from "../src/runtime.js";
 import { parseWebhookPayload } from "../src/webhook.js";
 import {
   ACCOUNT_ID,
@@ -499,5 +501,109 @@ describe("the gateway's template list matches the runtime registry", () => {
     }
     // CONTROL: the lookup can say no.
     expect(registry.findTemplate("isola-owner-manager@v9")).toBeNull();
+  });
+});
+
+describe("ROLLING-DEPLOY COMPATIBILITY — the new gateway before anyone opts in", () => {
+  /**
+   * State (c): the NEW gateway, WITH the signing key configured, on a binding
+   * that has NO `senderTemplates`. Every staff member must produce exactly the
+   * wire request the previous gateway produced: same keys, same order, same
+   * serialisation — no `principal` field. Measured on the real HTTP client, so
+   * the assertion is about the bytes that leave, not an in-memory object.
+   */
+  const SEVEN_STAFF = [
+    "+1 767 555 0101",
+    "+1 767 555 0102",
+    "+1 767 555 0103",
+    "+1 767 555 0104",
+    "+1 767 555 0105",
+    "+1 767 555 0106",
+    "+1 767 555 0107",
+  ];
+
+  async function wireBodyFor(senderPhone: string, binding: Record<string, unknown>): Promise<string> {
+    const captured: string[] = [];
+    const runtime = new HttpAgentRuntime({
+      baseUrl: "http://isola_isola-runtime:3000",
+      invokePath: "/v1/invoke",
+      bearer: placeholder("runtime"),
+      timeoutMs: 5000,
+      safeFetch: createSafeFetch({
+        allowlist: ["isola_isola-runtime"],
+        transport: async (_url, init) => {
+          captured.push(String(init?.body));
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              outcome: "ok",
+              completionState: "completed",
+              contractVersion: 1,
+              answerText: "Answer.",
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        },
+      }),
+    });
+    const config = loadConfig({ ...ENV, GATEWAY_BINDINGS_JSON: JSON.stringify([binding]) });
+    expect(refusals(config)).toEqual([]);
+    const server = await startServer({ runtime, config });
+    const payload = messageCreatedPayload();
+    (payload as Record<string, unknown>)["sender"] = {
+      type: "contact",
+      id: 55,
+      phone_number: senderPhone.replace(/[^\d+]/g, ""),
+    };
+    await postWebhook(server.url, signRequest({ body: payload }));
+    await server.gateway.drain();
+    await server.close();
+    expect(captured, "positive control: the runtime was called over HTTP").toHaveLength(1);
+    return captured[0]!;
+  }
+
+  /** What the PREVIOUS gateway serialised: exactly these keys, in this order. */
+  function previousGatewaySerialisation(body: Record<string, unknown>): string {
+    return JSON.stringify({
+      templateId: body["templateId"],
+      exposure: body["exposure"],
+      agentId: body["agentId"],
+      runId: body["runId"],
+      context: body["context"],
+      responseMode: "inline",
+    });
+  }
+
+  it.each(SEVEN_STAFF)(
+    "staff %s on a binding with no senderTemplates: byte-identical request",
+    async (phone) => {
+      const binding = {
+        ...makeBinding({
+          exposure: "INTERNAL",
+          templateId: DEFAULT_TEMPLATE,
+          allowedSenders: SEVEN_STAFF,
+        }),
+      };
+      const wire = await wireBodyFor(phone, binding);
+      const body = JSON.parse(wire) as Record<string, unknown>;
+      expect(wire).toBe(previousGatewaySerialisation(body));
+      expect(body["templateId"]).toBe(DEFAULT_TEMPLATE);
+      expect(Object.keys(body)).not.toContain("principal");
+    },
+  );
+
+  it("a PUBLIC binding (the 6737/3742 shape): byte-identical request", async () => {
+    const wire = await wireBodyFor("+1 555 000 1111", { ...makeBinding() });
+    const body = JSON.parse(wire) as Record<string, unknown>;
+    expect(wire).toBe(previousGatewaySerialisation(body));
+    expect(body["exposure"]).toBe("PUBLIC");
+  });
+
+  it("CONTROL: the same capture DOES see a principal once the binding opts in", async () => {
+    const wire = await wireBodyFor(OWNER, rawInternalBinding());
+    const body = JSON.parse(wire) as Record<string, unknown>;
+    expect(Object.keys(body)).toContain("principal");
+    expect(wire).not.toBe(previousGatewaySerialisation(body));
+    expect(body["templateId"]).toBe(OWNER_TEMPLATE);
   });
 });

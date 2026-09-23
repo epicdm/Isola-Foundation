@@ -303,22 +303,38 @@ export const PRINCIPAL_CHANNEL_HEADER = "X-Isola-Principal-Channel";
  * the realistic rate of one person's WhatsApp line.
  */
 export class PrincipalReplayGuard {
-  private readonly seen = new Map<string, number>();
+  private readonly seen = new Map<string, { expiry: number; fingerprint: string }>();
 
   constructor(
     private readonly ttlMs: number = PRINCIPAL_MAX_AGE_SEC * 1000,
     private readonly maxEntries: number = 10_000,
   ) {}
 
-  /** Records the nonce if it is new. `replayed`: accepted before; `full`: at capacity. */
-  accept(nonce: string, nowMs: number): "accepted" | "replayed" | "full" {
-    const until = this.seen.get(nonce);
-    if (until !== undefined && until > nowMs) return "replayed";
+  /**
+   * Records the nonce if it is new.
+   *
+   * `fingerprint` identifies the exact signed request (contextSha256 +
+   * signature). A second arrival of the SAME nonce with the SAME fingerprint is
+   * a byte-identical transport RETRY (`retry`) — it is let through to the
+   * run-id idempotency gate, which returns the stored outcome or reports the
+   * run in flight, and never calls the brain twice. The same nonce with a
+   * DIFFERENT fingerprint is a different request riding an accepted run id
+   * (`replayed`) and is refused. `full`: at capacity.
+   */
+  accept(
+    nonce: string,
+    fingerprint: string,
+    nowMs: number,
+  ): "accepted" | "retry" | "replayed" | "full" {
+    const prior = this.seen.get(nonce);
+    if (prior !== undefined && prior.expiry > nowMs) {
+      return prior.fingerprint === fingerprint ? "retry" : "replayed";
+    }
     if (this.seen.size >= this.maxEntries) {
-      for (const [n, expiry] of this.seen) if (expiry <= nowMs) this.seen.delete(n);
+      for (const [n, entry] of this.seen) if (entry.expiry <= nowMs) this.seen.delete(n);
       if (this.seen.size >= this.maxEntries) return "full";
     }
-    this.seen.set(nonce, nowMs + this.ttlMs);
+    this.seen.set(nonce, { expiry: nowMs + this.ttlMs, fingerprint });
     return "accepted";
   }
 

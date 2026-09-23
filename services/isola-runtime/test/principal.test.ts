@@ -24,7 +24,7 @@ import {
   verifyPrincipal,
   PrincipalReplayGuard,
 } from "../src/principal.js";
-import { findTemplate } from "../src/registry.js";
+import { allTemplates, findTemplate } from "../src/registry.js";
 import {
   CapturingLogger,
   INTERNAL_SECRET,
@@ -32,6 +32,7 @@ import {
   PRINCIPAL_SIGNING_KEY,
   PUBLIC_SECRET,
   PUBLIC_TEMPLATE,
+  RecordingRecorder,
   StubModelClient,
   envConfig,
   invoke,
@@ -162,6 +163,7 @@ async function boot() {
     logger: logger.logger,
     modelClient: model,
     safeFetch: safeFetch as never,
+    recorder: new RecordingRecorder(),
   });
   return { logger, model, brainCalls, url: server.url };
 }
@@ -505,22 +507,90 @@ describe("the replay gap is closed: text binding and one acceptance per nonce", 
     expect(brainCalls).toHaveLength(1);
   });
 
-  it("the IDENTICAL request replayed is refused as principal_replayed; a fresh runId is accepted", async () => {
+  it("an IDENTICAL retry after success gets the SAME stored answer; the brain is called once", async () => {
     const { brainCalls, url } = await boot();
-    const body = ownerSigned(OWNER_DIGITS);
+    const body = ownerSigned(OWNER_DIGITS, { responseMode: "inline" });
     const first = await invoke(url, { bearer: INTERNAL_SECRET, body });
-    expect(first.status, "control: the first acceptance succeeds").toBe(200);
+    expect(first.status, first.text).toBe(200);
+    expect(first.json["answerText"], "control: the first call really answered").toBe("owner-brain answer");
     expect(brainCalls).toHaveLength(1);
 
-    const second = await invoke(url, { bearer: INTERNAL_SECRET, body });
-    expect(second.status, second.text).toBe(400);
-    expect(second.json["outcome"]).toBe("principal_replayed");
-    expect(brainCalls, "the replay never reached the brain").toHaveLength(1);
+    const retry = await invoke(url, { bearer: INTERNAL_SECRET, body });
+    expect(retry.status, retry.text).toBe(200);
+    expect(retry.json["answerText"], "the SAME outcome, not a refusal").toBe("owner-brain answer");
+    expect(retry.json["replay"]).toBe(true);
+    expect(brainCalls, "a transport retry never duplicates work").toHaveLength(1);
 
-    // CONTROL: a fresh run, freshly signed, is accepted on the same server.
-    const fresh = await invoke(url, { bearer: INTERNAL_SECRET, body: ownerSigned(OWNER_DIGITS) });
+    // CONTROL: a fresh run, freshly signed, is a new request and IS executed.
+    const fresh = await invoke(url, {
+      bearer: INTERNAL_SECRET,
+      body: ownerSigned(OWNER_DIGITS, { responseMode: "inline" }),
+    });
     expect(fresh.status, fresh.text).toBe(200);
     expect(brainCalls).toHaveLength(2);
+  });
+
+  it("an IDENTICAL retry while the first is IN FLIGHT makes no second brain call", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    let brainCalls = 0;
+    const safeFetch = async (): Promise<Response> => {
+      brainCalls += 1;
+      await gate;
+      return new Response(JSON.stringify({ choices: [{ message: { content: "slow answer" } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    server = await startServer({
+      config: envConfig(),
+      logger: new CapturingLogger().logger,
+      modelClient: StubModelClient.returning("unused"),
+      safeFetch: safeFetch as never,
+      recorder: new RecordingRecorder(),
+    });
+    const body = ownerSigned(OWNER_DIGITS, { responseMode: "inline" });
+    const firstP = invoke(server.url, { bearer: INTERNAL_SECRET, body });
+    try {
+      for (let i = 0; i < 200 && brainCalls === 0; i++) await new Promise((r) => setTimeout(r, 5));
+      expect(brainCalls, "control: the first call is really in the brain").toBe(1);
+
+      const retry = await invoke(server.url, { bearer: INTERNAL_SECRET, body });
+      expect(retry.status, retry.text).toBe(200);
+      expect(retry.json["completionState"], "reported in flight, not refused").toBe("duplicate_in_flight");
+      expect(brainCalls, "no second brain call").toBe(1);
+    } finally {
+      // Never leave the first request hanging, even when an assertion fails.
+      release();
+    }
+    const first = await firstP;
+    expect(first.status, first.text).toBe(200);
+    expect(first.json["answerText"], "the original still completes").toBe("slow answer");
+    expect(brainCalls).toBe(1);
+  });
+
+  it("DIFFERENT content under an already-accepted runId is refused as principal_replayed", async () => {
+    const { brainCalls, url } = await boot();
+    const runId = `run-reuse-${Math.random().toString(16).slice(2)}`;
+    const first = await invoke(url, {
+      bearer: INTERNAL_SECRET,
+      body: ownerBody({ runId, principal: signedFor(OWNER_DIGITS, runId) }),
+    });
+    expect(first.status, "control: the first request is accepted").toBe(200);
+    // Validly signed for its own text, but riding a run id already accepted
+    // for different text.
+    const otherContext = { message: { role: "customer", content: "A different instruction." } };
+    const second = await invoke(url, {
+      bearer: INTERNAL_SECRET,
+      body: ownerBody({
+        runId,
+        context: otherContext,
+        principal: signedFor(OWNER_DIGITS, runId, { context: otherContext }),
+      }),
+    });
+    expect(second.status, second.text).toBe(400);
+    expect(second.json["outcome"]).toBe("principal_replayed");
+    expect(brainCalls).toHaveLength(1);
   });
 
   it("a forged principal does NOT consume a real run's nonce", async () => {
@@ -541,13 +611,65 @@ describe("the replay gap is closed: text binding and one acceptance per nonce", 
 
   it("the guard: TTL expiry, and a full set refuses rather than forgets", () => {
     const guard = new PrincipalReplayGuard(1_000, 2);
-    expect(guard.accept("a", 0)).toBe("accepted");
-    expect(guard.accept("a", 500)).toBe("replayed");
-    expect(guard.accept("a", 1_000), "after the TTL the entry has expired").toBe("accepted");
-    expect(guard.accept("b", 1_100)).toBe("accepted");
-    expect(guard.accept("c", 1_200), "full, nothing expired: refuse, never evict a live nonce").toBe("full");
-    expect(guard.accept("c", 2_100), "control: once entries expire there is room again").toBe("accepted");
+    expect(guard.accept("a", "f1", 0)).toBe("accepted");
+    expect(guard.accept("a", "f1", 400), "same fingerprint: a retry").toBe("retry");
+    expect(guard.accept("a", "f2", 500), "different fingerprint: a replay").toBe("replayed");
+    expect(guard.accept("a", "f2", 1_000), "after the TTL the entry has expired").toBe("accepted");
+    expect(guard.accept("b", "f", 1_100)).toBe("accepted");
+    expect(guard.accept("c", "f", 1_200), "full, nothing expired: refuse, never evict a live nonce").toBe("full");
+    expect(guard.accept("c", "f", 2_100), "control: once entries expire there is room again").toBe("accepted");
     expect(guard.size).toBeLessThanOrEqual(2);
+  });
+});
+
+describe("ROLLING-DEPLOY COMPATIBILITY — the new runtime with the OLD gateway's request shape", () => {
+  /**
+   * State (a): the new runtime receiving what the previous gateway sent — no
+   * `principal` field. EVERY existing template must behave exactly as before:
+   * answered, and the brain request carries no `user` and no extra header
+   * (default brain: exactly {model, messages, timeoutMs}; declared brain: body
+   * exactly {model, messages, stream}). Iterates the real registry, so a
+   * template added later is covered without editing this test.
+   */
+  const existing = allTemplates().filter((t) => t.requiresPrincipal !== true);
+
+  it.each(existing.map((t) => [t.id, t.exposure] as const))(
+    "%s (%s) without a principal: answered exactly as before",
+    async (templateId, exposure) => {
+      const { model, brainCalls, url } = await boot();
+      const res = await invoke(url, {
+        bearer: exposure === "PUBLIC" ? PUBLIC_SECRET : INTERNAL_SECRET,
+        body: {
+          templateId,
+          exposure,
+          agentId: "agent-compat",
+          runId: `run-compat-${Math.random().toString(16).slice(2)}`,
+          context: PLAIN_CONTEXT,
+        },
+      });
+      expect(res.status, res.text).toBe(200);
+      const calls = model.calls.length + brainCalls.length;
+      expect(calls, "positive control: exactly one brain call").toBe(1);
+      if (model.calls.length === 1) {
+        expect(Object.keys(model.calls[0]!).sort()).toEqual(["messages", "model", "timeoutMs"]);
+      } else {
+        expect(Object.keys(brainCalls[0]!.body).sort()).toEqual(["messages", "model", "stream"]);
+        expect(brainCalls[0]!.headers["X-Isola-Principal-Channel"]).toBeUndefined();
+      }
+    },
+  );
+
+  it("the public front-desk template is in that set (6737/3742)", () => {
+    expect(existing.map((t) => t.id)).toContain(PUBLIC_TEMPLATE);
+    expect(existing.map((t) => t.id)).toContain("isola-internal-manager@v1");
+  });
+
+  it("the owner template, reached without a principal, is refused — never answered anonymously", async () => {
+    const { brainCalls, model, url } = await boot();
+    const res = await invoke(url, { bearer: INTERNAL_SECRET, body: ownerBody() });
+    expect(res.status).toBe(400);
+    expect(res.json["outcome"]).toBe("principal_required");
+    expect(brainCalls.length + model.calls.length).toBe(0);
   });
 });
 

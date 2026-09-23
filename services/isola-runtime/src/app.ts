@@ -928,11 +928,19 @@ export function createRuntime(deps: AppDeps): Runtime {
       });
       // REPLAY. Only an otherwise-valid principal consumes its nonce, so a
       // forged one cannot burn a real run's id.
+      // A byte-identical retry (same contextSha256 + signature) passes through to
+      // the run-id idempotency gate below, which returns the STORED outcome or
+      // reports the original in flight — the brain is never called twice. Only
+      // different content under an already-accepted run id is refused.
       const replay =
         verification.kind === "verified" && runId !== null
-          ? principalReplayGuard.accept(runId, now())
+          ? principalReplayGuard.accept(
+              runId,
+              `${principalClaim.contextSha256 ?? ""}:${principalClaim.signature ?? ""}`,
+              now(),
+            )
           : null;
-      if (verification.kind === "verified" && replay !== "accepted") {
+      if (verification.kind === "verified" && replay !== "accepted" && replay !== "retry") {
         if (template.requiresPrincipal === true) {
           finish(
             400,
