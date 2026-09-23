@@ -167,6 +167,36 @@ describe("what the owner's brain receives", () => {
   });
 });
 
+describe("the operator MODEL_NAME override cannot re-route the owner's brain (Codex P1, PR #151)", () => {
+  it("owner keeps epic-owner-manager under MODEL_NAME; a non-pinned template still takes the override (control)", async () => {
+    const logger = new CapturingLogger();
+    const model = StubModelClient.returning("default-brain answer");
+    const brainCalls: BrainCall[] = [];
+    const safeFetch = async (url: string | URL, init?: RequestInit): Promise<Response> => {
+      const bodyText = String(init?.body ?? "");
+      brainCalls.push({ url: String(url), headers: { ...(init?.headers as Record<string, string>) }, bodyText, body: JSON.parse(bodyText) as Record<string, unknown> });
+      return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    // The live stack sets exactly this (deploy/isola-rt-stack.yml).
+    const config = envConfig({ MODEL_NAME: "deepseek-chat" });
+    expect(config.modelNameOverride, "the override is really active in this run").toBe("deepseek-chat");
+    server = await startServer({ config, logger: logger.logger, modelClient: model, safeFetch: safeFetch as never });
+
+    const owner = await invoke(server.url, { bearer: INTERNAL_SECRET, body: ownerBody({ principal: principalFor(OWNER_DIGITS) }) });
+    expect(owner.status, owner.text).toBe(200);
+    expect(brainCalls).toHaveLength(1);
+    expect(brainCalls[0]!.body["model"], "pinned: the override must not replace it").toBe("epic-owner-manager");
+
+    const staff = await invoke(server.url, {
+      bearer: INTERNAL_SECRET,
+      body: { templateId: INTERNAL_TEMPLATE, exposure: "INTERNAL", agentId: "agent-7", runId: "run-override-control", context: { hello: "world" } },
+    });
+    expect(staff.status, staff.text).toBe(200);
+    expect(model.calls, "control: the non-pinned template was called").toHaveLength(1);
+    expect(model.calls[0]!.model, "control: the override still applies where not pinned").toBe("deepseek-chat");
+  });
+});
+
 describe("the owner template refuses anything it cannot attribute", () => {
   it("no principal → 400 principal_required, brain never called", async () => {
     const { brainCalls, url } = await boot();

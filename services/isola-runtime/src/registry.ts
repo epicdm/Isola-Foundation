@@ -64,6 +64,16 @@ export interface TemplateEntry {
    * Absent means false — every template that predates this field is unchanged.
    */
   readonly requiresPrincipal?: boolean;
+  /**
+   * When true, the operator-wide MODEL_NAME override does NOT replace this
+   * template's `model`. For a template whose brain is selected by model/profile
+   * name (the owner's Hermes profile), a global override would silently route it
+   * to another profile or model. The live stack sets MODEL_NAME=deepseek-chat
+   * (deploy/isola-rt-stack.yml), which is why this exists (Codex P1 on PR #151).
+   * Absent means false — every template that predates this field keeps the
+   * override exactly as before.
+   */
+  readonly pinModel?: boolean;
 }
 
 /** Registry metadata safe to return over the API. Never includes the prompt. */
@@ -292,6 +302,7 @@ const TEMPLATE_LIST: readonly TemplateEntry[] = Object.freeze([
     toolPolicy: NO_TOOLS,
     systemPrompt: OWNER_MANAGER_FLOOR_PROMPT,
     requiresPrincipal: true,
+    pinModel: true,
   } satisfies TemplateEntry),
 ]);
 

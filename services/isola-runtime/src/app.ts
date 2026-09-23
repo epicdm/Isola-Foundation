@@ -902,7 +902,7 @@ export function createRuntime(deps: AppDeps): Runtime {
     // ---- authorised: do the work synchronously ----------------------------
     const exposure = decision.exposure;
     const rendered = renderContext(body.context, template.maxContextBytes);
-    const model = config.modelNameOverride ?? template.model;
+    const model = template.pinModel ? template.model : (config.modelNameOverride ?? template.model);
     resolvedModel = model;
     // The tighter of the template deadline and the operator deadline wins.
     const timeoutMs = Math.min(template.timeoutMs, config.modelTimeoutMs);
