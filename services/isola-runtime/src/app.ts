@@ -47,7 +47,14 @@ import {
 import { createLogger, type Logger } from "./log.js";
 import { buildIdempotencyKey, MeteringService, type MeteringOptions } from "./metering.js";
 import { createOpenAiCompatibleClient, type ModelClient } from "./model.js";
-import { parsePrincipal, principalUserId, PRINCIPAL_CHANNEL_HEADER } from "./principal.js";
+import {
+  parsePrincipal,
+  principalUserId,
+  principalUserKey,
+  verifyPrincipal,
+  PRINCIPAL_CHANNEL_HEADER,
+  type VerifiedPrincipal,
+} from "./principal.js";
 import type { TokenUsage } from "./money.js";
 import { createPaperclipApi, type PaperclipApi, type PaperclipCall } from "./paperclip.js";
 import {
@@ -96,6 +103,10 @@ export type Outcome =
   | "invalid_principal"
   /** 400: the template requires a verified principal and none was sent. */
   | "principal_required"
+  /** 400: the template requires a principal and the one sent failed authentication. */
+  | "principal_unverified"
+  /** Logged only: an unauthenticated principal on a template that does not need one was dropped. */
+  | "principal_ignored"
   | "exposure_mismatch"
   | "payload_too_large"
   | "model_timeout"
@@ -398,6 +409,13 @@ export function createRuntime(deps: AppDeps): Runtime {
    * error rather than silently falling back to the default provider — sending a
    * staff conversation to the customer brain is precisely the defect this fixes.
    */
+  // The key for the brain-facing `user` id, derived once. A verified principal
+  // implies a signing key, so this is non-null whenever it is used.
+  const brainUserKey = principalUserKey({
+    userKey: config.principalUserKey,
+    signingKey: config.principalSigningKey,
+  });
+
   const overrideClients = new Map<string, ModelClient>();
   const clientForTemplate = (template: TemplateEntry): ModelClient => {
     const base = template.modelBaseUrl;
@@ -874,8 +892,8 @@ export function createRuntime(deps: AppDeps): Runtime {
       );
       return;
     }
-    const principal = principalParse.kind === "ok" ? principalParse.principal : null;
-    if (principal !== null && decision.exposure !== "INTERNAL") {
+    const principalClaim = principalParse.kind === "ok" ? principalParse.claim : null;
+    if (principalClaim !== null && decision.exposure !== "INTERNAL") {
       // A principal is verified by the INTERNAL allowlist. On a PUBLIC run it
       // verifies nothing, and accepting it would let a public caller choose
       // whose memory a brain files a conversation under.
@@ -887,6 +905,47 @@ export function createRuntime(deps: AppDeps): Runtime {
         { completionState: "rejected", failureCategory: "invalid_principal" },
       );
       return;
+    }
+    // AUTHENTICATE. The INTERNAL credential is shared by every INTERNAL caller,
+    // so a claim is only a principal once the gateway's HMAC checks out, it is
+    // fresh, and it is bound to THIS run id.
+    let principal: VerifiedPrincipal | null = null;
+    if (principalClaim !== null) {
+      const verification = verifyPrincipal(principalClaim, {
+        key: config.principalSigningKey,
+        runId,
+        nowSec: Math.floor(now() / 1000),
+      });
+      if (verification.kind === "verified") {
+        principal = verification.principal;
+      } else if (template.requiresPrincipal === true) {
+        finish(
+          400,
+          "principal_unverified",
+          { error: "the principal could not be authenticated" },
+          {
+            agentId,
+            runId,
+            templateId: template.id,
+            credentialExposure,
+            // unsigned | bad_signature | stale | nonce_mismatch | no_key — never a value.
+            reason: verification.reason,
+          },
+          { completionState: "rejected", failureCategory: "principal_unverified" },
+        );
+        return;
+      } else {
+        // IGNORED, exactly as if it had not been sent: an unauthenticated claim
+        // must not shape what the brain receives. Logged so it is not silent.
+        logger.warn({
+          event: "invoke",
+          correlationId,
+          runId,
+          templateId: template.id,
+          outcome: "principal_ignored",
+          reason: verification.reason,
+        });
+      }
     }
     if (template.requiresPrincipal === true && principal === null) {
       finish(
@@ -1270,7 +1329,7 @@ export function createRuntime(deps: AppDeps): Runtime {
           ...(principal === null
             ? {}
             : {
-                user: principalUserId(principal),
+                ...(brainUserKey === null ? {} : { user: principalUserId(principal, brainUserKey) }),
                 headers: { [PRINCIPAL_CHANNEL_HEADER]: principal.channel },
               }),
         });

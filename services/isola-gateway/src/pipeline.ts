@@ -38,7 +38,7 @@ import type { Failpoint } from "./failpoint.js";
 import type { Ledger, SqlClient } from "./ledger.js";
 import type { Logger } from "./log.js";
 import type { AgentRuntime, AgentRuntimeResult } from "./runtime.js";
-import { selectTemplateId, type VerifiedPrincipal } from "./principal.js";
+import { selectTemplateId, signPrincipal, type VerifiedPrincipal } from "./principal.js";
 import {
   isReasonCode,
   suppressesAutomatedReply,
@@ -646,7 +646,17 @@ export async function processDelivery(
         agentId: binding.paperclipAgentId,
         runId,
         context: buildRuntimeContext(binding, payload, history),
-        ...(principal === null ? {} : { principal }),
+        // SIGNED, bound to this run id and to now. With no signing key nothing
+        // is sent: an unsigned principal is only an assertion, which the
+        // runtime would ignore anyway (and refuse for the owner template).
+        ...(principal === null || deps.config.principalSigningKey === null
+          ? {}
+          : {
+              principal: signPrincipal(deps.config.principalSigningKey, principal, {
+                issuedAt: Math.floor(deps.now() / 1000),
+                nonce: runId,
+              }),
+            }),
       });
 
   // `result.outcome` has already been derived from the runtime's structured

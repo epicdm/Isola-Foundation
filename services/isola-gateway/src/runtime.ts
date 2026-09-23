@@ -35,7 +35,7 @@
 import type { Exposure } from "./bindings.js";
 import type { SafeFetch } from "./egress.js";
 import { EgressBlockedError } from "./errors.js";
-import type { VerifiedPrincipal } from "./principal.js";
+import type { SignedPrincipal } from "./principal.js";
 
 export type RuntimeOutcome =
   | "ok"
@@ -83,7 +83,7 @@ export interface AgentRuntimeRequest {
    * Absent on PUBLIC deliveries and on recovered deliveries; the body is then
    * byte-for-byte what it was before this field existed.
    */
-  principal?: VerifiedPrincipal;
+  principal?: SignedPrincipal;
 }
 
 /**

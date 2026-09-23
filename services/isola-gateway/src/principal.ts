@@ -23,6 +23,8 @@
  * PUBLIC BINDINGS NEVER CARRY A PRINCIPAL. `checkSender` admits everyone on a
  * PUBLIC line, so an "allowed" there verifies nothing about who is speaking.
  */
+import { createHmac } from "node:crypto";
+
 import { checkSender, normalisePhone, type AllowlistBinding } from "./allowlist.js";
 
 export interface VerifiedPrincipal {
@@ -38,6 +40,54 @@ export interface VerifiedPrincipal {
   verifiedBy: "gateway-allowlist";
   /** `<chatwootAccountId>/<chatwootInboxId>` of the binding that admitted it. */
   bindingKey: string;
+}
+
+/**
+ * The principal as it travels to isola-runtime: SIGNED.
+ *
+ * The runtime credential is shared by every INTERNAL caller, so an unsigned
+ * principal would be a caller's assertion that anyone holding that credential
+ * could make (Codex, PR #151). The gateway therefore signs it with
+ * HMAC-SHA256 under PRINCIPAL_SIGNING_KEY — a key only this gateway and the
+ * runtime hold — over every identity field, `issuedAt` (unix seconds) and a
+ * `nonce` equal to the invoke's `runId`. The runtime refuses a stale,
+ * edited or re-bound one.
+ *
+ * The canonical form below MUST match services/isola-runtime/src/principal.ts
+ * byte for byte; `test/verified-principal.test.ts` signs here and verifies
+ * with the runtime's own verifier to hold the two together.
+ */
+export interface SignedPrincipal extends VerifiedPrincipal {
+  issuedAt: number;
+  nonce: string;
+  signature: string;
+}
+
+export const PRINCIPAL_SIGNATURE_VERSION = "isola-principal-v1";
+
+export function signPrincipal(
+  key: string,
+  principal: VerifiedPrincipal,
+  args: { issuedAt: number; nonce: string },
+): SignedPrincipal {
+  const canonical = [
+    PRINCIPAL_SIGNATURE_VERSION,
+    principal.channel,
+    principal.senderE164,
+    principal.verifiedBy,
+    principal.bindingKey,
+    String(args.issuedAt),
+    args.nonce,
+  ].join("\n");
+  return {
+    channel: principal.channel,
+    senderE164: principal.senderE164,
+    verifiedBy: principal.verifiedBy,
+    bindingKey: principal.bindingKey,
+    issuedAt: args.issuedAt,
+    nonce: args.nonce,
+    signature: createHmac("sha256", key).update(canonical, "utf8").digest("hex"),
+  };
 }
 
 export interface PrincipalBinding extends AllowlistBinding {

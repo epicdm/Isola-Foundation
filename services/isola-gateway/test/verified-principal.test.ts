@@ -35,6 +35,7 @@ import {
   InMemoryOwnershipGate,
   StubChatwootApi,
   makeBinding,
+  placeholder,
   messageCreatedPayload,
   postWebhook,
   signRequest,
@@ -52,6 +53,11 @@ const STRANGER = "+1 767 555 0199";
 
 const DEFAULT_TEMPLATE = "isola-internal-manager@v1";
 const OWNER_TEMPLATE = "isola-owner-manager@v1";
+
+/** The gateway↔runtime principal signing key, for these tests only. */
+const SIGNING_KEY = placeholder("principal-signing");
+/** BASE_ENV plus the signing key a sender-routed binding now requires at boot. */
+const ENV = { ...BASE_ENV, PRINCIPAL_SIGNING_KEY: SIGNING_KEY };
 
 /** The raw JSON an operator would put in the bindings secret. */
 function rawInternalBinding(extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -84,7 +90,7 @@ async function deliver(args: {
 }) {
   const runtime = StubAgentRuntime.answering("Answer.");
   const config = loadConfig({
-    ...BASE_ENV,
+    ...ENV,
     GATEWAY_BINDINGS_JSON: JSON.stringify([args.binding ?? rawInternalBinding()]),
   });
   expect(refusals(config), "fixture must boot, or every assertion below is vacuous").toEqual([]);
@@ -108,12 +114,73 @@ describe("the principal on the runtime request", () => {
   it("carries the REAL sender, verified by the allowlist, with the binding key", async () => {
     const { runtime } = await deliver({ senderPhone: STAFF });
     expect(runtime.requests, "positive control: the runtime must be reached").toHaveLength(1);
-    expect(runtime.requests[0]?.principal).toEqual({
+    expect(runtime.requests[0]?.principal).toMatchObject({
       channel: "whatsapp",
       senderE164: `+${STAFF_DIGITS}`,
       verifiedBy: "gateway-allowlist",
       bindingKey: `${ACCOUNT_ID}/${INBOX_ID}`,
+      // Bound to THIS run (Codex, PR #151).
+      nonce: runtime.requests[0]?.runId,
     });
+    expect(runtime.requests[0]?.principal?.signature).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  /**
+   * THE TWO GATES MUST AGREE. The gateway signs; the runtime verifies. This
+   * signs on the real webhook path and verifies with the RUNTIME'S OWN
+   * verifier, so a canonical-form drift on either side fails here — and it
+   * carries the controls that prove the verifier can say no.
+   */
+  it("the gateway's signature verifies under the runtime's own verifier", async () => {
+    const path = "../../isola-runtime/src/principal.js";
+    const rt = (await import(/* @vite-ignore */ path)) as {
+      parsePrincipal(raw: unknown): { kind: string; claim?: unknown };
+      verifyPrincipal(
+        claim: unknown,
+        args: { key: string | null; runId: string | null; nowSec: number },
+      ): { kind: string; reason?: string };
+    };
+    const { runtime } = await deliver({ senderPhone: OWNER });
+    expect(runtime.requests).toHaveLength(1);
+    const request = runtime.requests[0]!;
+    const parsed = rt.parsePrincipal(request.principal);
+    expect(parsed.kind).toBe("ok");
+    const nowSec = Math.floor(Date.now() / 1000);
+    const args = { key: SIGNING_KEY, runId: request.runId, nowSec };
+    expect(rt.verifyPrincipal(parsed.claim, args)).toEqual({
+      kind: "verified",
+      principal: {
+        channel: "whatsapp",
+        senderE164: `+${OWNER_DIGITS}`,
+        verifiedBy: "gateway-allowlist",
+        bindingKey: `${ACCOUNT_ID}/${INBOX_ID}`,
+      },
+    });
+    // CONTROLS: the same claim fails under another key, on another run, or edited.
+    expect(rt.verifyPrincipal(parsed.claim, { ...args, key: placeholder("other-key") }).kind).toBe(
+      "unverified",
+    );
+    expect(rt.verifyPrincipal(parsed.claim, { ...args, runId: "another-run" }).kind).toBe(
+      "unverified",
+    );
+    const edited = rt.parsePrincipal({ ...request.principal, senderE164: `+${STAFF_DIGITS}` });
+    expect(rt.verifyPrincipal(edited.claim, args).kind).toBe("unverified");
+  });
+
+  it("with no signing key and no sender-routed binding, no principal is sent at all", async () => {
+    const binding = rawInternalBinding();
+    delete binding["senderTemplates"];
+    const runtime = StubAgentRuntime.answering("Answer.");
+    const config = loadConfig({ ...BASE_ENV, GATEWAY_BINDINGS_JSON: JSON.stringify([binding]) });
+    expect(refusals(config), "boots: nothing routes by sender").toEqual([]);
+    const server = await startServer({ runtime, config });
+    const payload = messageCreatedPayload();
+    (payload as Record<string, unknown>)["sender"] = { type: "contact", id: 55, phone_number: `+${STAFF_DIGITS}` };
+    await postWebhook(server.url, signRequest({ body: payload }));
+    await server.gateway.drain();
+    await server.close();
+    expect(runtime.requests, "positive control").toHaveLength(1);
+    expect(runtime.requests[0]?.principal, "an unsigned principal is never sent").toBeUndefined();
   });
 
   it("CANNOT be set by message text — an impersonation claim changes nothing", async () => {
@@ -233,7 +300,7 @@ describe("a resumed delivery (no principal) on a sender-routed binding", () => {
       runtime,
       chatwoot,
       deps: {
-        config: envConfig(),
+        config: envConfig({ PRINCIPAL_SIGNING_KEY: SIGNING_KEY }),
         chatwoot,
         runtime,
         logger: new CapturingLogger().logger,
@@ -306,7 +373,7 @@ describe("derivePrincipal re-runs the gate itself", () => {
 describe("senderTemplates is validated at BOOT and fails closed", () => {
   function bootWith(extra: Record<string, unknown>): string[] {
     const config = loadConfig({
-      ...BASE_ENV,
+      ...ENV,
       GATEWAY_BINDINGS_JSON: JSON.stringify([rawInternalBinding(extra)]),
     });
     return refusals(config);
@@ -342,6 +409,31 @@ describe("senderTemplates is validated at BOOT and fails closed", () => {
     expect(errors.join("\n")).not.toContain("5550199");
   });
 
+  it("refuses to boot a sender-routed binding with no PRINCIPAL_SIGNING_KEY", () => {
+    const config = loadConfig({
+      ...BASE_ENV,
+      GATEWAY_BINDINGS_JSON: JSON.stringify([rawInternalBinding()]),
+    });
+    expect(config.bindings.ok, "control: the binding itself is valid").toBe(true);
+    expect(refusals(config).join("\n")).toContain("PRINCIPAL_SIGNING_KEY is unset");
+  });
+
+  it("refuses a signing key that is short or equals the runtime credential", () => {
+    const at = (key: string) =>
+      refusals(
+        loadConfig({
+          ...ENV,
+          PRINCIPAL_SIGNING_KEY: key,
+          GATEWAY_BINDINGS_JSON: JSON.stringify([rawInternalBinding()]),
+        }),
+      ).join("\n");
+    expect(at("short")).toContain("shorter than");
+    expect(at(String(BASE_ENV["RUNTIME_SECRET_PUBLIC"]))).toContain("equals the runtime credential");
+    expect(at(String(BASE_ENV["RUNTIME_SECRET_PUBLIC"]))).not.toContain(
+      String(BASE_ENV["RUNTIME_SECRET_PUBLIC"]),
+    );
+  });
+
   it("refuses senderTemplates on a PUBLIC binding", () => {
     const errors = bootWith({ exposure: "PUBLIC" });
     expect(errors.join("\n")).toContain("only valid on an INTERNAL binding");
@@ -349,7 +441,7 @@ describe("senderTemplates is validated at BOOT and fails closed", () => {
 
   it("keeps the one-binding-per-inbox rule", () => {
     const config = loadConfig({
-      ...BASE_ENV,
+      ...ENV,
       GATEWAY_BINDINGS_JSON: JSON.stringify([
         rawInternalBinding(),
         rawInternalBinding({ tenantId: "second" }),

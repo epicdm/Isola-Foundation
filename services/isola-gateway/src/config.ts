@@ -29,6 +29,14 @@ export interface GatewayConfig {
   runtimeInvokePath: string;
   /** Bearer presented to isola-runtime. `null` means every invocation fails closed. */
   runtimeSecret: string | null;
+  /**
+   * `PRINCIPAL_SIGNING_KEY` — the HMAC key the verified principal is signed with
+   * (src/principal.ts). Held ONLY by this gateway and isola-runtime; distinct
+   * from the runtime credential, which other INTERNAL callers share. Required
+   * at boot when any binding has `senderTemplates`. Absent: no principal is
+   * sent at all. Never logged, never returned.
+   */
+  principalSigningKey: string | null;
   runtimeTimeoutMs: number;
 
   /** Bearer required by `GET /v1/bindings`. `null` means that endpoint is 503. */
@@ -255,6 +263,7 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
     // PUBLIC while presenting the internal credential — a name that lies to the
     // next reader about which side of the boundary the service is on.
     runtimeSecret: str(env, "RUNTIME_SECRET") ?? str(env, "RUNTIME_SECRET_PUBLIC"),
+    principalSigningKey: str(env, "PRINCIPAL_SIGNING_KEY"),
     runtimeTimeoutMs: int(env, "GATEWAY_RUNTIME_TIMEOUT_MS", DEFAULT_RUNTIME_TIMEOUT_MS),
 
     adminToken: str(env, "GATEWAY_ADMIN_TOKEN"),
@@ -373,8 +382,33 @@ export function bootErrors(config: GatewayConfig): string[] {
     }
   }
 
+  // PER-SENDER ROUTING NEEDS A SIGNED PRINCIPAL. Without the key the gateway
+  // sends no principal, the runtime refuses the owner template on every
+  // message, and the owner's line looks broken rather than misconfigured.
+  // Refuse to start instead, so the misconfiguration is the thing reported.
+  const routed = configuredBindings(config).filter((b) => b.senderTemplates !== undefined);
+  const key = config.principalSigningKey;
+  if (routed.length > 0 && key === null) {
+    errors.push(
+      `PRINCIPAL_SIGNING_KEY is unset, but ${routed.length} binding(s) route by sender ("senderTemplates"). Their principals could not be signed and every override would be refused by the runtime; refusing to start.`,
+    );
+  }
+  if (key !== null) {
+    if (key.length < MIN_PRINCIPAL_KEY_CHARS) {
+      errors.push(`PRINCIPAL_SIGNING_KEY is shorter than ${MIN_PRINCIPAL_KEY_CHARS} characters.`);
+    }
+    if (key === config.runtimeSecret) {
+      errors.push(
+        "PRINCIPAL_SIGNING_KEY equals the runtime credential. Every holder of that credential could then sign a principal, which is exactly what the key exists to prevent.",
+      );
+    }
+  }
+
   return errors;
 }
+
+/** Floor for PRINCIPAL_SIGNING_KEY: a 128-bit hex string. Same as the runtime. */
+export const MIN_PRINCIPAL_KEY_CHARS = 32;
 
 export function bootWarnings(config: GatewayConfig): string[] {
   const warnings: string[] = [];

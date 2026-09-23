@@ -263,8 +263,11 @@ const TEMPLATE_LIST: readonly TemplateEntry[] = Object.freeze([
    * HOW A REQUEST GETS HERE. Only by the internal gateway's per-sender routing
    * (`senderTemplates` on the 9043 binding), which fires only for a sender the
    * allowlist VERIFIED — never for anything a message says. The gateway sends
-   * that verified principal alongside the invoke, and `requiresPrincipal`
-   * refuses any invocation that arrives without one.
+   * that verified principal alongside the invoke, SIGNED with
+   * PRINCIPAL_SIGNING_KEY, and `requiresPrincipal` refuses any invocation that
+   * arrives without one or with one that fails authentication (the INTERNAL
+   * runtime credential is shared, so a bare claim proves nothing). The runtime
+   * will not boot without that key while this template is registered.
    *
    * WHAT THE BRAIN SEES OF THE PRINCIPAL. The OpenAI `user` field carries a
    * stable, non-phone id (src/principal.ts) and the header

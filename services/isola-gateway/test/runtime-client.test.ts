@@ -93,6 +93,9 @@ describe("what the gateway sends", () => {
       senderE164: "+17675550100",
       verifiedBy: "gateway-allowlist" as const,
       bindingKey: "2/10",
+      issuedAt: 1_700_000_000,
+      nonce: REQUEST.runId,
+      signature: "0".repeat(64),
     };
     await runtime.invoke({ ...REQUEST, exposure: "INTERNAL", principal });
     const body = JSON.parse(String(captured[0]?.init?.body)) as Record<string, unknown>;

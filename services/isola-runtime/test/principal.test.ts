@@ -10,17 +10,25 @@
  * property that matters ("the phone number never reaches the brain") is a
  * property of those bytes, not of any one function.
  */
-import { createHash } from "node:crypto";
+import { createHash, createHmac, hkdfSync } from "node:crypto";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { bootErrors } from "../src/config.js";
 import { createOpenAiCompatibleClient } from "../src/model.js";
-import { parsePrincipal, principalUserId, PRINCIPAL_USER_NAMESPACE } from "../src/principal.js";
+import {
+  parsePrincipal,
+  principalUserId,
+  principalUserKey,
+  signPrincipal,
+  verifyPrincipal,
+} from "../src/principal.js";
 import { findTemplate } from "../src/registry.js";
 import {
   CapturingLogger,
   INTERNAL_SECRET,
   INTERNAL_TEMPLATE,
+  PRINCIPAL_SIGNING_KEY,
   PUBLIC_SECRET,
   PUBLIC_TEMPLATE,
   StubModelClient,
@@ -44,12 +52,52 @@ const principalFor = (digits: string) => ({
   bindingKey: "2/10",
 });
 
-/** Computed independently of src/principal.ts, so a change there is caught. */
-const expectedUser = (digits: string) =>
-  createHash("sha256")
-    .update(`isola-principal-user-v1:+${digits}`, "utf8")
-    .digest("hex")
-    .slice(0, 32);
+const nowSec = () => Math.floor(Date.now() / 1000);
+
+/**
+ * A principal as the gateway signs it — computed INDEPENDENTLY of
+ * src/principal.ts (same canonical form, written out here), so a change to
+ * the signing format on one side only is caught.
+ */
+function signedFor(
+  digits: string,
+  runId: string,
+  opts: { issuedAt?: number; key?: string } = {},
+): Record<string, unknown> {
+  const base = principalFor(digits);
+  const issuedAt = opts.issuedAt ?? nowSec();
+  const canonical = [
+    "isola-principal-v1",
+    base.channel,
+    base.senderE164,
+    base.verifiedBy,
+    base.bindingKey,
+    String(issuedAt),
+    runId,
+  ].join("\n");
+  const signature = createHmac("sha256", opts.key ?? PRINCIPAL_SIGNING_KEY)
+    .update(canonical, "utf8")
+    .digest("hex");
+  return { ...base, issuedAt, nonce: runId, signature };
+}
+
+/** Owner invoke body with a principal correctly signed for ITS run id. */
+function ownerSigned(digits: string, overrides: Record<string, unknown> = {}) {
+  const runId = `run-${Math.random().toString(16).slice(2)}`;
+  return ownerBody({ runId, principal: signedFor(digits, runId), ...overrides });
+}
+
+/** The KEYED user id, computed independently: HMAC(HKDF(signing key), E.164). */
+const expectedUser = (digits: string) => {
+  const userKey = Buffer.from(
+    hkdfSync("sha256", Buffer.from(PRINCIPAL_SIGNING_KEY, "utf8"), Buffer.alloc(0), "isola-principal-user-id-v1", 32),
+  );
+  return createHmac("sha256", userKey).update(`+${digits}`, "utf8").digest("hex").slice(0, 32);
+};
+
+/** The OLD, unkeyed id — anyone could recompute it for every phone number. */
+const publicHash = (digits: string) =>
+  createHash("sha256").update(`isola-principal-user-v1:+${digits}`, "utf8").digest("hex").slice(0, 32);
 
 interface BrainCall {
   url: string;
@@ -138,7 +186,7 @@ describe("what the owner's brain receives", () => {
     const { brainCalls, model, url } = await boot();
     const res = await invoke(url, {
       bearer: INTERNAL_SECRET,
-      body: ownerBody({ principal: principalFor(OWNER_DIGITS) }),
+      body: ownerSigned(OWNER_DIGITS),
     });
     expect(res.status, res.text).toBe(200);
     expect(brainCalls, "positive control: the owner brain was called").toHaveLength(1);
@@ -161,9 +209,34 @@ describe("what the owner's brain receives", () => {
     const owner = parsePrincipal(principalFor(OWNER_DIGITS));
     const staff = parsePrincipal(principalFor(STAFF_DIGITS));
     if (owner.kind !== "ok" || staff.kind !== "ok") throw new Error("fixture");
-    expect(principalUserId(owner.principal)).toBe(principalUserId(owner.principal));
-    expect(principalUserId(owner.principal)).not.toBe(principalUserId(staff.principal));
-    expect(PRINCIPAL_USER_NAMESPACE).toBe("isola-principal-user-v1");
+    const key = principalUserKey({ userKey: null, signingKey: PRINCIPAL_SIGNING_KEY })!;
+    expect(principalUserId(owner.claim, key)).toBe(principalUserId(owner.claim, key));
+    expect(principalUserId(owner.claim, key)).not.toBe(principalUserId(staff.claim, key));
+  });
+
+  /** Codex, PR #151: "Key the principal hash". */
+  it("the `user` id is KEYED: not the old public hash, and never contains the number", () => {
+    const owner = parsePrincipal(principalFor(OWNER_DIGITS));
+    if (owner.kind !== "ok") throw new Error("fixture");
+    const key = principalUserKey({ userKey: null, signingKey: PRINCIPAL_SIGNING_KEY })!;
+    const id = principalUserId(owner.claim, key);
+    expect(id).toMatch(/^[0-9a-f]{32}$/);
+    expect(id, "an unkeyed sha256 lets anyone enumerate numbers back").not.toBe(
+      publicHash(OWNER_DIGITS),
+    );
+    expect(id).not.toContain(OWNER_DIGITS);
+    expect(id).not.toContain("5550100");
+    // Keyed means the key matters: a different key yields a different id, and
+    // PRINCIPAL_USER_KEY, when set, is used instead of the derived key.
+    const other = principalUserKey({ userKey: null, signingKey: `${PRINCIPAL_SIGNING_KEY}-other` })!;
+    expect(principalUserId(owner.claim, other)).not.toBe(id);
+    const dedicated = principalUserKey({
+      userKey: "a-dedicated-user-key-at-least-32-chars-long",
+      signingKey: PRINCIPAL_SIGNING_KEY,
+    })!;
+    expect(principalUserId(owner.claim, dedicated)).not.toBe(id);
+    // The derived user key is NOT the signing key itself (distinct HKDF info).
+    expect(key.equals(Buffer.from(PRINCIPAL_SIGNING_KEY, "utf8"))).toBe(false);
   });
 });
 
@@ -182,7 +255,7 @@ describe("the operator MODEL_NAME override cannot re-route the owner's brain (Co
     expect(config.modelNameOverride, "the override is really active in this run").toBe("deepseek-chat");
     server = await startServer({ config, logger: logger.logger, modelClient: model, safeFetch: safeFetch as never });
 
-    const owner = await invoke(server.url, { bearer: INTERNAL_SECRET, body: ownerBody({ principal: principalFor(OWNER_DIGITS) }) });
+    const owner = await invoke(server.url, { bearer: INTERNAL_SECRET, body: ownerSigned(OWNER_DIGITS) });
     expect(owner.status, owner.text).toBe(200);
     expect(brainCalls).toHaveLength(1);
     expect(brainCalls[0]!.body["model"], "pinned: the override must not replace it").toBe("epic-owner-manager");
@@ -207,7 +280,7 @@ describe("the owner template refuses anything it cannot attribute", () => {
     // POSITIVE CONTROL, same server: with a principal it IS called.
     const ok = await invoke(url, {
       bearer: INTERNAL_SECRET,
-      body: ownerBody({ principal: principalFor(OWNER_DIGITS) }),
+      body: ownerSigned(OWNER_DIGITS),
     });
     expect(ok.status).toBe(200);
     expect(brainCalls).toHaveLength(1);
@@ -296,7 +369,7 @@ describe("existing templates are unaffected unless a principal is present", () =
         agentId: "agent-7",
         runId: "run-internal-principal",
         context: { hello: "world" },
-        principal: principalFor(STAFF_DIGITS),
+        principal: signedFor(STAFF_DIGITS, "run-internal-principal"),
       },
     });
     expect(res.status, res.text).toBe(200);
@@ -321,6 +394,107 @@ describe("existing templates are unaffected unless a principal is present", () =
     expect(res.status, res.text).toBe(200);
     expect(model.calls).toHaveLength(1);
     expect(Object.keys(model.calls[0]!)).not.toContain("user");
+  });
+});
+
+describe("principals are AUTHENTICATED, not asserted (Codex, PR #151)", () => {
+  /**
+   * RUNTIME_SECRET_INTERNAL is shared by every INTERNAL caller, so each forgery
+   * below is presented WITH A VALID RUNTIME CREDENTIAL. Only the gateway's
+   * PRINCIPAL_SIGNING_KEY may make a principal count.
+   */
+  const forgeries = (runId: string): Array<[string, unknown]> => [
+    ["unsigned (identity fields only)", principalFor(OWNER_DIGITS)],
+    ["signed with the wrong key (the INTERNAL runtime credential)", signedFor(OWNER_DIGITS, runId, { key: INTERNAL_SECRET })],
+    ["a staff signature with the owner's number pasted in", { ...signedFor(STAFF_DIGITS, runId), senderE164: `+${OWNER_DIGITS}` }],
+    ["stale: issued 121s ago", signedFor(OWNER_DIGITS, runId, { issuedAt: nowSec() - 121 })],
+    ["from the future: issued 121s ahead", signedFor(OWNER_DIGITS, runId, { issuedAt: nowSec() + 121 })],
+    ["signed for a different run", signedFor(OWNER_DIGITS, "some-other-run")],
+    ["issuedAt edited after signing", { ...signedFor(OWNER_DIGITS, runId), issuedAt: nowSec() + 1 }],
+  ];
+
+  it.each(forgeries("RUNID").map(([label]) => [label]))(
+    "owner template: %s → 400 principal_unverified, brain never called",
+    async (label) => {
+      const { brainCalls, url } = await boot();
+      const runId = `run-forge-${Math.random().toString(16).slice(2)}`;
+      const principal = forgeries(runId).find(([l]) => l === label)![1];
+      const res = await invoke(url, { bearer: INTERNAL_SECRET, body: ownerBody({ runId, principal }) });
+      expect(res.status, res.text).toBe(400);
+      expect(res.json["outcome"]).toBe("principal_unverified");
+      expect(res.text).not.toContain(OWNER_DIGITS);
+      expect(brainCalls, "the owner's brain must never be reached").toHaveLength(0);
+      // POSITIVE CONTROL, same server, same credential: a genuinely signed
+      // principal IS accepted — so the refusal above is not "refuses everything".
+      const ok = await invoke(url, { bearer: INTERNAL_SECRET, body: ownerSigned(OWNER_DIGITS) });
+      expect(ok.status, ok.text).toBe(200);
+      expect(brainCalls).toHaveLength(1);
+    },
+  );
+
+  it.each(forgeries("RUNID").map(([label]) => [label]))(
+    "other INTERNAL templates: %s → IGNORED (answered, no `user`, as if absent)",
+    async (label) => {
+      const { model, url, logger } = await boot();
+      const runId = `run-ignore-${Math.random().toString(16).slice(2)}`;
+      const principal = forgeries(runId).find(([l]) => l === label)![1];
+      const res = await invoke(url, {
+        bearer: INTERNAL_SECRET,
+        body: { templateId: INTERNAL_TEMPLATE, exposure: "INTERNAL", agentId: "agent-7", runId, context: { hello: "world" }, principal },
+      });
+      expect(res.status, res.text).toBe(200);
+      expect(model.calls, "positive control: the template still ran").toHaveLength(1);
+      expect(Object.keys(model.calls[0]!)).not.toContain("user");
+      expect(Object.keys(model.calls[0]!)).not.toContain("headers");
+      expect(logger.withOutcome("principal_ignored")).toHaveLength(1);
+    },
+  );
+
+  it("verifyPrincipal reports WHY, and a valid claim verifies (control)", () => {
+    const parse = (p: unknown) => {
+      const r = parsePrincipal(p);
+      if (r.kind !== "ok") throw new Error("fixture");
+      return r.claim;
+    };
+    const args = { key: PRINCIPAL_SIGNING_KEY, runId: "r1", nowSec: nowSec() };
+    expect(verifyPrincipal(parse(signedFor(OWNER_DIGITS, "r1")), args).kind).toBe("verified");
+    expect(verifyPrincipal(parse(principalFor(OWNER_DIGITS)), args)).toEqual({ kind: "unverified", reason: "unsigned" });
+    expect(verifyPrincipal(parse(signedFor(OWNER_DIGITS, "r1", { key: "x".repeat(40) })), args)).toEqual({ kind: "unverified", reason: "bad_signature" });
+    expect(verifyPrincipal(parse(signedFor(OWNER_DIGITS, "r1", { issuedAt: args.nowSec - 121 })), args)).toEqual({ kind: "unverified", reason: "stale" });
+    expect(verifyPrincipal(parse(signedFor(OWNER_DIGITS, "r2")), args)).toEqual({ kind: "unverified", reason: "nonce_mismatch" });
+    expect(verifyPrincipal(parse(signedFor(OWNER_DIGITS, "r1")), { ...args, key: null })).toEqual({ kind: "unverified", reason: "no_key" });
+    // The in-repo signer agrees with the independent one in this file.
+    const p = parse(signedFor(OWNER_DIGITS, "r1", { issuedAt: 1_000 }));
+    expect(signPrincipal(PRINCIPAL_SIGNING_KEY, { ...p, issuedAt: 1_000, nonce: "r1" })).toBe(p.signature);
+  });
+});
+
+describe("the signing key is a BOOT requirement while the owner template exists", () => {
+  it("CONTROL: the harness config boots clean", () => {
+    expect(bootErrors(envConfig())).toEqual([]);
+  });
+
+  it("refuses to boot with no PRINCIPAL_SIGNING_KEY", () => {
+    const errors = bootErrors(envConfig({ PRINCIPAL_SIGNING_KEY: undefined })).join(" | ");
+    expect(errors).toContain("PRINCIPAL_SIGNING_KEY is unset");
+    expect(errors).toContain("isola-owner-manager@v1");
+  });
+
+  it("refuses a key that equals a runtime credential, or is too short", () => {
+    expect(bootErrors(envConfig({ PRINCIPAL_SIGNING_KEY: INTERNAL_SECRET })).join(" | ")).toContain(
+      "equals a RUNTIME_SECRET_* credential",
+    );
+    expect(bootErrors(envConfig({ PRINCIPAL_SIGNING_KEY: "short" })).join(" | ")).toContain(
+      "shorter than",
+    );
+    expect(bootErrors(envConfig({ PRINCIPAL_USER_KEY: "short" })).join(" | ")).toContain(
+      "PRINCIPAL_USER_KEY is shorter than",
+    );
+  });
+
+  it("never echoes the key in a boot error", () => {
+    const errors = bootErrors(envConfig({ PRINCIPAL_SIGNING_KEY: INTERNAL_SECRET })).join(" | ");
+    expect(errors).not.toContain(INTERNAL_SECRET);
   });
 });
 
