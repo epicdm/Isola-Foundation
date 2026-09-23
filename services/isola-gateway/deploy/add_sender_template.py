@@ -97,9 +97,34 @@ def read_store(runner: Runner, container: str) -> bytes:
     return runner(["docker", "exec", container, "cat", SECRET_MOUNT_DIR + MOUNT_TARGET], None)
 
 
+def _no_duplicate_keys(pairs):
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        # A duplicate key parses to its LAST value here and in JSON.parse, and
+        # re-emitting would silently collapse it. Refuse rather than decide.
+        raise Refused("the store contains a duplicate key inside an object; refusing to re-emit it")
+    return dict(pairs)
+
+
+def _no_nonfinite(token):
+    raise Refused(f"the store contains a non-finite number ({token}); refusing to re-emit it")
+
+
+def strict_loads(raw: bytes):
+    return json.loads(raw, object_pairs_hook=_no_duplicate_keys, parse_constant=_no_nonfinite)
+
+
 def transform(raw: bytes, account: int, inbox: int, last4: str, template: str) -> tuple[bytes, dict]:
-    """Pure: returns (new store bytes, a value-free report). Raises Refused."""
-    data = json.loads(raw)
+    """Pure: returns (new store bytes, a value-free report). Raises Refused.
+
+    SERIALIZATION, stated plainly: the new store is RE-EMITTED as compact JSON,
+    so whitespace and escape forms of the original are not preserved byte for
+    byte. What is proven is PARSED equality, the thing the gateway consumes:
+    the new bytes are re-parsed, and every untouched binding, and every
+    untouched field of the target, must equal the original's parse.
+    Duplicate keys and non-finite numbers are refused, because those are the
+    cases where re-emitting would change meaning."""
+    data = strict_loads(raw)
     if not isinstance(data, list) or not all(isinstance(b, dict) for b in data):
         raise Refused("store is not a JSON array of binding objects")
     idx = [i for i, b in enumerate(data)
@@ -123,9 +148,14 @@ def transform(raw: bytes, account: int, inbox: int, last4: str, template: str) -
             raise Refused("the binding already carries exactly this senderTemplates entry (no change needed)")
         raise Refused("the binding already carries a different senderTemplates value; this tool only adds to an empty one")
 
-    new = json.loads(raw)  # an independent deep copy
-    new[t]["senderTemplates"] = {key: template}
-    new_raw = json.dumps(new, ensure_ascii=False).encode()
+    work = strict_loads(raw)  # an independent deep copy
+    work[t]["senderTemplates"] = {key: template}
+    new_raw = json.dumps(work, ensure_ascii=False).encode()
+    # Prove against a RE-PARSE of the emitted bytes, not the in-memory object:
+    # that is what the gateway will actually read.
+    new = strict_loads(new_raw)
+    if len(new) != len(data):
+        raise Refused("the re-parsed store has a different binding count")
 
     # Equality proofs, against the ORIGINAL bytes' parse, value-free.
     others_equal = all(canonical(data[i]) == canonical(new[i]) for i in range(len(data)) if i != t)
@@ -146,26 +176,55 @@ def transform(raw: bytes, account: int, inbox: int, last4: str, template: str) -
         "other_bindings_unchanged": others_equal,
         "senderTemplates_entries": 1,
         "senderTemplates_template": template,
+        "serialization": "re-emitted compact JSON; equality proven on the re-parse, not on bytes",
     }
     if report["keys_added"] != ["senderTemplates"] or report["keys_removed"] or not report["target_fields_unchanged"] or not others_equal:
         raise Refused("structural check failed: " + canonical({k: report[k] for k in ("keys_added", "keys_removed", "target_fields_unchanged", "other_bindings_unchanged")}))
     return new_raw, report
 
 
+# The parser's error TEXT is never emitted: an error string could quote a
+# value. Only a count and one boolean about senderTemplates leave the container.
 VALIDATOR_JS = (
     "import {parseBindings} from '/app/dist/bindings.js';"
     "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=parseBindings(s);"
+    "const errs=r.ok?[]:r.errors.map(e=>String(e));"
     "console.log(JSON.stringify({ok:r.ok,count:r.ok?r.bindings.length:0,"
-    "errors:r.ok?[]:r.errors.map(e=>String(e).slice(0,200)),"
+    "errorCount:errs.length,senderTemplatesErrors:errs.filter(e=>e.includes('\"senderTemplates\"')).length,"
     "senderTemplateCounts:r.ok?r.bindings.map(b=>Object.keys(b.senderTemplates??{}).length):[],"
     "templates:r.ok?r.bindings.map(b=>Object.values(b.senderTemplates??{})):[]}))});"
 )
+
+
+def service_image(runner: Runner, service: str) -> str:
+    """The image the service RUNS, so validation uses the parser that will read the store."""
+    spec = json.loads(runner(["docker", "service", "inspect", service], None))
+    image = spec[0]["Spec"]["TaskTemplate"]["ContainerSpec"]["Image"]
+    if not re.fullmatch(r"[A-Za-z0-9_.:/@-]+", image):
+        raise Refused("the service image reference has an unexpected shape")
+    return image
 
 
 def validate(runner: Runner, image: str, raw: bytes) -> dict:
     out = runner(["docker", "run", "--rm", "-i", "--network", "none", "--entrypoint", "node", image,
                   "--input-type=module", "-e", VALIDATOR_JS], raw)
     return json.loads(out)
+
+
+def wait_and_compare(runner: Runner, service: str, secret: str, old_container: str,
+                     expected: bytes, sleep: Callable[[float], None]):
+    """Wait for a NEW task (never the old container's mount) that mounts
+    `secret`, then compare its store to `expected`. True/False, or None on timeout."""
+    for _ in range(30):
+        try:
+            if mounted_secret(runner, service) == secret:
+                c = service_container(runner, service)
+                if c != old_container:
+                    return read_store(runner, c) == expected
+        except Refused:
+            pass
+        sleep(5)
+    return None
 
 
 def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callable[[float], None] = time.sleep) -> int:
@@ -177,12 +236,11 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
     ap.add_argument("--inbox", type=int, required=True)
     ap.add_argument("--sender-last4", required=True)
     ap.add_argument("--template", required=True)
-    ap.add_argument("--validator-image", required=True)
     ap.add_argument("--apply", action="store_true")
     a = ap.parse_args(argv)
     report: dict = {"mode": "apply" if a.apply else "dry-run"}
     try:
-        for n in (a.service, a.expect_current_secret, a.new_secret, a.validator_image.replace(":", "").replace("/", "")):
+        for n in (a.service, a.expect_current_secret, a.new_secret):
             if not NAME_RE.match(n):
                 raise Refused("a name argument contains characters outside [A-Za-z0-9_.-]")
         if not re.fullmatch(r"[0-9]{4}", a.sender_last4):
@@ -199,10 +257,13 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
         raw = read_store(runner, container)
         new_raw, structure = transform(raw, a.account, a.inbox, a.sender_last4, a.template)
         report["structure"] = structure
-        before = validate(runner, a.validator_image, raw)
-        after = validate(runner, a.validator_image, new_raw)
-        report["validator_original"] = {k: before.get(k) for k in ("ok", "count", "errors", "senderTemplateCounts")}
-        report["validator_new"] = {k: after.get(k) for k in ("ok", "count", "errors", "senderTemplateCounts", "templates")}
+        image = service_image(runner, a.service)
+        report["validator_image"] = image + " (the image the service runs)"
+        before = validate(runner, image, raw)
+        after = validate(runner, image, new_raw)
+        keep = ("ok", "count", "errorCount", "senderTemplatesErrors", "senderTemplateCounts")
+        report["validator_original"] = {k: before.get(k) for k in keep}
+        report["validator_new"] = {k: after.get(k) for k in keep + ("templates",)}
         if not before.get("ok"):
             raise Refused("CONTROL FAILED: the gateway parser rejects the ORIGINAL store, so its verdict on the new one means nothing")
         if not after.get("ok") or after.get("count") != before.get("count"):
@@ -218,27 +279,33 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
         if a.new_secret in existing:
             raise Refused("--new-secret already exists; choose the next version")
         runner(["docker", "secret", "create", a.new_secret, "-"], new_raw)
-        runner(["docker", "service", "update", "--quiet", "--secret-rm", current,
-                "--secret-add", f"source={a.new_secret},target={MOUNT_TARGET}",
-                "--update-failure-action", "rollback", "--update-monitor", "30s", a.service], None)
         report["created"] = a.new_secret
+        swap = ["docker", "service", "update", "--quiet", "--secret-rm", current,
+                "--secret-add", f"source={a.new_secret},target={MOUNT_TARGET}",
+                "--update-failure-action", "rollback", "--update-monitor", "30s", a.service]
+        try:
+            runner(swap, None)
+        except Refused:
+            # The swap never took: remove the new version so nothing is left
+            # half-done, and prove the service still mounts the original.
+            runner(["docker", "secret", "rm", a.new_secret], None)
+            report["created"] = None
+            report["cleanup"] = "swap failed; the new secret was removed"
+            report["still_mounted"] = mounted_secret(runner, a.service)
+            raise
         report["rollback_command"] = (f"sudo docker service update --secret-rm {a.new_secret} "
                                       f"--secret-add source={current},target={MOUNT_TARGET} {a.service}")
-        for _ in range(30):
-            if mounted_secret(runner, a.service) == a.new_secret:
-                try:
-                    c2 = service_container(runner, a.service)
-                    if c2 != container:
-                        mounted = read_store(runner, c2)
-                        report["mounted_equals_validated"] = (mounted == new_raw)
-                        break
-                except Refused:
-                    pass
-            sleep(5)
-        else:
-            raise Refused("the new task did not come up within 150s; check the service, and roll back if needed")
-        if not report["mounted_equals_validated"]:
-            raise Refused("the mounted store differs from the validated bytes; roll back")
+        verified = wait_and_compare(runner, a.service, a.new_secret, container, new_raw, sleep)
+        report["mounted_equals_validated"] = verified
+        if verified is not True:
+            # Unverified content must not stay live: roll back automatically,
+            # then prove the ORIGINAL bytes are what is mounted again.
+            new_container = service_container(runner, a.service)
+            runner(["docker", "service", "update", "--quiet", "--secret-rm", a.new_secret,
+                    "--secret-add", f"source={current},target={MOUNT_TARGET}", a.service], None)
+            report["auto_rollback"] = "performed"
+            report["rollback_restores_original"] = wait_and_compare(runner, a.service, current, new_container, raw, sleep)
+            raise Refused("the new task's mount was not verified; the service was rolled back to the original secret")
         report["result"] = "APPLIED: new secret mounted and byte-equal to the validated store"
         return 0
     except Refused as e:

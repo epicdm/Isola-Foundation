@@ -78,6 +78,21 @@ class TransformTests(unittest.TestCase):
         with self.assertRaisesRegex(T.Refused, "no change needed"):
             T.transform(store(same), 2, 10, "1274", "isola-owner-manager@v1")
 
+    def test_refuses_duplicate_keys_and_non_finite_numbers(self):
+        dup = b'[{"chatwootAccountId": 2, "chatwootInboxId": 10, "exposure": "INTERNAL", "exposure": "PUBLIC"}]'
+        with self.assertRaisesRegex(T.Refused, "duplicate key"):
+            T.transform(dup, 2, 10, "1274", "isola-owner-manager@v1")
+        nan = store(INTERNAL)[:-2] + b', "x": NaN}]'
+        with self.assertRaisesRegex(T.Refused, "non-finite"):
+            T.transform(nan, 2, 10, "1274", "isola-owner-manager@v1")
+
+    def test_equality_is_proven_on_the_reparse_of_the_emitted_bytes(self):
+        pretty = json.dumps([PUBLIC, INTERNAL], indent=4).encode()  # formatting differs, meaning does not
+        new_raw, rep = T.transform(pretty, 2, 10, "1274", "isola-owner-manager@v1")
+        self.assertTrue(rep["other_bindings_unchanged"] and rep["target_fields_unchanged"])
+        self.assertIn("re-parse", rep["serialization"])
+        self.assertEqual(json.loads(new_raw)[0], PUBLIC)
+
     def test_refuses_a_store_that_is_not_an_array_of_objects(self):
         with self.assertRaises(T.Refused):
             T.transform(b'{"a":1}', 2, 10, "1274", "isola-owner-manager@v1")
@@ -86,7 +101,12 @@ class TransformTests(unittest.TestCase):
 class FakeDocker:
     """Dispatches docker CLI argv; records what was created and swapped."""
 
-    def __init__(self, raw, validator_ok=True, secrets=("isola_gwint_bindings_v5",)):
+    def __init__(self, raw, validator_ok=True, secrets=("isola_gwint_bindings_v5",),
+                 fail_update=False, corrupt_new_mount=False):
+        self.fail_update = fail_update
+        self.corrupt_new_mount = corrupt_new_mount
+        self.image = "isola-gateway:vsp-da9a8df"
+        self.validated_images = []
         self.stores = {"isola_gwint_bindings_v5": raw}
         self.mounted = "isola_gwint_bindings_v5"
         self.container = "c1"
@@ -98,17 +118,20 @@ class FakeDocker:
         self.calls.append(list(argv))
         a = list(argv)
         if a[:3] == ["docker", "service", "inspect"]:
-            return json.dumps([{"Spec": {"TaskTemplate": {"ContainerSpec": {"Secrets": [
+            return json.dumps([{"Spec": {"TaskTemplate": {"ContainerSpec": {"Image": self.image, "Secrets": [
                 {"SecretName": self.mounted, "File": {"Name": "gateway_bindings"}}]}}}}]).encode()
         if a[:3] == ["docker", "ps", "-q"]:
             return (self.container + "\n").encode()
         if a[:2] == ["docker", "exec"]:
+            if self.corrupt_new_mount and self.mounted != "isola_gwint_bindings_v5":
+                return self.stores[self.mounted] + b" "
             return self.stores[self.mounted]
         if a[:3] == ["docker", "run", "--rm"]:
+            self.validated_images.append(a[a.index("node") + 1])
             data = json.loads(stdin)
             if not self.validator_ok:
-                return json.dumps({"ok": False, "count": 0, "errors": ["binding[0]: bad"]}).encode()
-            return json.dumps({"ok": True, "count": len(data),
+                return json.dumps({"ok": False, "count": 0, "errorCount": 1, "senderTemplatesErrors": 0}).encode()
+            return json.dumps({"ok": True, "count": len(data), "errorCount": 0, "senderTemplatesErrors": 0,
                                "senderTemplateCounts": [len(b.get("senderTemplates", {})) for b in data],
                                "templates": [list(b.get("senderTemplates", {}).values()) for b in data]}).encode()
         if a[:3] == ["docker", "secret", "ls"]:
@@ -117,18 +140,23 @@ class FakeDocker:
             self.stores[a[3]] = stdin
             self.secrets.append(a[3])
             return b"id\n"
+        if a[:3] == ["docker", "secret", "rm"]:
+            self.stores.pop(a[3], None)
+            self.secrets.remove(a[3])
+            return b"ok\n"
         if a[:3] == ["docker", "service", "update"]:
+            if self.fail_update:
+                raise T.Refused("command failed (docker service, exit 1)")
             src = [x for x in a if x.startswith("source=")][0].split(",")[0][len("source="):]
             self.mounted = src
-            self.container = "c2"
+            self.container = "c%d" % (int(self.container[1:]) + 1)  # a new task per update
             return b"svc\n"
         raise AssertionError("unexpected docker call: " + " ".join(a[:3]))
 
 
 ARGS = ["--service", "isolagwint_gateway", "--expect-current-secret", "isola_gwint_bindings_v5",
         "--new-secret", "isola_gwint_bindings_v6", "--account", "2", "--inbox", "10",
-        "--sender-last4", "1274", "--template", "isola-owner-manager@v1",
-        "--validator-image", "isola-gateway:vsp-da9a8df"]
+        "--sender-last4", "1274", "--template", "isola-owner-manager@v1"]
 
 
 def run_main(fake, extra=()):
@@ -146,6 +174,11 @@ class MainTests(unittest.TestCase):
         self.assertIn("DRY RUN OK", rep["result"])
         self.assertFalse(any(c[:3] in (["docker", "secret", "create"], ["docker", "service", "update"]) for c in fake.calls))
         self.assertTrue(rep["validator_original"]["ok"] and rep["validator_new"]["ok"])
+        # validated with the image the SERVICE runs, not an operator-supplied one
+        self.assertEqual(set(fake.validated_images), {"isola-gateway:vsp-da9a8df"})
+        fake2 = FakeDocker(store(PUBLIC, INTERNAL)); fake2.image = "isola-gateway:other-build"
+        run_main(fake2)
+        self.assertEqual(set(fake2.validated_images), {"isola-gateway:other-build"})
 
     def test_apply_creates_a_new_version_swaps_and_proves_the_mount(self):
         fake = FakeDocker(store(PUBLIC, INTERNAL))
@@ -177,6 +210,23 @@ class MainTests(unittest.TestCase):
         fake = FakeDocker(store(PUBLIC, INTERNAL), secrets=("isola_gwint_bindings_v5", "isola_gwint_bindings_v6"))
         code, rep, _ = run_main(fake, ["--apply"])
         self.assertEqual(code, 2)
+        self.assertEqual(fake.mounted, "isola_gwint_bindings_v5")
+
+    def test_a_failed_swap_removes_the_new_secret_and_leaves_the_original_mounted(self):
+        fake = FakeDocker(store(PUBLIC, INTERNAL), fail_update=True)
+        code, rep, _ = run_main(fake, ["--apply"])
+        self.assertEqual(code, 2)
+        self.assertNotIn("isola_gwint_bindings_v6", fake.stores)
+        self.assertNotIn("isola_gwint_bindings_v6", fake.secrets)
+        self.assertEqual(rep["still_mounted"], "isola_gwint_bindings_v5")
+
+    def test_an_unverified_mount_is_rolled_back_automatically_and_the_rollback_is_proven(self):
+        fake = FakeDocker(store(PUBLIC, INTERNAL), corrupt_new_mount=True)
+        code, rep, _ = run_main(fake, ["--apply"])
+        self.assertEqual(code, 2)
+        self.assertFalse(rep["mounted_equals_validated"])
+        self.assertEqual(rep["auto_rollback"], "performed")
+        self.assertTrue(rep["rollback_restores_original"])
         self.assertEqual(fake.mounted, "isola_gwint_bindings_v5")
 
     def test_refuses_bad_argument_shapes(self):
