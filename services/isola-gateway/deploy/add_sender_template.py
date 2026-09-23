@@ -394,6 +394,23 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
         existing = runner(["docker", "secret", "ls", "--format", "{{.Name}}"], None).decode().split()
         if a.new_secret in existing:
             raise Refused("--new-secret already exists; choose the next version")
+        # PIN FIRST, before anything is created, so no failure here can leave
+        # an orphan secret. The swap will use a tag this tool creates from the
+        # immutable validated id, unique to that id, so nothing else can move
+        # it; the new bytes can only go live under the parser that validated
+        # them (Swarm's CLI has no compare-and-swap on the spec version). Same
+        # image bytes as before; only the spec's image string changes. A
+        # digest-qualified reference (repo:tag@sha256:...) is reduced to its
+        # repository first.
+        ref = image.split("@", 1)[0]
+        repo = ref.rsplit(":", 1)[0] if ":" in ref.rsplit("/", 1)[-1] else ref
+        pinned = f"{repo}:bt-{validated_id[len('sha256:'):len('sha256:') + 12]}"
+        if not re.fullmatch(r"[A-Za-z0-9_./-]+(:[0-9]+)?[A-Za-z0-9_./-]*:bt-[0-9a-f]{12}", pinned):
+            raise Refused("could not form a pinned image reference")
+        runner(["docker", "tag", validated_id, pinned], None)
+        if image_id(runner, pinned) != validated_id:
+            raise Refused("the pinned tag does not resolve to the validated image id; nothing was created")
+        report["pinned_image"] = pinned
         # COMPARE-AND-SWAP: everything validated above is only valid for the
         # service as it was. Re-read spec version, image and mounted secret
         # immediately before the first write, and refuse if any moved.
@@ -407,22 +424,7 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
         if service_state(runner, a.service) != initial_state:
             _remove_new_secret(runner, a.new_secret, report)
             raise Refused("the service changed while the new secret was being created; nothing was swapped, re-run")
-        # The swap PINS the validated image by a tag this tool creates from the
-        # immutable id, unique to that id, so nothing else can move it. The new
-        # bytes can therefore only go live under the parser that validated
-        # them, even if the service's own tag moves in the last milliseconds
-        # (Swarm's CLI has no compare-and-swap on the spec version). Same
-        # image bytes as before; only the spec's image string changes.
-        repo = image.rsplit(":", 1)[0] if ":" in image.rsplit("/", 1)[-1] else image
-        pinned = f"{repo}:bt-{validated_id[len('sha256:'):len('sha256:') + 12]}"
-        if not re.fullmatch(r"[A-Za-z0-9_.:/-]+", pinned):
-            raise Refused("could not form a pinned image reference")
-        runner(["docker", "tag", validated_id, pinned], None)
-        if image_id(runner, pinned) != validated_id:
-            _remove_new_secret(runner, a.new_secret, report)
-            raise Refused("the pinned tag does not resolve to the validated image id; nothing was swapped")
-        report["pinned_image"] = pinned
-        swap = ["docker", "service", "update", "--quiet", "--image", pinned,
+        swap =["docker", "service", "update", "--quiet", "--image", pinned,
                 "--secret-rm", current,
                 "--secret-add", f"source={a.new_secret},target={MOUNT_TARGET}",
                 "--update-failure-action", "rollback", "--update-monitor", "30s", a.service]

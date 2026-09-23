@@ -291,6 +291,25 @@ class MainTests(unittest.TestCase):
         self.assertNotIn("isola_gwint_bindings_v6", fake.stores)
         self.assertFalse(any(c[:3] == ["docker", "secret", "create"] for c in fake.calls))
 
+    def test_a_digest_qualified_service_image_pins_cleanly_and_nothing_is_orphaned_on_pin_failure(self):
+        fake = FakeDocker(store(PUBLIC, INTERNAL))
+        fake.image = "registry.local:5000/isola-gateway:vsp-da9a8df@sha256:" + "c" * 64
+        code, rep, _ = run_main(fake, ["--apply"])
+        self.assertEqual(code, 0, rep)
+        self.assertEqual(rep["pinned_image"], "registry.local:5000/isola-gateway:bt-" + "a" * 12)
+        # pin failure: the tag resolves elsewhere -> refused BEFORE any secret is created
+        fake2 = FakeDocker(store(PUBLIC, INTERNAL))
+        real_call = fake2.__call__
+        def lying(argv, stdin):
+            if argv[:3] == ["docker", "image", "inspect"] and argv[-1].endswith(":bt-" + "a" * 12):
+                return ("sha256:" + "f" * 64).encode()
+            return real_call(argv, stdin)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code2 = T.main(ARGS + ["--apply"], runner=lying, sleep=lambda s: None)
+        self.assertEqual(code2, 2)
+        self.assertFalse(any(c[:3] == ["docker", "secret", "create"] for c in fake2.calls))
+
     def test_the_swap_pins_the_validated_image(self):
         fake = FakeDocker(store(PUBLIC, INTERNAL))
         code, rep, _ = run_main(fake, ["--apply"])
