@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -84,8 +85,11 @@ def task_container(runner: Runner, service: str, secret: str) -> str:
     Swarm's own task records (not a container-name match) to mount `secret`
     at the bindings target. Refuses if no running task, several, or any
     running task mounting something else (a rolling update in flight)."""
-    ids = runner(["docker", "service", "ps", service, "-q", "--no-trunc",
-                  "--filter", "desired-state=running"], None).decode().split()
+    # EVERY task, not only desired-state=running: during a start-first update
+    # the old task is still actually running while its desired state is
+    # already shutdown, and filtering it out would hide a live old mount
+    # (Codex #153). Liveness is judged by Status.State below.
+    ids = runner(["docker", "service", "ps", service, "-q", "--no-trunc"], None).decode().split()
     running = []
     for tid in ids:
         task = json.loads(runner(["docker", "inspect", "--type", "task", tid], None))[0]
@@ -257,7 +261,10 @@ def transform(raw: bytes, account: int, inbox: int, last4: str, template: str) -
 # of them secret).
 VALIDATOR_JS = (
     "import {parseBindings} from '/app/dist/bindings.js';"
-    "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=parseBindings(s);"
+    # Chunks are joined as BYTES and decoded once: decoding each chunk alone
+    # would corrupt a multibyte UTF-8 character split across a chunk boundary,
+    # so the parser would validate different text than gets mounted (Codex #153).
+    "const cs=[];process.stdin.on('data',d=>cs.push(d)).on('end',()=>{const s=Buffer.concat(cs).toString('utf8');const r=parseBindings(s);"
     "const errs=r.ok?[]:r.errors.map(e=>String(e));const i=Number(process.env.T_IDX);"
     "const tv=r.ok&&r.bindings[i]?Object.values(r.bindings[i].senderTemplates??{}):[];"
     "console.log(JSON.stringify({ok:r.ok,count:r.ok?r.bindings.length:0,"
@@ -427,8 +434,16 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
         # repository first.
         ref = image.split("@", 1)[0]
         repo = ref.rsplit(":", 1)[0] if ":" in ref.rsplit("/", 1)[-1] else ref
-        pinned = f"{repo}:bt-{validated_id[len('sha256:'):len('sha256:') + 12]}"
-        if not re.fullmatch(r"[A-Za-z0-9_./-]+(:[0-9]+)?[A-Za-z0-9_./-]*:bt-[0-9a-f]{12}", pinned):
+        # The tag carries a random nonce, so no other process can know (and
+        # retag) it in the window before the swap; and the tool refuses on a
+        # multi-node Swarm, where another node could resolve the same name to
+        # different bytes (Codex #153). The post-swap image-id proof remains.
+        nodes = runner(["docker", "node", "ls", "-q"], None).decode().split()
+        if len(nodes) != 1:
+            raise Refused("this tool pins a node-local image tag; refusing on a multi-node Swarm")
+        nonce = secrets.token_hex(4)
+        pinned = f"{repo}:bt-{validated_id[len('sha256:'):len('sha256:') + 12]}-{nonce}"
+        if not re.fullmatch(r"[A-Za-z0-9_./-]+(:[0-9]+)?[A-Za-z0-9_./-]*:bt-[0-9a-f]{12}-[0-9a-f]{8}", pinned):
             raise Refused("could not form a pinned image reference")
         runner(["docker", "tag", validated_id, pinned], None)
         if image_id(runner, pinned) != validated_id:

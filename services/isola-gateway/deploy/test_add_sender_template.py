@@ -129,6 +129,7 @@ class FakeDocker:
         self.task_secret_override = None  # a running task mounting something other than the spec
         self.retag_on_swap = False  # the tag resolves to a DIFFERENT image once swapped
         self.tags = {}
+        self.nodes = 1
         self.secrets = list(secrets)
         self.validator_ok = validator_ok
         self.calls = []
@@ -142,6 +143,8 @@ class FakeDocker:
                 {"SecretName": self.mounted, "File": {"Name": "gateway_bindings"}}]}}}}]).encode()
         if a[:3] == ["docker", "service", "ps"]:
             return ("task-" + self.container).encode()
+        if a[:3] == ["docker", "node", "ls"]:
+            return chr(10).join(["node1"] * self.nodes).encode()
         if a[:2] == ["docker", "tag"]:
             self.tags[a[3]] = a[2]
             return b""
@@ -296,12 +299,12 @@ class MainTests(unittest.TestCase):
         fake.image = "registry.local:5000/isola-gateway:vsp-da9a8df@sha256:" + "c" * 64
         code, rep, _ = run_main(fake, ["--apply"])
         self.assertEqual(code, 0, rep)
-        self.assertEqual(rep["pinned_image"], "registry.local:5000/isola-gateway:bt-" + "a" * 12)
+        self.assertRegex(rep["pinned_image"], r"^registry\.local:5000/isola-gateway:bt-a{12}-[0-9a-f]{8}$")
         # pin failure: the tag resolves elsewhere -> refused BEFORE any secret is created
         fake2 = FakeDocker(store(PUBLIC, INTERNAL))
         real_call = fake2.__call__
         def lying(argv, stdin):
-            if argv[:3] == ["docker", "image", "inspect"] and argv[-1].endswith(":bt-" + "a" * 12):
+            if argv[:3] == ["docker", "image", "inspect"] and ":bt-" in argv[-1]:
                 return ("sha256:" + "f" * 64).encode()
             return real_call(argv, stdin)
         buf = io.StringIO()
@@ -348,6 +351,33 @@ class MainTests(unittest.TestCase):
         self.assertNotIn("isola_gwint_bindings_v6", fake.secrets)
         self.assertNotIn("_raw", rep)
 
+    def test_refuses_on_a_multi_node_swarm_before_creating_anything(self):
+        fake = FakeDocker(store(PUBLIC, INTERNAL))
+        fake.nodes = 2
+        code, rep, _ = run_main(fake, ["--apply"])
+        self.assertEqual(code, 2)
+        self.assertIn("multi-node", rep["refused"])
+        self.assertFalse(any(c[:3] == ["docker", "secret", "create"] for c in fake.calls))
+
+    def test_a_running_old_task_hidden_by_desired_state_is_still_seen(self):
+        fake = FakeDocker(store(PUBLIC, INTERNAL))
+        real = fake.__call__
+        def two_running(argv, stdin):
+            if argv[:3] == ["docker", "service", "ps"]:
+                assert "--filter" not in argv  # every task, not only desired-running
+                return ("task-" + fake.container + chr(10) + "task-0000000000ff").encode()
+            return real(argv, stdin)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = T.main(ARGS + ["--apply"], runner=two_running, sleep=lambda s: None)
+        rep = json.loads(buf.getvalue())
+        self.assertEqual(code, 2)
+        self.assertIn("exactly 1 running task", rep["refused"])
+
+    def test_the_validator_joins_bytes_before_decoding(self):
+        self.assertIn("Buffer.concat", T.VALIDATOR_JS)
+        self.assertNotIn("s+=d", T.VALIDATOR_JS)
+
     def test_the_swap_pins_the_validated_image(self):
         fake = FakeDocker(store(PUBLIC, INTERNAL))
         code, rep, _ = run_main(fake, ["--apply"])
@@ -355,7 +385,7 @@ class MainTests(unittest.TestCase):
         swaps = [c for c in fake.calls if c[:3] == ["docker", "service", "update"]]
         self.assertEqual(len(swaps), 1)
         pinned = swaps[0][swaps[0].index("--image") + 1]
-        self.assertEqual(pinned, "isola-gateway:bt-" + "a" * 12)  # a tag this tool made from the validated id
+        self.assertRegex(pinned, r"^isola-gateway:bt-a{12}-[0-9a-f]{8}$")  # validated id + random nonce
         self.assertEqual(fake.tags[pinned], "sha256:" + "a" * 64)
         self.assertTrue(rep["image_unchanged"])
 
