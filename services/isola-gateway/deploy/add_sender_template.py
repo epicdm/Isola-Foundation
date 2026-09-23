@@ -333,6 +333,29 @@ def _remove_new_secret(runner: Runner, name: str, report: dict) -> None:
         report["cleanup"] = "the new secret could NOT be removed (still referenced?); remove it by hand"
 
 
+def _safety_net(runner: Runner, a, report: dict, sleep: Callable[[float], None]) -> None:
+    current = report.get("current_secret")
+    new_secret = report.get("created")
+    raw = report.pop("_raw", None)
+    for _ in range(3):
+        try:
+            mounted = mounted_secret(runner, a.service)
+            if mounted == new_secret:
+                runner(["docker", "service", "update", "--quiet", "--secret-rm", new_secret,
+                        "--secret-add", f"source={current},target={MOUNT_TARGET}", a.service], None)
+                continue
+            if mounted == current:
+                restored = wait_and_compare(runner, a.service, current, None, raw, sleep) if raw is not None else None
+                report["safety_net"] = "original secret mounted" + (" and its bytes proven" if restored is True else "; bytes NOT proven")
+                _remove_new_secret(runner, new_secret, report)
+                return
+            report["safety_net"] = "UNEXPECTED secret mounted; inspect the service now"
+            return
+        except Refused:
+            sleep(5)
+    report["safety_net"] = "LIVE STATE UNKNOWN: could not observe or roll back; run rollback_command and inspect now"
+
+
 def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callable[[float], None] = time.sleep) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--service", required=True)
@@ -418,11 +441,13 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
             raise Refused("the service changed (spec version, image or mounted secret) since validation; re-run")
         runner(["docker", "secret", "create", a.new_secret, "-"], new_raw)
         report["created"] = a.new_secret
+        report["_raw"] = raw
         report["rollback_command"] = (f"sudo docker service update --secret-rm {a.new_secret} "
                                       f"--secret-add source={current},target={MOUNT_TARGET} {a.service}")
         # Second compare-and-swap, closing the gap the secret create opened.
         if service_state(runner, a.service) != initial_state:
             _remove_new_secret(runner, a.new_secret, report)
+            report["handled"] = True
             raise Refused("the service changed while the new secret was being created; nothing was swapped, re-run")
         swap =["docker", "service", "update", "--quiet", "--image", pinned,
                 "--secret-rm", current,
@@ -443,9 +468,11 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
             report["mounted_after_swap"] = "original"
             report["original_bytes_still_mounted"] = wait_and_compare(runner, a.service, current, None, raw, sleep)
             _remove_new_secret(runner, a.new_secret, report)
+            report["handled"] = True
             raise Refused("the swap did not take effect; the service is on the original secret")
         if mounted_now != a.new_secret:
             _remove_new_secret(runner, a.new_secret, report)  # best effort: it is unreferenced here
+            report["handled"] = True
             raise Refused("the service mounts an UNEXPECTED secret after the swap; inspect it now")
 
         verified = wait_and_compare(runner, a.service, a.new_secret, container, new_raw, sleep)
@@ -480,13 +507,23 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
         report["rollback_restores_original"] = restored
         if restored is True:
             _remove_new_secret(runner, a.new_secret, report)
+            report["handled"] = True
             raise Refused("the new mount was not verified; the service is proven back on the original secret")
+        report["handled"] = True
         raise Refused("LIVE UNVERIFIED: the new mount was not verified and the rollback is NOT proven; "
                       "run the rollback_command and inspect the service now")
     except Refused as e:
         report["refused"] = str(e)
+        if report.get("created") and not report.get("handled"):
+            # An UNPLANNED failure after the new secret was created (a
+            # transient docker error mid-flight). Never leave it orphaned or
+            # live-unverified: observe, roll back if it is mounted, prove the
+            # original, then remove it; say plainly if any step is unprovable.
+            _safety_net(runner, a, report, sleep)
         return 2
     finally:
+        report.pop("_raw", None)  # bytes are never printed
+        report.pop("handled", None)
         print(json.dumps(report, indent=1, ensure_ascii=False))
 
 

@@ -310,6 +310,44 @@ class MainTests(unittest.TestCase):
         self.assertEqual(code2, 2)
         self.assertFalse(any(c[:3] == ["docker", "secret", "create"] for c in fake2.calls))
 
+    def _flaky(self, fake, after, skip):
+        """Fail the first `service inspect` issued after the first `after`
+        call, `skip` inspects later (a transient manager error mid-flight)."""
+        state = {"armed": False, "seen": 0, "fired": False}
+        def runner(argv, stdin):
+            if argv[:3] == after:
+                state["armed"] = True
+            if state["armed"] and not state["fired"] and argv[:3] == ["docker", "service", "inspect"]:
+                if state["seen"] == skip:
+                    state["fired"] = True
+                    raise T.Refused("command failed (docker service, exit 1)")
+                state["seen"] += 1
+            return fake(argv, stdin)
+        return runner
+
+    def test_a_transient_failure_right_after_create_leaves_no_orphan(self):
+        fake = FakeDocker(store(PUBLIC, INTERNAL))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = T.main(ARGS + ["--apply"], runner=self._flaky(fake, ["docker", "secret", "create"], 0), sleep=lambda s: None)
+        rep = json.loads(buf.getvalue())
+        self.assertEqual(code, 2)
+        self.assertIn("original secret mounted", rep["safety_net"])
+        self.assertNotIn("isola_gwint_bindings_v6", fake.secrets)
+        self.assertEqual(fake.mounted, "isola_gwint_bindings_v5")
+
+    def test_a_transient_failure_right_after_the_swap_rolls_back_and_cleans_up(self):
+        fake = FakeDocker(store(PUBLIC, INTERNAL))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = T.main(ARGS + ["--apply"], runner=self._flaky(fake, ["docker", "service", "update"], 0), sleep=lambda s: None)
+        rep = json.loads(buf.getvalue())
+        self.assertEqual(code, 2)
+        self.assertIn("original secret mounted", rep["safety_net"])
+        self.assertEqual(fake.mounted, "isola_gwint_bindings_v5")
+        self.assertNotIn("isola_gwint_bindings_v6", fake.secrets)
+        self.assertNotIn("_raw", rep)
+
     def test_the_swap_pins_the_validated_image(self):
         fake = FakeDocker(store(PUBLIC, INTERNAL))
         code, rep, _ = run_main(fake, ["--apply"])
