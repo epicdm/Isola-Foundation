@@ -76,6 +76,15 @@ onboarding only" condition.
 reconciliation note on 2026-09-22, but not in the dispatch's approved list for this ad and not independently
 re-verified as operational by this lane) and anything AI-receptionist/missed-call/unlimited-related.
 
+## Status: HELD by Lane A, 2026-09-23
+
+Package received and confirmed correct (bare wa.me/17678180001, no prefill). Held until three gates clear:
+AGENT's plans-page copy PR is live, PR #215 + the hand-off note are live, and the fresh-customer demo
+passes (one signup, one recoverable problem, one human escalation). The `agent_recommendable` housekeeping
+went to the Senior PM as owner of those `epic_offer` entities — not mine to chase further. **No action from
+this lane until Lane A reports the gates cleared**, at which point: re-verify the destination and the 0001
+intro line live, then owner approves publication and spend.
+
 ## 5. Remaining approvals and gates — none of them mine to clear
 
 - **Publication and spend — owner-only.** No engineering lane holds a Facebook/Instagram Page or Ads
