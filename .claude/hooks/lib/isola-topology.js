@@ -428,54 +428,95 @@ const SECRET_FILE_EXEMPT_RE = /\.(example|sample|template|dist)$|\.example\.|\.s
  * a governed deploy with no path at all (CLAUDE.md §2.26: a refusal needs a
  * mechanism, and §2.27c: guards bind to operations, not vocabulary).
  *
- * The exemption is deliberately narrow. It holds ONLY when ALL of these are true:
- *   1. every secret-store path in the command is the VALUE of an
- *      `--env-add NAME_FILE=/run/secrets/<plain-name>` flag, and removing those
- *      flags leaves no secret-store path anywhere;
- *   2. each statement carrying such a flag is a `docker service update`
- *      (optionally under sudo), the one verb that configures and never executes
- *      a command whose output returns to the caller;
- *   3. the command as a whole contains no read-capable verb or surface
- *      (cat/head/tail/less/more/strings/od/xxd/base64/grep/sed/awk/printenv/env,
- *      docker exec/run/create/cp/logs, docker service create/logs, kubectl,
- *      /proc/…/environ, --args/--entrypoint/--command/--mount/--config-add),
- *      and no `$NAME_FILE` reference that a later statement could dereference.
- * Anything else keeps the original deny. A path-setting mixed with a read is
- * still a read.
+ * THE EXEMPTION IS A PARSE, NOT A SCAN, AND IT FAILS CLOSED. Codex review of
+ * the first version (PR #152) broke a token-scanning design five ways:
+ *   echo $(docker service update --env-add K_FILE=… svc; cat<…)
+ *   docker service update --env-add K_FILE=… svc$(cat<…)
+ *   --container-label-add leak=$(cat<…), and --health-cmd running curl with
+ *   ${IFS} separators, which is code execution inside the container.
+ * Denylisting shapes cannot keep up with a shell. So the command must now BE
+ * one exact shape, character by character:
+ *   [ssh <-o Opt=val | -q | -T>… user@host '<INNER>']  or  <INNER>
+ *   INNER = [sudo] docker service update <ALLOWED FLAG>… <service-name>
+ * - INNER may contain only [A-Za-z0-9_.,:=@/+-] and spaces: no $, backtick,
+ *   quote, <, >, ;, &, |, parentheses, backslash, glob or newline, so no
+ *   substitution, redirection, chaining or expansion exists.
+ * - Every flag is from an allowlist of INERT update flags (PATH_SETTING_FLAGS).
+ *   There is no --health-cmd, --args, --entrypoint, --mount, --config-add,
+ *   --container-label-add, --env-file or --log-*.
+ * - `--secret-add` must be source=<name>,target=<plain-name>; a target that is
+ *   a path is refused.
+ * - `--env-add` is NAME_FILE=<secret mount>/<plain-name> or NAME=<plain value
+ *   naming no secret mount>, and at least one _FILE path-setting is required.
+ * Anything that does not parse is NOT exempt and keeps the original deny.
  */
-const SECRET_PATH_SETTING_RE =
-  /--env-add(?:=|\s+)(["']?)[A-Z][A-Z0-9_]*_FILE=\/(?:var\/)?run\/secrets\/[A-Za-z0-9_.-]+\1(?=[\s;|&)]|$)/g;
-const SECRET_PATH_SETTING_VERB_RE = /(^|[\s'"(])(?:sudo\s+(?:-\S+\s+)*)?docker\s+service\s+update\b/;
-const SECRET_READ_CAPABLE_RE = new RegExp(
-  [
-    '(^|[\\s;|&(\'"`])(?:cat|head|tail|less|more|strings|od|xxd|hexdump|base64|grep|egrep|sed|awk|printenv|env|tee|dd|cp|scp|rsync|curl|wget|nc)(?=\\s|$)',
-    '\\bdocker\\s+(?:exec|run|create|cp|logs|inspect|container|compose)\\b',
-    '\\bdocker\\s+service\\s+(?:create|logs|inspect|ps)\\b',
-    '\\bkubectl\\b',
-    '/proc/[^\\s]*environ',
-    '(^|\\s)--(?:args|entrypoint|command|mount|mount-add|config-add|hostname|label-add)\\b',
-    '\\$\\{?[A-Z][A-Z0-9_]*_FILE\\b',
-  ].join('|')
-);
+const PATH_SETTING_SAFE_CHARS_RE = /^[A-Za-z0-9_.,:=@\/+ -]+$/;
+const PATH_SETTING_SSH_RE =
+  /^ssh((?:\s+(?:-o\s+[A-Za-z]+=[A-Za-z0-9._-]+|-[qT]))*)\s+[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+\s+'([^']*)'\s*$/;
+const SECRET_MOUNT_VALUE_RE = /^\/(?:var\/)?run\/secrets\/[A-Za-z0-9_.-]+$/;
+const PLAIN_NAME_RE = /^[A-Za-z0-9_.-]+$/;
+const DURATION_RE = /^[0-9]+(ms|s|m|h)?$/;
+// flag -> validator of its value (null = the flag takes no value)
+const PATH_SETTING_FLAGS = {
+  '--image': (v) => /^[A-Za-z0-9_.\/:@-]+$/.test(v),
+  '--secret-add': (v) => /^source=[A-Za-z0-9_.-]+,target=[A-Za-z0-9_.-]+$/.test(v),
+  '--secret-rm': (v) => PLAIN_NAME_RE.test(v),
+  '--env-rm': (v) => /^[A-Z][A-Z0-9_]*$/.test(v),
+  '--env-add': (v) => {
+    const m = /^([A-Z][A-Z0-9_]*)=(.*)$/.exec(v);
+    if (!m) return false;
+    if (/_FILE$/.test(m[1])) return SECRET_MOUNT_VALUE_RE.test(m[2]);
+    return /^[A-Za-z0-9_.:@\/+-]*$/.test(m[2]) && !SECRET_STORE_PATH_RE.test(' ' + m[2]);
+  },
+  '--update-failure-action': (v) => /^(pause|continue|rollback)$/.test(v),
+  '--update-monitor': (v) => DURATION_RE.test(v),
+  '--update-delay': (v) => DURATION_RE.test(v),
+  '--update-parallelism': (v) => /^[0-9]+$/.test(v),
+  '--update-order': (v) => /^(start-first|stop-first)$/.test(v),
+  '--quiet': null,
+  '-q': null,
+  '--detach': null,
+  '-d': null,
+  '--with-registry-auth': null,
+};
 
 /**
- * True only when `cmd` is a pure Swarm path-setting as defined above. Pure
- * predicate: no I/O, exported for the selftest.
+ * True only when `cmd` is exactly the permitted Swarm path-setting shape above.
+ * Pure predicate: no I/O, exported for the selftest.
  */
 function isSecretPathSettingOnly(cmd) {
-  const text = String(cmd || '');
-  const matches = text.match(SECRET_PATH_SETTING_RE);
-  if (!matches) return false;
-  if (SECRET_STORE_PATH_RE.test(text.replace(SECRET_PATH_SETTING_RE, ' '))) return false;
-  if (SECRET_READ_CAPABLE_RE.test(text)) return false;
-  // Every statement that sets a path must itself be a `docker service update`.
-  const statements = text.split(/;|&&|\|\||\||\n/);
-  for (const s of statements) {
-    SECRET_PATH_SETTING_RE.lastIndex = 0;
-    if (SECRET_PATH_SETTING_RE.test(s) && !SECRET_PATH_SETTING_VERB_RE.test(s)) return false;
+  let inner = String(cmd || '').trim();
+  const ssh = PATH_SETTING_SSH_RE.exec(inner);
+  if (ssh) inner = ssh[2].trim();
+  else if (/^ssh\b/.test(inner)) return false;
+  if (!PATH_SETTING_SAFE_CHARS_RE.test(inner)) return false;
+  const tok = inner.split(/ +/);
+  let i = 0;
+  if (tok[i] === 'sudo') i++;
+  if (tok[i] !== 'docker' || tok[i + 1] !== 'service' || tok[i + 2] !== 'update') return false;
+  const rest = tok.slice(i + 3);
+  const service = rest.pop();
+  if (!service || !PLAIN_NAME_RE.test(service) || service.startsWith('-')) return false;
+  let fileSettings = 0;
+  for (let k = 0; k < rest.length; k++) {
+    let flag = rest[k];
+    let value;
+    const eq = flag.indexOf('=');
+    if (flag.startsWith('--') && eq > 0) {
+      value = flag.slice(eq + 1);
+      flag = flag.slice(0, eq);
+    }
+    if (!Object.prototype.hasOwnProperty.call(PATH_SETTING_FLAGS, flag)) return false;
+    const check = PATH_SETTING_FLAGS[flag];
+    if (check === null) {
+      if (value !== undefined) return false;
+      continue;
+    }
+    if (value === undefined) value = rest[++k];
+    if (value === undefined || !check(value)) return false;
+    if (flag === '--env-add' && /_FILE=/.test(value)) fileSettings++;
   }
-  SECRET_PATH_SETTING_RE.lastIndex = 0;
-  return true;
+  return fileSettings > 0;
 }
 
 /** Commands that would dump an environment or print a secret file to stdout. */
