@@ -90,8 +90,18 @@ class TransformTests(unittest.TestCase):
         pretty = json.dumps([PUBLIC, INTERNAL], indent=4).encode()  # formatting differs, meaning does not
         new_raw, rep = T.transform(pretty, 2, 10, "1274", "isola-owner-manager@v1")
         self.assertTrue(rep["other_bindings_unchanged"] and rep["target_fields_unchanged"])
-        self.assertIn("re-parse", rep["serialization"])
+        self.assertTrue(rep["other_bindings_byte_equal"])
+        self.assertIn("verbatim", rep["serialization"])
         self.assertEqual(json.loads(new_raw)[0], PUBLIC)
+
+    def test_every_other_binding_is_kept_byte_for_byte(self):
+        a = json.dumps(PUBLIC, indent=2, ensure_ascii=True)
+        head = "[\n  " + a + " ,\n  "
+        raw = (head + json.dumps(INTERNAL) + "\n]\n").encode()
+        new_raw, rep = T.transform(raw, 2, 10, "1274", "isola-owner-manager@v1")
+        self.assertTrue(rep["other_bindings_byte_equal"])
+        self.assertTrue(new_raw.startswith(head.encode()))  # the other binding, spacing and all
+        self.assertTrue(new_raw.endswith(b"\n]\n"))
 
     def test_refuses_a_store_that_is_not_an_array_of_objects(self):
         with self.assertRaises(T.Refused):
@@ -102,7 +112,8 @@ class FakeDocker:
     """Dispatches docker CLI argv; records what was created and swapped."""
 
     def __init__(self, raw, validator_ok=True, secrets=("isola_gwint_bindings_v5",),
-                 fail_update=False, corrupt_new_mount=False):
+                 fail_update=False, corrupt_new_mount=False, swarm_rolls_back=False):
+        self.swarm_rolls_back = swarm_rolls_back
         self.fail_update = fail_update
         self.corrupt_new_mount = corrupt_new_mount
         self.image = "isola-gateway:vsp-da9a8df"
@@ -131,9 +142,11 @@ class FakeDocker:
             data = json.loads(stdin)
             if not self.validator_ok:
                 return json.dumps({"ok": False, "count": 0, "errorCount": 1, "senderTemplatesErrors": 0}).encode()
+            env = dict(x.split("=", 1) for x in a if x.startswith(("T_IDX=", "T_TPL=")))
+            tv = list(data[int(env["T_IDX"])].get("senderTemplates", {}).values())
             return json.dumps({"ok": True, "count": len(data), "errorCount": 0, "senderTemplatesErrors": 0,
                                "senderTemplateCounts": [len(b.get("senderTemplates", {})) for b in data],
-                               "templates": [list(b.get("senderTemplates", {}).values()) for b in data]}).encode()
+                               "targetCarriesTemplate": len(tv) == 1 and tv[0] == env["T_TPL"]}).encode()
         if a[:3] == ["docker", "secret", "ls"]:
             return "\n".join(self.secrets).encode()
         if a[:3] == ["docker", "secret", "create"]:
@@ -150,6 +163,9 @@ class FakeDocker:
             src = [x for x in a if x.startswith("source=")][0].split(",")[0][len("source="):]
             self.mounted = src
             self.container = "c%d" % (int(self.container[1:]) + 1)  # a new task per update
+            if self.swarm_rolls_back and src != "isola_gwint_bindings_v5":
+                self.mounted = "isola_gwint_bindings_v5"  # Swarm reverted before the tool looked
+                self.container = "c%d" % (int(self.container[1:]) + 1)
             return b"svc\n"
         raise AssertionError("unexpected docker call: " + " ".join(a[:3]))
 
@@ -225,9 +241,29 @@ class MainTests(unittest.TestCase):
         code, rep, _ = run_main(fake, ["--apply"])
         self.assertEqual(code, 2)
         self.assertFalse(rep["mounted_equals_validated"])
-        self.assertEqual(rep["auto_rollback"], "performed")
+        self.assertEqual(rep["auto_rollback"], "performed by this tool")
+        self.assertNotIn("isola_gwint_bindings_v6", fake.secrets)  # the unverified version is removed
         self.assertTrue(rep["rollback_restores_original"])
         self.assertEqual(fake.mounted, "isola_gwint_bindings_v5")
+
+    def test_swarm_auto_rollback_is_recognised_proven_and_cleaned_up(self):
+        fake = FakeDocker(store(PUBLIC, INTERNAL), swarm_rolls_back=True)
+        code, rep, _ = run_main(fake, ["--apply"])
+        self.assertEqual(code, 2)
+        self.assertEqual(rep["auto_rollback"], "Swarm had already rolled back")
+        self.assertTrue(rep["rollback_restores_original"])
+        self.assertNotIn("isola_gwint_bindings_v6", fake.secrets)
+        self.assertEqual(fake.mounted, "isola_gwint_bindings_v5")
+
+    def test_existing_routing_on_another_binding_is_kept_and_never_printed(self):
+        other = dict(PUBLIC, exposure="INTERNAL", chatwootInboxId=11,
+                     allowedSenders=["+1 767 555 2222"], senderTemplates={"+1 767 555 2222": "private-routing-token@v1"})
+        fake = FakeDocker(store(other, INTERNAL))
+        code, rep, text = run_main(fake, ["--apply"])
+        self.assertEqual(code, 0, rep)
+        self.assertEqual(rep["validator_new"]["senderTemplateCounts"], [1, 1])
+        self.assertNotIn("private-routing-token", text)
+        self.assertNotIn("555 2222", text)
 
     def test_refuses_bad_argument_shapes(self):
         for bad in (["--sender-last4", "12a4"], ["--template", "x y"], ["--new-secret", "a;b"]):
