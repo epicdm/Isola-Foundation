@@ -35,6 +35,7 @@
 import type { Exposure } from "./bindings.js";
 import type { SafeFetch } from "./egress.js";
 import { EgressBlockedError } from "./errors.js";
+import type { VerifiedPrincipal } from "./principal.js";
 
 export type RuntimeOutcome =
   | "ok"
@@ -70,6 +71,19 @@ export interface AgentRuntimeRequest {
   agentId: string;
   runId: string;
   context: Record<string, unknown>;
+  /**
+   * The VERIFIED sender of an INTERNAL delivery — see src/principal.ts.
+   *
+   * Sent as a TOP-LEVEL body field and deliberately NOT inside `context`. The
+   * runtime renders `context` verbatim into the model's user message, so a
+   * principal there would put the raw phone number in front of the brain. A
+   * top-level field is also ignored outright by a runtime that predates it,
+   * rather than leaking into the prompt.
+   *
+   * Absent on PUBLIC deliveries and on recovered deliveries; the body is then
+   * byte-for-byte what it was before this field existed.
+   */
+  principal?: VerifiedPrincipal;
 }
 
 /**
@@ -273,6 +287,7 @@ export class HttpAgentRuntime implements AgentRuntime {
           agentId: request.agentId,
           runId: request.runId,
           context: request.context,
+          ...(request.principal === undefined ? {} : { principal: request.principal }),
           // The open half of the contract. See the module doc comment.
           responseMode: "inline",
         }),

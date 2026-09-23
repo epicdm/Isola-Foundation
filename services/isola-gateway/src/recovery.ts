@@ -428,6 +428,11 @@ export function createSweeper(deps: RecoveryDeps): Sweeper {
       mode: resumingHandoff || verdict.action === "handoff" ? "handoff" : "answer",
       classification:
         resumingHandoff || verdict.action === "handoff" ? classifyNoText(payload) : null,
+      // NO PRINCIPAL, deliberately. `rebuildPayload` carries no sender phone,
+      // so a resumed delivery cannot be re-verified — and an identity that was
+      // not verified on THIS attempt is not carried from a previous one. The
+      // binding's default template answers; a per-sender override never does.
+      principal: null,
     };
 
     deps.logger.warn({

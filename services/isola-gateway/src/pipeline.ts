@@ -38,6 +38,7 @@ import type { Failpoint } from "./failpoint.js";
 import type { Ledger, SqlClient } from "./ledger.js";
 import type { Logger } from "./log.js";
 import type { AgentRuntime } from "./runtime.js";
+import { selectTemplateId, type VerifiedPrincipal } from "./principal.js";
 import {
   isReasonCode,
   suppressesAutomatedReply,
@@ -214,6 +215,14 @@ export interface DeliveryJob {
   mode: DeliveryMode;
   /** Present iff `mode === "handoff"`. */
   classification: NoTextClassification | null;
+  /**
+   * The verified sender, set by the webhook path ONLY after the INTERNAL
+   * allowlist admitted them (src/principal.ts). Absent on PUBLIC deliveries
+   * and on deliveries the recovery sweeper resumes — recovery cannot re-verify
+   * a sender, so a resumed delivery is served by the binding's default
+   * template, never by a per-sender override.
+   */
+  principal?: VerifiedPrincipal | null;
 }
 
 export interface PipelineDeps {
@@ -593,8 +602,23 @@ export async function processDelivery(
     historyTruncated: history?.truncated ?? false,
   });
 
+  // WHICH TEMPLATE. The binding's default, unless the VERIFIED sender has a
+  // per-sender override. Message content plays no part in either half.
+  const principal = job.principal ?? null;
+  const templateId = selectTemplateId(binding, principal);
+  if (templateId !== binding.templateId) {
+    deps.logger.info({
+      ...base,
+      event: "routing",
+      outcome: "sender_template_override",
+      // The template, never the number.
+      templateId,
+      defaultTemplateId: binding.templateId,
+    });
+  }
+
   const result = await deps.runtime.invoke({
-    templateId: binding.templateId,
+    templateId,
     // THE BINDING'S exposure, not a constant. A hardcoded "PUBLIC" here made
     // every INTERNAL invocation fail closed with 403 exposure_mismatch — see
     // the note on AgentRuntimeRequest.exposure in runtime.ts.
@@ -602,6 +626,7 @@ export async function processDelivery(
     agentId: binding.paperclipAgentId,
     runId,
     context: buildRuntimeContext(binding, payload, history),
+    ...(principal === null ? {} : { principal }),
   });
 
   // `result.outcome` has already been derived from the runtime's structured

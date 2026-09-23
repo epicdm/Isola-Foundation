@@ -135,7 +135,7 @@ describe("POST /v1/invoke auth", () => {
     const allowed = await get(server!.url, "/v1/templates", INTERNAL_SECRET);
     expect(allowed.status).toBe(200);
     const templates = allowed.json["templates"] as Array<Record<string, unknown>>;
-    expect(templates).toHaveLength(3);
+    expect(templates).toHaveLength(4);
     for (const t of templates) {
       expect(Object.keys(t)).not.toContain("systemPrompt");
       expect(t["id"]).toEqual(expect.any(String));
@@ -154,7 +154,7 @@ describe("POST /v1/invoke auth", () => {
     expect(res.status).toBe(200);
     expect(res.json["status"]).toBe("ok");
     expect(res.json["version"]).toEqual(expect.any(String));
-    expect(res.json["templates"]).toHaveLength(3);
+    expect(res.json["templates"]).toHaveLength(4);
     expect(res.json["egressAllowlist"]).toEqual([
       "api.deepseek.com",
       "paperclip.example.test",

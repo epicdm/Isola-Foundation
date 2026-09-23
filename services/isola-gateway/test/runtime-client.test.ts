@@ -77,6 +77,29 @@ describe("what the gateway sends", () => {
     expect(body["responseMode"]).toBe("inline");
   });
 
+  it("sends no principal key at all when the request carries none", async () => {
+    const { runtime, captured } = client(() => jsonResponse({ ok: true, outcome: "ok", text: "hi" }));
+    await runtime.invoke(REQUEST);
+    const body = JSON.parse(String(captured[0]?.init?.body)) as Record<string, unknown>;
+    expect(Object.keys(body)).not.toContain("principal");
+    // CONTROL: the body was captured and is the invoke body.
+    expect(body["templateId"]).toBe(REQUEST.templateId);
+  });
+
+  it("sends a verified principal TOP-LEVEL, never inside the rendered context", async () => {
+    const { runtime, captured } = client(() => jsonResponse({ ok: true, outcome: "ok", text: "hi" }));
+    const principal = {
+      channel: "whatsapp" as const,
+      senderE164: "+17675550100",
+      verifiedBy: "gateway-allowlist" as const,
+      bindingKey: "2/10",
+    };
+    await runtime.invoke({ ...REQUEST, exposure: "INTERNAL", principal });
+    const body = JSON.parse(String(captured[0]?.init?.body)) as Record<string, unknown>;
+    expect(body["principal"]).toEqual(principal);
+    expect(body["context"]).toEqual(REQUEST.context);
+  });
+
   it("fails closed with no bearer, without opening a socket", async () => {
     const { runtime, captured } = client(() => jsonResponse({}), null);
     const result = await runtime.invoke(REQUEST);

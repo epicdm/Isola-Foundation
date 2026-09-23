@@ -47,6 +47,7 @@ import {
 import { createLogger, type Logger } from "./log.js";
 import { buildIdempotencyKey, MeteringService, type MeteringOptions } from "./metering.js";
 import { createOpenAiCompatibleClient, type ModelClient } from "./model.js";
+import { parsePrincipal, principalUserId, PRINCIPAL_CHANNEL_HEADER } from "./principal.js";
 import type { TokenUsage } from "./money.js";
 import { createPaperclipApi, type PaperclipApi, type PaperclipCall } from "./paperclip.js";
 import {
@@ -91,6 +92,10 @@ export type Outcome =
   | "no_credential_configured"
   | "bad_request"
   | "unknown_template"
+  /** 400: a `principal` was sent but is malformed, or sent on a non-INTERNAL run. */
+  | "invalid_principal"
+  /** 400: the template requires a verified principal and none was sent. */
+  | "principal_required"
   | "exposure_mismatch"
   | "payload_too_large"
   | "model_timeout"
@@ -274,6 +279,12 @@ export interface InvokeRequestShape {
    * 400 — see `parseResponseMode`.
    */
   responseMode: unknown;
+  /**
+   * The verified sender, from the internal gateway (src/principal.ts). A
+   * top-level field and never part of `context`, which is rendered verbatim to
+   * the model. Absent on every request that predates it.
+   */
+  principal: unknown;
 }
 
 export function parseInvokeBody(raw: Buffer): InvokeRequestShape | null {
@@ -294,6 +305,7 @@ export function parseInvokeBody(raw: Buffer): InvokeRequestShape | null {
     runIdIssuedBy: body["runIdIssuedBy"],
     context: body["context"],
     responseMode: body["responseMode"],
+    principal: body["principal"],
   };
 }
 
@@ -840,6 +852,53 @@ export function createRuntime(deps: AppDeps): Runtime {
       return;
     }
 
+    // ---- the verified principal --------------------------------------------
+    // Checked AFTER the credential has decided exposure, so a PUBLIC caller
+    // cannot use a principal to learn anything, and BEFORE the brain or the
+    // budget is touched. Every refusal here costs no token.
+    const principalParse = parsePrincipal(body.principal);
+    if (principalParse.kind === "invalid") {
+      finish(
+        400,
+        "invalid_principal",
+        { error: "malformed principal" },
+        {
+          agentId,
+          runId,
+          templateId: template.id,
+          credentialExposure,
+          // The reason names the field that failed, never its value.
+          reason: principalParse.reason,
+        },
+        { completionState: "rejected", failureCategory: "invalid_principal" },
+      );
+      return;
+    }
+    const principal = principalParse.kind === "ok" ? principalParse.principal : null;
+    if (principal !== null && decision.exposure !== "INTERNAL") {
+      // A principal is verified by the INTERNAL allowlist. On a PUBLIC run it
+      // verifies nothing, and accepting it would let a public caller choose
+      // whose memory a brain files a conversation under.
+      finish(
+        400,
+        "invalid_principal",
+        { error: "a principal is only accepted on an INTERNAL invocation" },
+        { agentId, runId, templateId: template.id, credentialExposure },
+        { completionState: "rejected", failureCategory: "invalid_principal" },
+      );
+      return;
+    }
+    if (template.requiresPrincipal === true && principal === null) {
+      finish(
+        400,
+        "principal_required",
+        { error: "this template requires a verified principal" },
+        { agentId, runId, templateId: template.id, credentialExposure },
+        { completionState: "rejected", failureCategory: "principal_required" },
+      );
+      return;
+    }
+
     // ---- authorised: do the work synchronously ----------------------------
     const exposure = decision.exposure;
     const rendered = renderContext(body.context, template.maxContextBytes);
@@ -1206,6 +1265,14 @@ export function createRuntime(deps: AppDeps): Runtime {
             { role: "system", content: resolvedPrompt.prompt },
             { role: "user", content: userMessage },
           ],
+          // THE PRINCIPAL, as the brain may see it: a derived non-phone id and
+          // the channel name. The number itself never leaves this process.
+          ...(principal === null
+            ? {}
+            : {
+                user: principalUserId(principal),
+                headers: { [PRINCIPAL_CHANNEL_HEADER]: principal.channel },
+              }),
         });
         brainMs = now() - tBrainStart;
         status = "succeeded";
