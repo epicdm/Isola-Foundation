@@ -127,6 +127,7 @@ class FakeDocker:
         self.mounted = "isola_gwint_bindings_v5"
         self.container = "0000000000c1"
         self.task_secret_override = None  # a running task mounting something other than the spec
+        self.retag_on_swap = False  # the tag resolves to a DIFFERENT image once swapped
         self.secrets = list(secrets)
         self.validator_ok = validator_ok
         self.calls = []
@@ -140,7 +141,12 @@ class FakeDocker:
                 {"SecretName": self.mounted, "File": {"Name": "gateway_bindings"}}]}}}}]).encode()
         if a[:3] == ["docker", "service", "ps"]:
             return ("task-" + self.container).encode()
-        if a[:3] == ["docker", "inspect", "--type"]:
+        if a[:3] == ["docker", "image", "inspect"]:
+            return ("sha256:" + "a" * 64).encode()  # what the tag resolves to at validation
+        if a[:4] == ["docker", "inspect", "--type", "container"]:
+            moved = self.retag_on_swap and self.mounted != "isola_gwint_bindings_v5"
+            return ("sha256:" + ("b" if moved else "a") * 64).encode()
+        if a[:4] == ["docker", "inspect", "--type", "task"]:
             cid = a[4][len("task-"):]
             secret = self.task_secret_override or self.mounted
             return json.dumps([{"Status": {"State": "running", "ContainerStatus": {"ContainerID": cid}},
@@ -215,11 +221,10 @@ class MainTests(unittest.TestCase):
         self.assertIn("DRY RUN OK", rep["result"])
         self.assertFalse(any(c[:3] in (["docker", "secret", "create"], ["docker", "service", "update"]) for c in fake.calls))
         self.assertTrue(rep["validator_original"]["ok"] and rep["validator_new"]["ok"])
-        # validated with the image the SERVICE runs, not an operator-supplied one
-        self.assertEqual(set(fake.validated_images), {"isola-gateway:vsp-da9a8df"})
-        fake2 = FakeDocker(store(PUBLIC, INTERNAL)); fake2.image = "isola-gateway:other-build"
-        run_main(fake2)
-        self.assertEqual(set(fake2.validated_images), {"isola-gateway:other-build"})
+        # validated with the immutable id of the image the SERVICE runs
+        self.assertEqual(set(fake.validated_images), {"sha256:" + "a" * 64})
+        self.assertTrue(any(c[:3] == ["docker", "image", "inspect"] and c[-1] == "isola-gateway:vsp-da9a8df"
+                            for c in fake.calls))
 
     def test_apply_creates_a_new_version_swaps_and_proves_the_mount(self):
         fake = FakeDocker(store(PUBLIC, INTERNAL))
@@ -285,6 +290,20 @@ class MainTests(unittest.TestCase):
         swaps = [c for c in fake.calls if c[:3] == ["docker", "service", "update"]]
         self.assertEqual(len(swaps), 1)
         self.assertEqual(swaps[0][swaps[0].index("--image") + 1], "isola-gateway:vsp-da9a8df")
+
+    def test_a_tag_that_moves_to_another_image_is_caught_and_rolled_back(self):
+        fake = FakeDocker(store(PUBLIC, INTERNAL))
+        fake.retag_on_swap = True
+        code, rep, _ = run_main(fake, ["--apply"])
+        self.assertEqual(code, 2)
+        self.assertFalse(rep["image_unchanged"])
+        self.assertTrue(rep["rollback_restores_original"])
+        self.assertEqual(fake.mounted, "isola_gwint_bindings_v5")
+
+    def test_validation_runs_on_the_immutable_image_id_not_the_tag(self):
+        fake = FakeDocker(store(PUBLIC, INTERNAL))
+        run_main(fake)
+        self.assertEqual(set(fake.validated_images), {"sha256:" + "a" * 64})
 
     def test_a_swap_that_applies_but_exits_nonzero_is_judged_by_observed_state(self):
         fake = FakeDocker(store(PUBLIC, INTERNAL), fail_after_apply=True)

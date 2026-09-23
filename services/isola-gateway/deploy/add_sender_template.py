@@ -267,6 +267,21 @@ VALIDATOR_JS = (
 )
 
 
+def image_id(runner: Runner, ref: str) -> str:
+    """The immutable local image ID a (possibly mutable) tag resolves to NOW."""
+    out = runner(["docker", "image", "inspect", "--format", "{{.Id}}", ref], None).decode().strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", out):
+        raise Refused("could not resolve the service image to an immutable local image id")
+    return out
+
+
+def container_image_id(runner: Runner, container: str) -> str:
+    out = runner(["docker", "inspect", "--type", "container", "--format", "{{.Image}}", container], None).decode().strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", out):
+        raise Refused("could not read the running container's image id")
+    return out
+
+
 def service_state(runner: Runner, service: str) -> tuple:
     """(Swarm spec version index, image, mounted bindings secret): the triple a
     compare-and-swap check re-reads immediately before writing."""
@@ -350,10 +365,15 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
         new_raw, structure = transform(raw, a.account, a.inbox, a.sender_last4, a.template)
         report["structure"] = structure
         image = initial_state[1]
-        report["validator_image"] = image + " (the image the service runs)"
+        # Validate with the IMMUTABLE id the tag resolves to, never the tag: a
+        # mutable tag could name a different parser by the time the swap runs.
+        validated_id = image_id(runner, image)
+        if container_image_id(runner, container) != validated_id:
+            raise Refused("the running task's image id differs from what the service tag resolves to; refusing")
+        report["validator_image"] = image + " (the image the service runs, validated by immutable id)"
         t = structure["target_index"]
-        before = validate(runner, image, raw, t, a.template)
-        after = validate(runner, image, new_raw, t, a.template)
+        before = validate(runner, validated_id, raw, t, a.template)
+        after = validate(runner, validated_id, new_raw, t, a.template)
         keep = ("ok", "count", "errorCount", "senderTemplatesErrors", "senderTemplateCounts")
         report["validator_original"] = {k: before.get(k) for k in keep}
         report["validator_new"] = {k: after.get(k) for k in keep + ("targetCarriesTemplate",)}
@@ -419,8 +439,12 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
         verified = wait_and_compare(runner, a.service, a.new_secret, container, new_raw, sleep)
         report["mounted_equals_validated"] = verified
         image_after = service_image(runner, a.service)
-        report["image_unchanged"] = image_after == image
-        if verified is True and image_after == image:
+        try:
+            running_id = container_image_id(runner, task_container(runner, a.service, a.new_secret))
+        except Refused:
+            running_id = None
+        report["image_unchanged"] = image_after == image and running_id == validated_id
+        if verified is True and report["image_unchanged"]:
             report["result"] = "APPLIED: new secret mounted, byte-equal to the validated store, same image"
             return 0
 
