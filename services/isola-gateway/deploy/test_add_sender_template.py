@@ -128,6 +128,7 @@ class FakeDocker:
         self.container = "0000000000c1"
         self.task_secret_override = None  # a running task mounting something other than the spec
         self.retag_on_swap = False  # the tag resolves to a DIFFERENT image once swapped
+        self.tags = {}
         self.secrets = list(secrets)
         self.validator_ok = validator_ok
         self.calls = []
@@ -141,7 +142,12 @@ class FakeDocker:
                 {"SecretName": self.mounted, "File": {"Name": "gateway_bindings"}}]}}}}]).encode()
         if a[:3] == ["docker", "service", "ps"]:
             return ("task-" + self.container).encode()
+        if a[:2] == ["docker", "tag"]:
+            self.tags[a[3]] = a[2]
+            return b""
         if a[:3] == ["docker", "image", "inspect"]:
+            if a[-1] in self.tags:
+                return self.tags[a[-1]].encode()
             return ("sha256:" + "a" * 64).encode()  # what the tag resolves to at validation
         if a[:4] == ["docker", "inspect", "--type", "container"]:
             moved = self.retag_on_swap and self.mounted != "isola_gwint_bindings_v5"
@@ -183,6 +189,8 @@ class FakeDocker:
         if a[:3] == ["docker", "service", "update"]:
             src = [x for x in a if x.startswith("source=")][0].split(",")[0][len("source="):]
             rollback = src == "isola_gwint_bindings_v5"
+            if "--image" in a:
+                self.image = a[a.index("--image") + 1]
             if self.fail_update:
                 raise T.Refused("command failed (docker service, exit 1)")
             if rollback and self.rollback_failures > 0:
@@ -289,7 +297,10 @@ class MainTests(unittest.TestCase):
         self.assertEqual(code, 0, rep)
         swaps = [c for c in fake.calls if c[:3] == ["docker", "service", "update"]]
         self.assertEqual(len(swaps), 1)
-        self.assertEqual(swaps[0][swaps[0].index("--image") + 1], "isola-gateway:vsp-da9a8df")
+        pinned = swaps[0][swaps[0].index("--image") + 1]
+        self.assertEqual(pinned, "isola-gateway:bt-" + "a" * 12)  # a tag this tool made from the validated id
+        self.assertEqual(fake.tags[pinned], "sha256:" + "a" * 64)
+        self.assertTrue(rep["image_unchanged"])
 
     def test_a_tag_that_moves_to_another_image_is_caught_and_rolled_back(self):
         fake = FakeDocker(store(PUBLIC, INTERNAL))

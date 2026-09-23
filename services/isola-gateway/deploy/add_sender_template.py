@@ -407,12 +407,22 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
         if service_state(runner, a.service) != initial_state:
             _remove_new_secret(runner, a.new_secret, report)
             raise Refused("the service changed while the new secret was being created; nothing was swapped, re-run")
-        # The swap also PINS the validated image, so the new bytes can only go
-        # live under the parser that validated them. Swarm's CLI has no
-        # compare-and-swap on the spec version, so after the re-check above the
-        # pin is a no-op in every case except a concurrent redeploy in the
-        # final milliseconds, where it keeps the service consistent.
-        swap = ["docker", "service", "update", "--quiet", "--image", image,
+        # The swap PINS the validated image by a tag this tool creates from the
+        # immutable id, unique to that id, so nothing else can move it. The new
+        # bytes can therefore only go live under the parser that validated
+        # them, even if the service's own tag moves in the last milliseconds
+        # (Swarm's CLI has no compare-and-swap on the spec version). Same
+        # image bytes as before; only the spec's image string changes.
+        repo = image.rsplit(":", 1)[0] if ":" in image.rsplit("/", 1)[-1] else image
+        pinned = f"{repo}:bt-{validated_id[len('sha256:'):len('sha256:') + 12]}"
+        if not re.fullmatch(r"[A-Za-z0-9_.:/-]+", pinned):
+            raise Refused("could not form a pinned image reference")
+        runner(["docker", "tag", validated_id, pinned], None)
+        if image_id(runner, pinned) != validated_id:
+            _remove_new_secret(runner, a.new_secret, report)
+            raise Refused("the pinned tag does not resolve to the validated image id; nothing was swapped")
+        report["pinned_image"] = pinned
+        swap = ["docker", "service", "update", "--quiet", "--image", pinned,
                 "--secret-rm", current,
                 "--secret-add", f"source={a.new_secret},target={MOUNT_TARGET}",
                 "--update-failure-action", "rollback", "--update-monitor", "30s", a.service]
@@ -443,7 +453,7 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
             running_id = container_image_id(runner, task_container(runner, a.service, a.new_secret))
         except Refused:
             running_id = None
-        report["image_unchanged"] = image_after == image and running_id == validated_id
+        report["image_unchanged"] = image_after == pinned and running_id == validated_id
         if verified is True and report["image_unchanged"]:
             report["result"] = "APPLIED: new secret mounted, byte-equal to the validated store, same image"
             return 0
