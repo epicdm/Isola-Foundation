@@ -77,11 +77,30 @@ def canonical(obj: object) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def service_container(runner: Runner, service: str) -> str:
-    out = runner(["docker", "ps", "-q", "-f", f"name={service}"], None).decode().split()
-    if len(out) != 1:
-        raise Refused(f"expected exactly 1 running container for {service}, found {len(out)}")
-    return out[0]
+def task_container(runner: Runner, service: str, secret: str) -> str:
+    """The container of the ONE running Swarm task of `service`, proven from
+    Swarm's own task records (not a container-name match) to mount `secret`
+    at the bindings target. Refuses if no running task, several, or any
+    running task mounting something else (a rolling update in flight)."""
+    ids = runner(["docker", "service", "ps", service, "-q", "--no-trunc",
+                  "--filter", "desired-state=running"], None).decode().split()
+    running = []
+    for tid in ids:
+        task = json.loads(runner(["docker", "inspect", "--type", "task", tid], None))[0]
+        if task.get("Status", {}).get("State") != "running":
+            continue
+        secrets = task["Spec"]["ContainerSpec"].get("Secrets") or []
+        mounted = [s["SecretName"] for s in secrets if s.get("File", {}).get("Name") == MOUNT_TARGET]
+        cid = task.get("Status", {}).get("ContainerStatus", {}).get("ContainerID")
+        running.append((mounted, cid))
+    if len(running) != 1:
+        raise Refused(f"expected exactly 1 running task for {service}, found {len(running)}")
+    mounted, cid = running[0]
+    if mounted != [secret]:
+        raise Refused("the running task does not mount the expected secret (a rolling update may be in flight)")
+    if not cid or not re.fullmatch(r"[0-9a-f]{12,64}", cid):
+        raise Refused("the running task has no local container id")
+    return cid
 
 
 def mounted_secret(runner: Runner, service: str) -> str:
@@ -271,13 +290,13 @@ def validate(runner: Runner, image: str, raw: bytes, target_index: int, template
 
 def wait_and_compare(runner: Runner, service: str, secret: str, old_container: str | None,
                      expected: bytes, sleep: Callable[[float], None]):
-    """Wait until the service mounts `secret` in a task other than
-    `old_container` (any task if None), then compare its store to `expected`.
-    True/False, or None on timeout."""
+    """Wait until exactly one running task mounts `secret` (proven from the
+    task record), in a container other than `old_container` (any if None),
+    then compare its store to `expected`. True/False, or None on timeout."""
     for _ in range(30):
         try:
             if mounted_secret(runner, service) == secret:
-                c = service_container(runner, service)
+                c = task_container(runner, service, secret)
                 if old_container is None or c != old_container:
                     return read_store(runner, c) == expected
         except Refused:
@@ -324,7 +343,7 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
         if a.new_secret == current:
             raise Refused("--new-secret must differ from the current secret")
         report["current_secret"] = current
-        container = service_container(runner, a.service)
+        container = task_container(runner, a.service, current)
         raw = read_store(runner, container)
         new_raw, structure = transform(raw, a.account, a.inbox, a.sender_last4, a.template)
         report["structure"] = structure
@@ -382,6 +401,7 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
             _remove_new_secret(runner, a.new_secret, report)
             raise Refused("the swap did not take effect; the service is on the original secret")
         if mounted_now != a.new_secret:
+            _remove_new_secret(runner, a.new_secret, report)  # best effort: it is unreferenced here
             raise Refused("the service mounts an UNEXPECTED secret after the swap; inspect it now")
 
         verified = wait_and_compare(runner, a.service, a.new_secret, container, new_raw, sleep)

@@ -125,7 +125,8 @@ class FakeDocker:
         self.validated_images = []
         self.stores = {"isola_gwint_bindings_v5": raw}
         self.mounted = "isola_gwint_bindings_v5"
-        self.container = "c1"
+        self.container = "0000000000c1"
+        self.task_secret_override = None  # a running task mounting something other than the spec
         self.secrets = list(secrets)
         self.validator_ok = validator_ok
         self.calls = []
@@ -137,8 +138,14 @@ class FakeDocker:
             return json.dumps([{"Version": {"Index": self.version},
                                 "Spec": {"TaskTemplate": {"ContainerSpec": {"Image": self.image, "Secrets": [
                 {"SecretName": self.mounted, "File": {"Name": "gateway_bindings"}}]}}}}]).encode()
-        if a[:3] == ["docker", "ps", "-q"]:
-            return (self.container + "\n").encode()
+        if a[:3] == ["docker", "service", "ps"]:
+            return ("task-" + self.container).encode()
+        if a[:3] == ["docker", "inspect", "--type"]:
+            cid = a[4][len("task-"):]
+            secret = self.task_secret_override or self.mounted
+            return json.dumps([{"Status": {"State": "running", "ContainerStatus": {"ContainerID": cid}},
+                                "Spec": {"ContainerSpec": {"Secrets": [
+                                    {"SecretName": secret, "File": {"Name": "gateway_bindings"}}]}}}]).encode()
         if a[:2] == ["docker", "exec"]:
             if self.corrupt_new_mount and self.mounted != "isola_gwint_bindings_v5":
                 return self.stores[self.mounted] + b" "
@@ -178,12 +185,12 @@ class FakeDocker:
             self.version += 1
             self.mounted = src
             if self.fail_after_apply and not rollback:
-                self.container = "c%d" % (int(self.container[1:]) + 1)
+                self.container = "%012x" % (int(self.container, 16) + 1)
                 raise T.Refused("command failed (docker service, exit 1)")
-            self.container = "c%d" % (int(self.container[1:]) + 1)  # a new task per update
+            self.container = "%012x" % (int(self.container, 16) + 1)  # a new task per update
             if self.swarm_rolls_back and src != "isola_gwint_bindings_v5":
                 self.mounted = "isola_gwint_bindings_v5"  # Swarm reverted before the tool looked
-                self.container = "c%d" % (int(self.container[1:]) + 1)
+                self.container = "%012x" % (int(self.container, 16) + 1)
             return b"svc\n"
         raise AssertionError("unexpected docker call: " + " ".join(a[:3]))
 
@@ -254,6 +261,14 @@ class MainTests(unittest.TestCase):
         self.assertNotIn("isola_gwint_bindings_v6", fake.secrets)
         self.assertEqual(rep["mounted_after_swap"], "original")
         self.assertTrue(rep["original_bytes_still_mounted"])
+
+    def test_a_rolling_update_in_flight_refuses_before_reading(self):
+        fake = FakeDocker(store(PUBLIC, INTERNAL))
+        fake.task_secret_override = "isola_gwint_bindings_v4"  # spec says v5, the running task still mounts v4
+        code, rep, _ = run_main(fake, ["--apply"])
+        self.assertEqual(code, 2)
+        self.assertIn("rolling update", rep["refused"])
+        self.assertFalse(any(c[:2] == ["docker", "exec"] for c in fake.calls))
 
     def test_a_redeploy_between_validation_and_write_refuses_before_any_write(self):
         fake = FakeDocker(store(PUBLIC, INTERNAL), redeploy_during_validation=True)
