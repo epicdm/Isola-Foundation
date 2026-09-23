@@ -47,6 +47,7 @@ import type { ConversationRef, OwnershipGate } from "./ownership.js";
 import { recordHumanReply } from "./ownership-store.js";
 import { constantTimeEquals } from "./signature.js";
 import { checkSender } from "./allowlist.js";
+import { derivePrincipal } from "./principal.js";
 import { classifyTurn, recordTurn } from "./turns.js";
 import { createLogger, type Logger } from "./log.js";
 import { processDelivery, type DeliveryJob, type DeliveryMode } from "./pipeline.js";
@@ -1097,6 +1098,11 @@ export function createGateway(deps: GatewayDeps): Gateway {
       startedAtMs: startedAt,
       mode: decision.mode,
       classification: decision.classification,
+      // THE VERIFIED PRINCIPAL. Derived from the webhook's sender field — the
+      // same field the INTERNAL allowlist gate above matched — by a function
+      // that re-runs that gate itself, so it cannot exist for a sender the
+      // gate would refuse. Null on PUBLIC bindings. Never read from content.
+      principal: derivePrincipal(decision.binding, decision.payload.senderPhone),
     };
 
     // ---- ACK NOW. Everything below this line is asynchronous. --------------

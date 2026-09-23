@@ -47,6 +47,15 @@ import {
 import { createLogger, type Logger } from "./log.js";
 import { buildIdempotencyKey, MeteringService, type MeteringOptions } from "./metering.js";
 import { createOpenAiCompatibleClient, type ModelClient } from "./model.js";
+import {
+  parsePrincipal,
+  principalUserId,
+  principalUserKey,
+  verifyPrincipal,
+  PrincipalReplayGuard,
+  PRINCIPAL_CHANNEL_HEADER,
+  type VerifiedPrincipal,
+} from "./principal.js";
 import type { TokenUsage } from "./money.js";
 import { createPaperclipApi, type PaperclipApi, type PaperclipCall } from "./paperclip.js";
 import {
@@ -91,6 +100,16 @@ export type Outcome =
   | "no_credential_configured"
   | "bad_request"
   | "unknown_template"
+  /** 400: a `principal` was sent but is malformed, or sent on a non-INTERNAL run. */
+  | "invalid_principal"
+  /** 400: the template requires a verified principal and none was sent. */
+  | "principal_required"
+  /** 400: the template requires a principal and the one sent failed authentication. */
+  | "principal_unverified"
+  /** 400: the template requires a principal and this one's nonce was already accepted. */
+  | "principal_replayed"
+  /** Logged only: an unauthenticated principal on a template that does not need one was dropped. */
+  | "principal_ignored"
   | "exposure_mismatch"
   | "payload_too_large"
   | "model_timeout"
@@ -128,6 +147,8 @@ export interface AppDeps {
   instructions?: InstructionsProvider;
   now?: () => number;
   newCorrelationId?: () => string;
+  /** Injectable so a test can bound or inspect it; defaults to a fresh per-process guard. */
+  principalReplayGuard?: PrincipalReplayGuard;
 }
 
 export type Handler = (req: IncomingMessage, res: ServerResponse) => void;
@@ -274,6 +295,12 @@ export interface InvokeRequestShape {
    * 400 — see `parseResponseMode`.
    */
   responseMode: unknown;
+  /**
+   * The verified sender, from the internal gateway (src/principal.ts). A
+   * top-level field and never part of `context`, which is rendered verbatim to
+   * the model. Absent on every request that predates it.
+   */
+  principal: unknown;
 }
 
 export function parseInvokeBody(raw: Buffer): InvokeRequestShape | null {
@@ -294,6 +321,7 @@ export function parseInvokeBody(raw: Buffer): InvokeRequestShape | null {
     runIdIssuedBy: body["runIdIssuedBy"],
     context: body["context"],
     responseMode: body["responseMode"],
+    principal: body["principal"],
   };
 }
 
@@ -386,6 +414,17 @@ export function createRuntime(deps: AppDeps): Runtime {
    * error rather than silently falling back to the default provider — sending a
    * staff conversation to the customer brain is precisely the defect this fixes.
    */
+  // The key for the brain-facing `user` id, derived once. A verified principal
+  // implies a signing key, so this is non-null whenever it is used.
+  const brainUserKey = principalUserKey({
+    userKey: config.principalUserKey,
+    signingKey: config.principalSigningKey,
+  });
+
+  // One acceptance per principal nonce, per process. See PrincipalReplayGuard
+  // for why per-process is acceptable (the freshness window bounds it).
+  const principalReplayGuard = deps.principalReplayGuard ?? new PrincipalReplayGuard();
+
   const overrideClients = new Map<string, ModelClient>();
   const clientForTemplate = (template: TemplateEntry): ModelClient => {
     const base = template.modelBaseUrl;
@@ -840,10 +879,139 @@ export function createRuntime(deps: AppDeps): Runtime {
       return;
     }
 
+    // ---- the verified principal --------------------------------------------
+    // Checked AFTER the credential has decided exposure, so a PUBLIC caller
+    // cannot use a principal to learn anything, and BEFORE the brain or the
+    // budget is touched. Every refusal here costs no token.
+    const principalParse = parsePrincipal(body.principal);
+    if (principalParse.kind === "invalid") {
+      finish(
+        400,
+        "invalid_principal",
+        { error: "malformed principal" },
+        {
+          agentId,
+          runId,
+          templateId: template.id,
+          credentialExposure,
+          // The reason names the field that failed, never its value.
+          reason: principalParse.reason,
+        },
+        { completionState: "rejected", failureCategory: "invalid_principal" },
+      );
+      return;
+    }
+    const principalClaim = principalParse.kind === "ok" ? principalParse.claim : null;
+    if (principalClaim !== null && decision.exposure !== "INTERNAL") {
+      // A principal is verified by the INTERNAL allowlist. On a PUBLIC run it
+      // verifies nothing, and accepting it would let a public caller choose
+      // whose memory a brain files a conversation under.
+      finish(
+        400,
+        "invalid_principal",
+        { error: "a principal is only accepted on an INTERNAL invocation" },
+        { agentId, runId, templateId: template.id, credentialExposure },
+        { completionState: "rejected", failureCategory: "invalid_principal" },
+      );
+      return;
+    }
+    // AUTHENTICATE. The INTERNAL credential is shared by every INTERNAL caller,
+    // so a claim is only a principal once the gateway's HMAC checks out, it is
+    // fresh, bound to THIS run id and to THIS context — and accepted once.
+    let principal: VerifiedPrincipal | null = null;
+    if (principalClaim !== null) {
+      const verification = verifyPrincipal(principalClaim, {
+        key: config.principalSigningKey,
+        runId,
+        nowSec: Math.floor(now() / 1000),
+        context: body.context,
+      });
+      // REPLAY. Only an otherwise-valid principal consumes its nonce, so a
+      // forged one cannot burn a real run's id.
+      // A byte-identical retry (same contextSha256 + signature) passes through to
+      // the run-id idempotency gate below, which returns the STORED outcome or
+      // reports the original in flight — the brain is never called twice. Only
+      // different content under an already-accepted run id is refused.
+      const replay =
+        verification.kind === "verified" && runId !== null
+          ? principalReplayGuard.accept(
+              runId,
+              `${principalClaim.contextSha256 ?? ""}:${principalClaim.signature ?? ""}`,
+              now(),
+            )
+          : null;
+      if (verification.kind === "verified" && replay !== "accepted" && replay !== "retry") {
+        if (template.requiresPrincipal === true) {
+          finish(
+            400,
+            "principal_replayed",
+            { error: "this principal has already been accepted" },
+            {
+              agentId,
+              runId,
+              templateId: template.id,
+              credentialExposure,
+              // replayed | full (the per-process set is at capacity)
+              reason: replay ?? "no_run_id",
+            },
+            { completionState: "rejected", failureCategory: "principal_replayed" },
+          );
+          return;
+        }
+        logger.warn({
+          event: "invoke",
+          correlationId,
+          runId,
+          templateId: template.id,
+          outcome: "principal_ignored",
+          reason: replay === "full" ? "replay_guard_full" : "replayed",
+        });
+      } else if (verification.kind === "verified") {
+        principal = verification.principal;
+      } else if (template.requiresPrincipal === true) {
+        finish(
+          400,
+          "principal_unverified",
+          { error: "the principal could not be authenticated" },
+          {
+            agentId,
+            runId,
+            templateId: template.id,
+            credentialExposure,
+            // unsigned | bad_signature | stale | nonce_mismatch | context_mismatch | no_key — never a value.
+            reason: verification.reason,
+          },
+          { completionState: "rejected", failureCategory: "principal_unverified" },
+        );
+        return;
+      } else {
+        // IGNORED, exactly as if it had not been sent: an unauthenticated claim
+        // must not shape what the brain receives. Logged so it is not silent.
+        logger.warn({
+          event: "invoke",
+          correlationId,
+          runId,
+          templateId: template.id,
+          outcome: "principal_ignored",
+          reason: verification.reason,
+        });
+      }
+    }
+    if (template.requiresPrincipal === true && principal === null) {
+      finish(
+        400,
+        "principal_required",
+        { error: "this template requires a verified principal" },
+        { agentId, runId, templateId: template.id, credentialExposure },
+        { completionState: "rejected", failureCategory: "principal_required" },
+      );
+      return;
+    }
+
     // ---- authorised: do the work synchronously ----------------------------
     const exposure = decision.exposure;
     const rendered = renderContext(body.context, template.maxContextBytes);
-    const model = config.modelNameOverride ?? template.model;
+    const model = template.pinModel ? template.model : (config.modelNameOverride ?? template.model);
     resolvedModel = model;
     // The tighter of the template deadline and the operator deadline wins.
     const timeoutMs = Math.min(template.timeoutMs, config.modelTimeoutMs);
@@ -1206,6 +1374,14 @@ export function createRuntime(deps: AppDeps): Runtime {
             { role: "system", content: resolvedPrompt.prompt },
             { role: "user", content: userMessage },
           ],
+          // THE PRINCIPAL, as the brain may see it: a derived non-phone id and
+          // the channel name. The number itself never leaves this process.
+          ...(principal === null
+            ? {}
+            : {
+                ...(brainUserKey === null ? {} : { user: principalUserId(principal, brainUserKey) }),
+                headers: { [PRINCIPAL_CHANNEL_HEADER]: principal.channel },
+              }),
         });
         brainMs = now() - tBrainStart;
         status = "succeeded";

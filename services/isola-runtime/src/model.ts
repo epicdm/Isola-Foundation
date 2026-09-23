@@ -21,6 +21,17 @@ export interface ModelRequest {
   model: string;
   messages: ChatMessage[];
   timeoutMs: number;
+  /**
+   * The OpenAI-compatible `user` field. Only ever a derived, non-phone id (see
+   * src/principal.ts). Absent means the key is not sent at all, so a request
+   * without a principal is byte-for-byte what it was before this field existed.
+   */
+  user?: string;
+  /**
+   * Extra, NON-CREDENTIAL request headers. Cannot replace the fixed headers:
+   * they are applied first and the fixed ones win.
+   */
+  headers?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -118,6 +129,8 @@ function extractContent(payload: unknown): {
   };
 }
 
+const FIXED_HEADERS: ReadonlySet<string> = new Set(["content-type", "accept", "authorization"]);
+
 export function createOpenAiCompatibleClient(
   options: OpenAiCompatibleClientOptions,
 ): ModelClient {
@@ -143,6 +156,14 @@ export function createOpenAiCompatibleClient(
         response = await options.safeFetch(url, {
           method: "POST",
           headers: {
+            // Extras first, and filtered case-insensitively, so none of them can
+            // override or duplicate the three below — least of all
+            // `authorization`.
+            ...Object.fromEntries(
+              Object.entries(request.headers ?? {}).filter(
+                ([name]) => !FIXED_HEADERS.has(name.toLowerCase()),
+              ),
+            ),
             "content-type": "application/json",
             accept: "application/json",
             authorization: `Bearer ${options.apiKey}`,
@@ -151,6 +172,7 @@ export function createOpenAiCompatibleClient(
             model: request.model,
             messages: request.messages,
             stream: false,
+            ...(request.user === undefined ? {} : { user: request.user }),
           }),
           signal: controller.signal,
         });
