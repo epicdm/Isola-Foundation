@@ -103,6 +103,13 @@ class TransformTests(unittest.TestCase):
         self.assertTrue(new_raw.startswith(head.encode()))  # the other binding, spacing and all
         self.assertTrue(new_raw.endswith(b"\n]\n"))
 
+    def test_an_empty_sendertemplates_map_is_filled_not_refused(self):
+        empty = dict(INTERNAL, senderTemplates={})
+        new_raw, rep = T.transform(store(PUBLIC, empty), 2, 10, "1274", "isola-owner-manager@v1")
+        self.assertEqual(json.loads(new_raw)[1]["senderTemplates"], {OWNER: "isola-owner-manager@v1"})
+        self.assertEqual(rep["keys_added"], [])
+        self.assertTrue(rep["target_fields_unchanged"])
+
     def test_refuses_a_store_that_is_not_an_array_of_objects(self):
         with self.assertRaises(T.Refused):
             T.transform(b'{"a":1}', 2, 10, "1274", "isola-owner-manager@v1")
@@ -384,6 +391,23 @@ class MainTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertFalse(rep["validator_new"]["targetKeyIsSelectedSender"])
         self.assertFalse(any(c[:3] == ["docker", "secret", "create"] for c in fake.calls))
+
+    def test_a_create_that_commits_but_exits_nonzero_is_found_and_removed(self):
+        fake = FakeDocker(store(PUBLIC, INTERNAL))
+        real = fake.__call__
+        def create_then_fail(argv, stdin):
+            if argv[:3] == ["docker", "secret", "create"]:
+                real(argv, stdin)  # the manager commits it...
+                raise T.Refused("command failed (docker secret, exit 1)")  # ...and the client fails
+            return real(argv, stdin)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = T.main(ARGS + ["--apply"], runner=create_then_fail, sleep=lambda s: None)
+        rep = json.loads(buf.getvalue())
+        self.assertEqual(code, 2)
+        self.assertNotIn("isola_gwint_bindings_v6", fake.secrets)
+        self.assertEqual(rep["cleanup"], "the unused new secret was removed")
+        self.assertEqual(fake.mounted, "isola_gwint_bindings_v5")
 
     def test_the_validator_joins_bytes_before_decoding(self):
         self.assertIn("Buffer.concat", T.VALIDATOR_JS)

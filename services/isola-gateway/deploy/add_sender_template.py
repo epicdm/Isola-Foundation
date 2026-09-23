@@ -229,8 +229,11 @@ def transform(raw: bytes, account: int, inbox: int, last4: str, template: str) -
     # Equality proofs, value-free: other bindings byte-equal AND parse-equal.
     others_equal = prefix_equal and suffix_equal and all(
         canonical(data[i]) == canonical(new[i]) for i in range(len(data)) if i != t)
+    # senderTemplates is the ONE field allowed to differ: absent before (a key
+    # is added) or present-but-empty before (its value is filled). Every other
+    # field must be equal.
     before_keys, after_keys = set(target), set(new[t])
-    unchanged = {k: (target[k] == new[t][k]) for k in sorted(before_keys & after_keys)}
+    unchanged = {k: (target[k] == new[t][k]) for k in sorted((before_keys & after_keys) - {"senderTemplates"})}
     report = {
         "bindings": len(data),
         "target_index": t,
@@ -249,7 +252,9 @@ def transform(raw: bytes, account: int, inbox: int, last4: str, template: str) -
         "other_bindings_byte_equal": prefix_equal and suffix_equal,
         "serialization": "only the target binding's text is replaced; all other bytes verbatim",
     }
-    if report["keys_added"] != ["senderTemplates"] or report["keys_removed"] or not report["target_fields_unchanged"] or not others_equal:
+    added_ok = report["keys_added"] == ["senderTemplates"] or (
+        report["keys_added"] == [] and target.get("senderTemplates") == {})
+    if not added_ok or report["keys_removed"] or not report["target_fields_unchanged"] or not others_equal:
         raise Refused("structural check failed: " + canonical({k: report[k] for k in ("keys_added", "keys_removed", "target_fields_unchanged", "other_bindings_unchanged")}))
     return new_raw, report
 
@@ -460,7 +465,24 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
         # immediately before the first write, and refuse if any moved.
         if service_state(runner, a.service) != initial_state:
             raise Refused("the service changed (spec version, image or mounted secret) since validation; re-run")
-        runner(["docker", "secret", "create", a.new_secret, "-"], new_raw)
+        try:
+            runner(["docker", "secret", "create", a.new_secret, "-"], new_raw)
+        except Refused:
+            # A non-zero exit does not prove nothing was created (the manager
+            # may have committed it before the client failed). Look, and
+            # remove it if it exists, before refusing.
+            try:
+                now = runner(["docker", "secret", "ls", "--format", "{{.Name}}"], None).decode().split()
+            except Refused:
+                now = None
+            if now is None:
+                report["created"] = a.new_secret
+                report["cleanup"] = "secret create failed and its existence could not be checked; check and remove it by hand"
+            elif a.new_secret in now:
+                report["created"] = a.new_secret
+                _remove_new_secret(runner, a.new_secret, report)
+            report["handled"] = True
+            raise Refused("docker secret create failed; nothing was swapped")
         report["created"] = a.new_secret
         report["_raw"] = raw
         report["rollback_command"] = (f"sudo docker service update --secret-rm {a.new_secret} "
