@@ -304,6 +304,20 @@ const cases = [
       tool_input: { command: "ssh -o BatchMode=yes epicadmin@66.118.37.110 'sudo docker service update --image isola-runtime:vsp-da9a8df --update-failure-action rollback isolart_runtime'" } },
   },
   {
+    name: 'BLOCKED (Codex #152 r3): a non-_FILE env value that is an @file operand on the secret',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: { session_id: SID, tool_name: 'Bash',
+      tool_input: { command: 'docker service update --env-add K_FILE=/run/secrets/k --env-add CURL_DATA=@/run/secrets/k leaker' } },
+  },
+  {
+    name: 'BLOCKED: path-setting plus ANY plain env change is outside the exemption',
+    expect: BLOCK,
+    contains: 'orchestrator-secret-store-read',
+    payload: { session_id: SID, tool_name: 'Bash',
+      tool_input: { command: 'docker service update --env-add K_FILE=/run/secrets/k --env-add LOG_LEVEL=debug svc' } },
+  },
+  {
     name: 'BLOCKED: a --health-cmd with no substitution at all is still not an allowed flag',
     expect: BLOCK,
     contains: 'orchestrator-secret-store-read',

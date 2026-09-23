@@ -447,8 +447,12 @@ const SECRET_FILE_EXEMPT_RE = /\.(example|sample|template|dist)$|\.example\.|\.s
  *   runs code or exposes files with the secret mounted.
  * - `--secret-add` must be source=<name>,target=<plain-name>; a target that is
  *   a path is refused.
- * - `--env-add` is NAME_FILE=<secret mount>/<plain-name> or NAME=<plain value
- *   naming no secret mount>, and at least one _FILE path-setting is required.
+ * - `--env-add` must be NAME_FILE=<secret mount>/<plain-name>, and nothing
+ *   else; at least one is required.
+ * OUT OF SCOPE, deliberately: which secret is attached to which service.
+ * `--secret-add source=<any>,target=<name>` without a path is already allowed,
+ * because rule 1a never governed it; this exemption neither widens nor
+ * narrows that.
  * Anything that does not parse is NOT exempt and keeps the original deny.
  */
 const PATH_SETTING_SAFE_CHARS_RE = /^[A-Za-z0-9_.,:=@\/+ -]+$/;
@@ -466,11 +470,13 @@ const PATH_SETTING_FLAGS = {
   '--secret-add': (v) => /^source=[A-Za-z0-9_.-]+,target=[A-Za-z0-9_.-]+$/.test(v),
   '--secret-rm': (v) => PLAIN_NAME_RE.test(v),
   '--env-rm': (v) => /^[A-Z][A-Z0-9_]*$/.test(v),
+  // ONLY `NAME_FILE=<secret mount>/<plain-name>`. Any other env value is
+  // refused, however plain: Codex (#152 r3) showed `CURL_DATA=@/run/secrets/k`
+  // is a read in the hands of a curl-style consumer. A plain env change needs
+  // no exemption, because it carries no secret path.
   '--env-add': (v) => {
-    const m = /^([A-Z][A-Z0-9_]*)=(.*)$/.exec(v);
-    if (!m) return false;
-    if (/_FILE$/.test(m[1])) return SECRET_MOUNT_VALUE_RE.test(m[2]);
-    return /^[A-Za-z0-9_.:@\/+-]*$/.test(m[2]) && !SECRET_STORE_PATH_RE.test(' ' + m[2]);
+    const m = /^([A-Z][A-Z0-9_]*_FILE)=(.*)$/.exec(v);
+    return !!m && SECRET_MOUNT_VALUE_RE.test(m[2]);
   },
   '--update-failure-action': (v) => /^(pause|continue|rollback)$/.test(v),
   '--update-monitor': (v) => DURATION_RE.test(v),
