@@ -246,6 +246,13 @@ VALIDATOR_JS = (
 )
 
 
+def service_state(runner: Runner, service: str) -> tuple:
+    """(Swarm spec version index, image, mounted bindings secret): the triple a
+    compare-and-swap check re-reads immediately before writing."""
+    spec = json.loads(runner(["docker", "service", "inspect", service], None))[0]
+    return (spec.get("Version", {}).get("Index"), service_image(runner, service), mounted_secret(runner, service))
+
+
 def service_image(runner: Runner, service: str) -> str:
     """The image the service RUNS, so validation uses the parser that will read the store."""
     spec = json.loads(runner(["docker", "service", "inspect", service], None))
@@ -279,6 +286,17 @@ def wait_and_compare(runner: Runner, service: str, secret: str, old_container: s
     return None
 
 
+def _remove_new_secret(runner: Runner, name: str, report: dict) -> None:
+    """Remove an unreferenced new version. Swarm refuses to remove a secret a
+    service still references, so a failure here is reported, never hidden."""
+    try:
+        runner(["docker", "secret", "rm", name], None)
+        report["created"] = None
+        report["cleanup"] = "the unused new secret was removed"
+    except Refused:
+        report["cleanup"] = "the new secret could NOT be removed (still referenced?); remove it by hand"
+
+
 def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callable[[float], None] = time.sleep) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--service", required=True)
@@ -299,7 +317,8 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
             raise Refused("--sender-last4 must be exactly four digits")
         if not TEMPLATE_RE.match(a.template):
             raise Refused("--template must look like name@vN")
-        current = mounted_secret(runner, a.service)
+        initial_state = service_state(runner, a.service)
+        current = initial_state[2]
         if current != a.expect_current_secret:
             raise Refused("the service does not mount the expected current secret")
         if a.new_secret == current:
@@ -309,7 +328,7 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
         raw = read_store(runner, container)
         new_raw, structure = transform(raw, a.account, a.inbox, a.sender_last4, a.template)
         report["structure"] = structure
-        image = service_image(runner, a.service)
+        image = initial_state[1]
         report["validator_image"] = image + " (the image the service runs)"
         t = structure["target_index"]
         before = validate(runner, image, raw, t, a.template)
@@ -334,50 +353,68 @@ def main(argv: Sequence[str] | None = None, runner: Runner = run, sleep: Callabl
         existing = runner(["docker", "secret", "ls", "--format", "{{.Name}}"], None).decode().split()
         if a.new_secret in existing:
             raise Refused("--new-secret already exists; choose the next version")
+        # COMPARE-AND-SWAP: everything validated above is only valid for the
+        # service as it was. Re-read spec version, image and mounted secret
+        # immediately before the first write, and refuse if any moved.
+        if service_state(runner, a.service) != initial_state:
+            raise Refused("the service changed (spec version, image or mounted secret) since validation; re-run")
         runner(["docker", "secret", "create", a.new_secret, "-"], new_raw)
         report["created"] = a.new_secret
+        report["rollback_command"] = (f"sudo docker service update --secret-rm {a.new_secret} "
+                                      f"--secret-add source={current},target={MOUNT_TARGET} {a.service}")
         swap = ["docker", "service", "update", "--quiet", "--secret-rm", current,
                 "--secret-add", f"source={a.new_secret},target={MOUNT_TARGET}",
                 "--update-failure-action", "rollback", "--update-monitor", "30s", a.service]
         try:
             runner(swap, None)
+            report["swap_command"] = "succeeded"
         except Refused:
-            # The swap never took: remove the new version so nothing is left
-            # half-done, and prove the service still mounts the original.
-            runner(["docker", "secret", "rm", a.new_secret], None)
-            report["created"] = None
-            report["cleanup"] = "swap failed; the new secret was removed"
-            report["still_mounted"] = mounted_secret(runner, a.service)
-            raise
-        report["rollback_command"] = (f"sudo docker service update --secret-rm {a.new_secret} "
-                                      f"--secret-add source={current},target={MOUNT_TARGET} {a.service}")
+            # An error exit does not prove the swap did not (partly) happen.
+            # Act on the OBSERVED state below, never on the exit code.
+            report["swap_command"] = "failed; acting on observed state"
+
+        mounted_now = mounted_secret(runner, a.service)
+        if mounted_now == current:
+            # The swap did not take (or Swarm already reverted it). Only now,
+            # with the new version provably unreferenced, remove it.
+            report["mounted_after_swap"] = "original"
+            report["original_bytes_still_mounted"] = wait_and_compare(runner, a.service, current, None, raw, sleep)
+            _remove_new_secret(runner, a.new_secret, report)
+            raise Refused("the swap did not take effect; the service is on the original secret")
+        if mounted_now != a.new_secret:
+            raise Refused("the service mounts an UNEXPECTED secret after the swap; inspect it now")
+
         verified = wait_and_compare(runner, a.service, a.new_secret, container, new_raw, sleep)
         report["mounted_equals_validated"] = verified
-        if verified is not True:
-            # Unverified content must not stay live. Swarm may ALREADY have
-            # rolled back (--update-failure-action rollback), so look before
-            # acting, then prove the ORIGINAL bytes are mounted, then remove
-            # the unused new version.
-            if mounted_secret(runner, a.service) == a.new_secret:
+        image_after = service_image(runner, a.service)
+        report["image_unchanged"] = image_after == image
+        if verified is True and image_after == image:
+            report["result"] = "APPLIED: new secret mounted, byte-equal to the validated store, same image"
+            return 0
+
+        # Unverified content must not stay live: roll back, retrying the
+        # command, and judge success ONLY by what is observed mounted.
+        for attempt in range(3):
+            if mounted_secret(runner, a.service) != a.new_secret:
+                break
+            try:
                 runner(["docker", "service", "update", "--quiet", "--secret-rm", a.new_secret,
                         "--secret-add", f"source={current},target={MOUNT_TARGET}", a.service], None)
-                report["auto_rollback"] = "performed by this tool"
-            else:
-                report["auto_rollback"] = "Swarm had already rolled back"
-            restored = wait_and_compare(runner, a.service, current, None, raw, sleep)
-            report["rollback_restores_original"] = restored
-            if restored is True:
-                try:
-                    runner(["docker", "secret", "rm", a.new_secret], None)
-                    report["created"] = None
-                    report["cleanup"] = "the unverified new secret was removed"
-                except Refused:
-                    report["cleanup"] = "the new secret could NOT be removed; remove it by hand"
-            raise Refused("the new task's mount was not verified; the service is back on the original secret"
-                          if restored is True else
-                          "the new task's mount was not verified AND the rollback is not proven; inspect the service now")
-        report["result"] = "APPLIED: new secret mounted and byte-equal to the validated store"
-        return 0
+                report["auto_rollback"] = f"issued by this tool (attempt {attempt + 1})"
+            except Refused:
+                report["auto_rollback"] = f"rollback command failed (attempt {attempt + 1})"
+                sleep(5)
+        else:
+            report.setdefault("auto_rollback", "not issued")
+        if "auto_rollback" not in report:
+            report["auto_rollback"] = "Swarm had already rolled back"
+        restored = wait_and_compare(runner, a.service, current, None, raw, sleep)
+        report["rollback_restores_original"] = restored
+        if restored is True:
+            _remove_new_secret(runner, a.new_secret, report)
+            raise Refused("the new mount was not verified; the service is proven back on the original secret")
+        raise Refused("LIVE UNVERIFIED: the new mount was not verified and the rollback is NOT proven; "
+                      "run the rollback_command and inspect the service now")
     except Refused as e:
         report["refused"] = str(e)
         return 2

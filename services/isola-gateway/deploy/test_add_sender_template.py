@@ -112,9 +112,14 @@ class FakeDocker:
     """Dispatches docker CLI argv; records what was created and swapped."""
 
     def __init__(self, raw, validator_ok=True, secrets=("isola_gwint_bindings_v5",),
-                 fail_update=False, corrupt_new_mount=False, swarm_rolls_back=False):
+                 fail_update=False, corrupt_new_mount=False, swarm_rolls_back=False,
+                 fail_after_apply=False, rollback_failures=0, redeploy_during_validation=False):
         self.swarm_rolls_back = swarm_rolls_back
         self.fail_update = fail_update
+        self.fail_after_apply = fail_after_apply        # the swap applies, then exits non-zero
+        self.rollback_failures = rollback_failures      # rollback commands that fail before one works
+        self.redeploy_during_validation = redeploy_during_validation
+        self.version = 10
         self.corrupt_new_mount = corrupt_new_mount
         self.image = "isola-gateway:vsp-da9a8df"
         self.validated_images = []
@@ -129,7 +134,8 @@ class FakeDocker:
         self.calls.append(list(argv))
         a = list(argv)
         if a[:3] == ["docker", "service", "inspect"]:
-            return json.dumps([{"Spec": {"TaskTemplate": {"ContainerSpec": {"Image": self.image, "Secrets": [
+            return json.dumps([{"Version": {"Index": self.version},
+                                "Spec": {"TaskTemplate": {"ContainerSpec": {"Image": self.image, "Secrets": [
                 {"SecretName": self.mounted, "File": {"Name": "gateway_bindings"}}]}}}}]).encode()
         if a[:3] == ["docker", "ps", "-q"]:
             return (self.container + "\n").encode()
@@ -148,20 +154,32 @@ class FakeDocker:
                                "senderTemplateCounts": [len(b.get("senderTemplates", {})) for b in data],
                                "targetCarriesTemplate": len(tv) == 1 and tv[0] == env["T_TPL"]}).encode()
         if a[:3] == ["docker", "secret", "ls"]:
+            if self.redeploy_during_validation:  # another deploy lands between validate and write
+                self.image, self.version = "isola-gateway:someone-elses-build", self.version + 1
             return "\n".join(self.secrets).encode()
         if a[:3] == ["docker", "secret", "create"]:
             self.stores[a[3]] = stdin
             self.secrets.append(a[3])
             return b"id\n"
         if a[:3] == ["docker", "secret", "rm"]:
+            if a[3] == self.mounted:  # Swarm refuses to remove a referenced secret
+                raise T.Refused("command failed (docker secret, exit 1)")
             self.stores.pop(a[3], None)
             self.secrets.remove(a[3])
             return b"ok\n"
         if a[:3] == ["docker", "service", "update"]:
+            src = [x for x in a if x.startswith("source=")][0].split(",")[0][len("source="):]
+            rollback = src == "isola_gwint_bindings_v5"
             if self.fail_update:
                 raise T.Refused("command failed (docker service, exit 1)")
-            src = [x for x in a if x.startswith("source=")][0].split(",")[0][len("source="):]
+            if rollback and self.rollback_failures > 0:
+                self.rollback_failures -= 1
+                raise T.Refused("command failed (docker service, exit 1)")
+            self.version += 1
             self.mounted = src
+            if self.fail_after_apply and not rollback:
+                self.container = "c%d" % (int(self.container[1:]) + 1)
+                raise T.Refused("command failed (docker service, exit 1)")
             self.container = "c%d" % (int(self.container[1:]) + 1)  # a new task per update
             if self.swarm_rolls_back and src != "isola_gwint_bindings_v5":
                 self.mounted = "isola_gwint_bindings_v5"  # Swarm reverted before the tool looked
@@ -234,14 +252,46 @@ class MainTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertNotIn("isola_gwint_bindings_v6", fake.stores)
         self.assertNotIn("isola_gwint_bindings_v6", fake.secrets)
-        self.assertEqual(rep["still_mounted"], "isola_gwint_bindings_v5")
+        self.assertEqual(rep["mounted_after_swap"], "original")
+        self.assertTrue(rep["original_bytes_still_mounted"])
+
+    def test_a_redeploy_between_validation_and_write_refuses_before_any_write(self):
+        fake = FakeDocker(store(PUBLIC, INTERNAL), redeploy_during_validation=True)
+        code, rep, _ = run_main(fake, ["--apply"])
+        self.assertEqual(code, 2)
+        self.assertIn("changed", rep["refused"])
+        self.assertNotIn("isola_gwint_bindings_v6", fake.stores)
+        self.assertFalse(any(c[:3] == ["docker", "secret", "create"] for c in fake.calls))
+
+    def test_a_swap_that_applies_but_exits_nonzero_is_judged_by_observed_state(self):
+        fake = FakeDocker(store(PUBLIC, INTERNAL), fail_after_apply=True)
+        code, rep, _ = run_main(fake, ["--apply"])
+        self.assertEqual(code, 0, rep)
+        self.assertEqual(rep["swap_command"], "failed; acting on observed state")
+        self.assertTrue(rep["mounted_equals_validated"])
+
+    def test_a_failing_rollback_command_is_retried_and_the_result_proven(self):
+        fake = FakeDocker(store(PUBLIC, INTERNAL), corrupt_new_mount=True, rollback_failures=1)
+        code, rep, _ = run_main(fake, ["--apply"])
+        self.assertEqual(code, 2)
+        self.assertTrue(rep["rollback_restores_original"])
+        self.assertEqual(fake.mounted, "isola_gwint_bindings_v5")
+        self.assertIn("proven back on the original", rep["refused"])
+
+    def test_an_unrecoverable_rollback_is_reported_as_live_unverified(self):
+        fake = FakeDocker(store(PUBLIC, INTERNAL), corrupt_new_mount=True, rollback_failures=9)
+        code, rep, _ = run_main(fake, ["--apply"])
+        self.assertEqual(code, 2)
+        self.assertIn("LIVE UNVERIFIED", rep["refused"])
+        self.assertIn("rollback_command", rep)
+        self.assertEqual(rep["created"], "isola_gwint_bindings_v6")  # never claims a cleanup it did not do
 
     def test_an_unverified_mount_is_rolled_back_automatically_and_the_rollback_is_proven(self):
         fake = FakeDocker(store(PUBLIC, INTERNAL), corrupt_new_mount=True)
         code, rep, _ = run_main(fake, ["--apply"])
         self.assertEqual(code, 2)
         self.assertFalse(rep["mounted_equals_validated"])
-        self.assertEqual(rep["auto_rollback"], "performed by this tool")
+        self.assertEqual(rep["auto_rollback"], "issued by this tool (attempt 1)")
         self.assertNotIn("isola_gwint_bindings_v6", fake.secrets)  # the unverified version is removed
         self.assertTrue(rep["rollback_restores_original"])
         self.assertEqual(fake.mounted, "isola_gwint_bindings_v5")
@@ -250,8 +300,8 @@ class MainTests(unittest.TestCase):
         fake = FakeDocker(store(PUBLIC, INTERNAL), swarm_rolls_back=True)
         code, rep, _ = run_main(fake, ["--apply"])
         self.assertEqual(code, 2)
-        self.assertEqual(rep["auto_rollback"], "Swarm had already rolled back")
-        self.assertTrue(rep["rollback_restores_original"])
+        self.assertEqual(rep["mounted_after_swap"], "original")  # observed, not assumed
+        self.assertTrue(rep["original_bytes_still_mounted"])
         self.assertNotIn("isola_gwint_bindings_v6", fake.secrets)
         self.assertEqual(fake.mounted, "isola_gwint_bindings_v5")
 
