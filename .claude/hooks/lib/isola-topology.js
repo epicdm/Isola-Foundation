@@ -442,8 +442,9 @@ const SECRET_FILE_EXEMPT_RE = /\.(example|sample|template|dist)$|\.example\.|\.s
  *   quote, <, >, ;, &, |, parentheses, backslash, glob or newline, so no
  *   substitution, redirection, chaining or expansion exists.
  * - Every flag is from an allowlist of INERT update flags (PATH_SETTING_FLAGS).
- *   There is no --health-cmd, --args, --entrypoint, --mount, --config-add,
- *   --container-label-add, --env-file or --log-*.
+ *   There is no --image, --health-cmd, --args, --entrypoint, --mount,
+ *   --config-add, --container-label-add, --env-file or --log-*: each of them
+ *   runs code or exposes files with the secret mounted.
  * - `--secret-add` must be source=<name>,target=<plain-name>; a target that is
  *   a path is refused.
  * - `--env-add` is NAME_FILE=<secret mount>/<plain-name> or NAME=<plain value
@@ -457,8 +458,11 @@ const SECRET_MOUNT_VALUE_RE = /^\/(?:var\/)?run\/secrets\/[A-Za-z0-9_.-]+$/;
 const PLAIN_NAME_RE = /^[A-Za-z0-9_.-]+$/;
 const DURATION_RE = /^[0-9]+(ms|s|m|h)?$/;
 // flag -> validator of its value (null = the flag takes no value)
+// NO --image. Codex review (#152, second round): a new image is new code
+// running with the secret mounted, so it can exfiltrate what this command
+// wires in. An image rollout is a separate `docker service update --image …`
+// that carries no secret path and is not governed by rule 1a at all.
 const PATH_SETTING_FLAGS = {
-  '--image': (v) => /^[A-Za-z0-9_.\/:@-]+$/.test(v),
   '--secret-add': (v) => /^source=[A-Za-z0-9_.-]+,target=[A-Za-z0-9_.-]+$/.test(v),
   '--secret-rm': (v) => PLAIN_NAME_RE.test(v),
   '--env-rm': (v) => /^[A-Z][A-Z0-9_]*$/.test(v),
