@@ -130,6 +130,21 @@ export interface RuntimeConfig {
   outboxFlushLimit: number;
   /** Background sweep interval. 0 disables the timer. */
   outboxSweepMs: number;
+
+  // ---- provider status (src/provider-status.ts) --------------------------
+  /**
+   * PROVIDER_STATUS_INTERVAL_MS. Periodic self-check of the DEFAULT brain's
+   * account. 0 (the default, when unset) means off: `/v1/provider-status` still
+   * answers on demand.
+   */
+  providerStatusIntervalMs: number;
+  /**
+   * PROVIDER_STATUS_PUSH_URL. Uptime Kuma push URL. A SECRET — its path carries
+   * the push token — so it is delivered as PROVIDER_STATUS_PUSH_URL_FILE through
+   * entrypoint.sh, never logged, never returned. Only its host is ever logged.
+   * Its host must be in EGRESS_ALLOWLIST; it is NOT added automatically.
+   */
+  providerStatusPushUrl: string | null;
 }
 
 export const DEFAULT_MODEL_BASE_URL = "https://api.deepseek.com";
@@ -381,6 +396,9 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
     outboxRetentionMs: int(env, "RUNTIME_OUTBOX_RETENTION_MS", 24 * 60 * 60 * 1000),
     outboxFlushLimit: int(env, "RUNTIME_OUTBOX_FLUSH_LIMIT", 10),
     outboxSweepMs: intAllowZero(env, "RUNTIME_OUTBOX_SWEEP_MS", DEFAULT_OUTBOX_SWEEP_MS),
+
+    providerStatusIntervalMs: intAllowZero(env, "PROVIDER_STATUS_INTERVAL_MS", 0),
+    providerStatusPushUrl: str(env, "PROVIDER_STATUS_PUSH_URL"),
   };
 }
 
@@ -551,6 +569,27 @@ export function bootWarnings(config: RuntimeConfig): string[] {
   if (config.stateBackend === "file" && config.stateDir.startsWith("/tmp")) {
     warnings.push(
       "RUNTIME_STATE_DIR points at /tmp: that path does not survive a container replacement, so idempotency records, undelivered cost events and the sub-cent carry are lost on every redeploy. Point it at the persistent volume (/data/isola-runtime-state).",
+    );
+  }
+  // Provider-status push. Warnings, not errors: boot must never fail because a
+  // monitor is unset. Host names only — the URL itself is a secret.
+  const pushHost = hostOf(config.providerStatusPushUrl);
+  if (config.providerStatusPushUrl !== null && pushHost === null) {
+    warnings.push("PROVIDER_STATUS_PUSH_URL is not a valid URL: provider status will not be pushed.");
+  }
+  if (config.providerStatusPushUrl !== null && config.providerStatusIntervalMs === 0) {
+    warnings.push(
+      "PROVIDER_STATUS_PUSH_URL is set but PROVIDER_STATUS_INTERVAL_MS is not: the periodic self-check is off, so nothing will be pushed.",
+    );
+  }
+  if (config.providerStatusIntervalMs > 0 && config.providerStatusPushUrl === null) {
+    warnings.push(
+      "PROVIDER_STATUS_INTERVAL_MS is set but PROVIDER_STATUS_PUSH_URL is not: provider status is checked and logged but pushed nowhere.",
+    );
+  }
+  if (pushHost !== null && !config.egressAllowlist.includes(pushHost)) {
+    warnings.push(
+      `PROVIDER_STATUS_PUSH_URL host ${pushHost} is not in EGRESS_ALLOWLIST: every push will be refused by the egress guard. Add the host to EGRESS_ALLOWLIST deliberately; it is not added automatically.`,
     );
   }
   return warnings;

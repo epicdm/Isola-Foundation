@@ -59,6 +59,10 @@ import {
 import type { TokenUsage } from "./money.js";
 import { createPaperclipApi, type PaperclipApi, type PaperclipCall } from "./paperclip.js";
 import {
+  createProviderStatusChecker,
+  type ProviderStatusChecker,
+} from "./provider-status.js";
+import {
   createStateStore,
   type RunResultRecord,
   type RunUsageRecord,
@@ -378,6 +382,10 @@ export interface Runtime {
   handler: Handler;
   metering: MeteringService;
   stateStore: StateStore;
+  /** The DEFAULT brain's account status. server.ts drives the optional monitor with it. */
+  providerStatus: ProviderStatusChecker;
+  /** The egress-checked transport, so the monitor's push is confined like everything else. */
+  safeFetch: SafeFetch;
 }
 
 export function createApp(deps: AppDeps): Handler {
@@ -392,6 +400,17 @@ export function createRuntime(deps: AppDeps): Runtime {
 
   const safeFetch =
     deps.safeFetch ?? createSafeFetch({ allowlist: config.egressAllowlist });
+
+  // The DEFAULT brain only: the same base URL and key the default modelClient
+  // below uses, through the same egress-checked transport.
+  const providerStatus = createProviderStatusChecker({
+    provider: config.modelProvider,
+    modelBaseUrl: config.modelBaseUrl,
+    apiKey: config.modelApiKey,
+    safeFetch,
+    logger,
+    now,
+  });
 
   const modelClient =
     deps.modelClient ??
@@ -1801,6 +1820,49 @@ export function createRuntime(deps: AppDeps): Runtime {
     });
   }
 
+  /**
+   * GET /v1/provider-status - is the DEFAULT brain's provider account able to
+   * answer? Operator-only: the INTERNAL credential and nothing else. A PUBLIC
+   * credential is the customer path's bearer and has no business reading the
+   * account's balance, so it is refused with 403 even though it is valid.
+   * Unauthenticated / unconfigured behave exactly like /v1/templates.
+   * Body is the sanitized result only (src/provider-status.ts).
+   */
+  async function handleProviderStatus(
+    req: IncomingMessage,
+    res: ServerResponse,
+    correlationId: string,
+  ): Promise<void> {
+    if (!hasAnyCredential(config)) {
+      sendJson(res, 503, correlationId, {
+        ok: false,
+        outcome: "no_credential_configured",
+        error: "no runtime credential is configured",
+      });
+      return;
+    }
+    const auth = resolveCredential(config, req.headers["authorization"]);
+    if (auth.kind !== "ok") {
+      const status = auth.kind === "not_configured" ? 503 : 401;
+      sendJson(res, status, correlationId, {
+        ok: false,
+        outcome: auth.kind === "not_configured" ? "no_credential_configured" : "unauthorized",
+        error: auth.kind === "not_configured" ? "no runtime credential is configured" : "unauthorized",
+      });
+      return;
+    }
+    if (auth.credentialExposure !== "INTERNAL") {
+      sendJson(res, 403, correlationId, {
+        ok: false,
+        outcome: "exposure_mismatch",
+        error: "provider status requires the INTERNAL credential",
+      });
+      return;
+    }
+    const result = await providerStatus.check();
+    sendJson(res, 200, correlationId, { ok: true, ...result });
+  }
+
   const handler: Handler = function handler(
     req: IncomingMessage,
     res: ServerResponse,
@@ -1825,6 +1887,21 @@ export function createRuntime(deps: AppDeps): Runtime {
     }
     if (method === "GET" && pathname === "/v1/templates") {
       handleTemplates(req, res, correlationId);
+      return;
+    }
+    if (method === "GET" && pathname === "/v1/provider-status") {
+      handleProviderStatus(req, res, correlationId).catch(() => {
+        logger.error({ event: "provider_status", correlationId, outcome: "internal_error" });
+        if (!res.headersSent) {
+          sendJson(res, 500, correlationId, {
+            ok: false,
+            outcome: "internal_error",
+            error: "internal error",
+          });
+        } else {
+          res.end();
+        }
+      });
       return;
     }
     if (pathname === "/v1/invoke") {
@@ -1855,5 +1932,5 @@ export function createRuntime(deps: AppDeps): Runtime {
     fail(404, "not_found", "not found");
   };
 
-  return { handler, metering, stateStore };
+  return { handler, metering, stateStore, providerStatus, safeFetch };
 }
