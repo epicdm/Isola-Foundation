@@ -297,6 +297,41 @@ Auth required (either bearer). Returns registry metadata — `id`, `name`,
 `version`, `exposure`, `model`, `timeoutMs`, `maxContextBytes`, `toolPolicy`.
 **Never the system prompt text.**
 
+### `GET /v1/provider-status`
+
+Operator-only: the **INTERNAL** bearer. No bearer or a wrong one ⇒ `401`; the
+PUBLIC bearer ⇒ `403 exposure_mismatch` (the customer path has no business
+reading the account balance); no runtime credential configured ⇒ `503`, exactly
+as `/v1/templates`.
+
+Answers "can the **default** brain answer right now?" by calling the provider's
+balance API with the runtime's own `MODEL_API_KEY`: `GET <origin of
+MODEL_BASE_URL>/user/balance` (DeepSeek's documented endpoint), through the
+same egress guard as a model call, 10 s timeout. The result is cached for 60 s,
+so at most one provider request per minute however often this is called.
+
+```json
+{ "ok": true, "provider": "deepseek", "checkedAt": "2026-09-23T12:00:00.000Z",
+  "available": true, "balances": [{ "currency": "USD", "total": "44.79" }],
+  "status": "ok", "httpStatus": 200 }
+```
+
+`status` is `ok` · `unavailable` (`is_available:false`, or provider `402`) ·
+`check_failed` (network, timeout, egress refused, other HTTP error, non-JSON or
+unexpected shape — `available` is then `null`, **never** `true`) ·
+`not_configured` (no `MODEL_API_KEY`). The body is sanitized: never the key,
+never a header, never the raw provider body. Override brains declared by a
+template are not checked.
+
+**Optional push monitor.** Set `PROVIDER_STATUS_INTERVAL_MS` and deliver the
+Uptime Kuma push URL as a secret (`PROVIDER_STATUS_PUSH_URL_FILE`, via the
+entrypoint shim). Each interval the runtime checks and pushes `status=up` when
+available, `status=down` otherwise, with `msg` such as `DeepSeek available,
+balance USD 44.79` or `DeepSeek UNAVAILABLE (402)`. The push host **must be
+added to `EGRESS_ALLOWLIST` by the operator** — it is not added automatically,
+and a missing host is a boot warning plus a logged `push_egress_blocked`, never
+a boot failure. Only the push host is ever logged; the URL carries the token.
+
 ---
 
 ## 4. The run loop and the callbacks
@@ -567,6 +602,9 @@ spending more money nobody is counting.
 | `RUNTIME_OUTBOX_RETENTION_MS` | no | `86400000` | Delivered entries are pruned after this |
 | `RUNTIME_OUTBOX_FLUSH_LIMIT` | no | `10` | Entries per flush |
 | `RUNTIME_OUTBOX_SWEEP_MS` | no | `60000` | Background sweep interval. `0` disables the timer |
+| **Provider status** | | | |
+| `PROVIDER_STATUS_INTERVAL_MS` | no | unset ⇒ off | Periodic self-check of the default brain's account (§3 `GET /v1/provider-status`). `/v1/provider-status` works on demand regardless |
+| `PROVIDER_STATUS_PUSH_URL` | no | — | **Secret** (the path carries the push token). Deliver as `PROVIDER_STATUS_PUSH_URL_FILE`. Uptime Kuma push URL; only its host is logged. Its host must be added to `EGRESS_ALLOWLIST` — never auto-added |
 
 Boot logs a one-line JSON warning for every fail-closed condition (missing
 secret, identical secrets, missing model key, empty allowlist, missing company

@@ -8,6 +8,8 @@ import { createServer } from "node:http";
 import { createRuntime } from "./app.js";
 import { bootErrors, bootWarnings, loadConfig } from "./config.js";
 import { createLogger } from "./log.js";
+import { hostOf } from "./egress.js";
+import { startProviderStatusMonitor } from "./provider-status.js";
 import { healthTemplateSummary } from "./registry.js";
 import { SERVICE_VERSION } from "./version.js";
 
@@ -91,6 +93,24 @@ if (config.outboxSweepMs > 0) {
     void runtime.metering.flush("sweep").catch(() => undefined);
   }, config.outboxSweepMs);
   if (typeof sweep.unref === "function") sweep.unref();
+}
+
+// Optional provider-status self-check (off unless PROVIDER_STATUS_INTERVAL_MS is
+// set). The push URL is a secret: only its host is ever logged.
+if (config.providerStatusIntervalMs > 0) {
+  logger.info({
+    event: "provider_status_monitor",
+    outcome: "provider_status_monitor_started",
+    intervalMs: config.providerStatusIntervalMs,
+    pushHost: hostOf(config.providerStatusPushUrl),
+  });
+  startProviderStatusMonitor({
+    checker: runtime.providerStatus,
+    intervalMs: config.providerStatusIntervalMs,
+    pushUrl: config.providerStatusPushUrl,
+    safeFetch: runtime.safeFetch,
+    logger,
+  });
 }
 
 function shutdown(signal: string): void {
