@@ -14,19 +14,29 @@ week's worth of discrepancy-finding, so the owner sees the full picture in one p
 | Trial | Free number + 7-day/15-min, ≤5 US-CAN min | Same terms restated | Not independently re-verified by this lane | `offer-personal-line-trial-7d-15min-2026-09-02` — Ratified, but this is a **different product** from the newer universal free-CALLBACK trial (`dec-call-dominica-for-free-universal-whatsapp-signup-magnus-first-2026-09-21`), which is separately paused. Don't conflate the two in any copy. |
 | Fair-use enforcement | "Fair-use 1,000 Dominica min/30 days **stated on the offer**" (policy language) | — | **No cap enforced on any plan today** — matches "stated, not enforced" reading of the original decision | The plan schema's own docs cite derived per-day figures (34 min/day, 3600s/call) that **nobody ratified** — don't use these numbers anywhere |
 
-## The one decision that actually blocks copy
+## RESOLVED 2026-09-26 — the one decision that blocked copy
 
-Everything above is either already resolved (the two EC$18/60 → EC$15/55 corrections) or is a pure
-engineering/billing bug (the US rating discrepancy) that doesn't change what marketing can honestly say.
-**The one real open question is whether Dominica calling is unlimited (as designed and as currently
-running) or capped (as the Blocked claim asserts).** Until that's answered, this lane cannot write "Plus"
-or any Dominica-minutes claim for the top tier, and the historical packet's own opening concierge script
-("unlimited" is absent from it already, for what it's worth) can't be extended into new campaign copy
-either.
+`dec-unlimited-dominica-fair-use-in-terms-hard-limit-2026-09-26` (Ratified, owner) answers this: Dominica
+calling is marketed as **unlimited** everywhere in ads/copy/agent answers; the fair-use figure (1,000
+min/30 days per knowledge v1, still pending final approval) lives only in the signup terms, never repeated
+in everyday copy; economics are protected by a background usage monitor plus a hard limit VOICE is
+designing, not by saying the number out loud. This unblocks "unlimited" across all copy — see checkpoint 09
+for the launch package's revised ad, checkpoint 11 for the campaign draft, checkpoint 15 for the testimonial
+CTA.
 
-## Recommendation
+**Process note:** the underlying `marketing_claim` entity had actually already moved to Approved on
+2026-09-24 (with a different, now-superseded condition requiring the cap to accompany "unlimited" in copy).
+This table's original text (below, preserved) treated it as still Blocked based on an earlier read that was
+never refreshed — caught only when updating for today's ruling. Always re-read a claim's live status before
+relying on a days-old note.
 
-Ask the owner directly: does the top tier ship as genuinely unlimited Dominica calling (matching the
-2026-09-02 pricing decision and what Magnus is actually configured to do), or was that always meant to be
-capped and the configuration itself needs fixing before launch? Whichever answer, `mc-personal-line-unlimited-dominica-calling-2026-09-02`'s
-status should then be updated to match — by whoever owns that entity, not this lane.
+**Still open, separately:** the top tier's customer-facing NAME ("Unlimited+" vs. "Plus") isn't addressed by
+today's ruling — see checkpoint 09's updated table for why that's now a slightly different question (every
+plan gets unlimited Dominica calling, not just the top tier, so a name built around "unlimited" may no
+longer differentiate the top tier specifically).
+
+## Original analysis, preserved for history (superseded by the resolution above)
+
+Everything in the table above is either already resolved (the two EC$18/60 → EC$15/55 corrections) or is a
+pure engineering/billing bug (the US rating discrepancy) that doesn't change what marketing can honestly
+say. The Dominica-calling row's "Blocked" reading was the one real open question — now resolved as above.

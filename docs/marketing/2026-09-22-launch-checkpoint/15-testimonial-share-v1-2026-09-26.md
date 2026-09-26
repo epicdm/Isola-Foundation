@@ -57,11 +57,14 @@ Reuses the same `(source:X)` WhatsApp prefill convention as the prelaunch campai
 - Every "Approve for EPIC to publish" submission lands in a pending-review queue before anything is
   scheduled — marketing checks: (a) the quote matches what's stored verbatim, no edits beyond what the
   customer already approved; (b) no claim beyond the approved `marketing_claim` register appears, even
-  implicitly, in the assembled quote (a customer saying "unlimited calls, no cap!" would need the caption
-  and surrounding copy to avoid restating that as EPIC's own claim, given `mc-personal-line-unlimited-dominica-calling-2026-09-02`
-  is Blocked); (c) attribution scope matches what was shown to the customer at approval time.
-- Caption template: "[quote]" — real EPIC customer. [one-line CTA, e.g. "Want your own Dominica number?
-  Message EARLY ACCESS →"] `wa.me/17678180001?text=...`
+  implicitly, in the assembled quote — **updated 2026-09-26:** a customer saying "unlimited calls, no cap!"
+  is now fine to keep as-is for the "unlimited calls" part (`mc-personal-line-unlimited-dominica-calling-2026-09-02`
+  is Approved as of `dec-unlimited-dominica-fair-use-in-terms-hard-limit-2026-09-26`), but the caption/surrounding
+  copy still must never repeat the fair-use minute figure — that stays in signup terms only, never in
+  published testimonial copy either; (c) attribution scope matches what was shown to the customer at
+  approval time.
+- Caption template: "[quote]" — real EPIC customer. [one-line CTA, updated 2026-09-26: "Want unlimited calls
+  to Dominica on your own number? Message EARLY ACCESS →"] `wa.me/17678180001?text=...`
 - Substantive edits to the quote require re-approval from the customer — never publish an edited version
   without that.
 - Withdrawal: a simple link/reply lets the customer pull a pending or already-scheduled post; withdrawn

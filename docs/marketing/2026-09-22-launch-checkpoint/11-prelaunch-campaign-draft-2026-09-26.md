@@ -17,17 +17,27 @@ Two corrections applied to the original draft below:
    it. Revised to mention Wi-Fi only as audience context (today's real, unchanged, existing service) — never
    as a promise of something new.
 
-## Transition message (on-site signage + digital) — REVISED
+## Second revision, 2026-09-26 (later same day): "unlimited Dominica calling" is now the lead product hook
 
-**Headline:** You already use EPIC Wi-Fi. Get early access to your own Dominica phone number.
+Per `dec-unlimited-dominica-fair-use-in-terms-hard-limit-2026-09-26` (Ratified, owner) — see checkpoint 09's
+own resolution note. **This is a different "unlimited" claim from the Wi-Fi one still barred above** — do
+not confuse them. "Unlimited Dominica calling" (Personal Line, approved today) leads the headline below;
+"unlimited WhatsApp" (a Wi-Fi-pilot claim) remains barred until the pilot proves itself, unchanged from the
+first revision above.
 
-**Body:** EPIC is opening early access to Personal Line — a real Dominica number, usable from the EPIC app.
-Message EARLY ACCESS on WhatsApp to register your interest. Priority access only — no purchase, no
-commitment, and no promised bonus at this stage.
+## Transition message (on-site signage + digital) — REVISED TWICE
 
-**Why this framing:** "priority access" is the entire ask — no amount, no reward, no reciprocal promise.
-Wi-Fi appears only as context for who's seeing the sign (today's existing, unchanged free service), never
-as a claim about what the Wi-Fi itself is becoming. No price, no minute figure, no "unlimited," no specific
+**Headline:** You already use EPIC Wi-Fi. Get early access to unlimited calls to Dominica.
+
+**Body:** EPIC is opening early access to Personal Line — unlimited calls to Dominica, from your own real
+number, usable from the EPIC app. Message EARLY ACCESS on WhatsApp to register your interest. Priority
+access only — no purchase, no commitment, and no promised bonus at this stage. Terms apply.
+
+**Why this framing:** "unlimited Dominica calling" is now the concrete hook (approved lead claim,
+2026-09-26) — no fair-use figure appears here, that lives only in signup terms per the ruling. "Priority
+access" is still the entire *ask* — no amount, no reward, no reciprocal promise for registering. Wi-Fi
+appears only as context for who's seeing the sign (today's existing, unchanged free service), never as a
+claim about what the Wi-Fi itself is becoming. No price, no minute figure, no "unlimited WhatsApp", no specific
 Wi-Fi tier or pilot term.
 
 ## Attributed CTA
@@ -61,7 +71,9 @@ that check now. This creative is prepared, not live.
 
 ## What this draft deliberately excludes
 
-No mention of the paid-plan ladder, the free-callback trial, "unlimited" (calling or WhatsApp), "always
-available," any Wi-Fi pilot term (1hr/day, 1/2 Mbps, device caps), AI receptionist, or any bonus/voucher
-amount — all either held pending owner rulings or explicitly barred from public copy until the pilot proves
-itself (checkpoint 09/10/16). This is purely the interest-capture step of the funnel.
+No mention of the paid-plan ladder or prices, the free-callback trial, the fair-use minute figure (belongs
+in signup terms only), "unlimited WhatsApp" (a separate, still-barred Wi-Fi claim — do not confuse with the
+now-approved "unlimited Dominica calling"), "always available," any Wi-Fi pilot term (1hr/day, 1/2 Mbps,
+device caps), AI receptionist, or any bonus/voucher amount — all either held pending owner rulings or
+explicitly barred from public copy until the pilot proves itself (checkpoint 09/10/16). This is purely the
+interest-capture step of the funnel, now with one concrete, approved product hook.

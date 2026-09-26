@@ -7,17 +7,29 @@ escalation) before anything here goes live.
 
 ## 1. Ad preview — text + creative spec
 
-**Headline:** Your Dominica number. Wherever life takes you.
+**Revised 2026-09-26 per `dec-unlimited-dominica-fair-use-in-terms-hard-limit-2026-09-26` (Ratified,
+owner):** "unlimited" is now the lead claim, not held. Owner's own framing: "wow them with the unlimited
+offer... we don't want users counting minutes." The fair-use figure (1,000 min/30 days, still pending final
+knowledge-v1 approval) does NOT appear in this ad — it lives only in the signup terms per the ruling.
+
+**Headline:** Unlimited calls to Dominica. From your own real number.
 
 **Body:**
-Call home to Dominica from the EPIC app. Message us on WhatsApp — we'll set up your line and get you
-calling in minutes.
+Call home to Dominica — as much as you like. Message us on WhatsApp and we'll set up your line and get you
+calling in minutes. Terms apply.
 
 **Required disclosure (visible, not link-only):** Voice calling service only. SMS and emergency calling are
 not supported.
 
+**"Terms apply" qualifier:** small print, e.g. "*Terms apply — see signup terms." I don't have a confirmed
+live, public URL for the actual signup terms page to link to (the only terms page I've verified is
+`/en/terms-and-conditions` on the internal Lumen console domain, which is not confirmed as the public
+customer-facing terms) — flagging this as a destination to confirm before publish, same practice as every
+other link in this checkpoint.
+
 **What's deliberately NOT in this ad**, per dispatch scope and the current claim register: no free-callback
-mention, no "unlimited," no AI receptionist/missed-call feature, no hero pricing line (`mc-personal-line-plans-from-ec5-2026-09-02`
+mention (still held, separate offer), no fair-use minute figure (belongs in signup terms only, not ads),
+no AI receptionist/missed-call feature, no hero pricing line (`mc-personal-line-plans-from-ec5-2026-09-02`
 is Draft and explicitly restricted to "the plan selector or visitor retargeting," not the hero ad message).
 
 **Creative spec:** Real UI illustration of the app mid-call or showing the Dominica number — labelled as a
@@ -63,18 +75,20 @@ onboarding only" condition.
 
 | Element | Claim/offer id | Status | Note |
 |---|---|---|---|
-| "Call home to Dominica from the app" | `claim-call-home-dominica` | Approved / Verified-and-Sellable | Core ad claim |
+| "Unlimited calls to Dominica" | `mc-personal-line-unlimited-dominica-calling-2026-09-02` | **Approved 2026-09-26** — now the lead claim. Fair-use figure lives in signup terms only, never repeated in ads/copy per the ruling | New lead claim, replaces "Call home to Dominica" as the headline |
+| "Call home to Dominica from the app" | `claim-call-home-dominica` | Approved / Verified-and-Sellable | Supporting claim, still valid |
 | Voice-only disclosure | `mc-personal-line-voice-only-disclosure-2026-08-30` | Approved | Mandatory, must stay visible |
 | Concierge-assisted onboarding (message → set up → install app → call) | `cap-lite-calling` | Conditional, "LIVE NOW — assisted/managed onboarding only" | Self-serve is Future; don't imply instant signup |
 | Day Pass — EC$5, 24h | `offer-personal-line-day-pass-2026-09-02` | Managed pilot, price Ratified | `agent_recommendable` still reads false in Port — decision says this should now read "recommendable contextually"; flagging as a pending Port housekeeping item, not mine to flip |
 | Week Pass — **EC$15**, 7d | `offer-personal-line-week-pass-2026-09-02` | **Price corrected 2026-09-23** — Lane A measured the live catalogue (`lite_plans`, what checkout actually charges, control: recent debits of -5) as EC$15, matching the original pricing decision, NOT the EC$18 the `epic_offer` entity records. Quoting the live price per Lane A's instruction; same `agent_recommendable` flag note applies |
 | 30-Day — EC$35/30d | `offer-personal-line-30d-2026-09-02` | Managed pilot, price Ratified | Matches both sources — no conflict here |
-| Top tier — **EC$55/30 days, 200 US-CAN min** (price restored, name still held) | `offer-personal-line-plus-2026-09-02` | Price confirmed 2026-09-23 by the Senior PM: `dec-personal-line-launch-pricing-and-pay-rail-2026-09-02` (Ratified) explicitly supersedes `dec-personal-line-commercial-ladder-recommendation-2026-09-02` (the EC$18/EC$60 source); Port's `epic_offer` entity reconciled to EC$55, history preserved. **Still held: the tier's customer-facing NAME** ("Unlimited+" vs. my proposed "Plus") and **all Dominica-allowance wording** ("unlimited," "fair use") — `mc-personal-line-unlimited-dominica-calling-2026-09-02` remains Blocked, and that's a separate decision still in front of the owner (checkpoint 10, item 1). Do not publish a name or any Dominica-minutes claim for this row yet. |
+| Top tier — **EC$55/30 days, 200 US-CAN min, unlimited Dominica calling** (price restored, Dominica-wording hold lifted) | `offer-personal-line-plus-2026-09-02` | Price confirmed 2026-09-23 by the Senior PM: `dec-personal-line-launch-pricing-and-pay-rail-2026-09-02` (Ratified) explicitly supersedes `dec-personal-line-commercial-ladder-recommendation-2026-09-02` (the EC$18/EC$60 source); Port's `epic_offer` entity reconciled to EC$55, history preserved. **Dominica-allowance wording hold lifted 2026-09-26** — "unlimited" is now approved, per `dec-unlimited-dominica-fair-use-in-terms-hard-limit-2026-09-26`. **Still open, not addressed by today's ruling: the tier's customer-facing NAME** ("Unlimited+" vs. my proposed "Plus"). Given every plan now carries unlimited Dominica calling (per the original 2026-09-02 pricing decision, "unlimited Dominica calling on every plan"), naming only the top tier "Unlimited+" may now read as redundant/confusing rather than differentiating — flagging this naming question back to Lane A rather than assuming it's settled just because the underlying claim is. |
 
 **Deliberately excluded from this ad**, per dispatch scope: `offer-personal-line-trial-7d-15min-2026-09-02`
 (the older Personal Line trial — a different product from the held free-callback, per LINE's own
 reconciliation note on 2026-09-22, but not in the dispatch's approved list for this ad and not independently
-re-verified as operational by this lane) and anything AI-receptionist/missed-call/unlimited-related.
+re-verified as operational by this lane) and anything AI-receptionist/missed-call-related. ("Unlimited" is
+no longer excluded — it's the lead claim as of 2026-09-26, see above.)
 
 ## Status: HELD by Lane A, 2026-09-23 — updated same day with a pricing correction
 
@@ -96,6 +110,18 @@ wording** (the $/min charged beyond included minutes): the Day Pass's live rate 
 with the ratified EC$0.25/min and is being verified as a charging discrepancy — this package doesn't state
 an overage rate anywhere currently, and shouldn't gain one until that's resolved. Nothing in this package is
 publishable in the meantime regardless.
+
+## Resolution, 2026-09-26 — the unlimited-vs-capped question is settled
+
+`dec-unlimited-dominica-fair-use-in-terms-hard-limit-2026-09-26` (Ratified, owner) answers checkpoint 14's
+central open question: Dominica calling is marketed as **unlimited**, everyday copy never repeats the
+fair-use figure, and EPIC's economics are protected by a background monitor plus a hard limit VOICE is
+designing (recommended: overage bills per-minute from the wallet rather than blocking the call) — not by
+saying the number out loud to customers. Ad copy above revised accordingly. **Process note:** the
+underlying `marketing_claim` entity had actually moved to Approved on 2026-09-24 already (with a different,
+now-superseded condition requiring the cap to always accompany "unlimited") — this lane didn't re-check that
+when revisiting the question again this week and treated it as still Blocked based on an earlier read.
+Caught only when updating for today's ruling; flagging so it doesn't recur.
 
 ## 5. Remaining approvals and gates — none of them mine to clear
 
