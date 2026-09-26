@@ -46,8 +46,14 @@ Your plan includes generous calling to Dominica numbers, reset at the start of e
 
 If you use your full allowance within a cycle, calls to Dominica continue automatically at **EC$0.135 per
 minute**, charged from your wallet balance. By activating your plan, you agree that this rate applies
-automatically once your allowance is used — your call will not be interrupted or require confirmation
-mid-call.
+automatically once your allowance is used — **you will not be asked to confirm this mid-call; your consent
+is given in advance, here, once.**
+
+[**Placeholder — not established yet, per Lane A 2026-09-26:** whether crossing the allowance *mid-call*
+is caught during that same call or only detected at the start of the next call is exactly what VOICE's
+approved controlled test call is designed to determine. Not drafting a "your call will/won't be
+interrupted" claim until that test result lands — could go either way, and I don't want terms language that
+turns out to describe behavior the system doesn't actually have.]
 
 If your wallet balance is insufficient to continue at the per-minute rate, [**placeholder — the exact
 insufficient-balance behavior isn't finalized yet per the ruling's own item 4: "Before overage is switched
