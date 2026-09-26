@@ -1,101 +1,125 @@
-# EC$10 welcome voucher — cost validation, 2026-09-26 (round 6: real US/CA rate + actual usage data)
+# EC$10 welcome voucher — cost validation, 2026-09-26 (round 7: full contribution + breakeven)
 
-Per `dec-wifi-personal-line-pilot-approval-2026-09-26` §6. This validates the proposal from checkpoint 13 —
-it does not re-propose or approve anything.
+Per `dec-wifi-personal-line-pilot-approval-2026-09-26` §6. Validates the checkpoint-13 proposal; does not
+re-approve anything. Round 7 adds the owner-supplied non-minute costs and answers the headline breakeven
+question directly.
 
-**What's new this round:** VOICE gave the real US/Canada termination rate and pulled actual Dominica usage
-from voice03 CDRs. The usage sample turned out too small to model directly (3 accounts, 5 calls, 0.8 min
-total) — VOICE's own call, not this lane's. Per Lane A, using **stated assumptions** (100/250/500 min/month)
-for the expected case instead, clearly labelled as assumptions, with 1,000 min kept as the worst case (now
-capped by the hard limit design from `dec-unlimited-dominica-fair-use-in-terms-hard-limit-2026-09-26`).
+## HEADLINE: customer count at which the EC$35 plan breaks even, EC$5 vs EC$10 voucher
+
+| Dominica usage assumption | Full price (no voucher) | EC$5 voucher | EC$10 voucher |
+|---|---|---|---|
+| 100 min/month (assumed) | ~21 customers | ~25 customers | ~31 customers |
+| 250 min/month (assumed) | ~23 customers | ~28 customers | ~36 customers |
+| 500 min/month (assumed) | ~28 customers | ~35 customers | ~48 customers |
+| **1,000 min/month (worst case, hard-limit cap)** | **~47 customers** | **~74 customers** | **~178 customers** |
+
+**Read this as: below the stated count, the plan doesn't cover its fixed costs at that usage level; above
+it, it does — before VAT, Fiserv fee and support/CAC, which are still unknown and would only push these
+numbers higher, never lower.** The EC$10 voucher needs roughly 2.4x the customers of the EC$5 voucher to
+reach breakeven at every usage level, because it removes a much bigger share of a plan whose fixed-cost
+allocation is already the main lever here.
 
 ## Numbers used, labelled by source
 
 | Number | Value | Status |
 |---|---|---|
-| Voucher face value | EC$10 (also costed at EC$5) | This lane's proposal (checkpoint 13), not yet approved |
-| Redemption rule | Becomes EC$ wallet credit; spendable on calls/plans; never on airtime | **Measured** — matches `dec-bonus-value-as-vouchers-and-card-only-airtime-2026-09-26` |
-| Dominica per-minute rate, Personal Line, voice03 (retail) | EC$0.135/min | **Measured** — Lane A, prior thread |
-| Dominica wholesale, mobile (Digicel/Flow) | ≈ **EC$0.0193/min** | **Measured** — VOICE, voice03 buy-side tables |
-| Dominica wholesale, Flow fixed | ≈ **EC$0.0104/min** | **Measured** — same source |
-| Dominica on-net (EPIC↔EPIC) | EC$0/min | **Measured** — same source |
-| **US & Canada termination, least-cost route (VITELITY)** | US$0.0098/min ≈ **EC$0.0265/min** | **Measured** — VOICE, voice03 CDRs/rate tables, 2026-09-26. Flat: no mobile/fixed split, same rate for US and Canada. (GM-Telecom alternate route: US$0.0125/min, not used — least-cost route applies) |
-| Actual Dominica usage, last 30 days | Only 3 Personal Line accounts made any calls; 5 outbound calls, 0.8 min total; avg 0.24 min/active account, max 0.4 min | **Measured, but VOICE flags as too small to model** — EPIC's own DID block also starts 1767818, so inbound calls to customers' own numbers were excluded from this count by design, not an oversight |
-| Expected-case Dominica usage | **Stated assumptions: 100, 250, 500 min/month** | Not derived from the (too-small) real sample — explicit stated scenarios, per Lane A, clearly labelled as assumptions, not measurements |
-| Worst-case Dominica usage | 1,000 min/30 days (knowledge v1 fair-use figure) | **Relayed by Lane A**, no Tiledesk access to verify directly. Now backstopped by a hard limit VOICE is designing — see resolution below |
-| Non-minute cost components (platform, Acrobits, VAT, processing, support/CAC, incoming reserve) | Still unknown | **Owner/finance input** — no engineering system holds these, per Lane A. Still placeholders, not guessed |
+| Dominica wholesale, mobile | EC$0.0193/min | **VOICE-verified** |
+| US/Canada termination, flat | EC$0.0265/min | **VOICE-verified** |
+| Acrobits platform | US$134/mo → EC$361.80 | **Owner-supplied** |
+| Acrobits per device | US$0.20/device (assumed monthly) | **Owner-supplied**, period assumed |
+| DID block 1767818XXXX | EC$450/yr → EC$37.50/mo | **Owner-supplied** |
+| Server | US$50 (assumed monthly) → EC$135.00 | **Owner-supplied**, period assumed |
+| Electricity | EC$100.00/mo | **Owner-supplied** |
+| AI tokens | Variable | **Owner-flagged, not quantified — placeholder** |
+| **Fixed total** | **≈ EC$634.30/month** + EC$0.54/device | Sum of the above |
+| Fixed cost per customer | 50 cust → EC$13.23; 200 cust → EC$3.71; 500 cust → EC$1.81 | Owner-supplied total ÷ N, + EC$0.54 device fee |
+| Dominica usage: 100/250/500 min | **Assumed** (stated scenarios, not measured — real 30-day sample was 3 accounts/5 calls/0.8 min, VOICE flagged as too small to model) | **Assumed** |
+| Dominica usage: 1,000 min | **Worst case**, backstopped by the ratified hard limit (`dec-unlimited-dominica-fair-use-in-terms-hard-limit-2026-09-26`) | Relayed allowance figure (knowledge v1), capped by design |
+| US/CA allowance, full use | 60 min (EC$35 plan) → EC$1.59; 200 min (EC$55 plan) → EC$5.29 | **VOICE-verified rate** × plan allowance (allowance itself from knowledge v1, relayed) |
+| VAT, Fiserv card-fee %, support/CAC | Unknown | **Still placeholders** — not supplied yet, not guessed |
 
-## Resolved since round 4: the unlimited-vs-cap question
+## EC$35 Personal Line — full contribution (revenue − Dominica cost − US/CA cost − fixed cost/customer)
 
-`dec-unlimited-dominica-fair-use-in-terms-hard-limit-2026-09-26` (Ratified, owner) settles checkpoint 14's
-open question: Dominica calling is marketed as unlimited; the fair-use figure lives only in signup terms;
-economics are protected by a background monitor and a hard limit (mechanism TBD by VOICE, recommended:
-overage bills per-minute from the wallet rather than blocking the call). This means the "worst case" below
-is now a genuinely enforced ceiling once the hard limit ships, not just an unenforced policy number — a real
-improvement for this analysis, separate from the rate/usage updates.
+**At 50 customers (fixed cost EC$13.23/customer):**
 
-## Path A — voucher spent as pay-per-minute Dominica calling (unchanged)
-
-EC$10 ÷ EC$0.135/min (retail) = 74.07 min covered. Wholesale cost at the conservative mobile rate:
-74.07 × EC$0.0193 ≈ **EC$1.43**. EC$5 → 37.04 min → **EC$0.71**. Doesn't depend on plan allowance, unaffected
-by anything else in this round.
-
-## Path B — full plan contribution, now computable at three expected-case points plus worst case
-
-**US/Canada minute cost, now measured (60-min allowance on the EC$35 plan):**
-60 × EC$0.0265 = **EC$1.59** if fully used (VOICE's own figure, confirmed by this lane's recompute).
-**200-min allowance on the top tier:** 200 × EC$0.0265 = **EC$5.29** (also VOICE's own figure, confirmed).
-
-**Combined minute cost (Dominica + US/CA), EC$35 Personal Line plan, at each usage scenario:**
-
-| Dominica usage scenario | Dominica cost | + US/CA cost (60 min, full use) | = Total minute cost |
+| Dominica usage | Full price | EC$5 voucher | EC$10 voucher |
 |---|---|---|---|
-| Worst case: 1,000 min | EC$19.30 | EC$1.59 | **EC$20.89** |
-| Stated assumption: 500 min | EC$9.65 | EC$1.59 | **EC$11.24** |
-| Stated assumption: 250 min | EC$4.83 | EC$1.59 | **EC$6.42** |
-| Stated assumption: 100 min | EC$1.93 | EC$1.59 | **EC$3.52** |
-| Actual measured sample (0.24 min avg/active account) | ~EC$0.005 | not in the sample | **negligible — but this lane is not treating a 5-call sample as a basis for planning, per VOICE's own "too small to model" flag** |
+| 100 min | EC$18.25 | EC$13.25 | EC$8.25 |
+| 250 min | EC$15.35 | EC$10.35 | EC$5.35 |
+| 500 min | EC$10.53 | EC$5.53 | EC$0.53 |
+| 1,000 min (worst case) | EC$0.88 | **−EC$4.12** | **−EC$9.12** |
 
-**Remaining revenue before non-minute costs (still placeholders), at each scenario:**
+**At 200 customers (fixed cost EC$3.71/customer):**
 
-| | Full price (EC$35) | EC$10 voucher (EC$25) | EC$5 voucher (EC$30) |
+| Dominica usage | Full price | EC$5 voucher | EC$10 voucher |
 |---|---|---|---|
-| Worst case (1,000 min) | EC$14.11 | **EC$4.11** | **EC$9.11** |
-| 500-min assumption | EC$23.76 | **EC$13.76** | **EC$18.76** |
-| 250-min assumption | EC$28.58 | **EC$18.58** | **EC$23.58** |
-| 100-min assumption | EC$31.48 | **EC$21.48** | **EC$26.48** |
+| 100 min | EC$27.77 | EC$22.77 | EC$17.77 |
+| 250 min | EC$24.87 | EC$19.87 | EC$14.87 |
+| 500 min | EC$20.05 | EC$15.05 | EC$10.05 |
+| 1,000 min (worst case) | EC$10.40 | EC$5.40 | EC$0.40 |
 
-All rows are still **ceilings**, not final contribution — the six non-minute cost lines (platform, Acrobits,
-VAT, processing, support/CAC, incoming reserve) still reduce every number here once they land. But the range
-from worst case to the 100-min assumption is now wide enough to be genuinely informative: even under a
-fairly generous expected-usage assumption (500 min/month — the real measured sample suggests actual usage
-is far below even 100 min, but that sample is too small to plan on), an EC$10 voucher redemption still
-leaves EC$13.76 before other costs, which is a materially healthier number than the worst case's EC$4.11.
+**At 500 customers (fixed cost EC$1.81/customer):**
 
-## Sensitivity table, Path A + Path B face-value exposure (unchanged mechanics)
-
-| Signups | Voucher | Path A real cost | Path B face-value cost |
+| Dominica usage | Full price | EC$5 voucher | EC$10 voucher |
 |---|---|---|---|
-| 50 | EC$10 | ≈ EC$71.50 | EC$500 |
-| 200 | EC$10 | ≈ EC$286 | EC$2,000 |
-| 50 | EC$5 | ≈ EC$35.75 | EC$250 |
-| 200 | EC$5 | ≈ EC$143 | EC$1,000 |
+| 100 min | EC$29.67 | EC$24.67 | EC$19.67 |
+| 250 min | EC$26.77 | EC$21.77 | EC$16.77 |
+| 500 min | EC$21.95 | EC$16.95 | EC$11.95 |
+| 1,000 min (worst case) | EC$12.30 | EC$7.30 | EC$2.30 |
 
-## Recommendation, updated for the wider range
+All figures still before VAT/Fiserv-fee/support-CAC — every number above is a ceiling, not final.
 
-Still leaning toward **Option 1 (EC$5 voucher)** as the lowest-effort protective choice — it widens the
-remaining-before-other-costs margin at every usage scenario, worst case included (EC$9.11 vs EC$4.11).
-**Option 2 (calls-only restriction)** remains available if the owner wants zero exposure to the plan-
-purchase path regardless of usage scenario, at the cost of a real LINE/AGENT build item. Given the range now
-spans EC$4.11 (worst case) to EC$21.48 (100-min assumption) for the EC$10 voucher, this lane's honest
-position is: **the worst case alone shouldn't drive the decision** now that it's backstopped by a real hard
-limit (not just a stated policy) — but the non-minute costs are still the piece that would turn any of these
-numbers from "remaining before other costs" into an actual contribution figure, and those are still with the
-owner.
+## EC$55 plan — full contribution (200 min US/CA allowance, EC$5.29 at full use)
+
+**At 50 customers:**
+
+| Dominica usage | Full price | EC$5 voucher | EC$10 voucher |
+|---|---|---|---|
+| 100 min | EC$34.55 | EC$29.55 | EC$24.55 |
+| 250 min | EC$31.65 | EC$26.65 | EC$21.65 |
+| 500 min | EC$26.83 | EC$21.83 | EC$16.83 |
+| 1,000 min (worst case) | EC$17.18 | EC$12.18 | EC$7.18 |
+
+**At 200 customers:**
+
+| Dominica usage | Full price | EC$5 voucher | EC$10 voucher |
+|---|---|---|---|
+| 100 min | EC$44.07 | EC$39.07 | EC$34.07 |
+| 250 min | EC$41.17 | EC$36.17 | EC$31.17 |
+| 500 min | EC$36.35 | EC$31.35 | EC$26.35 |
+| 1,000 min (worst case) | EC$26.70 | EC$21.70 | EC$16.70 |
+
+**At 500 customers:**
+
+| Dominica usage | Full price | EC$5 voucher | EC$10 voucher |
+|---|---|---|---|
+| 100 min | EC$45.97 | EC$40.97 | EC$35.97 |
+| 250 min | EC$43.07 | EC$38.07 | EC$33.07 |
+| 500 min | EC$38.25 | EC$33.25 | EC$28.25 |
+| 1,000 min (worst case) | EC$28.60 | EC$23.60 | EC$18.60 |
+
+The EC$55 plan never goes negative at any tested combination — its higher revenue absorbs the same fixed
+and minute costs far more easily than the EC$35 plan does.
+
+## What this means, plainly
+
+- **The EC$35 plan is the one that can actually go negative** — specifically at low customer counts (≤50)
+  combined with high Dominica usage (≥500 min) and a voucher applied. That combination is exactly the
+  worst-case-meets-early-pilot scenario: few customers (fixed costs not yet spread thin) and heavy usage.
+- **The EC$55 plan has real headroom** at every tested combination — even worst case at 50 customers with a
+  EC$10 voucher still leaves EC$7.18.
+- **VAT, Fiserv fee and support/CAC are still missing** and will only make every number in this file smaller,
+  never larger — the breakeven customer counts above are optimistic floors, not final answers.
+
+## Recommendation, updated
+
+For an early pilot (50-customer scale per Lane A's original cohort recommendation), **the EC$35 plan with a
+EC$10 voucher is genuinely risky** if usage lands anywhere near the worst case — it's the only cell in
+either table that goes solidly negative. EC$5 stays non-negative across every EC$35 scenario except the
+worst case at 50 customers (barely, −EC$4.12). Once the pilot scales past ~200 customers, the fixed-cost
+allocation shrinks enough that even EC$10 stays positive except at the worst-case usage extreme.
 
 ## Still open
-1. The six non-minute cost components — owner/finance input, per Lane A, still placeholders.
-2. The owner's cohort-size and voucher-size decision.
-3. VOICE's hard-limit mechanism design (recommended: per-minute billing from the wallet beyond the cap,
-   rather than blocking the call) — once specified, worth confirming it doesn't change the worst-case math
-   above (e.g. if overage is billed at a different rate than the plan's base minutes).
+1. VAT treatment, Fiserv card-processing fee %, support/CAC — owner/finance inputs, still placeholders.
+2. AI token cost — flagged by the owner as variable and not quantified; not in any total above.
+3. The owner's actual cohort-size and voucher-size decision, informed by the breakeven table above.
