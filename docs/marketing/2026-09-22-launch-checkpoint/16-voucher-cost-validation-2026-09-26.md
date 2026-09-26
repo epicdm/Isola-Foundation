@@ -1,74 +1,98 @@
-# EC$10 welcome voucher — cost validation, 2026-09-26
+# EC$10 welcome voucher — cost validation, 2026-09-26 (round 3: real VOICE rates)
 
-Per `dec-wifi-personal-line-pilot-approval-2026-09-26` §6: "The EC$10 welcome voucher is a proposal, NOT
-approved. Validate its cost against actual redemption and rating rules, eligible destinations, expected
-usage and the maximum campaign exposure." This validates the proposal from checkpoint 13 — it does not
-re-propose or approve anything.
+Per `dec-wifi-personal-line-pilot-approval-2026-09-26` §6. This validates the proposal from checkpoint 13 —
+it does not re-propose or approve anything. **Round 3 replaces the EC$0.03/min placeholder with real rates
+VOICE read live from voice03's buy-side tables**, and the conclusion on Path B changes as a result — see
+below, flagged carefully rather than just asserted.
 
 ## Numbers used, labelled by source
 
 | Number | Value | Status |
 |---|---|---|
-| Voucher face value | EC$10 | This lane's proposal (checkpoint 13), not yet approved |
-| Redemption rule | Becomes EC$ wallet credit; spendable on calls/plans; **never on airtime** | **Measured** — Lane A, this thread, matches `dec-bonus-value-as-vouchers-and-card-only-airtime-2026-09-26` |
-| Dominica per-minute rate, Personal Line, voice03 | EC$0.135/min | **Measured** — given directly by Lane A this thread |
-| Dominica wholesale/interconnect cost | **EC$0.03/min — labelled "Port-sourced 2026-09-02, unverified"** | Lane A is asking the VOICE lane for the current measured figure. Per Lane A's instruction (2026-09-26), keep this label on the number until VOICE answers rather than treat it as confirmed. Source: `mc-personal-line-unlimited-dominica-calling-2026-09-02`'s own rationale. |
-| Early-access signup cap | **50 (primary), 200 (sensitivity range)** | Lane A's recommendation, replacing the illustrative/non-authoritative 500 this lane used originally. Sized to what support can handle and to the 12-device Wi-Fi pilot cap. Still an owner decision, not final — shown as a two-point sensitivity range per Lane A's instruction. |
+| Voucher face value | EC$10 (also costed at EC$5) | This lane's proposal (checkpoint 13), not yet approved |
+| Redemption rule | Becomes EC$ wallet credit; spendable on calls/plans; **never on airtime** | **Measured** — matches `dec-bonus-value-as-vouchers-and-card-only-airtime-2026-09-26` |
+| Dominica per-minute rate, Personal Line, voice03 (customer-facing/retail) | EC$0.135/min | **Measured** — Lane A, prior thread |
+| Digicel mobile (Dominica) | US$0.007148/min ≈ **EC$0.0193/min** | **Measured** — VOICE lane, read live from voice03 buy-side tables, 2026-09-26 |
+| Flow mobile (Dominica) | US$0.007148/min ≈ **EC$0.0193/min** | **Measured** — same source |
+| Flow fixed (Dominica) | US$0.003852/min ≈ **EC$0.0104/min** | **Measured** — same source |
+| On-net (EPIC↔EPIC) | EC$0/min | **Measured** — same source |
+| Conservative wholesale rate (this file's default) | **EC$0.0193/min** (mobile) | Used until VOICE sends the actual call mix (mobile/fixed/on-net split) — this is a ceiling, not an expected average; real blended cost is likely lower once on-net and fixed-line traffic is counted in |
+| Blended call-mix cost | Not yet available | **Pending** — VOICE asked, per Lane A |
+| Early-access signup cap | 50 (primary), 200 (sensitivity range) | Lane A's recommendation, still an owner decision |
+| Dominica minute allowance on the 30-Day plan | 400 min/30 days (historical packet) **or genuinely unlimited/uncapped** (original 2026-09-02 pricing decision + Lane A's own earlier measurement that Magnus rates Dominica at 0/min with no enforced cap) | **Unresolved** — this is checkpoint 14's open conflict, not settled by today's rate update. The 400-min figure is used below only because it's the one concrete allowance number on record; if the owner rules "unlimited," this whole calculation needs a usage-based model instead of an allowance-based one. |
 
-## Two redemption paths, costed separately (both are "spendable on calls/plans")
+## Path A — voucher spent as pay-per-minute Dominica calling, recomputed
 
-**Path A — spent as pay-per-minute Dominica calling (no plan purchase):**
-EC$10 ÷ EC$0.135/min = **74 minutes** of Dominica calling covered, at the customer-facing rate.
-Real wholesale cost to EPIC, if the EC$0.03/min figure above is confirmed current: 74 min × EC$0.03/min ≈
-**EC$2.22 per redeeming customer** — about 22% of face value.
+EC$10 ÷ EC$0.135/min (retail) = 74.07 min covered. Wholesale cost at the conservative mobile rate:
+74.07 × EC$0.0193 ≈ **EC$1.43** (down from the prior placeholder estimate of EC$2.22, which used the
+unverified EC$0.03/min figure).
+EC$5 ÷ EC$0.135 = 37.04 min → 37.04 × EC$0.0193 ≈ **EC$0.71**.
 
-**Path B — applied toward a plan purchase (e.g., the EC$35 30-Day plan):**
-This is the path this lane considers the more realistic risk, since Personal Line's business model is
-plan-based, not pay-per-minute. If a customer applies the EC$10 voucher toward a EC$35 30-Day plan, EPIC
-receives EC$25 cash instead of EC$35 for that plan. The historical packet's own revised contribution
-estimate for a full-price 30-Day plan is ~EC$7.86 before support/CAC/incoming reserve. Subtracting the
-EC$10 voucher from that revenue: **≈ –EC$2.14 contribution per redeeming customer** — i.e. this redemption
-path could make the acquisition **loss-making before support/CAC**, not just lower-margin. This is the
-number that most needs the owner's attention, more than Path A's wholesale-cost framing.
+## Path B — applied toward the EC$35 30-Day plan, recomputed **with a real caveat**
 
-## Maximum campaign exposure — sensitivity at 50 and 200 signups
+**What changed and what didn't:** the voucher's face-value reduction from plan revenue is unchanged by this
+rate update (EC$10 or EC$5 comes straight off the EC$35 price regardless of wholesale cost). What changes is
+the plan's own **cost side**, which determines what contribution is left after that discount.
 
-Confirmed by Lane A: the wallet-credit path is real — a redeemed voucher can go toward calls **or** a plan
-purchase (never airtime), so Path B (plan discount) isn't a hypothetical, it's how the mechanism actually
-works today. Two voucher sizes shown, since a smaller voucher is one way to remove Path B's loss-making risk
-without new engineering.
+**Dominica-cost component, recomputed:**
+- Old assumption (round 2, unverified): 400 min × EC$0.03/min = EC$12.00.
+- New (measured, conservative mobile rate): 400 min × EC$0.0193/min = **EC$7.72** — EC$4.28 cheaper per
+  plan-month than the old placeholder assumed.
 
-| Signups | Voucher | Path A (calls only) — real cost | Path B (plan-purchase redemption) — real cost | Plan contribution after Path B redemption |
+**Directional effect on the plan's contribution:** the historical packet's own top-line estimate was ~EC$7.86
+contribution before support/CAC/incoming reserve. I don't have that estimate's full itemized breakdown (the
+US-CAN minute cost, platform fee, Acrobits, VAT, processing, support/CAC and incoming-reserve components
+weren't given to me individually — only the final ~EC$7.86 result). **I can't fully rebuild that number from
+scratch**, but I can apply the one input that changed: adding back the EC$4.28 Dominica-cost improvement to
+the old baseline gives a **directional estimate of ~EC$12.14** contribution before a voucher discount — flagged
+as directional, not a verified recomputation, since the other cost inputs are assumed unchanged, not re-confirmed.
+
+**This reverses round 2's conclusion, with that caveat attached:**
+- EC$10 voucher against ~EC$12.14: **≈ +EC$2.14/customer — positive, not loss-making** (round 2 said −EC$2.14,
+  using the unverified EC$0.03/min figure).
+- EC$5 voucher against ~EC$12.14: **≈ +EC$7.14/customer.**
+
+**Why this isn't a clean "all clear":** it depends on (1) the 400-min allowance assumption, which is itself
+unresolved against the "unlimited" reading of the original pricing decision, and (2) the other cost
+components in the ~EC$7.86 baseline being accurate and unchanged, which I haven't independently re-verified.
+If Dominica calling is genuinely uncapped, a heavy-usage customer's real cost could exceed the 400-min
+figure this estimate relies on — the historical packet's own framing ("at full stated use") only makes sense
+for a plan with a stated allowance, not an unlimited one.
+
+## Sensitivity table, recomputed
+
+| Signups | Voucher | Path A real cost (conservative mobile rate) | Path B face-value cost (unchanged) | Plan contribution after Path B redemption (directional, see caveat above) |
 |---|---|---|---|---|
-| 50 | EC$10 | 50 × EC$2.22 ≈ **EC$111** | 50 × EC$10 = **EC$500** | ~EC$7.86 − EC$10 = **−EC$2.14/customer (loss-making)** |
-| 200 | EC$10 | 200 × EC$2.22 ≈ **EC$444** | 200 × EC$10 = **EC$2,000** | same per-customer result: **−EC$2.14/customer** |
-| 50 | EC$5 | 50 × EC$1.11 ≈ **EC$56** | 50 × EC$5 = **EC$250** | ~EC$7.86 − EC$5 = **+EC$2.86/customer (still positive)** |
-| 200 | EC$5 | 200 × EC$1.11 ≈ **EC$222** | 200 × EC$5 = **EC$1,000** | same per-customer result: **+EC$2.86/customer** |
+| 50 | EC$10 | 50 × EC$1.43 ≈ **EC$71.50** | EC$500 | **+EC$2.14/customer** |
+| 200 | EC$10 | 200 × EC$1.43 ≈ **EC$286** | EC$2,000 | **+EC$2.14/customer** |
+| 50 | EC$5 | 50 × EC$0.71 ≈ **EC$35.75** | EC$250 | **+EC$7.14/customer** |
+| 200 | EC$5 | 200 × EC$0.71 ≈ **EC$143** | EC$1,000 | **+EC$7.14/customer** |
 
-(Path A real-cost figures use the unverified EC$0.03/min wholesale label above — treat as an estimate until
-VOICE confirms.)
+## Two options for the owner — updated status
 
-## Two options for the owner, beyond just picking a cohort size
+**Option 1 — smaller voucher (EC$5).** Still valid, still no new engineering, still the more conservative
+choice — now shown to widen an already-positive margin rather than rescue a negative one.
 
-**Option 1 — smaller voucher (EC$5 instead of EC$10).** No new engineering. Keeps the plan-purchase
-redemption path solidly positive-contribution (+EC$2.86 vs the EC$10 voucher's −EC$2.14). Halves both
-exposure columns. This lane's preference if the goal is removing the loss-making risk with the least work.
+**Option 2 — restrict the voucher to calls-only.** Still a real LINE/AGENT build item, not a copy change, per
+round 2. With Path B now directionally positive, this option is less urgent than it looked in round 2, but
+still removes the residual uncertainty from the 400-min/unlimited allowance question entirely if the owner
+wants a number with no caveats attached.
 
-**Option 2 — restrict the voucher to calls only (no plan-purchase redemption).** Removes Path B's risk
-entirely regardless of voucher size, but **this is not how the mechanism works today** — per
-`dec-bonus-value-as-vouchers-and-card-only-airtime-2026-09-26` and Lane A's confirmation, the wallet credit
-currently spends on calls **or** plans, with no scope restriction. Choosing this option means asking
-LINE/AGENT to add that restriction before launch — a real build item, not a copy change. Flagging the
-dependency rather than assuming it's a quick flag flip.
+## What this validation recommends, updated
 
-## What this validation recommends
-
-Not a yes/no on the EC$10 figure — that's the owner's call. But: **Option 1 (EC$5, no new engineering) is
-the lowest-effort way to remove the one genuinely dangerous number in this analysis** (Path B going
-loss-making). Option 2 is cleaner in principle but costs a build item this pilot's own order-of-work
-sequence (currency → vouchers → testimonial) doesn't currently include.
+Round 2 flagged Path B as the most dangerous number. With the real VOICE rate, that specific concern is
+substantially reduced — but **not eliminated**, because the directional contribution estimate still rests on
+an unconfirmed allowance assumption and an unverified non-Dominica cost baseline. This lane's honest
+position: the EC$10 voucher no longer looks clearly loss-making, but "no longer looks loss-making" is weaker
+than "confirmed profitable" — the owner's ruling on unlimited-vs-capped Dominica calling (checkpoint 14) is
+still the one thing that would make this a clean number instead of a directional one.
 
 ## Still open
-1. VOICE's confirmation of the current Dominica wholesale/interconnect rate (Path A numbers move if it
-   differs from EC$0.03/min).
-2. The owner's actual cohort-size decision (50 vs 200 vs something else) and voucher-size/scope choice.
+1. VOICE's blended call-mix cost (mobile/fixed/on-net split), to replace the conservative mobile-only rate
+   with an expected-average figure.
+2. The unlimited-vs-400-min-cap ruling (checkpoint 14) — this is what turns "directional" into "confirmed"
+   for the Path B numbers above.
+3. Independent confirmation of the non-Dominica cost components in the historical ~EC$7.86 baseline (US-CAN
+   minute cost, platform/Acrobits/VAT/processing/support-CAC/incoming-reserve) — this lane only has the
+   top-line result, not the itemized inputs, and hasn't rebuilt them from scratch.
+4. The owner's cohort-size and voucher-size decision.
