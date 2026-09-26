@@ -6,6 +6,13 @@ EC$0.005–0.03/min; historical retail overage EC$0.15/min Dominica, EC$0.25/min
 ladder is itself unratified per checkpoint 14, used here only as a costing reference, not a claim). Currency
 shown per `dec-card-currency-default-by-payer-number-2026-09-26` (EC$ = US$ × 2.70).
 
+## Status: proposal only, NOT approved (`dec-wifi-personal-line-pilot-approval-2026-09-26` §6)
+
+The EC$10 figure and cost estimates below are this lane's original proposal. A more rigorous validation
+against real voice03 rating and a request for the actual pilot cohort size lives in **checkpoint 16** —
+read that alongside this file; it supersedes the illustrative "500-signup" cost math below, which used an
+unconfirmed cohort size and should not be relied on further.
+
 ## Recommendation: (a) priority access + bonus voucher
 
 **Why:** it directly reuses the mechanism the owner ratified and had built *today*
