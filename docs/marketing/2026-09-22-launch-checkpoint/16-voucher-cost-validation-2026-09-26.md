@@ -63,12 +63,33 @@ the still-uncosted items (US/CA minutes, platform fee, Acrobits, VAT, processing
 reserve) are added. Given the historical model's own first attempt landed *negative* before correction, I
 would not want to tell the owner this is fine without the missing inputs — this table shows why.
 
-## Question back to Lane A, as instructed — not assumed
+## Full plan contribution — table with explicit placeholders, not guesses
 
-**What is the actual US/Canada per-minute termination cost VOICE would read for this plan?** I need this
-figure, plus the non-minute cost components (or an updated top-line contribution figure built on the
-1,000-min allowance, if that's faster on your side), to finish Path B properly. Until then this file shows
-Path A cleanly and Path B's worst-case Dominica exposure only — not a full contribution number.
+Per Lane A: US/Canada rate and average/max Dominica usage requested from VOICE; non-minute costs are an
+owner/finance input Lane A is putting to the owner directly. Structured below so it's presentation-ready
+the moment those land — every unfilled cell says so plainly rather than being estimated.
+
+| Cost component | Worst case | Expected case | Status |
+|---|---|---|---|
+| Dominica minutes (1,000 min fair-use) | **EC$19.30** | *owner/VOICE input needed — average/max usage per account per 30 days requested* | Worst case computed (measured rate × relayed allowance); expected pending |
+| US/Canada minutes (60 min allowance) | *owner/VOICE input needed* | *owner/VOICE input needed* | Termination rate requested from VOICE |
+| Platform fee | *owner/finance input needed* | *owner/finance input needed* | No engineering system holds this — owner/finance input, per Lane A |
+| Acrobits | *owner/finance input needed* | *owner/finance input needed* | Same |
+| VAT | *owner/finance input needed* | *owner/finance input needed* | Same |
+| Processing (payment) | *owner/finance input needed* | *owner/finance input needed* | Same |
+| Support/CAC | *owner/finance input needed* | *owner/finance input needed* | Same |
+| Incoming reserve | *owner/finance input needed* | *owner/finance input needed* | Same |
+| **Total known cost so far** | **EC$19.30 + unfilled lines** | **unfilled** | Cannot total until all lines land |
+
+| | Full price | EC$10 voucher | EC$5 voucher |
+|---|---|---|---|
+| Revenue | EC$35.00 | EC$25.00 | EC$30.00 |
+| **Contribution, worst case (upper bound — falls further once unfilled lines land)** | **≤ EC$15.70** | **≤ EC$5.70** | **≤ EC$10.70** |
+| Contribution, expected case | *pending* | *pending* | *pending* |
+
+The worst-case contribution column is a **ceiling, not an estimate** — it can only go down as the unfilled
+lines are added, never up. That's why EC$5.70 (EC$10 voucher, worst case) is already a meaningful number
+even with six cost lines still missing: there isn't much room left to absorb them.
 
 ## Sensitivity table — Path A only (Path B contribution withheld until the above lands)
 
@@ -83,7 +104,15 @@ Path B face-value exposure is unchanged by any of this (EC$10 or EC$5 × signups
 revenue regardless of cost inputs): 50×EC$10=EC$500, 200×EC$10=EC$2,000, 50×EC$5=EC$250, 200×EC$5=EC$1,000.
 What's missing is the resulting **contribution**, not the exposure — withheld above rather than guessed.
 
-## Two options for the owner — unchanged, per Lane A
+## Recommendation under worst case, confirmed fair to show by Lane A
+
+**Lean toward Option 1 (EC$5 voucher) or Option 2 (calls-only restriction).** Under the worst-case ceiling
+above, an EC$10 voucher redeemed against a plan purchase leaves only EC$5.70 to cover six still-unknown cost
+lines — thin enough that this lane would not want to greenlight EC$10 on the worst-case numbers alone.
+EC$5 leaves EC$10.70, nearly double the room. Calls-only removes the question entirely regardless of size,
+at the cost of a real build item. Neither is a final call — the expected-case numbers (likely materially
+better than worst case, per Lane A) could change this once they land; this is a worst-case-informed lean,
+not a recommendation to decide the offer now.
 
 **Option 1 — smaller voucher (EC$5).** Still no new engineering. Given the worst-case Dominica exposure grew
 under the 1,000-min figure, this option matters more this round, not less — it leaves EC$10.70 before other
