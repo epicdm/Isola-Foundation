@@ -16,7 +16,15 @@ import {
 // For defaultVerifyStaffBinding's own tests only -- every other test in this
 // file injects an explicit verifyStaffBinding override and never reaches
 // this dynamic import at all.
-const findBindingByOdooUserMock = vi.fn()
+//
+// Codex review, PR #155: vi.mock() factories are hoisted above ordinary
+// top-level initialization, so a plain `const` referenced inside the
+// factory is read from its temporal dead zone. vi.hoisted() -- the pattern
+// this repo's other mocked test files already use -- runs before that
+// hoisting instead of after it.
+const { findBindingByOdooUserMock } = vi.hoisted(() => ({
+  findBindingByOdooUserMock: vi.fn(),
+}))
 vi.mock('@/lib/staff-ops/service', () => ({
   findBindingByOdooUser: findBindingByOdooUserMock,
 }))
