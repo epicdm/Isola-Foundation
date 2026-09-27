@@ -512,6 +512,18 @@ async function resolveAssignableUser(config: OdooConfig, tenantId: string, assig
   // manager-tap path requires `.active` explicitly (service.ts:882-885);
   // this is the same requirement, for the same reason.
   if (!binding || !binding.active) return null;
+  // KNOWN, DISCLOSED LIMITATION (Codex review, PR #156, not fixed here):
+  // StaffBinding stores no database identity, only (tenantId, odoo_res_
+  // user_id). If a tenant's OdooBinding is ever repointed at a different
+  // Odoo database, a stale StaffBinding row for user id N in the OLD
+  // database could validate an unrelated active user id N in the NEW one
+  // -- Odoo user ids are small sequential integers, so this is a real
+  // collision class, the same shape already documented in this file's own
+  // tenantOwnsPersonalLine comment for a different table. Closing it
+  // properly needs a database-identity column on StaffBinding (a schema
+  // change to shared, cross-feature infrastructure) -- out of scope for
+  // an assignment-verification PR to make unilaterally. Reported, not
+  // silently patched.
   return { id: Number(row.id), name: String(row.name ?? '') };
 }
 
@@ -574,7 +586,18 @@ export async function createCustomerFollowUp(
     // readback disagrees on WHO it was assigned to -- the same "created
     // but unreadable" honesty standard, pointed at the assignment
     // specifically rather than existence alone.
-    throw new Error('the follow-up was created but the assignment could not be confirmed on readback');
+    //
+    // Codex review, PR #156: the mismatched record is NOT deleted here.
+    // Rolling it back would need a delete/unlink capability this identity
+    // has no other reason to hold, widening the write surface for a rare
+    // failure path -- a bigger change than this PR's scope. Naming the
+    // record's id is the safer, minimal fix: a human (or a caller with its
+    // own retry logic) can find and correct exactly this record instead of
+    // guessing, and a blind automatic retry that ignores this message text
+    // is a caller-side bug, not something this function can prevent alone.
+    throw new Error(
+      `the follow-up (mail.activity ${externalId}) was created but the assignment could not be confirmed on readback -- it may be assigned to the wrong person and needs manual review, not a retry`,
+    );
   }
   const now = new Date();
   return {

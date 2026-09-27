@@ -130,6 +130,17 @@ describe('createCustomerFollowUp — assigneeRef', () => {
     )
   })
 
+  it('Codex PR #156 P2 — the mismatch error names the created record id, so a human can find and correct it instead of retrying', async () => {
+    findBindingByOdooUserMock.mockResolvedValue({ id: 'binding-1', active: true })
+    setScript({
+      'res.users.search_read': [{ id: 7, name: 'Ann Owner' }],
+      'mail.activity.search_read': [{ id: 4242, summary: 'call back', date_deadline: '2026-10-01', user_id: [3, 'Ann Owner'] }],
+    })
+    await expect(createCustomerFollowUp(CONFIG, 99, 'call back', '2026-10-01', '7', TENANT)).rejects.toThrow(
+      /mail\.activity 4242/,
+    )
+  })
+
   it('CONTROL for the sabotage case — an UNTAMPERED write with the same assignee id executes cleanly', async () => {
     findBindingByOdooUserMock.mockResolvedValue({ id: 'binding-1', active: true })
     setScript({
