@@ -168,7 +168,10 @@ export const GOVERNED_ACTION_CATALOGUE: readonly GovernedActionMeta[] = [
     fields: [
       { name: 'note', label: 'Follow-up note', kind: 'longtext', required: true, maxLength: 2000 },
       { name: 'dueDate', label: 'Due', kind: 'date', required: true },
-      { name: 'ownerRef', label: 'Owner', kind: 'reference', required: false },
+      // ownerRef removed (Codex review, PR #155): this action never assigns
+      // to anyone, including 'staff' among allowedRoles -- listing a field
+      // that does nothing would be misleading. followup.scheduleAssigned is
+      // the one door for assignment.
     ],
     expectedResult: 'The follow-up is read back by its note before it is reported as done.',
   },

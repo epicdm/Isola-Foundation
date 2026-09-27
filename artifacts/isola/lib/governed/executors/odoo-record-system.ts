@@ -94,7 +94,11 @@ export interface OdooRecordSystemDeps {
 async function defaultVerifyStaffBinding(tenantId: string, odooUserId: number): Promise<boolean> {
   const { findBindingByOdooUser } = await import('@/lib/staff-ops/service')
   const binding = await findBindingByOdooUser(tenantId, odooUserId)
-  return binding !== null
+  // Codex review, PR #155: existence alone is not enough -- a deactivated
+  // staff member's binding row still exists. lib/staff-ops/service.ts's own
+  // manager-tap path requires `.active` explicitly (service.ts:882-885);
+  // this is the same requirement, for the same reason.
+  return binding !== null && binding.active
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000

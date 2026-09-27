@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { OdooApiError, OdooNoApiError, type OdooConfig } from '@/engines/odoo'
 
@@ -12,6 +12,14 @@ import {
   plainText,
   type OdooCall,
 } from './odoo-record-system'
+
+// For defaultVerifyStaffBinding's own tests only -- every other test in this
+// file injects an explicit verifyStaffBinding override and never reaches
+// this dynamic import at all.
+const findBindingByOdooUserMock = vi.fn()
+vi.mock('@/lib/staff-ops/service', () => ({
+  findBindingByOdooUser: findBindingByOdooUserMock,
+}))
 
 /**
  * No network. The transport is injected in every test and a test at the bottom
@@ -210,6 +218,27 @@ describe('resolveAssignableUser — real+active+internal is necessary but not su
     const r = await rec.resolveAssignableUser('tenant-a', '999999')
     expect(r).toBeNull()
     expect(called).toBe(false)
+  })
+})
+
+describe('defaultVerifyStaffBinding (the REAL default, no override) — Codex PR #155 P1', () => {
+  it('a deactivated Foundation staff member with an otherwise-matching binding → null, not assignable', async () => {
+    findBindingByOdooUserMock.mockResolvedValue({ id: 'binding-1', active: false })
+    // No verifyStaffBinding override here -- this exercises the real
+    // defaultVerifyStaffBinding, which must reject on `active: false` even
+    // though a binding row genuinely exists (an offboarded staff member
+    // whose Odoo account is still active).
+    const { rec } = sys({ 'res.users.search_read': [{ id: 7, name: 'Formerly Staff' }] })
+    const r = await rec.resolveAssignableUser('tenant-a', '7')
+    expect(r).toBeNull()
+    expect(findBindingByOdooUserMock).toHaveBeenCalledWith('tenant-a', 7)
+  })
+
+  it('CONTROL — an active binding via the real default → resolves', async () => {
+    findBindingByOdooUserMock.mockResolvedValue({ id: 'binding-1', active: true })
+    const { rec } = sys({ 'res.users.search_read': [{ id: 7, name: 'Ann Owner' }] })
+    const r = await rec.resolveAssignableUser('tenant-a', '7')
+    expect(r).toEqual({ id: '7', name: 'Ann Owner' })
   })
 })
 

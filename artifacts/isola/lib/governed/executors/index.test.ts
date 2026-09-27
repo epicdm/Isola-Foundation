@@ -582,4 +582,44 @@ describe('followup.scheduleAssigned — the rules narrower than followup.schedul
     )
     expect(r.outcome, r.detail).toBe('EXECUTED')
   })
+
+  it('Codex PR #155 P2 — a non-canonical but numerically valid assigneeRef ("007") still confirms on readback', async () => {
+    const { rec, state } = fakeRecordSystem()
+    const { ports } = buildPorts(rec)
+    const r = await runGovernedAction(
+      { ...BASE, actorRole: 'manager', payload: { note: 'call back', dueDate: '2026-08-12', assigneeRef: '007' } },
+      ports,
+    )
+    expect(r.outcome, r.detail).toBe('EXECUTED')
+    expect(state.writeAttempts).toBe(1)
+  })
+})
+
+describe('followup.schedule — the assignment bypass is closed (Codex PR #155 P1)', () => {
+  it('a staff-supplied ownerRef is NEVER forwarded to Odoo, even though it used to reach production once objectType translation made this action reachable', async () => {
+    const { rec } = fakeRecordSystem()
+    const { ports } = buildPorts(rec)
+    const r = await runGovernedAction(
+      {
+        actionType: 'followup.schedule',
+        objectType: 'crm.lead',
+        objectId: 'lead-9',
+        actorRole: 'staff',
+        actorPrincipalId: 'principal-7',
+        companyId: COMPANY,
+        idempotencyKey: 'idem-bypass-1',
+        correlationId: 'corr-1',
+        // A staff caller attempting to assign to an arbitrary user id --
+        // exactly the bypass Codex found once this action became reachable.
+        payload: { note: 'call back', dueDate: '2026-08-12', ownerRef: '999' },
+      },
+      ports,
+    )
+    expect(r.outcome, r.detail).toBe('EXECUTED')
+    // The fake's scheduleFollowup stores whatever it was called with; if
+    // ownerRef had leaked through, the stored row would show a user_id for
+    // it (the fake sets user_id from i.ownerRef when truthy).
+    expect(r.readback?.ownerRef).toBeNull()
+    expect(r.readback?.user_id).toBe(false)
+  })
 })

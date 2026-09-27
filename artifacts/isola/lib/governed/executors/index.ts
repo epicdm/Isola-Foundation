@@ -303,21 +303,19 @@ export function buildExecutors(rec: RecordSystem): readonly ActionExecutor[] {
           objectId: p.objectId,
           note: str(p.payload.note),
           dueDate: str(p.payload.dueDate),
-          ownerRef: str(p.payload.ownerRef) || null,
+          // Codex review, PR #155: ownerRef is NEVER forwarded here, even if
+          // a caller supplies one -- this action's own allowedRoles includes
+          // 'staff', and forwarding an unvalidated ownerRef straight to Odoo
+          // (once the objectType fix above made this action reachable
+          // in production) bypassed BOTH the manager/owner restriction and
+          // the tenant-binding check followup.scheduleAssigned exists to
+          // enforce. Assignment has exactly one door now; this is not it.
+          ownerRef: null,
         }),
       readback: async (externalId, p) => {
         const row = await rec.readFollowup(externalId)
         if (!row) return null
-        if (!matches(row, { note: str(p.payload.note) })) return null
-        // ev-isola-360-followup-assignment-2026-09-27: readback previously
-        // asserted the note only, never the assignee -- a write that reported
-        // success but landed on the wrong (or no) user_id was invisible here.
-        // ownerRef unset is not a claim about who it's assigned to, so no
-        // check runs; ownerRef set is a claim, and it must be confirmed the
-        // same way `note` already is.
-        const expectedOwnerRef = str(p.payload.ownerRef)
-        if (expectedOwnerRef && !m2oIdMatches(row.user_id, expectedOwnerRef)) return null
-        return row
+        return matches(row, { note: str(p.payload.note) }) ? row : null
       },
     },
 
@@ -387,8 +385,16 @@ export function buildExecutors(rec: RecordSystem): readonly ActionExecutor[] {
         // Assignment is the entire point of this action -- unlike
         // followup.schedule, where ownerRef is optional, here a readback that
         // does not confirm the assignee is a failure, not a pass.
-        const assigneeRef = str(p.payload.assigneeRef)
-        if (!m2oIdMatches(row.user_id, assigneeRef)) return null
+        //
+        // Compared against the CANONICAL numeric id (Codex review, PR #155):
+        // a non-canonical but numerically valid reference like "007" resolves
+        // to user 7 in execute() and the write correctly stores user_id=7,
+        // but comparing against the raw payload string "007" would wrongly
+        // report READBACK_FAILED after a successful, correct write.
+        // String(Number(x)) reproduces exactly what resolveAssignableUser's
+        // own id resolution yields, without a second Odoo round-trip.
+        const canonicalAssigneeRef = String(Number(str(p.payload.assigneeRef)))
+        if (!m2oIdMatches(row.user_id, canonicalAssigneeRef)) return null
         return row
       },
     },
