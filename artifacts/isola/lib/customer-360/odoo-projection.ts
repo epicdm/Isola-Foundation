@@ -493,16 +493,25 @@ function m2oId(value: unknown): number | null {
 async function resolveAssignableUser(config: OdooConfig, tenantId: string, assigneeRef: string): Promise<{ id: number; name: string } | null> {
   const id = Number(assigneeRef);
   if (!Number.isFinite(id) || id <= 0) return null;
+  // 12000ms, matching every other json2Call in this file (Codex review, PR
+  // #156: omitting it means NO timeout at all per engines/odoo.ts's own
+  // documented default -- a stalled res.users lookup would otherwise hang
+  // the request until the hosting platform kills it, unlike the bounded
+  // record-system calls immediately after).
   const rows = await json2Call(config, 'res.users', 'search_read', {
     domain: [['id', '=', id], ['active', '=', true], ['share', '=', false]],
     fields: ['id', 'name'],
     limit: 1,
-  }) as Array<{ id: number; name: string }>;
+  }, 12000) as Array<{ id: number; name: string }>;
   const row = rows[0];
   if (!row) return null;
   const { findBindingByOdooUser } = await import('@/lib/staff-ops/service');
   const binding = await findBindingByOdooUser(tenantId, Number(row.id));
-  if (!binding) return null;
+  // Codex review, PR #156: existence alone is not enough -- a deactivated
+  // staff member's binding row still exists. lib/staff-ops/service.ts's own
+  // manager-tap path requires `.active` explicitly (service.ts:882-885);
+  // this is the same requirement, for the same reason.
+  if (!binding || !binding.active) return null;
   return { id: Number(row.id), name: String(row.name ?? '') };
 }
 

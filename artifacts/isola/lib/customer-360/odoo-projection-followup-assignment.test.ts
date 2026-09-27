@@ -66,7 +66,7 @@ describe('createCustomerFollowUp — assigneeRef', () => {
   })
 
   it('real assigneeRef, bound to the tenant → resolved, written, and the readback confirms the SAME id Odoo actually stored', async () => {
-    findBindingByOdooUserMock.mockResolvedValue({ id: 'binding-1' })
+    findBindingByOdooUserMock.mockResolvedValue({ id: 'binding-1', active: true })
     setScript({
       'res.users.search_read': [{ id: 7, name: 'Ann Owner' }],
       'mail.activity.search_read': [{ id: 4242, summary: 'call back', date_deadline: '2026-10-01', user_id: [7, 'Ann Owner'] }],
@@ -76,6 +76,15 @@ describe('createCustomerFollowUp — assigneeRef', () => {
     expect(findBindingByOdooUserMock).toHaveBeenCalledWith(TENANT, 7)
     const createCall = calls.find((c) => c.model === 'mail.activity' && c.method === 'create')
     expect(createCall?.params.vals_list).toMatchObject([{ user_id: 7 }])
+  })
+
+  it('SECURITY — binding row exists but is DEACTIVATED (offboarded staff, still-active Odoo account) → thrown, not assignable', async () => {
+    findBindingByOdooUserMock.mockResolvedValue({ id: 'binding-1', active: false })
+    setScript({ 'res.users.search_read': [{ id: 7, name: 'Formerly Staff' }] })
+    await expect(createCustomerFollowUp(CONFIG, 99, 'call back', '2026-10-01', '7', TENANT)).rejects.toThrow(
+      /does not match a real, active, internal user bound to this tenant/,
+    )
+    expect(calls.some((c) => c.model === 'mail.activity')).toBe(false)
   })
 
   it('assigneeRef that does not resolve in Odoo at all → thrown BEFORE any write, binding check never called', async () => {
@@ -106,7 +115,7 @@ describe('createCustomerFollowUp — assigneeRef', () => {
   })
 
   it('SABOTAGE — write reports success but the readback disagrees on the assignee ID → thrown, never silently reported as assigned', async () => {
-    findBindingByOdooUserMock.mockResolvedValue({ id: 'binding-1' })
+    findBindingByOdooUserMock.mockResolvedValue({ id: 'binding-1', active: true })
     setScript({
       'res.users.search_read': [{ id: 7, name: 'Ann Owner' }],
       // Readback shows a DIFFERENT user id than what was requested/written --
@@ -122,7 +131,7 @@ describe('createCustomerFollowUp — assigneeRef', () => {
   })
 
   it('CONTROL for the sabotage case — an UNTAMPERED write with the same assignee id executes cleanly', async () => {
-    findBindingByOdooUserMock.mockResolvedValue({ id: 'binding-1' })
+    findBindingByOdooUserMock.mockResolvedValue({ id: 'binding-1', active: true })
     setScript({
       'res.users.search_read': [{ id: 7, name: 'Ann Owner' }],
       'mail.activity.search_read': [{ id: 4242, summary: 'call back', date_deadline: '2026-10-01', user_id: [7, 'Ann Owner'] }],
