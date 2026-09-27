@@ -65,9 +65,41 @@ export interface RecordSystem {
     ownerRef?: string | null
   }): Promise<{ externalId: string }>
   readFollowup(externalId: string): Promise<Record<string, unknown> | null>
+
+  /**
+   * Resolves an assignee target -- real, active, internal (never a
+   * portal/customer login), AND bound to `tenantId` as staff (Codex review,
+   * PR #155: an Odoo instance can be shared across tenants/companies, so
+   * "active internal user in this Odoo" alone does not prove the user
+   * belongs to the ACTING tenant -- a manager could otherwise assign a
+   * follow-up to a different tenant's staff member who happens to be
+   * visible in the same res.users table). Returns null on any failure to
+   * confirm all three. Used by followup.scheduleAssigned before any write.
+   */
+  resolveAssignableUser(tenantId: string, assigneeRef: string): Promise<{ id: string; name: string } | null>
 }
 
 const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
+
+// Codex review, PR #155: runCustomerAction() (the only production caller,
+// lib/governed/customer-actions.ts) hardcodes every proposal's objectType to
+// the generic Foundation vocabulary word 'customer' -- never a real Odoo
+// model name. activityVals()'s ir.model lookup (odoo-record-system.ts) needs
+// the concrete model. This is the ONE translation this module owns; unknown
+// object types pass through unchanged (never guessed) rather than silently
+// mis-resolving to a model nobody asked for.
+//
+// NOTE, flagged separately, not fixed here: createNote/createTask/
+// scheduleActivity share the identical p.objectType passthrough and would
+// hit the same gap for the 'customer' case -- out of scope for this PR
+// (assignment, not a sweep of every executor's object-type handling), and
+// reported to Lane A as its own finding.
+const OBJECT_TYPE_TO_ODOO_MODEL: Readonly<Record<string, string>> = {
+  customer: 'res.partner',
+}
+function toOdooModel(objectType: string): string {
+  return OBJECT_TYPE_TO_ODOO_MODEL[objectType] ?? objectType
+}
 
 /** ISO date, date-only or full timestamp. Rejects anything unparseable. */
 function validDate(v: unknown): boolean {
@@ -82,6 +114,15 @@ function validDate(v: unknown): boolean {
  */
 function matches(readback: Record<string, unknown>, expected: Record<string, string>): boolean {
   return Object.entries(expected).every(([k, v]) => str(readback[k]) === v)
+}
+
+/**
+ * A many2one field arrives as `[id, "Name"]` or `false` -- `matches()`'s plain
+ * string comparison can never match it (str() on an array is ''). This checks
+ * the id component specifically, for the one field `matches()` cannot cover.
+ */
+function m2oIdMatches(value: unknown, expectedId: string): boolean {
+  return Array.isArray(value) && typeof value[0] === 'number' && String(value[0]) === expectedId
 }
 
 /** The fields `lead.update` is permitted to change. Anything else is ignored. */
@@ -258,16 +299,103 @@ export function buildExecutors(rec: RecordSystem): readonly ActionExecutor[] {
       execute: async (p) =>
         rec.scheduleFollowup({
           companyId: p.companyId,
-          objectType: p.objectType,
+          objectType: toOdooModel(p.objectType),
           objectId: p.objectId,
           note: str(p.payload.note),
           dueDate: str(p.payload.dueDate),
-          ownerRef: str(p.payload.ownerRef) || null,
+          // Codex review, PR #155: ownerRef is NEVER forwarded here, even if
+          // a caller supplies one -- this action's own allowedRoles includes
+          // 'staff', and forwarding an unvalidated ownerRef straight to Odoo
+          // (once the objectType fix above made this action reachable
+          // in production) bypassed BOTH the manager/owner restriction and
+          // the tenant-binding check followup.scheduleAssigned exists to
+          // enforce. Assignment has exactly one door now; this is not it.
+          ownerRef: null,
         }),
       readback: async (externalId, p) => {
         const row = await rec.readFollowup(externalId)
         if (!row) return null
         return matches(row, { note: str(p.payload.note) }) ? row : null
+      },
+    },
+
+    /**
+     * followup.scheduleAssigned — ev-isola-360-followup-assignment-2026-09-27.
+     * A DELIBERATE SIBLING of followup.schedule, not a variant of it: the
+     * Lumen-facing action (`foundation_actions.schedule_customer_followup`)
+     * is confirmed narrow by design (note + dueDate only), and "assign to a
+     * person" is a materially different, higher-trust act reviewed on its own
+     * terms here, per the owner's ruling that assignment needs its own
+     * tenant/role gate rather than an optional field on the existing action.
+     *
+     * assigneeRef is REQUIRED (an optional one would just be followup.schedule
+     * again). allowedRoles is intentionally narrower than followup.schedule's
+     * (manager/owner only) -- a design choice stated here, not derived from an
+     * existing rule, matching the same default already applied to the
+     * isola-360 panel's create-followup route for consistency between the
+     * two doors into the same underlying write.
+     */
+    {
+      actionType: 'followup.scheduleAssigned',
+      riskLevel: 'low',
+      allowedRoles: ['manager', 'owner'],
+      validate: (payload) => {
+        const note = str(payload.note)
+        if (!note) return { ok: false, detail: 'note is required' }
+        if (note.length > 2000) return { ok: false, detail: 'note exceeds 2000 characters' }
+        if (!validDate(payload.dueDate)) {
+          return { ok: false, detail: 'dueDate is required and must be a date' }
+        }
+        // Presence only, matching this catalogue's own convention for
+        // 'reference' fields (ownerRef on lead.update/followup.schedule is
+        // never format-checked here either) -- catalogue.test.ts's generic
+        // payload builder fills 'reference' fields with `example ${name}`,
+        // not a number. The strict positive-integer shape check, and whether
+        // it resolves to a REAL, active, internal, tenant-bound user, are
+        // both Odoo/Foundation lookups validate() cannot perform (it is
+        // synchronous by contract) -- both run in execute(), and a
+        // non-numeric or non-existent id is refused there as
+        // EXECUTION_FAILED rather than VALIDATION_FAILED.
+        if (!str(payload.assigneeRef)) {
+          return { ok: false, detail: 'assigneeRef is required' }
+        }
+        return { ok: true }
+      },
+      execute: async (p) => {
+        const assigneeRef = str(p.payload.assigneeRef)
+        const resolved = await rec.resolveAssignableUser(p.companyId, assigneeRef)
+        if (!resolved) {
+          throw new Error(
+            'assigneeRef does not match a real, active, internal user bound to this tenant; the follow-up was not created',
+          )
+        }
+        return rec.scheduleFollowup({
+          companyId: p.companyId,
+          objectType: toOdooModel(p.objectType),
+          objectId: p.objectId,
+          note: str(p.payload.note),
+          dueDate: str(p.payload.dueDate),
+          ownerRef: resolved.id,
+        })
+      },
+      readback: async (externalId, p) => {
+        const row = await rec.readFollowup(externalId)
+        if (!row) return null
+        if (!matches(row, { note: str(p.payload.note) })) return null
+        // Assignment is the entire point of this action -- unlike
+        // followup.schedule, where ownerRef is optional, here a readback that
+        // does not confirm the assignee is a failure, not a pass.
+        //
+        // Compared against the CANONICAL numeric id (Codex review, PR #155):
+        // a non-canonical but numerically valid reference like "007" resolves
+        // to user 7 in execute() and the write correctly stores user_id=7,
+        // but comparing against the raw payload string "007" would wrongly
+        // report READBACK_FAILED after a successful, correct write.
+        // String(Number(x)) reproduces exactly what resolveAssignableUser's
+        // own id resolution yields, without a second Odoo round-trip.
+        const canonicalAssigneeRef = String(Number(str(p.payload.assigneeRef)))
+        if (!m2oIdMatches(row.user_id, canonicalAssigneeRef)) return null
+        return row
       },
     },
   ]

@@ -80,8 +80,19 @@ function fakeRecordSystem(fault: Fault = 'none') {
     createLead: (i) => write('lead', { ...i }),
     readLead: read,
     updateLead: (i) => write('lead', { ...i.fields }, i.leadId),
-    scheduleFollowup: (i) => write('followup', { ...i }),
+    scheduleFollowup: (i) => write('followup', { ...i, user_id: i.ownerRef ? [Number(i.ownerRef), 'Fake User'] : false }),
     readFollowup: read,
+    // '999999' is the reserved "no such user" sentinel for the fault-injection
+    // table's followup.scheduleAssigned case; any other positive-integer-like
+    // string resolves. tenantId is accepted (matching the real signature,
+    // Codex PR #155) but not itself exercised by this generic fake --
+    // dedicated tenant-binding tests live in odoo-record-system.test.ts,
+    // against the real implementation and an injected verifyStaffBinding.
+    async resolveAssignableUser(_tenantId, assigneeRef) {
+      const id = Number(assigneeRef)
+      if (!Number.isFinite(id) || id <= 0 || assigneeRef === '999999') return null
+      return { id: assigneeRef, name: 'Fake User' }
+    },
   }
 
   return { rec, rows, state }
@@ -182,6 +193,20 @@ const CASES: Case[] = [
     valid: { note: 'Check whether the quote landed', dueDate: '2026-08-12' },
     invalid: { note: 'Check whether the quote landed', dueDate: 'whenever' },
     invalidDetail: /dueDate is required/,
+    matchField: 'note',
+  },
+  {
+    actionType: 'followup.scheduleAssigned',
+    objectType: 'crm.lead',
+    objectId: 'lead-9',
+    actorRole: 'manager',
+    valid: { note: 'Call back about renewal', dueDate: '2026-08-12', assigneeRef: '7' },
+    // Presence only is checked in validate() (matching this catalogue's own
+    // convention for 'reference' fields); a non-numeric assigneeRef PASSES
+    // validate() and is refused later in execute() as EXECUTION_FAILED --
+    // covered by its own dedicated test below, not this generic table.
+    invalid: { note: 'Call back about renewal', dueDate: '2026-08-12', assigneeRef: '' },
+    invalidDetail: /assigneeRef is required/,
     matchField: 'note',
   },
 ]
@@ -428,11 +453,12 @@ describe.each(CASES)('$actionType', (c) => {
 })
 
 describe('the executor set as a whole', () => {
-  it('declares exactly the six Foundation-owned actions', () => {
+  it('declares exactly the seven Foundation-owned actions', () => {
     const { rec } = fakeRecordSystem()
     expect(buildExecutors(rec).map((e) => e.actionType).sort()).toEqual([
       'activity.schedule',
       'followup.schedule',
+      'followup.scheduleAssigned',
       'lead.create',
       'lead.update',
       'note.create',
@@ -472,5 +498,128 @@ describe('the executor set as a whole', () => {
     expect(code).not.toMatch(/\b(sendMessage|sendReply|deliver|enqueueMessage)\s*\(/)
     expect(src).not.toMatch(/graph\.facebook\.com|api\.twilio|chatwoot|agents\.epic\.dm/i)
     expect(src).not.toMatch(/process\.env/)
+  })
+})
+
+describe('followup.scheduleAssigned — the rules narrower than followup.schedule', () => {
+  const BASE = {
+    actionType: 'followup.scheduleAssigned',
+    objectType: 'crm.lead',
+    objectId: 'lead-9',
+    actorPrincipalId: 'principal-7',
+    companyId: COMPANY,
+    idempotencyKey: 'idem-assigned-1',
+    correlationId: 'corr-1',
+  }
+
+  it('CONTROL — manager, real assignee → EXECUTED, readback confirms note AND assignee', async () => {
+    const { rec, state } = fakeRecordSystem()
+    const { ports } = buildPorts(rec)
+    const r = await runGovernedAction(
+      { ...BASE, actorRole: 'manager', payload: { note: 'call back', dueDate: '2026-08-12', assigneeRef: '7' } },
+      ports,
+    )
+    expect(r.outcome, r.detail).toBe('EXECUTED')
+    expect(r.readback?.note).toBe('call back')
+    expect(r.readback?.user_id).toEqual([7, 'Fake User'])
+    expect(state.writeAttempts).toBe(1)
+  })
+
+  it('staff (allowed for followup.schedule) is REFUSED here — the narrower role gate is the whole point', async () => {
+    const { rec, state } = fakeRecordSystem()
+    const { ports } = buildPorts(rec)
+    const r = await runGovernedAction(
+      { ...BASE, actorRole: 'staff', payload: { note: 'call back', dueDate: '2026-08-12', assigneeRef: '7' } },
+      ports,
+    )
+    expect(r.outcome).toBe('PERMISSION_DENIED')
+    expect(state.writeAttempts).toBe(0)
+  })
+
+  it('owner is allowed, same as manager', async () => {
+    const { rec } = fakeRecordSystem()
+    const { ports } = buildPorts(rec)
+    const r = await runGovernedAction(
+      { ...BASE, actorRole: 'owner', payload: { note: 'call back', dueDate: '2026-08-12', assigneeRef: '7' } },
+      ports,
+    )
+    expect(r.outcome, r.detail).toBe('EXECUTED')
+  })
+
+  it('assigneeRef that does not resolve (the fake\'s reserved "no such user" sentinel) → EXECUTION_FAILED, refused BEFORE any write', async () => {
+    const { rec, state } = fakeRecordSystem()
+    const { ports } = buildPorts(rec)
+    const r = await runGovernedAction(
+      { ...BASE, actorRole: 'manager', payload: { note: 'call back', dueDate: '2026-08-12', assigneeRef: '999999' } },
+      ports,
+    )
+    expect(r.outcome).toBe('EXECUTION_FAILED')
+    expect(r.detail).toMatch(/does not match a real, active, internal user/)
+    expect(state.writeAttempts).toBe(0)
+  })
+
+  it('SABOTAGE — the write reports success but readback disagrees on the assignee → refused, never reported as assigned', async () => {
+    const { rec } = fakeRecordSystem()
+    // Force the fake's scheduleFollowup to record a DIFFERENT user than the
+    // one requested, simulating an Odoo write that landed wrong.
+    const original = rec.scheduleFollowup
+    rec.scheduleFollowup = async (i) => original({ ...i, ownerRef: '3' })
+    const { ports, audits } = buildPorts(rec)
+    const r = await runGovernedAction(
+      { ...BASE, actorRole: 'manager', payload: { note: 'call back', dueDate: '2026-08-12', assigneeRef: '7' } },
+      ports,
+    )
+    expect(r.outcome).toBe('READBACK_FAILED')
+    expect(audits.at(-1)?.outcome).toBe('READBACK_FAILED')
+  })
+
+  it('CONTROL for the sabotage case — an UNTAMPERED write with the same assignee executes cleanly', async () => {
+    const { rec } = fakeRecordSystem()
+    const { ports } = buildPorts(rec)
+    const r = await runGovernedAction(
+      { ...BASE, actorRole: 'manager', payload: { note: 'call back', dueDate: '2026-08-12', assigneeRef: '7' } },
+      ports,
+    )
+    expect(r.outcome, r.detail).toBe('EXECUTED')
+  })
+
+  it('Codex PR #155 P2 — a non-canonical but numerically valid assigneeRef ("007") still confirms on readback', async () => {
+    const { rec, state } = fakeRecordSystem()
+    const { ports } = buildPorts(rec)
+    const r = await runGovernedAction(
+      { ...BASE, actorRole: 'manager', payload: { note: 'call back', dueDate: '2026-08-12', assigneeRef: '007' } },
+      ports,
+    )
+    expect(r.outcome, r.detail).toBe('EXECUTED')
+    expect(state.writeAttempts).toBe(1)
+  })
+})
+
+describe('followup.schedule — the assignment bypass is closed (Codex PR #155 P1)', () => {
+  it('a staff-supplied ownerRef is NEVER forwarded to Odoo, even though it used to reach production once objectType translation made this action reachable', async () => {
+    const { rec } = fakeRecordSystem()
+    const { ports } = buildPorts(rec)
+    const r = await runGovernedAction(
+      {
+        actionType: 'followup.schedule',
+        objectType: 'crm.lead',
+        objectId: 'lead-9',
+        actorRole: 'staff',
+        actorPrincipalId: 'principal-7',
+        companyId: COMPANY,
+        idempotencyKey: 'idem-bypass-1',
+        correlationId: 'corr-1',
+        // A staff caller attempting to assign to an arbitrary user id --
+        // exactly the bypass Codex found once this action became reachable.
+        payload: { note: 'call back', dueDate: '2026-08-12', ownerRef: '999' },
+      },
+      ports,
+    )
+    expect(r.outcome, r.detail).toBe('EXECUTED')
+    // The fake's scheduleFollowup stores whatever it was called with; if
+    // ownerRef had leaked through, the stored row would show a user_id for
+    // it (the fake sets user_id from i.ownerRef when truthy).
+    expect(r.readback?.ownerRef).toBeNull()
+    expect(r.readback?.user_id).toBe(false)
   })
 })

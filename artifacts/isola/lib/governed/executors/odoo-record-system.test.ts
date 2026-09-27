@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { OdooApiError, OdooNoApiError, type OdooConfig } from '@/engines/odoo'
 
@@ -12,6 +12,22 @@ import {
   plainText,
   type OdooCall,
 } from './odoo-record-system'
+
+// For defaultVerifyStaffBinding's own tests only -- every other test in this
+// file injects an explicit verifyStaffBinding override and never reaches
+// this dynamic import at all.
+//
+// Codex review, PR #155: vi.mock() factories are hoisted above ordinary
+// top-level initialization, so a plain `const` referenced inside the
+// factory is read from its temporal dead zone. vi.hoisted() -- the pattern
+// this repo's other mocked test files already use -- runs before that
+// hoisting instead of after it.
+const { findBindingByOdooUserMock } = vi.hoisted(() => ({
+  findBindingByOdooUserMock: vi.fn(),
+}))
+vi.mock('@/lib/staff-ops/service', () => ({
+  findBindingByOdooUser: findBindingByOdooUserMock,
+}))
 
 /**
  * No network. The transport is injected in every test and a test at the bottom
@@ -160,6 +176,93 @@ describe('writes land on the right Odoo model with the right arguments', () => {
     const vals = (calls[0].params.vals_list as Record<string, unknown>[])[0]
     expect(vals.name).toBe('Bay Front Hotel')
     expect(vals.type).toBe('lead')
+  })
+})
+
+describe('resolveAssignableUser — real+active+internal is necessary but not sufficient (Codex review, PR #155)', () => {
+  it('CONTROL — real, active, internal, AND bound to the tenant → resolves', async () => {
+    const { rec } = sys(
+      { 'res.users.search_read': [{ id: 7, name: 'Ann Owner' }] },
+      { verifyStaffBinding: async () => true },
+    )
+    const r = await rec.resolveAssignableUser('tenant-a', '7')
+    expect(r).toEqual({ id: '7', name: 'Ann Owner' })
+  })
+
+  it('real, active, internal in Odoo, but NOT bound to this tenant → null, no false positive from Odoo identity alone', async () => {
+    const { rec } = sys(
+      { 'res.users.search_read': [{ id: 7, name: 'Ann Owner' }] },
+      { verifyStaffBinding: async () => false },
+    )
+    const r = await rec.resolveAssignableUser('tenant-a', '7')
+    expect(r).toBeNull()
+  })
+
+  it('the tenantId actually reaches verifyStaffBinding, not a hardcoded or swapped value', async () => {
+    const seen: Array<{ tenantId: string; odooUserId: number }> = []
+    const { rec } = sys(
+      { 'res.users.search_read': [{ id: 7, name: 'Ann Owner' }] },
+      {
+        verifyStaffBinding: async (tenantId: string, odooUserId: number) => {
+          seen.push({ tenantId, odooUserId })
+          return tenantId === 'tenant-a'
+        },
+      },
+    )
+    await rec.resolveAssignableUser('tenant-a', '7')
+    await rec.resolveAssignableUser('tenant-b', '7')
+    expect(seen).toEqual([
+      { tenantId: 'tenant-a', odooUserId: 7 },
+      { tenantId: 'tenant-b', odooUserId: 7 },
+    ])
+  })
+
+  it('no matching Odoo user at all → null, verifyStaffBinding never called (nothing to bind-check)', async () => {
+    let called = false
+    const { rec } = sys(
+      { 'res.users.search_read': [] },
+      { verifyStaffBinding: async () => { called = true; return true } },
+    )
+    const r = await rec.resolveAssignableUser('tenant-a', '999999')
+    expect(r).toBeNull()
+    expect(called).toBe(false)
+  })
+})
+
+describe('defaultVerifyStaffBinding (the REAL default, no override) — Codex PR #155 P1', () => {
+  it('a deactivated Foundation staff member with an otherwise-matching binding → null, not assignable', async () => {
+    findBindingByOdooUserMock.mockResolvedValue({ id: 'binding-1', active: false })
+    // No verifyStaffBinding override here -- this exercises the real
+    // defaultVerifyStaffBinding, which must reject on `active: false` even
+    // though a binding row genuinely exists (an offboarded staff member
+    // whose Odoo account is still active).
+    const { rec } = sys({ 'res.users.search_read': [{ id: 7, name: 'Formerly Staff' }] })
+    const r = await rec.resolveAssignableUser('tenant-a', '7')
+    expect(r).toBeNull()
+    expect(findBindingByOdooUserMock).toHaveBeenCalledWith('tenant-a', 7)
+  })
+
+  it('CONTROL — an active binding via the real default → resolves', async () => {
+    findBindingByOdooUserMock.mockResolvedValue({ id: 'binding-1', active: true })
+    const { rec } = sys({ 'res.users.search_read': [{ id: 7, name: 'Ann Owner' }] })
+    const r = await rec.resolveAssignableUser('tenant-a', '7')
+    expect(r).toEqual({ id: '7', name: 'Ann Owner' })
+  })
+})
+
+describe('resolveAssignableUser — a binding-check outage is DependencyUnavailable, not a write refusal (Codex PR #155 P2)', () => {
+  it('verifyStaffBinding throwing (e.g. Prisma/DB unreachable) surfaces as DependencyUnavailable', async () => {
+    const { rec } = sys(
+      { 'res.users.search_read': [{ id: 7, name: 'Ann Owner' }] },
+      { verifyStaffBinding: async () => { throw new Error('connect ECONNREFUSED') } },
+    )
+    await expect(rec.resolveAssignableUser('tenant-a', '7')).rejects.toThrow(DependencyUnavailable)
+  })
+
+  it('CONTROL — the SAME failure through the real default (Prisma import) also surfaces as DependencyUnavailable', async () => {
+    findBindingByOdooUserMock.mockRejectedValue(new Error('connect ECONNREFUSED'))
+    const { rec } = sys({ 'res.users.search_read': [{ id: 7, name: 'Ann Owner' }] })
+    await expect(rec.resolveAssignableUser('tenant-a', '7')).rejects.toThrow(DependencyUnavailable)
   })
 })
 

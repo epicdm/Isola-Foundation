@@ -79,6 +79,26 @@ export interface OdooRecordSystemDeps {
    * activity type ids differ per database.
    */
   resolveActivityTypeId?: (config: OdooConfig, call: OdooCall) => Promise<number | null>
+  /**
+   * Confirms an Odoo res.users id is bound to `tenantId` as staff (Codex
+   * review, PR #155: an Odoo instance can be shared across tenants/companies,
+   * so "active internal user" alone never proves tenant membership).
+   * Injectable so odoo-record-system.ts itself stays Prisma-free and every
+   * existing test needs no real database -- defaults to the real Foundation
+   * binding table via lib/staff-ops/service.ts's findBindingByOdooUser, the
+   * SAME check the staff-ops flow already uses for this exact question.
+   */
+  verifyStaffBinding?: (tenantId: string, odooUserId: number) => Promise<boolean>
+}
+
+async function defaultVerifyStaffBinding(tenantId: string, odooUserId: number): Promise<boolean> {
+  const { findBindingByOdooUser } = await import('@/lib/staff-ops/service')
+  const binding = await findBindingByOdooUser(tenantId, odooUserId)
+  // Codex review, PR #155: existence alone is not enough -- a deactivated
+  // staff member's binding row still exists. lib/staff-ops/service.ts's own
+  // manager-tap path requires `.active` explicitly (service.ts:882-885);
+  // this is the same requirement, for the same reason.
+  return binding !== null && binding.active
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000
@@ -198,6 +218,7 @@ export function createOdooRecordSystem(deps: OdooRecordSystemDeps): RecordSystem
   const timeout = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const stageNames = deps.stageNames ?? DEFAULT_STAGE_NAMES
   const resolveActivityTypeId = deps.resolveActivityTypeId ?? defaultResolveActivityTypeId
+  const verifyStaffBinding = deps.verifyStaffBinding ?? defaultVerifyStaffBinding
 
   async function config(): Promise<OdooConfig> {
     try {
@@ -440,9 +461,49 @@ export function createOdooRecordSystem(deps: OdooRecordSystemDeps): RecordSystem
       )
     },
     async readFollowup(externalId) {
-      const row = await readOne('mail.activity', externalId, ['id', 'summary', 'date_deadline'])
+      const row = await readOne('mail.activity', externalId, ['id', 'summary', 'date_deadline', 'user_id'])
       if (!row) return null
       return { ...row, note: String(row.summary ?? '') }
+    },
+
+    // ── assignable-user resolution — ev-isola-360-followup-assignment- ──────
+    // 2026-09-27, followup.scheduleAssigned's target check. `share = false`
+    // excludes portal/customer logins on Odoo's shared multi-tenant instance
+    // -- "any active user" would let a follow-up be assigned to a customer's
+    // own portal account. Odoo identity alone is NOT tenant proof (Codex
+    // review, PR #155): an id real and active in THIS Odoo can still belong
+    // to a DIFFERENT tenant sharing the same database/company, so
+    // verifyStaffBinding (Foundation's own tenant<->Odoo-user binding table,
+    // the same one lib/staff-ops/service.ts already uses for this question)
+    // must also confirm it before this returns non-null.
+    async resolveAssignableUser(tenantId, assigneeRef) {
+      const id = Number(assigneeRef)
+      if (!Number.isFinite(id) || id <= 0) return null
+      const res = await rpc('res.users', 'search_read', {
+        domain: [['id', '=', id], ['active', '=', true], ['share', '=', false]],
+        fields: ['id', 'name'],
+        limit: 1,
+      })
+      const row = firstRow(res)
+      const resolvedId = row ? asId(row.id) : null
+      if (resolvedId === null) return null
+      let bound: boolean
+      try {
+        bound = await verifyStaffBinding(tenantId, resolvedId)
+      } catch (err) {
+        // Codex review, PR #155: this runs BEFORE any Odoo write. A Prisma/
+        // Foundation-database outage here is the dependency being
+        // unreachable, not the write being refused -- a plain throw would
+        // surface as EXECUTION_FAILED ("Odoo rejected it, do not retry"),
+        // which is the wrong advice for a check that never touched Odoo and
+        // where retrying is genuinely safe.
+        throw new DependencyUnavailable(
+          'staff-binding',
+          err instanceof Error ? err.message : String(err),
+        )
+      }
+      if (!bound) return null
+      return { id: String(resolvedId), name: String(row?.name ?? '') }
     },
   }
 }

@@ -306,7 +306,7 @@ describe('activity is partial when one of its sources did not answer', () => {
 /* ── actions offered ───────────────────────────────────────────────────────*/
 
 describe('the actions offered are the ones both gates permit', () => {
-  it('offers a manager the seven governed actions and flags the one needing approval', async () => {
+  it('offers a manager the eight governed actions and flags the one needing approval', async () => {
     const response = await assemble(caller())
     const offered = response.availableActions.map((a) => a.actionType).sort()
 
@@ -315,6 +315,7 @@ describe('the actions offered are the ones both gates permit', () => {
         'activity.schedule',
         'document.send',
         'followup.schedule',
+        'followup.scheduleAssigned',
         'lead.create',
         'lead.update',
         'note.create',

@@ -171,7 +171,16 @@ const STAFF_ACTIONS = [
   // otherwise grant it via the shared STAFF_ACTIONS.
   'document.send',
 ] as const
-const MANAGER_ACTIONS = [...STAFF_ACTIONS, 'lead.create', 'lead.update', 'task.reassign'] as const
+const MANAGER_ACTIONS = [
+  ...STAFF_ACTIONS,
+  'lead.create',
+  'lead.update',
+  'task.reassign',
+  // ev-isola-360-followup-assignment-2026-09-27: manager/owner only, per the
+  // owner's ruling that assigning a follow-up to someone else is a different,
+  // higher-trust act than followup.schedule (which staff already has above).
+  'followup.scheduleAssigned',
+] as const
 const OWNER_ACTIONS = [...MANAGER_ACTIONS, 'business_field.update', 'approval.override'] as const
 
 export const ACTIONS_BY_ROLE: Readonly<Record<Role, readonly string[]>> = {

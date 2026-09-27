@@ -56,7 +56,7 @@ function payloadFrom(meta: GovernedActionMeta, omit?: string): Record<string, un
 describe('the catalogue describes the executors that actually exist', () => {
   it('describes exactly the registered action types, no more and no fewer', () => {
     expect([...GOVERNED_ACTION_TYPES].sort()).toEqual(executors.map((e) => e.actionType).sort())
-    expect(GOVERNED_ACTION_CATALOGUE).toHaveLength(7)
+    expect(GOVERNED_ACTION_CATALOGUE).toHaveLength(8)
   })
 
   it.each(GOVERNED_ACTION_CATALOGUE.map((m) => [m.actionType, m] as const))(
@@ -115,13 +115,14 @@ describe('note.create is the canonical name', () => {
 /* ── the two lists have to agree ───────────────────────────────────────────*/
 
 describe('an offered action is one BOTH gates permit', () => {
-  it('offers a manager all seven', () => {
+  it('offers a manager all eight', () => {
     const offered = availableActionsFor('manager', ACTIONS_BY_ROLE.manager).map((a) => a.actionType)
     expect(offered.sort()).toEqual(
       [
         'activity.schedule',
         'document.send',
         'followup.schedule',
+        'followup.scheduleAssigned',
         'lead.create',
         'lead.update',
         'note.create',
