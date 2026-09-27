@@ -440,9 +440,29 @@ export function createOdooRecordSystem(deps: OdooRecordSystemDeps): RecordSystem
       )
     },
     async readFollowup(externalId) {
-      const row = await readOne('mail.activity', externalId, ['id', 'summary', 'date_deadline'])
+      const row = await readOne('mail.activity', externalId, ['id', 'summary', 'date_deadline', 'user_id'])
       if (!row) return null
       return { ...row, note: String(row.summary ?? '') }
+    },
+
+    // ── assignable-user resolution — ev-isola-360-followup-assignment- ──────
+    // 2026-09-27, followup.scheduleAssigned's target check. `share = false`
+    // excludes portal/customer logins on Odoo's shared multi-tenant instance
+    // -- "any active user" would let a follow-up be assigned to a customer's
+    // own portal account. Scoped to THIS RecordSystem's own resolved config,
+    // so an id from a different tenant's Odoo simply will not resolve here.
+    async resolveAssignableUser(assigneeRef) {
+      const id = Number(assigneeRef)
+      if (!Number.isFinite(id) || id <= 0) return null
+      const res = await rpc('res.users', 'search_read', {
+        domain: [['id', '=', id], ['active', '=', true], ['share', '=', false]],
+        fields: ['id', 'name'],
+        limit: 1,
+      })
+      const row = firstRow(res)
+      const resolvedId = row ? asId(row.id) : null
+      if (resolvedId === null) return null
+      return { id: String(resolvedId), name: String(row?.name ?? '') }
     },
   }
 }

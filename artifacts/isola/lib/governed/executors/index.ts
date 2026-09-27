@@ -65,6 +65,14 @@ export interface RecordSystem {
     ownerRef?: string | null
   }): Promise<{ externalId: string }>
   readFollowup(externalId: string): Promise<Record<string, unknown> | null>
+
+  /**
+   * Resolves an assignee target -- real, active, and internal (never a
+   * portal/customer login) -- or null when it does not resolve. Scoped to
+   * this RecordSystem's own tenant Odoo, so a cross-tenant id fails closed
+   * by construction. Used by followup.scheduleAssigned before any write.
+   */
+  resolveAssignableUser(assigneeRef: string): Promise<{ id: string; name: string } | null>
 }
 
 const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
@@ -82,6 +90,15 @@ function validDate(v: unknown): boolean {
  */
 function matches(readback: Record<string, unknown>, expected: Record<string, string>): boolean {
   return Object.entries(expected).every(([k, v]) => str(readback[k]) === v)
+}
+
+/**
+ * A many2one field arrives as `[id, "Name"]` or `false` -- `matches()`'s plain
+ * string comparison can never match it (str() on an array is ''). This checks
+ * the id component specifically, for the one field `matches()` cannot cover.
+ */
+function m2oIdMatches(value: unknown, expectedId: string): boolean {
+  return Array.isArray(value) && typeof value[0] === 'number' && String(value[0]) === expectedId
 }
 
 /** The fields `lead.update` is permitted to change. Anything else is ignored. */
@@ -267,7 +284,82 @@ export function buildExecutors(rec: RecordSystem): readonly ActionExecutor[] {
       readback: async (externalId, p) => {
         const row = await rec.readFollowup(externalId)
         if (!row) return null
-        return matches(row, { note: str(p.payload.note) }) ? row : null
+        if (!matches(row, { note: str(p.payload.note) })) return null
+        // ev-isola-360-followup-assignment-2026-09-27: readback previously
+        // asserted the note only, never the assignee -- a write that reported
+        // success but landed on the wrong (or no) user_id was invisible here.
+        // ownerRef unset is not a claim about who it's assigned to, so no
+        // check runs; ownerRef set is a claim, and it must be confirmed the
+        // same way `note` already is.
+        const expectedOwnerRef = str(p.payload.ownerRef)
+        if (expectedOwnerRef && !m2oIdMatches(row.user_id, expectedOwnerRef)) return null
+        return row
+      },
+    },
+
+    /**
+     * followup.scheduleAssigned — ev-isola-360-followup-assignment-2026-09-27.
+     * A DELIBERATE SIBLING of followup.schedule, not a variant of it: the
+     * Lumen-facing action (`foundation_actions.schedule_customer_followup`)
+     * is confirmed narrow by design (note + dueDate only), and "assign to a
+     * person" is a materially different, higher-trust act reviewed on its own
+     * terms here, per the owner's ruling that assignment needs its own
+     * tenant/role gate rather than an optional field on the existing action.
+     *
+     * assigneeRef is REQUIRED (an optional one would just be followup.schedule
+     * again). allowedRoles is intentionally narrower than followup.schedule's
+     * (manager/owner only) -- a design choice stated here, not derived from an
+     * existing rule, matching the same default already applied to the
+     * isola-360 panel's create-followup route for consistency between the
+     * two doors into the same underlying write.
+     */
+    {
+      actionType: 'followup.scheduleAssigned',
+      riskLevel: 'low',
+      allowedRoles: ['manager', 'owner'],
+      validate: (payload) => {
+        const note = str(payload.note)
+        if (!note) return { ok: false, detail: 'note is required' }
+        if (note.length > 2000) return { ok: false, detail: 'note exceeds 2000 characters' }
+        if (!validDate(payload.dueDate)) {
+          return { ok: false, detail: 'dueDate is required and must be a date' }
+        }
+        // Shape only, here -- whether it resolves to a REAL, active, internal
+        // user is an Odoo lookup, which validate() cannot perform (it is
+        // synchronous by contract; the resolution runs in execute()).
+        const assigneeRef = str(payload.assigneeRef)
+        if (!assigneeRef || !/^[1-9]\d*$/.test(assigneeRef)) {
+          return { ok: false, detail: 'assigneeRef is required and must be a positive integer user id' }
+        }
+        return { ok: true }
+      },
+      execute: async (p) => {
+        const assigneeRef = str(p.payload.assigneeRef)
+        const resolved = await rec.resolveAssignableUser(assigneeRef)
+        if (!resolved) {
+          throw new Error(
+            'assigneeRef does not match a real, active, internal user in this tenant; the follow-up was not created',
+          )
+        }
+        return rec.scheduleFollowup({
+          companyId: p.companyId,
+          objectType: p.objectType,
+          objectId: p.objectId,
+          note: str(p.payload.note),
+          dueDate: str(p.payload.dueDate),
+          ownerRef: resolved.id,
+        })
+      },
+      readback: async (externalId, p) => {
+        const row = await rec.readFollowup(externalId)
+        if (!row) return null
+        if (!matches(row, { note: str(p.payload.note) })) return null
+        // Assignment is the entire point of this action -- unlike
+        // followup.schedule, where ownerRef is optional, here a readback that
+        // does not confirm the assignee is a failure, not a pass.
+        const assigneeRef = str(p.payload.assigneeRef)
+        if (!m2oIdMatches(row.user_id, assigneeRef)) return null
+        return row
       },
     },
   ]
