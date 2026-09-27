@@ -440,7 +440,7 @@ export function createOdooRecordSystem(deps: OdooRecordSystemDeps): RecordSystem
       )
     },
     async readFollowup(externalId) {
-      const row = await readOne('mail.activity', externalId, ['id', 'summary', 'date_deadline'])
+      const row = await readOne('mail.activity', externalId, ['id', 'summary', 'date_deadline', 'user_id'])
       if (!row) return null
       return { ...row, note: String(row.summary ?? '') }
     },

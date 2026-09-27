@@ -468,20 +468,100 @@ function dueDateLabel(dateStr: string | null, now: Date): string {
   return dateStr.slice(0, 10);
 }
 
+/** many2one arrives as [id, "Name"] or false. The numeric id, or null. */
+function m2oId(value: unknown): number | null {
+  return Array.isArray(value) && typeof value[0] === 'number' ? value[0] : null;
+}
+
+/**
+ * Confirms an assignee target is a real, active, INTERNAL Odoo user BOUND TO
+ * THIS TENANT, before the follow-up write is attempted -- an assigneeRef is
+ * caller-supplied input, never trusted as a valid id just because it parses
+ * as a number.
+ *
+ * `share = false` excludes portal/public users: Odoo's shared multi-tenant
+ * instance can have external customers with a login, and "any active user"
+ * would let a follow-up be assigned to one of them.
+ *
+ * Odoo identity is NOT tenant proof (Codex review, PR #156): a database or
+ * company can be shared across Foundation tenants, so "real, active,
+ * internal in THIS Odoo" alone does not prove the user belongs to the
+ * ACTING tenant. findBindingByOdooUser (lib/staff-ops/service.ts) is
+ * Foundation's own tenant<->Odoo-user binding table, and the SAME check the
+ * staff-ops flow already uses for this identical question.
+ */
+async function resolveAssignableUser(config: OdooConfig, tenantId: string, assigneeRef: string): Promise<{ id: number; name: string } | null> {
+  const id = Number(assigneeRef);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  // 12000ms, matching every other json2Call in this file (Codex review, PR
+  // #156: omitting it means NO timeout at all per engines/odoo.ts's own
+  // documented default -- a stalled res.users lookup would otherwise hang
+  // the request until the hosting platform kills it, unlike the bounded
+  // record-system calls immediately after).
+  const rows = await json2Call(config, 'res.users', 'search_read', {
+    domain: [['id', '=', id], ['active', '=', true], ['share', '=', false]],
+    fields: ['id', 'name'],
+    limit: 1,
+  }, 12000) as Array<{ id: number; name: string }>;
+  const row = rows[0];
+  if (!row) return null;
+  const { findBindingByOdooUser } = await import('@/lib/staff-ops/service');
+  const binding = await findBindingByOdooUser(tenantId, Number(row.id));
+  // Codex review, PR #156: existence alone is not enough -- a deactivated
+  // staff member's binding row still exists. lib/staff-ops/service.ts's own
+  // manager-tap path requires `.active` explicitly (service.ts:882-885);
+  // this is the same requirement, for the same reason.
+  if (!binding || !binding.active) return null;
+  // KNOWN, DISCLOSED LIMITATION (Codex review, PR #156, not fixed here):
+  // StaffBinding stores no database identity, only (tenantId, odoo_res_
+  // user_id). If a tenant's OdooBinding is ever repointed at a different
+  // Odoo database, a stale StaffBinding row for user id N in the OLD
+  // database could validate an unrelated active user id N in the NEW one
+  // -- Odoo user ids are small sequential integers, so this is a real
+  // collision class, the same shape already documented in this file's own
+  // tenantOwnsPersonalLine comment for a different table. Closing it
+  // properly needs a database-identity column on StaffBinding (a schema
+  // change to shared, cross-feature infrastructure) -- out of scope for
+  // an assignment-verification PR to make unilaterally. Reported, not
+  // silently patched.
+  return { id: Number(row.id), name: String(row.name ?? '') };
+}
+
 /**
  * Writes a real `mail.activity` on this partner via the ALREADY-BUILT,
  * ALREADY-TESTED governed executor (lib/governed/executors/odoo-record-
  * system.ts) rather than a second copy of its activityVals logic. This IS
  * "Create follow-up task" landing a real row, not a toast -- the design's
  * own distinction (dec-c360-... 2026-09-05).
+ *
+ * assigneeRef (added ev-isola-360-followup-assignment-2026-09-27, closing the
+ * W2 gap): optional, an Odoo res.users id as a string. Resolved and verified
+ * REAL and ACTIVE before the write -- an assignee that does not resolve is a
+ * thrown error, never a silently-dropped assignment. Persistence of the
+ * assignment itself (not just the follow-up's existence) is proven by the
+ * SAME readback this function already required: readFollowup now selects
+ * user_id, and `assignee` below reflects what Odoo actually stored, not what
+ * was requested.
  */
 export async function createCustomerFollowUp(
   config: OdooConfig,
   partnerId: number,
   note: string,
   dueDate: string,
+  assigneeRef: string | null = null,
+  tenantId: string | null = null,
 ): Promise<Customer360FollowUp> {
   const rec = createOdooRecordSystem({ resolveConfig: async () => config });
+  let resolvedAssignee: { id: number; name: string } | null = null;
+  if (assigneeRef) {
+    if (!tenantId) {
+      throw new Error('tenantId is required to verify an assignee; the follow-up was not created');
+    }
+    resolvedAssignee = await resolveAssignableUser(config, tenantId, assigneeRef);
+    if (!resolvedAssignee) {
+      throw new Error('assigneeRef does not match a real, active, internal user bound to this tenant; the follow-up was not created');
+    }
+  }
   // companyId is part of RecordSystem's generic interface (other
   // implementations may use it); the Odoo implementation's scheduleFollowup
   // never reads it -- confirmed by reading odoo-record-system.ts directly,
@@ -492,10 +572,32 @@ export async function createCustomerFollowUp(
     objectId: String(partnerId),
     note,
     dueDate,
+    ownerRef: resolvedAssignee ? String(resolvedAssignee.id) : null,
   });
   const readback = await rec.readFollowup(externalId);
   if (!readback) {
     throw new Error('the follow-up was created but could not be read back; not shown as confirmed');
+  }
+  if (resolvedAssignee && m2oId(readback.user_id) !== resolvedAssignee.id) {
+    // Codex review, PR #156: comparing DISPLAY NAMES let two same-named
+    // users pass as a false match. Compare the numeric id -- the only
+    // thing that actually identifies who it landed on -- and use the name
+    // only for presentation below. The write reported success but the
+    // readback disagrees on WHO it was assigned to -- the same "created
+    // but unreadable" honesty standard, pointed at the assignment
+    // specifically rather than existence alone.
+    //
+    // Codex review, PR #156: the mismatched record is NOT deleted here.
+    // Rolling it back would need a delete/unlink capability this identity
+    // has no other reason to hold, widening the write surface for a rare
+    // failure path -- a bigger change than this PR's scope. Naming the
+    // record's id is the safer, minimal fix: a human (or a caller with its
+    // own retry logic) can find and correct exactly this record instead of
+    // guessing, and a blind automatic retry that ignores this message text
+    // is a caller-side bug, not something this function can prevent alone.
+    throw new Error(
+      `the follow-up (mail.activity ${externalId}) was created but the assignment could not be confirmed on readback -- it may be assigned to the wrong person and needs manual review, not a retry`,
+    );
   }
   const now = new Date();
   return {
@@ -503,7 +605,7 @@ export async function createCustomerFollowUp(
     summary: String(readback.summary ?? note),
     dueDate,
     dueLabel: dueDateLabel(dueDate, now),
-    assignee: null,
+    assignee: displayName(readback.user_id),
   };
 }
 

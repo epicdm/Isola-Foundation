@@ -14,6 +14,17 @@
  * ledger, audit). It needs the SAME tenant/caller resolution every read in
  * this lineage already uses (resolveCaller), and a customerId locator,
  * exactly like the customerId door on /api/isola-360/context.
+ *
+ * assigneeRef (ev-isola-360-followup-assignment-2026-09-27): optional Odoo
+ * res.users id to assign the follow-up to. Gated on actorRole — 'staff'
+ * cannot assign to anyone, matching the conservative default this repo's
+ * other assignment path (governed executors' `followup.schedule`,
+ * allowedRoles ['staff','manager','owner']) uses for the ACTION itself; this
+ * route narrows further because assigning WORK TO SOMEONE ELSE is a
+ * different act than logging one's own follow-up. A DESIGN CHOICE, not
+ * derived from an existing rule — flagged for owner review, not assumed
+ * correct. The target itself is verified real/active in
+ * odoo-projection.ts's resolveAssignableUser before any write.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -61,9 +72,25 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'dueDate must be a real date, YYYY-MM-DD' }, { status: 400 })
   }
 
+  const rawAssigneeRef = body.assigneeRef
+  let assigneeRef: string | null = null
+  if (rawAssigneeRef !== undefined && rawAssigneeRef !== null) {
+    const assigneeId = positiveInt(rawAssigneeRef) ?? (typeof rawAssigneeRef === 'string' ? positiveInt(Number(rawAssigneeRef)) : null)
+    if (assigneeId === null) {
+      return NextResponse.json({ error: 'assigneeRef must be a positive integer Odoo user id' }, { status: 400 })
+    }
+    if (caller.actorRole !== 'manager' && caller.actorRole !== 'owner') {
+      return NextResponse.json(
+        { error: 'this caller is not authorized to assign a follow-up to another user' },
+        { status: 403 },
+      )
+    }
+    assigneeRef = String(assigneeId)
+  }
+
   try {
     const config = await resolveOdooConfigForTenant(caller.tenantId)
-    const followUp = await createCustomerFollowUp(config, customerId, note, dueDate)
+    const followUp = await createCustomerFollowUp(config, customerId, note, dueDate, assigneeRef, caller.tenantId)
     return NextResponse.json({ ok: true, followUp }, { status: 200 })
   } catch (err) {
     // Created-but-unreadable and never-created both surface as the same
