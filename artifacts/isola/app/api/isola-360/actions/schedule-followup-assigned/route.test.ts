@@ -109,6 +109,20 @@ describe('POST /api/isola-360/actions/schedule-followup-assigned -- auth', () =>
     expect(status).toBe(401)
   })
 
+  it('Codex P1 REFUSAL: a real session-cookie caller (manager or owner) is refused outright, never silently downgraded to the service path', async () => {
+    M.getSessionFromCookie.mockResolvedValueOnce({
+      identityId: 'ident-1',
+      effectiveTenantId: TENANT_ID,
+      isAdmin: true,
+      isOwner: true,
+      user: { id: 'user-real-owner', tenant_id: TENANT_ID },
+    } as any)
+    const { status, body } = await post(validBody(), { cookie: 'isola_session=fake' })
+    expect(status).toBe(403)
+    expect(body.error).toBe('Forbidden')
+    expect(M.runCustomerAction).not.toHaveBeenCalled()
+  })
+
   it('CONTROL: the real service door authenticates and resolves actorRole to "manager", never "owner"', async () => {
     M.runCustomerAction.mockResolvedValueOnce(validOutcome())
     const { status } = await post(validBody(), bearer(SERVICE_TOKEN))
@@ -140,6 +154,28 @@ describe('actor identity is constructed, never accepted as-is', () => {
     const { status } = await post(validBody({ paperclipAgentId: undefined }), bearer(SERVICE_TOKEN))
     expect(status).toBe(400)
     expect(M.runCustomerAction).not.toHaveBeenCalled()
+  })
+})
+
+describe('Codex P2: malformed body shapes', () => {
+  it('REFUSAL: a syntactically valid JSON `null` body -> 400, not an uncaught 500', async () => {
+    const { status, body } = await post('null', bearer(SERVICE_TOKEN))
+    expect(status).toBe(400)
+    expect(body.error).toMatch(/JSON body/)
+    expect(M.runCustomerAction).not.toHaveBeenCalled()
+  })
+
+  it('REFUSAL: a JSON array body -> 400, not an uncaught 500', async () => {
+    const { status } = await post('[1,2,3]', bearer(SERVICE_TOKEN))
+    expect(status).toBe(400)
+    expect(M.runCustomerAction).not.toHaveBeenCalled()
+  })
+
+  it('CONTROL: a numeric customerId (as Hermes would actually send it, matching context/create-followup) is accepted, not rejected', async () => {
+    M.runCustomerAction.mockResolvedValueOnce(validOutcome())
+    const { status } = await post(validBody({ customerId: 42 }), bearer(SERVICE_TOKEN))
+    expect(status).toBe(200)
+    expect(M.runCustomerAction).toHaveBeenCalledWith(expect.objectContaining({ customerId: '42' }), expect.anything())
   })
 })
 

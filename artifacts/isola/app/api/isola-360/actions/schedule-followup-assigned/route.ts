@@ -69,17 +69,44 @@ export async function POST(req: NextRequest) {
   if (!resolved.ok) return resolved.response
   const caller = resolved.caller
 
-  let body: ScheduleFollowupAssignedBody
+  // Codex P1: this route is a machine door, not a general session-authenticated
+  // one. resolveCaller's session-cookie fallback would let a real browser
+  // session (manager OR owner) reach it too -- and this route unconditionally
+  // builds actorPrincipalId as "hermes:...:<caller-supplied paperclipAgentId>",
+  // so a human session would corrupt the audit trail to look like Hermes
+  // acted, and could ride in as actorRole 'owner', which this route was never
+  // designed to carry. Service callers only; a session caller is refused
+  // outright, not silently downgraded.
+  if (caller.kind !== 'service') {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  }
+
+  let parsedBody: unknown
   try {
-    body = (await req.json()) as ScheduleFollowupAssignedBody
+    parsedBody = await req.json()
   } catch {
     return NextResponse.json({ error: 'a JSON body is required' }, { status: 400 })
   }
+  // Codex P2: `req.json()` succeeds on literal JSON `null` (and on an array),
+  // which is not an object a field can be read from -- an unchecked cast
+  // would throw on the first `body.x` access and surface as an uncaught 500
+  // instead of this route's own intended 400.
+  if (!parsedBody || typeof parsedBody !== 'object' || Array.isArray(parsedBody)) {
+    return NextResponse.json({ error: 'a JSON body is required' }, { status: 400 })
+  }
+  const body = parsedBody as ScheduleFollowupAssignedBody
 
-  const customerIdRaw = str(body.customerId)
-  if (parseCustomerId(customerIdRaw) === null) {
+  // Codex P2: parseCustomerId already accepts a number OR a numeric string;
+  // pre-converting with str() turned a legitimate numeric customerId (as
+  // Hermes would send it, matching the existing context/create-followup
+  // APIs) into an empty string and produced a false 400. Parse the raw field
+  // first, canonicalize to a string only afterward for the string-typed
+  // fields downstream.
+  const parsedCustomerId = parseCustomerId(body.customerId)
+  if (parsedCustomerId === null) {
     return NextResponse.json({ error: 'customerId is required' }, { status: 400 })
   }
+  const customerIdRaw = String(parsedCustomerId)
 
   const note = str(body.note)
   if (!note) {
@@ -132,7 +159,7 @@ export async function POST(req: NextRequest) {
 
   let exists: boolean
   try {
-    const found = await readCustomer(odooCallerFor(config), parseCustomerId(customerIdRaw)!)
+    const found = await readCustomer(odooCallerFor(config), parsedCustomerId)
     exists = found.length > 0
   } catch {
     return NextResponse.json(
