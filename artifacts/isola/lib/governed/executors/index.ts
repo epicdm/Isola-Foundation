@@ -67,15 +67,39 @@ export interface RecordSystem {
   readFollowup(externalId: string): Promise<Record<string, unknown> | null>
 
   /**
-   * Resolves an assignee target -- real, active, and internal (never a
-   * portal/customer login) -- or null when it does not resolve. Scoped to
-   * this RecordSystem's own tenant Odoo, so a cross-tenant id fails closed
-   * by construction. Used by followup.scheduleAssigned before any write.
+   * Resolves an assignee target -- real, active, internal (never a
+   * portal/customer login), AND bound to `tenantId` as staff (Codex review,
+   * PR #155: an Odoo instance can be shared across tenants/companies, so
+   * "active internal user in this Odoo" alone does not prove the user
+   * belongs to the ACTING tenant -- a manager could otherwise assign a
+   * follow-up to a different tenant's staff member who happens to be
+   * visible in the same res.users table). Returns null on any failure to
+   * confirm all three. Used by followup.scheduleAssigned before any write.
    */
-  resolveAssignableUser(assigneeRef: string): Promise<{ id: string; name: string } | null>
+  resolveAssignableUser(tenantId: string, assigneeRef: string): Promise<{ id: string; name: string } | null>
 }
 
 const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
+
+// Codex review, PR #155: runCustomerAction() (the only production caller,
+// lib/governed/customer-actions.ts) hardcodes every proposal's objectType to
+// the generic Foundation vocabulary word 'customer' -- never a real Odoo
+// model name. activityVals()'s ir.model lookup (odoo-record-system.ts) needs
+// the concrete model. This is the ONE translation this module owns; unknown
+// object types pass through unchanged (never guessed) rather than silently
+// mis-resolving to a model nobody asked for.
+//
+// NOTE, flagged separately, not fixed here: createNote/createTask/
+// scheduleActivity share the identical p.objectType passthrough and would
+// hit the same gap for the 'customer' case -- out of scope for this PR
+// (assignment, not a sweep of every executor's object-type handling), and
+// reported to Lane A as its own finding.
+const OBJECT_TYPE_TO_ODOO_MODEL: Readonly<Record<string, string>> = {
+  customer: 'res.partner',
+}
+function toOdooModel(objectType: string): string {
+  return OBJECT_TYPE_TO_ODOO_MODEL[objectType] ?? objectType
+}
 
 /** ISO date, date-only or full timestamp. Rejects anything unparseable. */
 function validDate(v: unknown): boolean {
@@ -275,7 +299,7 @@ export function buildExecutors(rec: RecordSystem): readonly ActionExecutor[] {
       execute: async (p) =>
         rec.scheduleFollowup({
           companyId: p.companyId,
-          objectType: p.objectType,
+          objectType: toOdooModel(p.objectType),
           objectId: p.objectId,
           note: str(p.payload.note),
           dueDate: str(p.payload.dueDate),
@@ -324,26 +348,32 @@ export function buildExecutors(rec: RecordSystem): readonly ActionExecutor[] {
         if (!validDate(payload.dueDate)) {
           return { ok: false, detail: 'dueDate is required and must be a date' }
         }
-        // Shape only, here -- whether it resolves to a REAL, active, internal
-        // user is an Odoo lookup, which validate() cannot perform (it is
-        // synchronous by contract; the resolution runs in execute()).
-        const assigneeRef = str(payload.assigneeRef)
-        if (!assigneeRef || !/^[1-9]\d*$/.test(assigneeRef)) {
-          return { ok: false, detail: 'assigneeRef is required and must be a positive integer user id' }
+        // Presence only, matching this catalogue's own convention for
+        // 'reference' fields (ownerRef on lead.update/followup.schedule is
+        // never format-checked here either) -- catalogue.test.ts's generic
+        // payload builder fills 'reference' fields with `example ${name}`,
+        // not a number. The strict positive-integer shape check, and whether
+        // it resolves to a REAL, active, internal, tenant-bound user, are
+        // both Odoo/Foundation lookups validate() cannot perform (it is
+        // synchronous by contract) -- both run in execute(), and a
+        // non-numeric or non-existent id is refused there as
+        // EXECUTION_FAILED rather than VALIDATION_FAILED.
+        if (!str(payload.assigneeRef)) {
+          return { ok: false, detail: 'assigneeRef is required' }
         }
         return { ok: true }
       },
       execute: async (p) => {
         const assigneeRef = str(p.payload.assigneeRef)
-        const resolved = await rec.resolveAssignableUser(assigneeRef)
+        const resolved = await rec.resolveAssignableUser(p.companyId, assigneeRef)
         if (!resolved) {
           throw new Error(
-            'assigneeRef does not match a real, active, internal user in this tenant; the follow-up was not created',
+            'assigneeRef does not match a real, active, internal user bound to this tenant; the follow-up was not created',
           )
         }
         return rec.scheduleFollowup({
           companyId: p.companyId,
-          objectType: p.objectType,
+          objectType: toOdooModel(p.objectType),
           objectId: p.objectId,
           note: str(p.payload.note),
           dueDate: str(p.payload.dueDate),

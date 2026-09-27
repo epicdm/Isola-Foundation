@@ -79,6 +79,22 @@ export interface OdooRecordSystemDeps {
    * activity type ids differ per database.
    */
   resolveActivityTypeId?: (config: OdooConfig, call: OdooCall) => Promise<number | null>
+  /**
+   * Confirms an Odoo res.users id is bound to `tenantId` as staff (Codex
+   * review, PR #155: an Odoo instance can be shared across tenants/companies,
+   * so "active internal user" alone never proves tenant membership).
+   * Injectable so odoo-record-system.ts itself stays Prisma-free and every
+   * existing test needs no real database -- defaults to the real Foundation
+   * binding table via lib/staff-ops/service.ts's findBindingByOdooUser, the
+   * SAME check the staff-ops flow already uses for this exact question.
+   */
+  verifyStaffBinding?: (tenantId: string, odooUserId: number) => Promise<boolean>
+}
+
+async function defaultVerifyStaffBinding(tenantId: string, odooUserId: number): Promise<boolean> {
+  const { findBindingByOdooUser } = await import('@/lib/staff-ops/service')
+  const binding = await findBindingByOdooUser(tenantId, odooUserId)
+  return binding !== null
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000
@@ -198,6 +214,7 @@ export function createOdooRecordSystem(deps: OdooRecordSystemDeps): RecordSystem
   const timeout = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const stageNames = deps.stageNames ?? DEFAULT_STAGE_NAMES
   const resolveActivityTypeId = deps.resolveActivityTypeId ?? defaultResolveActivityTypeId
+  const verifyStaffBinding = deps.verifyStaffBinding ?? defaultVerifyStaffBinding
 
   async function config(): Promise<OdooConfig> {
     try {
@@ -449,9 +466,13 @@ export function createOdooRecordSystem(deps: OdooRecordSystemDeps): RecordSystem
     // 2026-09-27, followup.scheduleAssigned's target check. `share = false`
     // excludes portal/customer logins on Odoo's shared multi-tenant instance
     // -- "any active user" would let a follow-up be assigned to a customer's
-    // own portal account. Scoped to THIS RecordSystem's own resolved config,
-    // so an id from a different tenant's Odoo simply will not resolve here.
-    async resolveAssignableUser(assigneeRef) {
+    // own portal account. Odoo identity alone is NOT tenant proof (Codex
+    // review, PR #155): an id real and active in THIS Odoo can still belong
+    // to a DIFFERENT tenant sharing the same database/company, so
+    // verifyStaffBinding (Foundation's own tenant<->Odoo-user binding table,
+    // the same one lib/staff-ops/service.ts already uses for this question)
+    // must also confirm it before this returns non-null.
+    async resolveAssignableUser(tenantId, assigneeRef) {
       const id = Number(assigneeRef)
       if (!Number.isFinite(id) || id <= 0) return null
       const res = await rpc('res.users', 'search_read', {
@@ -462,6 +483,8 @@ export function createOdooRecordSystem(deps: OdooRecordSystemDeps): RecordSystem
       const row = firstRow(res)
       const resolvedId = row ? asId(row.id) : null
       if (resolvedId === null) return null
+      const bound = await verifyStaffBinding(tenantId, resolvedId)
+      if (!bound) return null
       return { id: String(resolvedId), name: String(row?.name ?? '') }
     },
   }

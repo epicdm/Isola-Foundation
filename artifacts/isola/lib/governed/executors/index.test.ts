@@ -84,8 +84,11 @@ function fakeRecordSystem(fault: Fault = 'none') {
     readFollowup: read,
     // '999999' is the reserved "no such user" sentinel for the fault-injection
     // table's followup.scheduleAssigned case; any other positive-integer-like
-    // string resolves.
-    async resolveAssignableUser(assigneeRef) {
+    // string resolves. tenantId is accepted (matching the real signature,
+    // Codex PR #155) but not itself exercised by this generic fake --
+    // dedicated tenant-binding tests live in odoo-record-system.test.ts,
+    // against the real implementation and an injected verifyStaffBinding.
+    async resolveAssignableUser(_tenantId, assigneeRef) {
       const id = Number(assigneeRef)
       if (!Number.isFinite(id) || id <= 0 || assigneeRef === '999999') return null
       return { id: assigneeRef, name: 'Fake User' }
@@ -198,8 +201,12 @@ const CASES: Case[] = [
     objectId: 'lead-9',
     actorRole: 'manager',
     valid: { note: 'Call back about renewal', dueDate: '2026-08-12', assigneeRef: '7' },
-    invalid: { note: 'Call back about renewal', dueDate: '2026-08-12', assigneeRef: 'not-a-number' },
-    invalidDetail: /assigneeRef is required and must be a positive integer/,
+    // Presence only is checked in validate() (matching this catalogue's own
+    // convention for 'reference' fields); a non-numeric assigneeRef PASSES
+    // validate() and is refused later in execute() as EXECUTION_FAILED --
+    // covered by its own dedicated test below, not this generic table.
+    invalid: { note: 'Call back about renewal', dueDate: '2026-08-12', assigneeRef: '' },
+    invalidDetail: /assigneeRef is required/,
     matchField: 'note',
   },
 ]

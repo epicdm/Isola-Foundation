@@ -43,7 +43,7 @@ function recordSystem(mode: Mode = 'ok'): RecordSystem {
     updateLead: async (i) => write(i.fields),
     scheduleFollowup: async (i) => write({ note: i.note, user_id: i.ownerRef ? [Number(i.ownerRef), 'Fake User'] : false }),
     readFollowup: read,
-    async resolveAssignableUser(assigneeRef) {
+    async resolveAssignableUser(_tenantId, assigneeRef) {
       const id = Number(assigneeRef)
       if (!Number.isFinite(id) || id <= 0) return null
       return { id: assigneeRef, name: 'Fake User' }
@@ -84,6 +84,7 @@ const PAYLOADS: Readonly<Record<string, Record<string, unknown>>> = {
   'lead.create': { name: 'Second line for the shop' },
   'lead.update': { stage: 'qualified' },
   'followup.schedule': { note: 'Check the line held', dueDate: '2026-09-02' },
+  'followup.scheduleAssigned': { note: 'Check the line held', dueDate: '2026-09-02', assigneeRef: '7' },
   'document.send': {
     conversationId: 15,
     documentId: 1,

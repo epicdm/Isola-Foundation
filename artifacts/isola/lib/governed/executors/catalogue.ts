@@ -173,6 +173,22 @@ export const GOVERNED_ACTION_CATALOGUE: readonly GovernedActionMeta[] = [
     expectedResult: 'The follow-up is read back by its note before it is reported as done.',
   },
   {
+    actionType: 'followup.scheduleAssigned',
+    label: 'Schedule a follow-up and assign it',
+    writes:
+      'Records the intention to follow up AND assigns it to a specific staff member. It does not send anything to the customer.',
+    riskLevel: 'low',
+    allowedRoles: ['manager', 'owner'],
+    requiresApproval: false,
+    fields: [
+      { name: 'note', label: 'Follow-up note', kind: 'longtext', required: true, maxLength: 2000 },
+      { name: 'dueDate', label: 'Due', kind: 'date', required: true },
+      { name: 'assigneeRef', label: 'Assign to', kind: 'reference', required: true },
+    ],
+    expectedResult:
+      'The follow-up is read back by its note AND its assignee before it is reported as done -- a write that lands on the wrong (or no) person is reported as unconfirmed, not as done.',
+  },
+  {
     actionType: 'document.send',
     label: 'Send this document to the customer',
     writes:

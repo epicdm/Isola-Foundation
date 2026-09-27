@@ -163,6 +163,56 @@ describe('writes land on the right Odoo model with the right arguments', () => {
   })
 })
 
+describe('resolveAssignableUser — real+active+internal is necessary but not sufficient (Codex review, PR #155)', () => {
+  it('CONTROL — real, active, internal, AND bound to the tenant → resolves', async () => {
+    const { rec } = sys(
+      { 'res.users.search_read': [{ id: 7, name: 'Ann Owner' }] },
+      { verifyStaffBinding: async () => true },
+    )
+    const r = await rec.resolveAssignableUser('tenant-a', '7')
+    expect(r).toEqual({ id: '7', name: 'Ann Owner' })
+  })
+
+  it('real, active, internal in Odoo, but NOT bound to this tenant → null, no false positive from Odoo identity alone', async () => {
+    const { rec } = sys(
+      { 'res.users.search_read': [{ id: 7, name: 'Ann Owner' }] },
+      { verifyStaffBinding: async () => false },
+    )
+    const r = await rec.resolveAssignableUser('tenant-a', '7')
+    expect(r).toBeNull()
+  })
+
+  it('the tenantId actually reaches verifyStaffBinding, not a hardcoded or swapped value', async () => {
+    const seen: Array<{ tenantId: string; odooUserId: number }> = []
+    const { rec } = sys(
+      { 'res.users.search_read': [{ id: 7, name: 'Ann Owner' }] },
+      {
+        verifyStaffBinding: async (tenantId: string, odooUserId: number) => {
+          seen.push({ tenantId, odooUserId })
+          return tenantId === 'tenant-a'
+        },
+      },
+    )
+    await rec.resolveAssignableUser('tenant-a', '7')
+    await rec.resolveAssignableUser('tenant-b', '7')
+    expect(seen).toEqual([
+      { tenantId: 'tenant-a', odooUserId: 7 },
+      { tenantId: 'tenant-b', odooUserId: 7 },
+    ])
+  })
+
+  it('no matching Odoo user at all → null, verifyStaffBinding never called (nothing to bind-check)', async () => {
+    let called = false
+    const { rec } = sys(
+      { 'res.users.search_read': [] },
+      { verifyStaffBinding: async () => { called = true; return true } },
+    )
+    const r = await rec.resolveAssignableUser('tenant-a', '999999')
+    expect(r).toBeNull()
+    expect(called).toBe(false)
+  })
+})
+
 describe('reads are translated into the caller’s vocabulary', () => {
   it('turns stage_id [id, name] into the canonical stage word', async () => {
     const { rec } = sys({
