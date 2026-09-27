@@ -12,12 +12,23 @@ proposal" line and the Week Pass economics caveat.** Re-verified directly before
 PRODUCTION: a real signup on this build, a real purchase, a real top-up, overage behaviour." First real
 customers on this build are the actual test — staff script below reflects that.
 
-**Destination check:** `https://app.isola.epic.dm` returns HTTP 200 (confirmed just now). It's a small SPA
-shell (4,068 bytes) — same pattern as the isola-lumen-prod page I found broken two weeks ago. Given the
-30-minute target, I did not repeat that full anonymous-content verification here; flagging it as a residual
-gap rather than skipping it silently. Cross-checked against the evidence entity's own claim that this exact
-build (isola-connect PR #71, `4937ee03`) is what's deployed there, which raises my confidence but doesn't
-replace an anonymous content check.
+**Destination changed, owner direction, 2026-09-27 (later same session):** the front door is **not**
+`app.isola.epic.dm` — it's a direct WhatsApp message to the sole public front door, **+1 767 818 3742**:
+
+`https://wa.me/17678183742?text=Hi%20%E2%80%94%20I'd%20like%20my%20own%20Dominica%20number%20with%20Isola.`
+
+(decoded: "Hi — I'd like my own Dominica number with Isola.") 3742 is documented in this repo's own
+operating rules as the sole public front door — a live, protected product surface, not something I'm taking
+on Lane A's word alone. **Everything below is updated to use this link.** The `app.isola.epic.dm` check
+below is left for history/context only — it is no longer the CTA anywhere in this file.
+
+**Superseded destination check (history only):** `https://app.isola.epic.dm` returned HTTP 200, a small SPA
+shell (4,068 bytes) — same pattern as the isola-lumen-prod page found broken two weeks ago; full
+anonymous-content verification was not completed before this destination was replaced.
+
+**Two different numbers, do not mix up, per Lane A's explicit instruction:** **+1 767 818 3742** is the
+first-contact number for **new** customers (this campaign's CTA). **+1 767 818 0001** is support for
+**existing** customers only — it does not appear anywhere in this new-customer creative below.
 
 ## Live offer, as given (used exactly, not the diaspora brief's superseded 1,500-shared proposal)
 
@@ -43,23 +54,25 @@ mobiles and landlines — using your own Wi-Fi or mobile data, wherever you are.
 **Disclosure (visible, not link-only):** Internet required; data charges may apply. Voice only — no SMS or
 emergency calling.
 
-**CTA:** app.isola.epic.dm · **Support:** Questions? WhatsApp +1 767 818 0001
+**CTA:** Message us on WhatsApp → `wa.me/17678183742` (prefilled: "Hi — I'd like my own Dominica number with
+Isola.")
 
 **Creative preview — 1:1 feed:**
 - Top third: headline, large legible type, EPIC logo unaltered (standard corner placement).
 - Middle: phone-in-hand product illustration showing a call in progress to a Dominica number — labelled as
   an illustration, not presented as a live screenshot (same open asset dependency as every prior checkpoint;
   no approved real capture exists yet).
-- Bottom third: price/allowance badge "EC$35 / 30 days / 1,000 min", CTA button "Get your number",
-  WhatsApp support line in small print.
+- Bottom third: price/allowance badge "EC$35 / 30 days / 1,000 min", CTA button "Message us on WhatsApp"
+  linking to the wa.me/3742 URL above. No 0001 anywhere on this creative — that's existing-customer support
+  only.
 
 **Creative preview — 9:16 (WhatsApp Status / IG Reels):**
 - Top third: headline.
 - Middle: same illustration, full-bleed.
-- Bottom third: price badge + CTA. IG Reels supports a tappable link sticker to app.isola.epic.dm.
-  **WhatsApp Status, confirmed by Lane A 2026-09-27:** no Business API status link assumed — show
-  `app.isola.epic.dm` as visible text plus "WhatsApp +1 767 818 0001 for help" underneath, same as any other
-  non-clickable Status post.
+- Bottom third: price badge + CTA. IG Reels supports a tappable link sticker to the wa.me/3742 URL directly
+  (click-to-WhatsApp works the same as any other link there). **WhatsApp Status:** no clickable link at all
+  — show the number **+1 767 818 3742** and the `wa.me/17678183742` link as visible text, per Lane A's
+  confirmation.
 
 ## 2. Caption
 
@@ -67,13 +80,15 @@ emergency calling.
 > Get set up before you travel home for Independence — call regular Dominican mobiles and landlines on your
 > existing Wi-Fi or data. Personal Line: EC$35 (≈US$12.96)/30 days, 1,000 minutes included.
 > Internet required. Voice only — no SMS or emergency calls.
-> 👉 app.isola.epic.dm
-> Questions? WhatsApp +1 767 818 0001
+> 👉 Message us on WhatsApp: wa.me/17678183742
 
 ## 3. Staff/agent setup + objection script
 
 **Setup, given this build has no proven real signup yet:**
-1. Customer arrives via ad/QR → app.isola.epic.dm, or messages 0001 directly if they prefer WhatsApp-first.
+1. Customer arrives via ad/QR and messages **+1 767 818 3742** (the prefilled text is already their
+   opening line). **This is the only new-customer entry point in this campaign — not 0001, not
+   app.isola.epic.dm.** 0001 is existing-customer support only; if a new prospect somehow reaches 0001
+   instead, redirect them to 3742 rather than serving them there.
 2. Owner is personally staffing WhatsApp tonight via Chatwoot — **first several customers should be watched
    closely, not treated as routine.** If anything about signup, pricing display, or activation looks
    unexpected, escalate to the owner immediately rather than reassuring the customer with a guess — this
@@ -98,23 +113,28 @@ emergency calling.
 ## 4. Lead follow-up text (for interest that didn't complete)
 
 > Hi! 👋 Saw you were checking out your Dominica number with EPIC. Still want to get set up before you
-> travel? Message us here or visit app.isola.epic.dm — happy to help you finish in a couple of minutes.
+> travel? Message us here or on WhatsApp: wa.me/17678183742 — happy to help you finish in a couple of
+> minutes.
 
 ## 5. Meta campaign replacement — campaign `120251434498070326`
 
 - **Replace creative:** the old 15-minute-trial ad → the diaspora creative in §1/§2 above. **The old
   15-minute creative must not run** (matches the live ladder having replaced that trial framing entirely).
-- **Destination URL:** `https://app.isola.epic.dm` (see verification note above — 200 confirmed, full
-  content check not repeated under the time target).
+- **Destination:** `https://wa.me/17678183742?text=Hi%20%E2%80%94%20I'd%20like%20my%20own%20Dominica%20number%20with%20Isola.`
+  — this is a **click-to-WhatsApp ad**, not a link-to-website ad; the destination field in Ads Manager
+  should be the WhatsApp business phone connection (+1 767 818 3742) with this prefilled message, not a URL
+  field pointing at app.isola.epic.dm.
 - **Budget:** Lane A stated the currently configured budget as US$3/day. **I have no Ads Manager access to
   verify this myself** — no engineering-held credential can reach Meta Ads (confirmed earlier this week,
   `ev-meta-publishing-and-ads-access-measured-2026-09-22`) — so this figure is relayed, not independently
   checked. **Not proposing any budget change** — the existing US$3/day, whatever it actually is, is not a
   new authorization per Lane A's own framing.
 - **Exact activation action, as a procedure for whoever holds Ads Manager access** (not something I can
-  execute): open the paused ad under campaign `120251434498070326`, replace the ad creative/copy with §1/§2
-  above, update the destination URL to `app.isola.epic.dm`, leave the daily budget unchanged, then the
-  account holder (owner or delegate) clicks to reactivate. **Nothing here activates anything by itself.**
+  execute): open the paused ad under campaign `120251434498070326`, confirm it's set as (or convert it to) a
+  click-to-WhatsApp ad type connected to +1 767 818 3742, replace the ad creative/copy with §1/§2 above, set
+  the prefilled message to "Hi — I'd like my own Dominica number with Isola.", leave the daily budget
+  unchanged, then the account holder (owner or delegate) clicks to reactivate. **Nothing here activates
+  anything by itself.**
 
 ## Recorded through the marketing_claim gate
 
