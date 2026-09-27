@@ -163,10 +163,21 @@ export function parseHint(value: unknown): ChatwootContextHint | null {
     : null
 }
 
-/** Session role → the governed runtime's vocabulary. Defaults DOWN, always. */
+/**
+ * Session role → the governed runtime's vocabulary. Defaults DOWN, always.
+ *
+ * Codex review, PR #156: membershipRole comes from lib/permissions.ts's
+ * `Membership.role`, whose real vocabulary is 'owner' | 'admin' | 'staff'
+ * (permissions.ts:17) -- 'manager' has never been a value there. Checking
+ * for 'manager' here made a tenant admin's own Membership row invisible to
+ * this mapping, silently falling through to 'staff' every time -- half of
+ * an OR condition that could never be true. `admin` is this codebase's own
+ * name for exactly the tier the governed runtime calls `manager`; this
+ * translates between the two vocabularies rather than assuming they match.
+ */
 export function actorRoleFor(isAdmin: boolean, homeOwner: boolean, membershipRole: string | null): string {
   if (isAdmin || homeOwner) return 'owner'
-  return membershipRole === 'manager' || membershipRole === 'owner' ? 'manager' : 'staff'
+  return membershipRole === 'admin' || membershipRole === 'owner' ? 'manager' : 'staff'
 }
 
 /**
