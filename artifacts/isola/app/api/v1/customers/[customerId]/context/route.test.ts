@@ -163,7 +163,7 @@ describe('a customer that exists', () => {
     }
   })
 
-  it('offers the seven governed actions and no others', async () => {
+  it('offers the eight governed actions and no others', async () => {
     const res = await GET(request(), params())
     const body = await res.json()
 
@@ -174,6 +174,7 @@ describe('a customer that exists', () => {
         // send itself is only reachable from the C360 panel's confirm flow.
         'document.send',
         'followup.schedule',
+        'followup.scheduleAssigned',
         'lead.create',
         'lead.update',
         'note.create',

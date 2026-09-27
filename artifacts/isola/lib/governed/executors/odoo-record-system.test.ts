@@ -242,6 +242,22 @@ describe('defaultVerifyStaffBinding (the REAL default, no override) — Codex PR
   })
 })
 
+describe('resolveAssignableUser — a binding-check outage is DependencyUnavailable, not a write refusal (Codex PR #155 P2)', () => {
+  it('verifyStaffBinding throwing (e.g. Prisma/DB unreachable) surfaces as DependencyUnavailable', async () => {
+    const { rec } = sys(
+      { 'res.users.search_read': [{ id: 7, name: 'Ann Owner' }] },
+      { verifyStaffBinding: async () => { throw new Error('connect ECONNREFUSED') } },
+    )
+    await expect(rec.resolveAssignableUser('tenant-a', '7')).rejects.toThrow(DependencyUnavailable)
+  })
+
+  it('CONTROL — the SAME failure through the real default (Prisma import) also surfaces as DependencyUnavailable', async () => {
+    findBindingByOdooUserMock.mockRejectedValue(new Error('connect ECONNREFUSED'))
+    const { rec } = sys({ 'res.users.search_read': [{ id: 7, name: 'Ann Owner' }] })
+    await expect(rec.resolveAssignableUser('tenant-a', '7')).rejects.toThrow(DependencyUnavailable)
+  })
+})
+
 describe('reads are translated into the caller’s vocabulary', () => {
   it('turns stage_id [id, name] into the canonical stage word', async () => {
     const { rec } = sys({

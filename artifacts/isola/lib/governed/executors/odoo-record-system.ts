@@ -487,7 +487,21 @@ export function createOdooRecordSystem(deps: OdooRecordSystemDeps): RecordSystem
       const row = firstRow(res)
       const resolvedId = row ? asId(row.id) : null
       if (resolvedId === null) return null
-      const bound = await verifyStaffBinding(tenantId, resolvedId)
+      let bound: boolean
+      try {
+        bound = await verifyStaffBinding(tenantId, resolvedId)
+      } catch (err) {
+        // Codex review, PR #155: this runs BEFORE any Odoo write. A Prisma/
+        // Foundation-database outage here is the dependency being
+        // unreachable, not the write being refused -- a plain throw would
+        // surface as EXECUTION_FAILED ("Odoo rejected it, do not retry"),
+        // which is the wrong advice for a check that never touched Odoo and
+        // where retrying is genuinely safe.
+        throw new DependencyUnavailable(
+          'staff-binding',
+          err instanceof Error ? err.message : String(err),
+        )
+      }
       if (!bound) return null
       return { id: String(resolvedId), name: String(row?.name ?? '') }
     },
