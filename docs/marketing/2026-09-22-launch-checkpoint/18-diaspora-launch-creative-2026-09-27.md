@@ -1,12 +1,12 @@
 # Diaspora launch creative — 5 deliverables, 2026-09-27
 
 Per Lane A's dispatch under `dec-owner-pl-launch-ladder-included-minutes-2026-09-27` /
-`ev-pl-launch-ladder-live-production-2026-09-27`. **Verification note before anything else:** the decision
-entity itself came back with no status, no decision text, no rationale — a title-only stub, not a filled-in
-ratification. I did **not** just take the dispatch's numbers on faith regardless: the evidence entity's raw
-Magnus offer durations (3600/12000/36000/60000/90000 seconds) convert exactly to 60/200/600/1000/1500
-minutes — matching Lane A's stated ladder precisely, independent cross-check. Treating the ladder as real
-and live on that basis, while flagging the empty decision record as a process gap, not a blocker.
+`ev-pl-launch-ladder-live-production-2026-09-27`. **Verification note:** at the time this checkpoint was
+first drafted, the decision entity had no status/text/rationale — a title-only stub. Cross-checked instead
+against the evidence entity's raw Magnus offer durations (3600/12000/36000/60000/90000 seconds → exactly
+60/200/600/1000/1500 minutes, matching the stated ladder). **Lane A has since filled in the decision entity
+— now Ratified, full decision text matches everything used below, including the "supersedes... the 1,500/2,500
+proposal" line and the Week Pass economics caveat.** Re-verified directly before this update.
 
 **Also carried from the evidence entity, relevant to staff-facing material below:** "NOT YET PROVEN IN
 PRODUCTION: a real signup on this build, a real purchase, a real top-up, overage behaviour." First real
@@ -56,11 +56,10 @@ emergency calling.
 **Creative preview — 9:16 (WhatsApp Status / IG Reels):**
 - Top third: headline.
 - Middle: same illustration, full-bleed.
-- Bottom third: price badge + CTA. **Note on mechanics:** IG Reels supports a tappable link sticker to
-  app.isola.epic.dm; organic WhatsApp Status does not support a clickable link at all — for Status, the URL
-  needs to appear as visible text customers type manually, or the post needs to route through the WhatsApp
-  Business API's own link-in-status mechanism if that's connected (not confirmed either way — flagging as a
-  destination-mechanics question, not assumed).
+- Bottom third: price badge + CTA. IG Reels supports a tappable link sticker to app.isola.epic.dm.
+  **WhatsApp Status, confirmed by Lane A 2026-09-27:** no Business API status link assumed — show
+  `app.isola.epic.dm` as visible text plus "WhatsApp +1 767 818 0001 for help" underneath, same as any other
+  non-clickable Status post.
 
 ## 2. Caption
 
@@ -127,3 +126,7 @@ stays as its own Draft record, not touched, since today's live ladder is a separ
 
 No ad reactivated, no spend authorized, no message sent to a real customer. Owner approval required for
 every one of the five items above before anything goes live.
+
+## Status: HELD, with the owner
+
+Lane A has passed this pack to the owner for approval. No action from this lane until an answer comes back.
