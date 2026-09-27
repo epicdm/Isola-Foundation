@@ -469,19 +469,59 @@ function dueDateLabel(dateStr: string | null, now: Date): string {
 }
 
 /**
+ * Confirms an assignee target is a real, active, INTERNAL Odoo user BEFORE
+ * the follow-up write is attempted -- an assigneeRef is caller-supplied
+ * input, never trusted as a valid id just because it parses as a number.
+ * `share = false` excludes portal/public users: Odoo's shared multi-tenant
+ * instance can have external customers with a login, and "any active user"
+ * would let a follow-up be assigned to one of them. Reads against `config`'s
+ * own resolved Odoo connection, so a numeric id that belongs to a DIFFERENT
+ * tenant's Odoo simply will not resolve here -- cross-tenant assignment
+ * fails closed by construction, not by an extra tenant-matching check.
+ */
+async function resolveAssignableUser(config: OdooConfig, assigneeRef: string): Promise<{ id: number; name: string } | null> {
+  const id = Number(assigneeRef);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  const rows = await json2Call(config, 'res.users', 'search_read', {
+    domain: [['id', '=', id], ['active', '=', true], ['share', '=', false]],
+    fields: ['id', 'name'],
+    limit: 1,
+  }) as Array<{ id: number; name: string }>;
+  const row = rows[0];
+  return row ? { id: Number(row.id), name: String(row.name ?? '') } : null;
+}
+
+/**
  * Writes a real `mail.activity` on this partner via the ALREADY-BUILT,
  * ALREADY-TESTED governed executor (lib/governed/executors/odoo-record-
  * system.ts) rather than a second copy of its activityVals logic. This IS
  * "Create follow-up task" landing a real row, not a toast -- the design's
  * own distinction (dec-c360-... 2026-09-05).
+ *
+ * assigneeRef (added ev-isola-360-followup-assignment-2026-09-27, closing the
+ * W2 gap): optional, an Odoo res.users id as a string. Resolved and verified
+ * REAL and ACTIVE before the write -- an assignee that does not resolve is a
+ * thrown error, never a silently-dropped assignment. Persistence of the
+ * assignment itself (not just the follow-up's existence) is proven by the
+ * SAME readback this function already required: readFollowup now selects
+ * user_id, and `assignee` below reflects what Odoo actually stored, not what
+ * was requested.
  */
 export async function createCustomerFollowUp(
   config: OdooConfig,
   partnerId: number,
   note: string,
   dueDate: string,
+  assigneeRef: string | null = null,
 ): Promise<Customer360FollowUp> {
   const rec = createOdooRecordSystem({ resolveConfig: async () => config });
+  let resolvedAssignee: { id: number; name: string } | null = null;
+  if (assigneeRef) {
+    resolvedAssignee = await resolveAssignableUser(config, assigneeRef);
+    if (!resolvedAssignee) {
+      throw new Error('assigneeRef does not match a real, active user; the follow-up was not created');
+    }
+  }
   // companyId is part of RecordSystem's generic interface (other
   // implementations may use it); the Odoo implementation's scheduleFollowup
   // never reads it -- confirmed by reading odoo-record-system.ts directly,
@@ -492,10 +532,17 @@ export async function createCustomerFollowUp(
     objectId: String(partnerId),
     note,
     dueDate,
+    ownerRef: resolvedAssignee ? String(resolvedAssignee.id) : null,
   });
   const readback = await rec.readFollowup(externalId);
   if (!readback) {
     throw new Error('the follow-up was created but could not be read back; not shown as confirmed');
+  }
+  if (resolvedAssignee && displayName(readback.user_id) !== resolvedAssignee.name) {
+    // The write reported success but the readback disagrees on WHO it was
+    // assigned to -- the same "created but unreadable" honesty standard,
+    // pointed at the assignment specifically rather than existence alone.
+    throw new Error('the follow-up was created but the assignment could not be confirmed on readback');
   }
   const now = new Date();
   return {
@@ -503,7 +550,7 @@ export async function createCustomerFollowUp(
     summary: String(readback.summary ?? note),
     dueDate,
     dueLabel: dueDateLabel(dueDate, now),
-    assignee: null,
+    assignee: displayName(readback.user_id),
   };
 }
 
