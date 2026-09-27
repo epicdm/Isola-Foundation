@@ -90,7 +90,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const config = await resolveOdooConfigForTenant(caller.tenantId)
-    const followUp = await createCustomerFollowUp(config, customerId, note, dueDate, assigneeRef)
+    const followUp = await createCustomerFollowUp(config, customerId, note, dueDate, assigneeRef, caller.tenantId)
     return NextResponse.json({ ok: true, followUp }, { status: 200 })
   } catch (err) {
     // Created-but-unreadable and never-created both surface as the same

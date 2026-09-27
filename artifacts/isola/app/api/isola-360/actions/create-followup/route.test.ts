@@ -46,7 +46,7 @@ describe('POST create-followup — assigneeRef authorization', () => {
     resolveCallerMock.mockResolvedValue(caller('staff'))
     const res = await POST(req(VALID_BODY))
     expect(res.status).toBe(200)
-    expect(createFollowUpMock).toHaveBeenCalledWith(expect.anything(), 42, 'call back', '2026-10-01', null)
+    expect(createFollowUpMock).toHaveBeenCalledWith(expect.anything(), 42, 'call back', '2026-10-01', null, 't1')
   })
 
   it('staff caller WITH assigneeRef → 403, createCustomerFollowUp never called', async () => {
@@ -56,18 +56,18 @@ describe('POST create-followup — assigneeRef authorization', () => {
     expect(createFollowUpMock).not.toHaveBeenCalled()
   })
 
-  it('manager caller WITH assigneeRef → allowed, forwarded as a string id', async () => {
+  it('manager caller WITH assigneeRef → allowed, forwarded as a string id plus the caller\'s tenantId', async () => {
     resolveCallerMock.mockResolvedValue(caller('manager'))
     const res = await POST(req({ ...VALID_BODY, assigneeRef: 7 }))
     expect(res.status).toBe(200)
-    expect(createFollowUpMock).toHaveBeenCalledWith(expect.anything(), 42, 'call back', '2026-10-01', '7')
+    expect(createFollowUpMock).toHaveBeenCalledWith(expect.anything(), 42, 'call back', '2026-10-01', '7', 't1')
   })
 
   it('owner caller WITH assigneeRef → allowed', async () => {
     resolveCallerMock.mockResolvedValue(caller('owner'))
     const res = await POST(req({ ...VALID_BODY, assigneeRef: 7 }))
     expect(res.status).toBe(200)
-    expect(createFollowUpMock).toHaveBeenCalledWith(expect.anything(), 42, 'call back', '2026-10-01', '7')
+    expect(createFollowUpMock).toHaveBeenCalledWith(expect.anything(), 42, 'call back', '2026-10-01', '7', 't1')
   })
 
   it('malformed assigneeRef (not a positive integer) → 400 before the role check, never reaches Odoo', async () => {
@@ -81,6 +81,6 @@ describe('POST create-followup — assigneeRef authorization', () => {
     resolveCallerMock.mockResolvedValue(caller('manager'))
     const res = await POST(req({ ...VALID_BODY, assigneeRef: '7' }))
     expect(res.status).toBe(200)
-    expect(createFollowUpMock).toHaveBeenCalledWith(expect.anything(), 42, 'call back', '2026-10-01', '7')
+    expect(createFollowUpMock).toHaveBeenCalledWith(expect.anything(), 42, 'call back', '2026-10-01', '7', 't1')
   })
 })

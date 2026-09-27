@@ -468,18 +468,29 @@ function dueDateLabel(dateStr: string | null, now: Date): string {
   return dateStr.slice(0, 10);
 }
 
+/** many2one arrives as [id, "Name"] or false. The numeric id, or null. */
+function m2oId(value: unknown): number | null {
+  return Array.isArray(value) && typeof value[0] === 'number' ? value[0] : null;
+}
+
 /**
- * Confirms an assignee target is a real, active, INTERNAL Odoo user BEFORE
- * the follow-up write is attempted -- an assigneeRef is caller-supplied
- * input, never trusted as a valid id just because it parses as a number.
+ * Confirms an assignee target is a real, active, INTERNAL Odoo user BOUND TO
+ * THIS TENANT, before the follow-up write is attempted -- an assigneeRef is
+ * caller-supplied input, never trusted as a valid id just because it parses
+ * as a number.
+ *
  * `share = false` excludes portal/public users: Odoo's shared multi-tenant
  * instance can have external customers with a login, and "any active user"
- * would let a follow-up be assigned to one of them. Reads against `config`'s
- * own resolved Odoo connection, so a numeric id that belongs to a DIFFERENT
- * tenant's Odoo simply will not resolve here -- cross-tenant assignment
- * fails closed by construction, not by an extra tenant-matching check.
+ * would let a follow-up be assigned to one of them.
+ *
+ * Odoo identity is NOT tenant proof (Codex review, PR #156): a database or
+ * company can be shared across Foundation tenants, so "real, active,
+ * internal in THIS Odoo" alone does not prove the user belongs to the
+ * ACTING tenant. findBindingByOdooUser (lib/staff-ops/service.ts) is
+ * Foundation's own tenant<->Odoo-user binding table, and the SAME check the
+ * staff-ops flow already uses for this identical question.
  */
-async function resolveAssignableUser(config: OdooConfig, assigneeRef: string): Promise<{ id: number; name: string } | null> {
+async function resolveAssignableUser(config: OdooConfig, tenantId: string, assigneeRef: string): Promise<{ id: number; name: string } | null> {
   const id = Number(assigneeRef);
   if (!Number.isFinite(id) || id <= 0) return null;
   const rows = await json2Call(config, 'res.users', 'search_read', {
@@ -488,7 +499,11 @@ async function resolveAssignableUser(config: OdooConfig, assigneeRef: string): P
     limit: 1,
   }) as Array<{ id: number; name: string }>;
   const row = rows[0];
-  return row ? { id: Number(row.id), name: String(row.name ?? '') } : null;
+  if (!row) return null;
+  const { findBindingByOdooUser } = await import('@/lib/staff-ops/service');
+  const binding = await findBindingByOdooUser(tenantId, Number(row.id));
+  if (!binding) return null;
+  return { id: Number(row.id), name: String(row.name ?? '') };
 }
 
 /**
@@ -513,13 +528,17 @@ export async function createCustomerFollowUp(
   note: string,
   dueDate: string,
   assigneeRef: string | null = null,
+  tenantId: string | null = null,
 ): Promise<Customer360FollowUp> {
   const rec = createOdooRecordSystem({ resolveConfig: async () => config });
   let resolvedAssignee: { id: number; name: string } | null = null;
   if (assigneeRef) {
-    resolvedAssignee = await resolveAssignableUser(config, assigneeRef);
+    if (!tenantId) {
+      throw new Error('tenantId is required to verify an assignee; the follow-up was not created');
+    }
+    resolvedAssignee = await resolveAssignableUser(config, tenantId, assigneeRef);
     if (!resolvedAssignee) {
-      throw new Error('assigneeRef does not match a real, active user; the follow-up was not created');
+      throw new Error('assigneeRef does not match a real, active, internal user bound to this tenant; the follow-up was not created');
     }
   }
   // companyId is part of RecordSystem's generic interface (other
@@ -538,10 +557,14 @@ export async function createCustomerFollowUp(
   if (!readback) {
     throw new Error('the follow-up was created but could not be read back; not shown as confirmed');
   }
-  if (resolvedAssignee && displayName(readback.user_id) !== resolvedAssignee.name) {
-    // The write reported success but the readback disagrees on WHO it was
-    // assigned to -- the same "created but unreadable" honesty standard,
-    // pointed at the assignment specifically rather than existence alone.
+  if (resolvedAssignee && m2oId(readback.user_id) !== resolvedAssignee.id) {
+    // Codex review, PR #156: comparing DISPLAY NAMES let two same-named
+    // users pass as a false match. Compare the numeric id -- the only
+    // thing that actually identifies who it landed on -- and use the name
+    // only for presentation below. The write reported success but the
+    // readback disagrees on WHO it was assigned to -- the same "created
+    // but unreadable" honesty standard, pointed at the assignment
+    // specifically rather than existence alone.
     throw new Error('the follow-up was created but the assignment could not be confirmed on readback');
   }
   const now = new Date();
