@@ -183,7 +183,7 @@ function sectionFrom(
   return ok(id, result);
 }
 
-function companyIdOf(value: unknown): number | null {
+export function companyIdOf(value: unknown): number | null {
   if (Array.isArray(value) && typeof value[0] === 'number') return value[0];
   return null;
 }
@@ -219,7 +219,7 @@ interface OdooUserRow {
   company_ids: unknown;
 }
 
-type CompanyScopeResult = { ok: true; companyId: number } | { ok: false };
+export type CompanyScopeResult = { ok: true; companyId: number } | { ok: false };
 
 /**
  * CORRECTED 2026-09-18 (Codex review finding, re-confirmed on re-review):
@@ -298,7 +298,7 @@ async function resolveBearerUserId(config: OdooConfig): Promise<number | null> {
  * doc comment above for the full reconciliation of why this replaces the
  * prior `login`-selected lookup.
  */
-async function resolveAuthorizedCompany(config: OdooConfig, login: string | null | undefined): Promise<CompanyScopeResult> {
+export async function resolveAuthorizedCompany(config: OdooConfig, login: string | null | undefined): Promise<CompanyScopeResult> {
   if (!login || !login.trim()) return { ok: false };
 
   const bearerUid = await resolveBearerUserId(config);
