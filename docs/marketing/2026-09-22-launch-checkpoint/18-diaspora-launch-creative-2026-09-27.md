@@ -141,17 +141,48 @@ Isola.")
   unchanged, then the account holder (owner or delegate) clicks to reactivate. **Nothing here activates
   anything by itself.**
 
+## 6. Owner walkthrough — campaign `120251434498070326`, under 5 minutes
+
+Approved at commit `9fe8612` (creative + wording + budget as currently configured, no increase). Written
+from general Meta Ads Manager UX, not verified against the live account — **neither Lane A nor I have Ads
+Manager access** (the Meta MCP available to this session is app-inspection only, confirmed
+`ev-meta-publishing-and-ads-access-measured-2026-09-22`). If any step below doesn't match what's actually on
+screen, that's this gap showing, not a change in what's approved.
+
+1. **Open the ad.** Ads Manager → Campaigns → find `120251434498070326` → open its one ad set → open the
+   existing (paused) ad — the one currently showing the old 15-minute-trial creative.
+2. **Set destination to click-to-WhatsApp.** In the ad's Destination section, choose WhatsApp (not
+   Website). Connect it to the WhatsApp Business number **+1 767 818 3742**. In the "message" or "prefilled
+   text" field for that destination, enter exactly: `Hi — I'd like my own Dominica number with Isola.`
+3. **Replace the creative — THE ONE REAL GAP:** I don't have a finished image or video file to give you a
+   path for. What exists is the full text (headline, body, disclosure — §1/§2 above) and a written visual
+   spec (phone-in-hand illustration, EPIC logo, price badge) — **not a produced asset.** Someone needs to
+   turn that spec into an actual 1:1 image/video and a 9:16 version before this step is truly a 5-minute
+   swap. If a design asset already exists somewhere I don't know about, use that instead of waiting on a
+   new one; I can't confirm one exists.
+4. **Enter the ad copy.** Primary text = the caption in §2. Headline (if the ad format has a separate
+   headline field) = "Your Dominican number. Before you land. After you leave."
+5. **Confirm the budget reads US$3/day** at the ad set level before changing anything else — if it reads
+   differently, stop and check with Lane A/the owner before proceeding; this walkthrough does not authorize
+   any budget change.
+6. **Activate.** Toggle the ad (or ad set, if that's where it's paused) from Off/Paused to On/Active.
+7. **After activation, check:**
+   - The ad's delivery status shows "In review" (Meta reviews new/edited ads before they start delivering
+     impressions — this is normal, not an error).
+   - Use Ads Manager's own ad preview to confirm tapping the ad opens WhatsApp to **+1 767 818 3742** with
+     the prefilled message showing correctly (not a different number, not blank, not truncated).
+   - Confirm the old 15-minute-trial creative is genuinely gone, not just paused alongside the new one.
+
 ## Recorded through the marketing_claim gate
 
 New entity `mc-diaspora-launch-creative-2026-09-27` created for this batch — see Port. No existing claim
 was overwritten; the diaspora brief's 1,500-shared proposal (`mc-personal-line-diaspora-price-comparison-2026-09-27`)
 stays as its own Draft record, not touched, since today's live ladder is a separate, later ratification.
 
-## Nothing published or activated by this checkpoint
+## Status: APPROVED by the owner, 2026-09-28
 
-No ad reactivated, no spend authorized, no message sent to a real customer. Owner approval required for
-every one of the five items above before anything goes live.
-
-## Status: HELD, with the owner
-
-Lane A has passed this pack to the owner for approval. No action from this lane until an answer comes back.
+Creative, wording and budget (as currently configured, US$3/day, no increase) approved at commit `9fe8612`.
+Activation itself is still a manual owner action via the walkthrough in §6 above — **this checkpoint still
+has not activated, published, or reactivated anything itself.** The one real remaining gap before that
+walkthrough is genuinely a 5-minute task: no finished creative asset file exists yet (§6 step 3) — only the
+approved copy and a written visual spec.
