@@ -154,12 +154,13 @@ screen, that's this gap showing, not a change in what's approved.
 2. **Set destination to click-to-WhatsApp.** In the ad's Destination section, choose WhatsApp (not
    Website). Connect it to the WhatsApp Business number **+1 767 818 3742**. In the "message" or "prefilled
    text" field for that destination, enter exactly: `Hi — I'd like my own Dominica number with Isola.`
-3. **Replace the creative — THE ONE REAL GAP:** I don't have a finished image or video file to give you a
-   path for. What exists is the full text (headline, body, disclosure — §1/§2 above) and a written visual
-   spec (phone-in-hand illustration, EPIC logo, price badge) — **not a produced asset.** Someone needs to
-   turn that spec into an actual 1:1 image/video and a 9:16 version before this step is truly a 5-minute
-   swap. If a design asset already exists somewhere I don't know about, use that instead of waiting on a
-   new one; I can't confirm one exists.
+3. **Replace the creative — RESOLVED, 2026-09-28.** Final PNGs are in `creative/` alongside this file:
+   `creative/diaspora-feed-1080x1080.png` (1:1) and `creative/diaspora-story-1080x1920.png` (9:16). Produced
+   by rendering the approved copy as HTML/CSS through headless Chromium on deepseek (never the laptop, never
+   a live checkout) — see `creative/README.md` for exactly how, including the one flag worth knowing: the
+   paused campaign's actual old creative was never retrieved for layout reference (no Ads Manager/creative-library
+   access exists for this lane), so these are built from the EPIC logo (fetched live from epic.dm) and this
+   repo's own existing brand color reference instead.
 4. **Enter the ad copy.** Primary text = the caption in §2. Headline (if the ad format has a separate
    headline field) = "Your Dominican number. Before you land. After you leave."
 5. **Confirm the budget reads US$3/day** at the ad set level before changing anything else — if it reads
@@ -182,7 +183,6 @@ stays as its own Draft record, not touched, since today's live ladder is a separ
 ## Status: APPROVED by the owner, 2026-09-28
 
 Creative, wording and budget (as currently configured, US$3/day, no increase) approved at commit `9fe8612`.
-Activation itself is still a manual owner action via the walkthrough in §6 above — **this checkpoint still
-has not activated, published, or reactivated anything itself.** The one real remaining gap before that
-walkthrough is genuinely a 5-minute task: no finished creative asset file exists yet (§6 step 3) — only the
-approved copy and a written visual spec.
+Final creative assets produced at commit `953f42d`. The §6 walkthrough is now genuinely a ~5-minute task —
+no remaining asset gap. Activation itself is still a manual owner action — **this checkpoint still has not
+activated, published, or reactivated anything itself.**
