@@ -102,18 +102,30 @@ next 30 days, not an established fact.
 
 ## Part 2 — Proposed 30-day plan (PROPOSAL ONLY — not applied)
 
-### Proposed goals, for the owner's confirmation
+### Proposed goals, for the owner's confirmation — revised 2026-09-28 per Lane A's request for explicit numbers
 
-Grounded in the top-performer rate above ($0.14–$0.39/conversation from real historical evidence,
-plus this account's genuine data thinness):
-- **~150–300 WhatsApp conversations started** over 30 days, assuming a blended $0.30–$0.60/
-  conversation at these budget levels (a rough estimate bridging historical best-case and
-  current-launch unknowns — not a guarantee; this is new creative, a new destination number, and a
-  new offer, so historical rates are a reference point, not a forecast).
-- Signups and paying customers: **no historical conversion-rate data exists** from conversation → signup
-  → payment (the CAPI/pixel path has never fired). Propose treating the first 30 days as the
-  baseline-setting period for this specific funnel stage rather than committing to a signup/purchase
-  number now — set that target after the first 1–2 weeks of real data.
+**Conservative cost-per-conversation assumption: $0.80.** Not the account's best-ever rate ($0.14,
+from a thin, opaque-creative sample) — anchored instead to **EPIC_HOTSPOT's $0.81/conversation, the
+largest real sample in the account's history (118 conversations, $95.08 spent)**. Conservative means
+planning against the worst *large-sample* result, not the best small-sample one. Tonight's campaign
+may well beat this (tighter targeting, a purpose-built offer), but this is the floor to commit to.
+
+- **Conversations started: ~185 over 30 days** ($150 ÷ $0.80/conversation ≈ 187, rounded down).
+- **Signups and paying customers — built on explicitly ASSUMED conversion rates, not measured data**
+  (Part 1 confirmed zero historical conversion data exists for this funnel — these are stated,
+  conservative placeholders, not evidence-based forecasts):
+  - Conversation → signup (lite account created): **assumed 15%** → ~28 signups.
+  - Signup → paying (first plan purchase or top-up): **assumed 30%** → ~8 paying customers.
+- **Target cost per conversation: ≤$0.80** (the planning assumption itself — beating it is upside).
+- **Target cost per paying customer: ~$18.75** ($150 ÷ ~8), built on the two assumed rates above —
+  treat this figure as fragile until real conversion data replaces the assumptions.
+- **Measurability gap, stated plainly**: signups and paying customers **cannot be automatically
+  attributed to ads** until AGENT's `ctwa_clid` capture (awaiting the owner's go) and LINE's bff-v2
+  CAPI sender are both live. Until then, this lane will **count them manually** by cross-referencing
+  Tiledesk conversation timestamps/sources against bff-v2 signup and payment records — not from any
+  Ads Manager column, which will show nothing for this funnel stage until the pipeline exists. The
+  15%/30% assumptions above should be replaced with real observed rates as soon as that manual count
+  produces a real sample (even a small one, clearly labeled as a small sample).
 
 ### Structure
 
@@ -181,17 +193,12 @@ Port's `marketing_claim` gate before running:
   cannot create custom conversions, confirmed gap, a human must do this in Ads Manager** once real
   events start flowing — and the system-user token path (documented, not generated, per this
   session's standing rule never to handle secret values directly).
-- **Decision rules** (concrete, not vague):
-  - **Kill**: an ad with **>$10 spent and zero conversations** — at this account's historical worst
-    real rate ($0.82/conversation), $10 should have produced at least one; zero at that spend is a
-    real signal, not noise.
-  - **Iterate (new creative, same ad set)**: cost per conversation **>2x the account's historical
-    best ($0.14)** — i.e., above ~$0.28 — after at least $15 spent (enough to clear early noise at
-    this budget).
-  - **Scale**: cost per conversation **at or below the account's historical median** (~$0.39, from
-    the table above) sustained over at least 7 days and $15+ spent — move budget from a
-    weaker-performing ad set toward it, within the same $150/month total, rather than adding new
-    spend.
+- **Decision rules — revised 2026-09-28**: the original bands overlapped (iterate ">$0.28" and scale "at or below $0.39" both matched a $0.30 ad). Restated below as non-overlapping, each justified from the real $0.14-$0.82 historical range.
+  - **Kill** (either condition, whichever hits first): an ad with **>$10 spent and zero conversions** — at this account's historical worst real large-sample rate ($0.81/conversation), $10 should have produced at least one; zero at that spend is a real signal, not noise. **OR** cost per conversation **above $0.55** after 5+ conversations and $15+ spent — set meaningfully below the worst-ever real rate ($0.81-$0.82), so an ad is cut before it reaches historically-worst territory, not after matching it.
+  - **Iterate** (new creative, same ad set): cost per conversation **above $0.25 and at or below $0.55**, after 5+ conversations and $15+ spent — the band between "close to the account's better historical tier" and "kill." Covers where the account's middling performers actually landed ($0.39, $0.51).
+  - **Scale** (+20% budget, owner-approved, moved from a weaker ad set, not new spend): cost per conversation **at or below $0.25**, sustained over 7+ days with 5+ conversations and $15+ spent — set just above the account's best-tier cluster ($0.14-$0.16), giving room for normal variance without requiring the literal best-ever rate to qualify.
+  - **Minimum sample, all three rules**: 5+ conversations before any cost-per-conversation rule applies (below that, one lucky or unlucky message swings the rate too much to act on) — the zero-conversion kill rule is the only one that fires before 5 conversations, since zero is unambiguous at any sample size.
+  - **Bands, for reference**: Scale <=$0.25 < Iterate ($0.25-$0.55] < Kill >$0.55 (plus the standalone zero-conversion floor) — no value can satisfy two rules at once.
 
 ### Weekly review cadence
 
