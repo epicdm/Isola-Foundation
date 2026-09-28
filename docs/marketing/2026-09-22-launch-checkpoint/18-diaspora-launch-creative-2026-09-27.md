@@ -26,9 +26,14 @@ below is left for history/context only — it is no longer the CTA anywhere in t
 shell (4,068 bytes) — same pattern as the isola-lumen-prod page found broken two weeks ago; full
 anonymous-content verification was not completed before this destination was replaced.
 
-**Two different numbers, do not mix up, per Lane A's explicit instruction:** **+1 767 818 3742** is the
-first-contact number for **new** customers (this campaign's CTA). **+1 767 818 0001** is support for
-**existing** customers only — it does not appear anywhere in this new-customer creative below.
+**Two different numbers, roles refined 2026-09-28** (`dec-owner-whatsapp-number-roles-3742-conversation-0001-transactional-2026-09-28`,
+Ratified — checked directly, this supersedes the narrower "0001 = existing-customer support" framing this
+file used earlier): **+1 767 818 3742** carries ALL conversations — new-customer front door (this campaign's
+CTA), sales, support, **and opted-in announcements** — new or existing customer, doesn't matter. **+1 767
+818 0001** carries only automatic **transactional** messages (OTP, invoice/payment reminders, balance/plan
+alerts); it is not a general support channel even for existing customers, though replies to it still route
+to a human during the transition. **0001 does not appear anywhere in this new-customer creative, and any
+future announcement/broadcast content must use 3742 with opted-in contacts only, not 0001.**
 
 ## Live offer, as given (used exactly, not the diaspora brief's superseded 1,500-shared proposal)
 
@@ -87,8 +92,8 @@ Isola.")
 **Setup, given this build has no proven real signup yet:**
 1. Customer arrives via ad/QR and messages **+1 767 818 3742** (the prefilled text is already their
    opening line). **This is the only new-customer entry point in this campaign — not 0001, not
-   app.isola.epic.dm.** 0001 is existing-customer support only; if a new prospect somehow reaches 0001
-   instead, redirect them to 3742 rather than serving them there.
+   app.isola.epic.dm.** 0001 sends automatic transactional messages only (OTP, invoices, alerts) — it's not
+   a support channel to direct anyone to; if a prospect somehow reaches 0001, redirect them to 3742.
 2. Owner is personally staffing WhatsApp tonight via Chatwoot — **first several customers should be watched
    closely, not treated as routine.** If anything about signup, pricing display, or activation looks
    unexpected, escalate to the owner immediately rather than reassuring the customer with a guess — this
