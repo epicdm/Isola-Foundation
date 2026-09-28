@@ -54,7 +54,7 @@ No "unlimited," no "fair use" anywhere — this ladder replaces both.
 
 **Body:** Get your Dominica number before you travel home for Independence. Call ordinary Dominican
 mobiles and landlines — using your own Wi-Fi or mobile data, wherever you are. **Personal Line: EC$35
-(≈US$12.96) for 30 days, 1,000 minutes included.**
+(≈US$12.96) for 30 days, 1,000 minutes to Dominica & US/Canada.**
 
 **Disclosure (visible, not link-only):** Internet required; data charges may apply. Voice only — no SMS or
 emergency calling.
@@ -83,7 +83,7 @@ Isola.")
 
 > Your Dominican number. Before you land. After you leave. 🇩🇲
 > Get set up before you travel home for Independence — call regular Dominican mobiles and landlines on your
-> existing Wi-Fi or data. Personal Line: EC$35 (≈US$12.96)/30 days, 1,000 minutes included.
+> existing Wi-Fi or data. Personal Line: EC$35 (≈US$12.96)/30 days, 1,000 minutes to Dominica & US/Canada.
 > Internet required. Voice only — no SMS or emergency calls.
 > 👉 Message us on WhatsApp: wa.me/17678183742
 
