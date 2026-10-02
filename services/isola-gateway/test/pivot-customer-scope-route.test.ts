@@ -51,6 +51,7 @@ function body(senderPhone: string): Record<string, unknown> {
       id: CONVERSATION_DISPLAY_ID,
       status: "pending",
       meta: { assignee: null },
+      contact_inbox: { id: 9, contact_id: 55, inbox_id: 3, source_id: senderPhone },
       custom_attributes: { customer_id: OTHER_CUSTOMER, service_id: OTHER_SERVICE, phone: OTHER_PHONE },
     },
   });

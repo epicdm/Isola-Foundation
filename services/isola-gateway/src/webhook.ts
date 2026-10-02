@@ -44,8 +44,20 @@ export interface WebhookPayload {
    */
   private: boolean | null;
   senderType: string | null;
-  /** E.164-ish, as Chatwoot supplies it. Used ONLY by the INTERNAL allowlist. */
+  /**
+   * E.164-ish, as Chatwoot supplies it. Used ONLY by the INTERNAL allowlist.
+   * This is read off the Contact RECORD at delivery time, which an agent can edit:
+   * it is NEVER the customer-scope subject (see `channelSubject`).
+   */
   senderPhone: string | null;
+  /**
+   * The identifier the CHANNEL bound this conversation to: `conversation.contact_inbox
+   * .source_id` (WhatsApp: the wa_id). Chatwoot does not rewrite it when a contact's
+   * phone is edited, so it is the subject the customer scope is keyed on. `null` when
+   * the node is absent: the scope then fails closed. That the installed Chatwoot sends
+   * `contact_inbox` on `message_created` is UNVERIFIED (docs/payload shape only).
+   */
+  channelSubject: string | null;
   accountId: number | null;
   inboxId: number | null;
   /**
@@ -80,6 +92,19 @@ function readString(value: unknown): string | null {
 function child(record: Record<string, unknown>, key: string): Record<string, unknown> | null {
   const value = record[key];
   return isRecord(value) ? value : null;
+}
+
+/**
+ * The channel-bound subject: `conversation.contact_inbox.source_id`, only when it is a
+ * non-empty string. A message payload nests it under `conversation`; a conversation-
+ * shaped payload carries no message and is never scoped, so it reads `null`.
+ */
+function readChannelSubject(conversation: Record<string, unknown> | null): string | null {
+  if (conversation === null) return null;
+  const contactInbox = child(conversation, "contact_inbox");
+  if (contactInbox === null) return null;
+  const sourceId = readString(contactInbox["source_id"]);
+  return sourceId !== null && sourceId.trim().length > 0 ? sourceId : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +415,7 @@ export function parseWebhookPayload(raw: Buffer): WebhookPayload | null {
       sender === null
         ? null
         : (readString(sender["phone_number"]) ?? readString(sender["identifier"])),
+    channelSubject: readChannelSubject(conversation),
     accountId: account.value,
     inboxId: inbox.value,
     conversationDisplayId:

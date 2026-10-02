@@ -604,7 +604,7 @@ export async function processDelivery(
       chatwootAccountId: binding.chatwootAccountId,
       chatwootInboxId: binding.chatwootInboxId,
       chatwootConversationId: job.conversationId,
-      senderPhone: payload.senderPhone,
+      channelSubject: payload.channelSubject,
     });
     if (resolved.verdict.kind === "unresolved") {
       deps.logger.error({

@@ -44,6 +44,7 @@ function payload(overrides: Record<string, unknown> = {}): Record<string, unknow
     private: false,
     senderType: "user",
     senderPhone: null,
+    channelSubject: null,
     accountId: ACCOUNT_ID,
     inboxId: INBOX_ID,
     conversationDisplayId: CONVERSATION_DISPLAY_ID,

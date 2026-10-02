@@ -23,7 +23,7 @@ const QUERY: CustomerScopeQuery = {
   chatwootAccountId: 1,
   chatwootInboxId: 7,
   chatwootConversationId: 42,
-  senderPhone: "+1 (767) 555-0101",
+  channelSubject: "+1 (767) 555-0101",
 };
 
 const FIXTURE = {
@@ -102,7 +102,7 @@ describe("the fail-closed default resolver", () => {
   it("answers unresolved for everyone", async () => {
     const r = createFailClosedCustomerScopeResolver();
     expect(await r.resolve(QUERY)).toEqual({ kind: "unresolved" });
-    expect(await r.resolve({ ...QUERY, senderPhone: null })).toEqual({ kind: "unresolved" });
+    expect(await r.resolve({ ...QUERY, channelSubject: null })).toEqual({ kind: "unresolved" });
   });
 });
 
@@ -122,20 +122,20 @@ describe("the FIXTURE resolver — a known fixture account or nothing", () => {
   });
 
   it("an UNKNOWN number is unresolved, NOT anonymous: an API-channel identifier is caller-supplied", async () => {
-    expect(await resolver.resolve({ ...QUERY, senderPhone: "+17675550199" })).toEqual({
+    expect(await resolver.resolve({ ...QUERY, channelSubject: "+17675550199" })).toEqual({
       kind: "unresolved",
     });
   });
 
   it("a number that merely ENDS like the fixture's does not match (no suffix matching)", async () => {
-    expect(await resolver.resolve({ ...QUERY, senderPhone: "99917675550101" })).toEqual({
+    expect(await resolver.resolve({ ...QUERY, channelSubject: "99917675550101" })).toEqual({
       kind: "unresolved",
     });
   });
 
   it("no sender phone, and a too-short one, are unresolved", async () => {
-    expect(await resolver.resolve({ ...QUERY, senderPhone: null })).toEqual({ kind: "unresolved" });
-    expect(await resolver.resolve({ ...QUERY, senderPhone: "0101" })).toEqual({ kind: "unresolved" });
+    expect(await resolver.resolve({ ...QUERY, channelSubject: null })).toEqual({ kind: "unresolved" });
+    expect(await resolver.resolve({ ...QUERY, channelSubject: "0101" })).toEqual({ kind: "unresolved" });
   });
 
   it("refuses two fixtures that share a number, and an unusable number (the ambiguity the production rule refuses)", () => {
@@ -171,7 +171,7 @@ describe("customerScopeFromEnv — a typo never reads as 'off'", () => {
     if (out.ok) {
       expect(out.mode).toBe("fixture");
       expect((await out.resolver!.resolve(QUERY)).kind).toBe("verified");
-      expect((await out.resolver!.resolve({ ...QUERY, senderPhone: "+17675550199" })).kind).toBe(
+      expect((await out.resolver!.resolve({ ...QUERY, channelSubject: "+17675550199" })).kind).toBe(
         "unresolved",
       );
     }

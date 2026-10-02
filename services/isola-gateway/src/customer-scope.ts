@@ -11,11 +11,16 @@
  *   defect-chatwoot-webhook-account-only-tenant-resolution.
  *
  * THE CONTRACT
- *   The scope is resolved SERVER-SIDE from the one identity the signed webhook
- *   authenticates — the sender's phone from Chatwoot's own `sender` node — and
- *   from nothing else. The conversation's `custom_attributes`, the message text
- *   and anything the model says are CLAIMS: they never enter the query and never
- *   widen the verdict.
+ *   The scope is resolved SERVER-SIDE from the one identifier the CHANNEL bound the
+ *   conversation to — `conversation.contact_inbox.source_id` (WhatsApp: the wa_id) —
+ *   and from nothing else. The signed webhook proves Chatwoot sent the event; it does
+ *   not make `sender.phone_number` trustworthy, because that is read off the Contact
+ *   record at delivery time and an agent can edit a contact. The conversation's
+ *   `custom_attributes`, the message text, the contact's phone and anything the model
+ *   says are CLAIMS: they never enter the query and never widen the verdict. An absent
+ *   `contact_inbox.source_id` is "no channel-bound subject": unresolved, fail closed.
+ *   (That the installed Chatwoot sends `contact_inbox` is UNVERIFIED; see
+ *   test/pivot-contact-edit-scope.test.ts.)
  *
  *     verified    a customer this gateway can name; carries the ids the runtime
  *                 may scope its business tools to.
@@ -64,8 +69,12 @@ export interface CustomerScopeQuery {
   chatwootAccountId: number;
   chatwootInboxId: number;
   chatwootConversationId: number;
-  /** The sender's phone from Chatwoot's `sender` node, as signed. Null = unidentified. */
-  senderPhone: string | null;
+  /**
+   * The identifier the CHANNEL bound the conversation to (`conversation.contact_inbox
+   * .source_id`; WhatsApp: the wa_id). NOT `sender.phone_number`: that is read off the
+   * Contact record, which an agent can edit. Null = no channel-bound subject => fail closed.
+   */
+  channelSubject: string | null;
 }
 
 export interface VerifiedCustomerScope {
@@ -204,7 +213,7 @@ export function createFixtureCustomerScopeResolver(
   }
   return {
     resolve: async (query) => {
-      const key = normalisePhone(query.senderPhone);
+      const key = normalisePhone(query.channelSubject);
       if (key === null) return { kind: "unresolved" };
       const fixture = byPhone.get(key);
       if (fixture === undefined) return { kind: "unresolved" };

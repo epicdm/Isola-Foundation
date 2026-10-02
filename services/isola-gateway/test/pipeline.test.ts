@@ -261,6 +261,7 @@ describe("pure helpers", () => {
       messageType: "incoming",
       private: false,
       senderPhone: null,
+      channelSubject: null,
     senderType: "contact",
       accountId: 1,
       inboxId: 7,

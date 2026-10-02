@@ -78,7 +78,7 @@ interface ScopeQuery {
   chatwootAccountId: number;
   chatwootInboxId: number;
   chatwootConversationId: number;
-  senderPhone: string | null;
+  channelSubject: string | null;
 }
 
 class RecordingResolver {
@@ -92,7 +92,7 @@ class RecordingResolver {
 
 // ---- fixtures: two DISTINCT identities (Law 20) -----------------------------
 
-/** The customer the signed event authenticates: Chatwoot's own `sender` node. */
+/** The customer the CHANNEL bound the conversation to: `conversation.contact_inbox.source_id`. */
 const VERIFIED_PHONE = "+17675550101";
 const VERIFIED_CUSTOMER = "cust-alice";
 const VERIFIED_SERVICES = ["svc-alice-line-1"];
@@ -110,6 +110,7 @@ function poisonedBody(): Record<string, unknown> {
       id: CONVERSATION_DISPLAY_ID,
       status: "pending",
       meta: { assignee: null },
+      contact_inbox: { source_id: VERIFIED_PHONE },
       custom_attributes: {
         customer_id: CLAIMED_CUSTOMER,
         service_id: CLAIMED_SERVICE,
@@ -183,8 +184,8 @@ describe("CONTROLS — the poisoned fixture is real and the two identities are d
   it("CONTROL 2 (Law 20, multi-gate): the authenticated sender and the claimed customer are different values from different payload nodes", () => {
     const parsed = parseWebhookPayload(Buffer.from(JSON.stringify(poisonedBody())))!;
 
-    // authenticated: the `sender` node
-    expect(parsed.senderPhone).toBe(VERIFIED_PHONE);
+    // channel-bound: conversation.contact_inbox.source_id
+    expect(parsed.channelSubject).toBe(VERIFIED_PHONE);
     // claimed: the conversation's custom_attributes and the free text — a
     // different node, and a different value
     expect(parsed.customAttributes["customer_id"]).toBe(CLAIMED_CUSTOMER);
@@ -192,7 +193,7 @@ describe("CONTROLS — the poisoned fixture is real and the two identities are d
 
     expect(VERIFIED_PHONE).not.toBe(CLAIMED_PHONE);
     expect(VERIFIED_CUSTOMER).not.toBe(CLAIMED_CUSTOMER);
-    expect(parsed.senderPhone).not.toBe(parsed.customAttributes["phone"]);
+    expect(parsed.channelSubject).not.toBe(parsed.customAttributes["phone"]);
   });
 
   it("CONTROL 1: the claimed identity DOES reach the runtime today, as ordinary untrusted event data", async () => {
@@ -231,7 +232,7 @@ describe("the scope comes from the AUTHENTICATED sender, never from the event's 
     await processDelivery(deps, makeJob(poisonedBody()));
 
     expect(resolver.queries, "the gateway never consulted a customer-scope resolver").toHaveLength(1);
-    expect(resolver.queries[0]!.senderPhone).toBe(VERIFIED_PHONE);
+    expect(resolver.queries[0]!.channelSubject).toBe(VERIFIED_PHONE);
     expect(scopeSeenByRuntime(runtime)).toEqual(verifiedAlice());
   });
 
@@ -264,7 +265,7 @@ describe("the scope comes from the AUTHENTICATED sender, never from the event's 
       ],
     ]);
     const resolverFor = () =>
-      new RecordingResolver(async (q) => byPhone.get(q.senderPhone ?? "") ?? { kind: "unresolved" });
+      new RecordingResolver(async (q) => byPhone.get(q.channelSubject ?? "") ?? { kind: "unresolved" });
 
     // Alice, claiming to be Bob.
     const a = makeDeps(resolverFor());
@@ -278,6 +279,7 @@ describe("the scope comes from the AUTHENTICATED sender, never from the event's 
         id: CONVERSATION_DISPLAY_ID,
         status: "pending",
         meta: { assignee: null },
+        contact_inbox: { source_id: CLAIMED_PHONE },
         custom_attributes: { customer_id: VERIFIED_CUSTOMER },
       },
     });
