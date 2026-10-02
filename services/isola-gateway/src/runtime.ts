@@ -70,6 +70,19 @@ export interface AgentRuntimeRequest {
   agentId: string;
   runId: string;
   context: Record<string, unknown>;
+  /**
+   * The ledger key of this delivery `(tenant, binding, account, inbox, event id,
+   * action)`, as the Paperclip path's stable idempotencyKey. The isola-runtime
+   * client ignores it.
+   */
+  idempotencyKey?: string;
+  /**
+   * Whether the gateway STILL owns this conversation (the same predicate as the
+   * post-run recheck). A long-running runtime may poll it and stop early on a
+   * takeover; it rejects when ownership cannot be read, which means "unknown".
+   * The isola-runtime client ignores it.
+   */
+  isStillOwned?: () => Promise<boolean>;
 }
 
 /**

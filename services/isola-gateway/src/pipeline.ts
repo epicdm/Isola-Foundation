@@ -42,6 +42,7 @@ import { DELIVERY_ACTION, deliveryRef, type LedgerIdentity } from "./deliveryref
 import type { Failpoint } from "./failpoint.js";
 import type { Ledger, SqlClient } from "./ledger.js";
 import type { Logger } from "./log.js";
+import { paperclipIdempotencyKey } from "./paperclip-runtime.js";
 import { isAgentEscalationReason, type AgentRuntime } from "./runtime.js";
 import {
   isReasonCode,
@@ -686,6 +687,17 @@ export async function processDelivery(
     historyTruncated: history?.truncated ?? false,
   });
 
+  // The ONE predicate for "the AI still has authority over this conversation",
+  // used by the post-run recheck below AND handed to a long-running runtime so it
+  // can stop early on a takeover. Same state, same episode, same rule.
+  const ownershipStillMine = (read: Awaited<ReturnType<typeof deps.ownership.read>>): boolean =>
+    !read.diverged &&
+    read.episode === ownership.episode &&
+    (finishingOwnWork
+      ? read.state === ownership.state &&
+        read.escalationOperationId === ownership.escalationOperationId
+      : !suppressesAutomatedReply(read.state));
+
   const result = await deps.runtime.invoke({
     templateId: binding.templateId,
     // THE BINDING'S exposure, not a constant. A hardcoded "PUBLIC" here made
@@ -695,6 +707,8 @@ export async function processDelivery(
     agentId: binding.paperclipAgentId,
     runId,
     context: buildRuntimeContext(binding, payload, history, customerScope),
+    idempotencyKey: paperclipIdempotencyKey(job.identity, job.mode),
+    isStillOwned: async () => ownershipStillMine(await deps.ownership.read(conversationRefOf(job))),
   });
 
   // ---- THE IN-FLIGHT OWNERSHIP RECHECK ------------------------------------
@@ -726,13 +740,7 @@ export async function processDelivery(
   // milliseconds between this read and the post cannot be caught here; it is
   // narrowed from "the whole model run" to "one network round trip".
   const recheck = await deps.ownership.read(conversationRefOf(job));
-  const stillMine =
-    !recheck.diverged &&
-    recheck.episode === ownership.episode &&
-    (finishingOwnWork
-      ? recheck.state === ownership.state &&
-        recheck.escalationOperationId === ownership.escalationOperationId
-      : !suppressesAutomatedReply(recheck.state));
+  const stillMine = ownershipStillMine(recheck);
 
   if (!stillMine) {
     deps.logger.warn({

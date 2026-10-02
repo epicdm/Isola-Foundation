@@ -133,6 +133,13 @@ export interface GatewayConfig {
   /** Parsed bindings, or the validation errors that must stop the boot. */
   bindings: BindingParseResult;
 
+  /**
+   * THE PAPERCLIP-GOVERNED EXECUTION PATH. DEFAULT OFF: with no agent id listed,
+   * every message keeps the isola-runtime path and the host is not allowed out.
+   * Enabled PER EMPLOYEE (a binding's paperclipAgentId), never globally.
+   */
+  paperclip: PaperclipConfig;
+
   // -- Personal-line voice read (read-only projection) ----------------------
   /**
    * KILL SWITCH. Defaults to FALSE, so the endpoint deploys inert and is
@@ -151,6 +158,25 @@ export interface GatewayConfig {
   /** Parsed (tenant, member) → Magnus seat mapping. */
   voiceSeats: SeatParseResult;
 }
+
+export interface PaperclipConfig {
+  /** paperclipAgentIds whose turns run through Paperclip. Empty = the path is OFF. */
+  agentIds: string[];
+  baseUrl: string | null;
+  companyId: string | null;
+  /** The credential presented to Paperclip. Its KIND is not assumed here: this is only the bearer transport. */
+  bearer: string | null;
+  /** Hard ceiling on the poll. Must fit inside the runtime timeout AND the ledger lease. */
+  pollDeadlineMs: number;
+  pollIntervalMs: number;
+  requestTimeoutMs: number;
+}
+
+/** The poll ceiling, agreed with Lane A (2026-10-02): <= 80 s. */
+export const MAX_PAPERCLIP_POLL_DEADLINE_MS = 80_000;
+export const DEFAULT_PAPERCLIP_POLL_DEADLINE_MS = 75_000;
+export const DEFAULT_PAPERCLIP_POLL_INTERVAL_MS = 1_500;
+export const DEFAULT_PAPERCLIP_REQUEST_TIMEOUT_MS = 10_000;
 
 export const DEFAULT_CHATWOOT_BASE_URL = "https://isola-chat.saas00.epic.dm";
 export const DEFAULT_RUNTIME_BASE_URL = "http://isola_isola-runtime:3000";
@@ -244,6 +270,20 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
   // two decisions cannot drift apart.
   const voiceReadEnabled = bool(env, "GATEWAY_VOICE_READ_ENABLED", false);
 
+  const paperclipBaseRaw = str(env, "GATEWAY_PAPERCLIP_BASE_URL");
+  const paperclip: PaperclipConfig = {
+    agentIds: (str(env, "GATEWAY_PAPERCLIP_AGENT_IDS") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0),
+    baseUrl: paperclipBaseRaw === null ? null : stripTrailingSlash(paperclipBaseRaw),
+    companyId: str(env, "GATEWAY_PAPERCLIP_COMPANY_ID"),
+    bearer: str(env, "GATEWAY_PAPERCLIP_BEARER"),
+    pollDeadlineMs: int(env, "GATEWAY_PAPERCLIP_POLL_DEADLINE_MS", DEFAULT_PAPERCLIP_POLL_DEADLINE_MS),
+    pollIntervalMs: int(env, "GATEWAY_PAPERCLIP_POLL_INTERVAL_MS", DEFAULT_PAPERCLIP_POLL_INTERVAL_MS),
+    requestTimeoutMs: int(env, "GATEWAY_PAPERCLIP_REQUEST_TIMEOUT_MS", DEFAULT_PAPERCLIP_REQUEST_TIMEOUT_MS),
+  };
+
   const explicitAllowlist = parseAllowlist(env["EGRESS_ALLOWLIST"]);
   const derivedAllowlist = [
     hostOf(chatwootBaseUrl),
@@ -255,6 +295,9 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
     // contradicts "inert if landed". A disabled feature must expand no
     // capability, egress included.
     voiceReadEnabled ? hostOf(magnusBaseUrl) : null,
+    // The same stance as Magnus: a disabled path expands no capability, egress
+    // included. The Paperclip host is allowed out ONLY once an employee is enabled.
+    paperclip.agentIds.length > 0 ? hostOf(paperclip.baseUrl) : null,
   ].filter((h): h is string => h !== null);
   const egressAllowlist =
     explicitAllowlist.length > 0
@@ -349,6 +392,8 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
       parseOverlayBindings(env["GATEWAY_BINDINGS_OVERLAY_JSON"], envSecretResolver(env)),
     ),
 
+    paperclip,
+
     // The SAME boolean the egress derivation above used. Do not re-read it.
     voiceReadEnabled,
     voiceReadToken: str(env, "GATEWAY_VOICE_READ_TOKEN"),
@@ -403,6 +448,39 @@ export function bootErrors(config: GatewayConfig): string[] {
     }
   }
 
+  errors.push(...paperclipBootErrors(config));
+
+  return errors;
+}
+
+/**
+ * The Paperclip path is OFF unless an employee is listed. Once it is on, a
+ * misconfiguration REFUSES to boot: a poll that can outlive the ledger lease would
+ * let the recovery sweeper take a delivery that is still running (two replies), and
+ * a missing credential would turn every turn into an escalation. Names only; never a value.
+ */
+function paperclipBootErrors(config: GatewayConfig): string[] {
+  const p = config.paperclip;
+  if (p.agentIds.length === 0) return [];
+  const errors: string[] = [];
+  if (p.baseUrl === null || hostOf(p.baseUrl) === null) {
+    errors.push("GATEWAY_PAPERCLIP_AGENT_IDS is set but GATEWAY_PAPERCLIP_BASE_URL is missing or not a URL.");
+  }
+  if (p.companyId === null) {
+    errors.push("GATEWAY_PAPERCLIP_AGENT_IDS is set but GATEWAY_PAPERCLIP_COMPANY_ID is missing.");
+  }
+  if (p.bearer === null) {
+    errors.push("GATEWAY_PAPERCLIP_AGENT_IDS is set but GATEWAY_PAPERCLIP_BEARER (the credential) is missing.");
+  }
+  if (p.pollDeadlineMs > MAX_PAPERCLIP_POLL_DEADLINE_MS) {
+    errors.push(`GATEWAY_PAPERCLIP_POLL_DEADLINE_MS exceeds the ${MAX_PAPERCLIP_POLL_DEADLINE_MS} ms ceiling.`);
+  }
+  if (p.pollDeadlineMs >= config.runtimeTimeoutMs) {
+    errors.push("GATEWAY_PAPERCLIP_POLL_DEADLINE_MS must be inside GATEWAY_RUNTIME_TIMEOUT_MS.");
+  }
+  if (p.pollDeadlineMs >= config.ledgerLeaseMs) {
+    errors.push("GATEWAY_PAPERCLIP_POLL_DEADLINE_MS must be inside GATEWAY_LEDGER_LEASE_MS, or the recovery sweeper can take a delivery that is still running.");
+  }
   return errors;
 }
 

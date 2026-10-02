@@ -1,0 +1,449 @@
+/**
+ * The Paperclip-governed execution path — a credential-agnostic CLIENT SEAM.
+ *
+ * PIVOT PACKET ISOLA-PIVOT-20261002-01, commit B. Tested ONLY against a local STUB
+ * Paperclip (test/paperclip-stub.ts); the stub is NOT evidence of installed
+ * behaviour (Law 5).
+ *
+ * WHAT THIS IS
+ *   An `AgentRuntime`, i.e. a drop-in for `HttpAgentRuntime` (isola-runtime
+ *   /v1/invoke). The pipeline, the ledger, the ownership gate, the in-flight
+ *   recheck and the escalation path are all REUSED unchanged: this class only
+ *   changes who executes the turn. When it handles a message the old runtime is
+ *   NOT also called (`RoutingAgentRuntime`): ONE execution owner.
+ *
+ *   Flow: create a Paperclip issue (assigneeAgentId = the employee, stable
+ *   idempotencyKey = the ledger key) -> Paperclip's own assignment wakeup runs the
+ *   employee -> the gateway POLLS the issue's comments, with a hard deadline, for
+ *   the employee's final disposition -> that becomes an `AgentRuntimeResult`.
+ *
+ * SOURCE / UNVERIFIED (every Paperclip endpoint and field this file touches)
+ *   SOURCE (Workspace lane OBSERVED in the installed Paperclip 0.3.1, relayed by
+ *   Lane A, 2026-10-02): POST /api/companies/:companyId/issues accepts
+ *   `idempotencyKey` (1-255), `externalRef`, `assigneeAgentId`; creating with an
+ *   assignee queues an `issue_assigned` wakeup; GET /issues/:id/comments takes
+ *   `after`/`afterCommentId`/`limit`/`order`; POST /heartbeat-runs/:runId/cancel.
+ *   UNVERIFIED: the `/api` prefix on the comments route; the create response shape
+ *   (`id`, `executionRunId`); the comment list shape and its `id`/`body`/
+ *   `authorAgentId` fields; that replay by the same idempotencyKey returns the
+ *   original issue (schema text only); that the run id is discoverable from the
+ *   created issue; that cancel reaches Hermes mid-run.
+ *
+ * WHAT THE EMPLOYEE RECEIVES, AND HOW (flagged for review, not hidden)
+ *   Paperclip stores the issue title and description. They carry: correlation ids
+ *   (account / inbox / conversation / message / delivery), the SERVER-RESOLVED
+ *   customer scope ids (customerId, serviceIds) and the CURRENT customer message
+ *   text, which the employee must have in order to answer. Nothing else from the
+ *   run context goes to Paperclip: no history, no custom attributes, no contact
+ *   phone, no Lite/Magnus/Odoo ids. Prior-turn history is NOT carried in this slice.
+ *
+ * THE RESULT CONVENTION IS A MODEL CONVENTION, NOT A CONTRACT
+ *   The employee's final comment is a JSON object
+ *   `{"isola":1,"disposition":"reply","text":"..."}` or
+ *   `{"isola":1,"disposition":"request_human","reason":"<code>","text":"..."}`.
+ *   Paperclip does not enforce it. Anything else — chatter, malformed JSON, an
+ *   unknown disposition, empty text, a comment by someone other than the assigned
+ *   employee — is not a result, and at the deadline the turn FAILS CLOSED: no
+ *   customer message, the existing escalation path (Law 12).
+ *
+ * LAW 10 (a retry that changes the request is a different request)
+ *   `X-Paperclip-Run-Id` is NEVER sent, dropped or invented here. A 401/403 —
+ *   including the literal "Task bridge key cannot use this API action" — is a
+ *   CONFIG DEFECT: one request, no retry, no customer message.
+ */
+import { createHash } from "node:crypto";
+
+import type { LedgerIdentity } from "./deliveryref.js";
+import type { SafeFetch } from "./egress.js";
+import {
+  isAgentEscalationReason,
+  type AgentRuntime,
+  type AgentRuntimeRequest,
+  type AgentRuntimeResult,
+} from "./runtime.js";
+
+/** Credential-agnostic: a task_bridge agent key, a routine-trigger signature or anything else plugs in here. */
+export interface PaperclipAuth {
+  headers(): Record<string, string>;
+}
+
+/**
+ * Where the created issue id is remembered so a replayed delivery REUSES it and
+ * makes no second create call. In production this belongs on the ledger row (a
+ * reviewed migration, UAT only: see the DDL in the commit-B report); the in-memory
+ * store below is the default and is LOST on restart, after which recovery rests on
+ * the server honouring `idempotencyKey` (UNVERIFIED).
+ */
+export interface IssueStore {
+  get(key: string): Promise<string | null>;
+  put(key: string, issueId: string): Promise<void>;
+  /** An earlier create for this key had an unknown outcome and no issue id is on record. */
+  isUncertain(key: string): Promise<boolean>;
+  markUncertain(key: string): Promise<void>;
+}
+
+export function inMemoryIssueStore(): IssueStore {
+  const ids = new Map<string, string>();
+  const uncertain = new Set<string>();
+  return {
+    get: async (key) => ids.get(key) ?? null,
+    put: async (key, id) => void ids.set(key, id),
+    isUncertain: async (key) => uncertain.has(key),
+    markUncertain: async (key) => void uncertain.add(key),
+  };
+}
+
+export const PAPERCLIP_OUTCOMES = {
+  /** 401/403/other 4xx, or a request this client refuses to send: configuration, not weather. */
+  configDefect: "paperclip_config_defect",
+  /** The create's outcome is unknown and no issue id is on record: NEVER re-created. */
+  createUncertain: "paperclip_create_uncertain",
+  /** The poll ended with no conforming result. */
+  noResult: "paperclip_no_result",
+  /** The conversation stopped being ours mid-run. */
+  ownershipLost: "paperclip_ownership_lost",
+  /** The poll deadline passed: the existing runtime vocabulary. */
+  timeout: "model_timeout",
+} as const;
+
+/** Paperclip's documented ceiling for `idempotencyKey` (SOURCE: Lane A relay: 1-255). */
+const MAX_IDEMPOTENCY_KEY = 255;
+const MAX_MESSAGE_CHARS = 4000;
+
+/**
+ * The stable idempotency key: the ledger key `(tenant, binding, account, inbox,
+ * event id, action)`. Replays, sweeper retries and worker retries all compute the
+ * same value. Over 255 characters it is replaced by a sha256 of itself, which is
+ * still deterministic and still unique per ledger key.
+ */
+export function paperclipIdempotencyKey(identity: LedgerIdentity, mode: string): string {
+  const raw = [
+    `isolagw:${identity.tenantId}`,
+    identity.bindingId,
+    String(identity.chatwootAccountId),
+    String(identity.chatwootInboxId),
+    identity.eventId,
+    mode,
+  ].join("|");
+  if (raw.length <= MAX_IDEMPOTENCY_KEY) return raw;
+  return `isolagw:sha256:${createHash("sha256").update(raw).digest("hex")}`;
+}
+
+export interface PaperclipRuntimeOptions {
+  baseUrl: string;
+  companyId: string;
+  auth: PaperclipAuth;
+  safeFetch: SafeFetch;
+  issueStore: IssueStore;
+  /** Hard ceiling on the whole poll. Validated at boot against the ledger lease and the runtime timeout. */
+  pollDeadlineMs: number;
+  pollIntervalMs: number;
+  /** Per-HTTP-request timeout. */
+  requestTimeoutMs: number;
+}
+
+type CreateResult =
+  | { kind: "created"; issueId: string; runId: string | null }
+  | { kind: "config_defect"; detail: string }
+  | { kind: "uncertain"; detail: string };
+
+type Envelope =
+  | { kind: "reply"; text: string }
+  | { kind: "request_human"; text: string; reason: string | null };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function str(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function failure(runId: string, outcome: string): AgentRuntimeResult {
+  return {
+    text: null,
+    action: null,
+    actionUnrecognised: false,
+    actionReason: null,
+    outcome,
+    correlationId: runId,
+    completionState: null,
+    contractVersion: null,
+  };
+}
+
+/** Parse ONE comment body into the result envelope, or null when it is not one. */
+export function parseEnvelope(body: string): Envelope | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.trim());
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || parsed["isola"] !== 1) return null;
+  const text = typeof parsed["text"] === "string" ? parsed["text"] : null;
+  if (parsed["disposition"] === "reply") {
+    return text !== null && text.trim().length > 0 ? { kind: "reply", text } : null;
+  }
+  if (parsed["disposition"] === "request_human") {
+    if (text === null || text.trim().length === 0) return null;
+    const reason = isAgentEscalationReason(parsed["reason"]) ? (parsed["reason"] as string) : null;
+    return { kind: "request_human", text, reason };
+  }
+  return null;
+}
+
+function describeContext(request: AgentRuntimeRequest): { title: string; description: string } {
+  const ctx = isRecord(request.context) ? request.context : {};
+  const chatwoot = isRecord(ctx["chatwoot"]) ? ctx["chatwoot"] : {};
+  const message = isRecord(ctx["message"]) ? ctx["message"] : {};
+  const scope = isRecord(ctx["customerScope"]) ? ctx["customerScope"] : null;
+
+  const ids = `account=${String(chatwoot["accountId"] ?? "?")} inbox=${String(chatwoot["inboxId"] ?? "?")} conversation=${String(chatwoot["conversationDisplayId"] ?? "?")} message=${String(chatwoot["messageId"] ?? "?")}`;
+  let scopeLines: string;
+  if (scope === null) scopeLines = "- not resolved (no customer-scope resolver configured)";
+  else if (scope["kind"] === "verified") {
+    const serviceIds = Array.isArray(scope["serviceIds"]) ? (scope["serviceIds"] as unknown[]).map(String).join(",") : "";
+    scopeLines = `- customerId=${String(scope["customerId"])}\n- serviceIds=${serviceIds}`;
+  } else scopeLines = `- ${String(scope["kind"])}`;
+
+  const text = typeof message["content"] === "string" ? message["content"].slice(0, MAX_MESSAGE_CHARS) : "";
+  return {
+    title: `Chatwoot ${ids.replace(/ /g, " ")} (${request.runId})`,
+    description: [
+      "Chatwoot correlation:",
+      `- ${ids}`,
+      `- delivery=${request.runId}`,
+      "",
+      "Verified customer scope (server-resolved; use ONLY these ids for business lookups):",
+      scopeLines,
+      "",
+      "Customer message (the only customer content sent here):",
+      text,
+      "",
+      'Finish by leaving ONE comment whose entire body is a JSON object: {"isola":1,"disposition":"reply","text":"<the reply>"} or {"isola":1,"disposition":"request_human","reason":"<code>","text":"<handover message>"}. Any other final comment is treated as no answer.',
+    ].join("\n"),
+  };
+}
+
+export class PaperclipAgentRuntime implements AgentRuntime {
+  private readonly runIds = new Map<string, string>();
+
+  constructor(private readonly options: PaperclipRuntimeOptions) {}
+
+  async invoke(request: AgentRuntimeRequest): Promise<AgentRuntimeResult> {
+    const key = request.idempotencyKey;
+    if (typeof key !== "string" || key.length === 0 || key.length > MAX_IDEMPOTENCY_KEY) {
+      // Refused before any network call: a Paperclip turn without the stable key
+      // could not be replayed safely.
+      return failure(request.runId, PAPERCLIP_OUTCOMES.configDefect);
+    }
+    const store = this.options.issueStore;
+
+    let issueId = await store.get(key);
+    if (issueId === null) {
+      // NEVER re-create an uncertain create. The issue may well exist.
+      if (await store.isUncertain(key)) return failure(request.runId, PAPERCLIP_OUTCOMES.createUncertain);
+      const created = await this.createIssue(request, key);
+      if (created.kind === "config_defect") return failure(request.runId, PAPERCLIP_OUTCOMES.configDefect);
+      if (created.kind === "uncertain") {
+        await store.markUncertain(key);
+        return failure(request.runId, PAPERCLIP_OUTCOMES.createUncertain);
+      }
+      issueId = created.issueId;
+      await store.put(key, issueId);
+      if (created.runId !== null) this.runIds.set(issueId, created.runId);
+    }
+
+    return this.pollForResult(request, issueId);
+  }
+
+  // ---- create ---------------------------------------------------------------
+
+  private async createIssue(request: AgentRuntimeRequest, key: string): Promise<CreateResult> {
+    const { title, description } = describeContext(request);
+    const url = `${this.base()}/api/companies/${encodeURIComponent(this.options.companyId)}/issues`;
+    let response: Response;
+    try {
+      response = await this.send(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json", ...this.options.auth.headers() },
+        body: JSON.stringify({ title, description, assigneeAgentId: request.agentId, idempotencyKey: key }),
+      });
+    } catch {
+      return { kind: "uncertain", detail: "create failed in transport" };
+    }
+    if (response.status === 401 || response.status === 403) {
+      return { kind: "config_defect", detail: `create refused (${response.status})` };
+    }
+    if (response.status >= 500) return { kind: "uncertain", detail: `create ${response.status}` };
+    if (response.status < 200 || response.status >= 300) {
+      return { kind: "config_defect", detail: `create rejected (${response.status})` };
+    }
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+    const issueId = isRecord(body) ? str(body["id"]) : null;
+    if (issueId === null) return { kind: "uncertain", detail: "create 2xx without an issue id" };
+    const runId = isRecord(body) ? (str(body["executionRunId"]) ?? str(body["runId"])) : null;
+    return { kind: "created", issueId, runId };
+  }
+
+  // ---- poll -----------------------------------------------------------------
+
+  private async pollForResult(request: AgentRuntimeRequest, issueId: string): Promise<AgentRuntimeResult> {
+    const deadline = Date.now() + this.options.pollDeadlineMs;
+    let after: string | null = null;
+    for (;;) {
+      if (request.isStillOwned !== undefined) {
+        let owned: boolean;
+        try {
+          owned = await request.isStillOwned();
+        } catch {
+          owned = false; // "I could not find out who holds this" is never "nobody does".
+        }
+        if (!owned) {
+          await this.cancelRun(issueId);
+          return failure(request.runId, PAPERCLIP_OUTCOMES.ownershipLost);
+        }
+      }
+
+      const polled = await this.fetchComments(issueId, after);
+      if (polled.kind === "config_defect") return failure(request.runId, PAPERCLIP_OUTCOMES.configDefect);
+      if (polled.kind === "ok") {
+        for (const comment of polled.comments) {
+          after = comment.id;
+          // Only the ASSIGNED employee's comment can be a result: a customer who
+          // types an envelope as their message must not be able to answer for it.
+          if (comment.authorAgentId !== request.agentId) continue;
+          const envelope = parseEnvelope(comment.body);
+          if (envelope === null) continue;
+          return {
+            text: envelope.text,
+            action: envelope.kind === "reply" ? "reply" : "request_human",
+            actionUnrecognised: false,
+            actionReason: envelope.kind === "request_human" ? envelope.reason : null,
+            outcome: "ok",
+            correlationId: `paperclip:${issueId}`,
+            completionState: "completed",
+            contractVersion: 2,
+          };
+        }
+      }
+      // A transient poll failure (network, 5xx, unreadable list) is not a result and
+      // not a reason to stop early: the deadline decides.
+
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return failure(request.runId, PAPERCLIP_OUTCOMES.timeout);
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, Math.min(this.options.pollIntervalMs, remaining));
+        if (typeof t.unref === "function") t.unref();
+      });
+    }
+  }
+
+  private async fetchComments(
+    issueId: string,
+    after: string | null,
+  ): Promise<
+    | { kind: "ok"; comments: Array<{ id: string; body: string; authorAgentId: string | null }> }
+    | { kind: "config_defect" }
+    | { kind: "transient" }
+  > {
+    const query = new URLSearchParams({ order: "asc", limit: "50" });
+    if (after !== null) query.set("after", after);
+    const url = `${this.base()}/api/issues/${encodeURIComponent(issueId)}/comments?${query.toString()}`;
+    let response: Response;
+    try {
+      response = await this.send(url, {
+        method: "GET",
+        headers: { accept: "application/json", ...this.options.auth.headers() },
+      });
+    } catch {
+      return { kind: "transient" };
+    }
+    if (response.status === 401 || response.status === 403) return { kind: "config_defect" };
+    if (response.status < 200 || response.status >= 300) return { kind: "transient" };
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      return { kind: "transient" };
+    }
+    const list = Array.isArray(body)
+      ? body
+      : isRecord(body)
+        ? ((body["comments"] ?? body["items"]) as unknown)
+        : null;
+    if (!Array.isArray(list)) return { kind: "transient" };
+    const comments: Array<{ id: string; body: string; authorAgentId: string | null }> = [];
+    for (const entry of list) {
+      if (!isRecord(entry)) continue;
+      const id = entry["id"] === undefined || entry["id"] === null ? null : String(entry["id"]);
+      const text = typeof entry["body"] === "string" ? entry["body"] : typeof entry["content"] === "string" ? entry["content"] : null;
+      if (id === null || text === null) continue;
+      comments.push({ id, body: text, authorAgentId: str(entry["authorAgentId"]) });
+    }
+    return { kind: "ok", comments };
+  }
+
+  // ---- cancel ---------------------------------------------------------------
+
+  /**
+   * Best effort, and ONLY with a run id the server told us. A failed cancel never
+   * changes the outcome: the takeover is already enforced by the ownership gate.
+   * Whether Paperclip's cancel reaches Hermes mid-run is UNVERIFIED.
+   */
+  private async cancelRun(issueId: string): Promise<void> {
+    const runId = this.runIds.get(issueId);
+    if (runId === undefined) return;
+    try {
+      await this.send(`${this.base()}/api/heartbeat-runs/${encodeURIComponent(runId)}/cancel`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json", ...this.options.auth.headers() },
+        body: "{}",
+      });
+    } catch {
+      /* best effort */
+    }
+  }
+
+  // ---- plumbing -------------------------------------------------------------
+
+  private base(): string {
+    return this.options.baseUrl.replace(/\/+$/, "");
+  }
+
+  private async send(url: string, init: RequestInit): Promise<Response> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.options.requestTimeoutMs);
+    if (typeof timer.unref === "function") timer.unref();
+    try {
+      return await this.options.safeFetch(url, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/**
+ * ONE execution owner: a message whose employee is enabled for Paperclip goes to
+ * Paperclip and ONLY to Paperclip; every other message keeps the existing runtime.
+ * With an empty set (the default) the behaviour is exactly what it was.
+ */
+export class RoutingAgentRuntime implements AgentRuntime {
+  constructor(
+    private readonly fallback: AgentRuntime,
+    private readonly paperclip: AgentRuntime,
+    private readonly paperclipAgentIds: ReadonlySet<string>,
+  ) {}
+
+  invoke(request: AgentRuntimeRequest): Promise<AgentRuntimeResult> {
+    return this.paperclipAgentIds.has(request.agentId)
+      ? this.paperclip.invoke(request)
+      : this.fallback.invoke(request);
+  }
+}

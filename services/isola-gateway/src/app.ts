@@ -51,6 +51,11 @@ import { checkSender } from "./allowlist.js";
 import { classifyTurn, recordTurn } from "./turns.js";
 import { createLogger, type Logger } from "./log.js";
 import { processDelivery, type DeliveryJob, type DeliveryMode } from "./pipeline.js";
+import {
+  inMemoryIssueStore,
+  PaperclipAgentRuntime,
+  RoutingAgentRuntime,
+} from "./paperclip-runtime.js";
 import { createAgentRuntime, type AgentRuntime } from "./runtime.js";
 import {
   createMagnusPersonalLineSource,
@@ -587,15 +592,45 @@ export function createGateway(deps: GatewayDeps): Gateway {
       timeoutMs: config.chatwootTimeoutMs,
     });
 
-  const runtime =
-    deps.runtime ??
-    createAgentRuntime({
-      baseUrl: config.runtimeBaseUrl,
-      invokePath: config.runtimeInvokePath,
-      bearer: config.runtimeSecret,
-      safeFetch,
-      timeoutMs: config.runtimeTimeoutMs,
-    });
+  const isolaRuntime = createAgentRuntime({
+    baseUrl: config.runtimeBaseUrl,
+    invokePath: config.runtimeInvokePath,
+    bearer: config.runtimeSecret,
+    safeFetch,
+    timeoutMs: config.runtimeTimeoutMs,
+  });
+
+  // THE PAPERCLIP PATH, per employee and DEFAULT OFF. With no agent id listed the
+  // runtime below is exactly the isola-runtime client it always was. When an
+  // employee is listed, its turns go to Paperclip and ONLY to Paperclip (one
+  // execution owner); every other employee is untouched. `bootErrors` has already
+  // refused to boot a half-configured path, so the non-null reads below are safe.
+  // The issue store is in-memory: a restart forgets issue ids, after which recovery
+  // rests on the server honouring idempotencyKey (UNVERIFIED) — the ledger column
+  // that removes that dependency needs a reviewed migration (see the commit report).
+  const paperclipCfg = config.paperclip;
+  const paperclipEnabled =
+    paperclipCfg.agentIds.length > 0 &&
+    paperclipCfg.baseUrl !== null &&
+    paperclipCfg.companyId !== null &&
+    paperclipCfg.bearer !== null;
+  const configuredRuntime: AgentRuntime = paperclipEnabled
+    ? new RoutingAgentRuntime(
+        isolaRuntime,
+        new PaperclipAgentRuntime({
+          baseUrl: paperclipCfg.baseUrl as string,
+          companyId: paperclipCfg.companyId as string,
+          auth: { headers: () => ({ authorization: `Bearer ${paperclipCfg.bearer as string}` }) },
+          safeFetch,
+          issueStore: inMemoryIssueStore(),
+          pollDeadlineMs: paperclipCfg.pollDeadlineMs,
+          pollIntervalMs: paperclipCfg.pollIntervalMs,
+          requestTimeoutMs: paperclipCfg.requestTimeoutMs,
+        }),
+        new Set(paperclipCfg.agentIds),
+      )
+    : isolaRuntime;
+  const runtime = deps.runtime ?? configuredRuntime;
 
   const ledger = deps.ledger;
 
