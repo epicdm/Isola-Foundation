@@ -208,14 +208,17 @@ async function boot(): Promise<void> {
   logger.info({ event: "boot", outcome: "recovery_sweep", resumed });
   sweeper.start();
 
-  // HANDBACK — the IDLE trigger. Without this a conversation a human took over
-  // stays HUMAN_OWNED forever and the AI never answers that customer again.
-  // The manual trigger ("Mark as pending" in Chatwoot) is handled on the
-  // webhook path (`handleManualHandbackWebhook`, wired in `app.ts` via
-  // `ownershipExec` above); this is the one that needs a clock. This
-  // sweeper's OWN `recordReadable` fallback below is a second, weaker manual
-  // detection path retained for redundancy — see its comment for why it
-  // cannot be relied on alone once a team has been assigned.
+  // HANDBACK — EXPLICIT-ONLY by default (pivot packet ISOLA-PIVOT-20261002-01).
+  // The ratified contract hands a conversation back only on an explicit,
+  // verified Chatwoot transition ("Mark as pending"), never on idleness. That
+  // gesture is handled on the webhook path (`handleManualHandbackWebhook`, wired
+  // in `app.ts` via `ownershipExec` above). This sweeper is STARTED, but with the
+  // idle clock OFF (`idleHandbackEnabled`, default false): its OWN
+  // `recordReadable` fallback is a second, weaker detection of the SAME explicit
+  // gesture, retained for redundancy — see its comment for why the webhook path
+  // cannot be relied on alone once a team has been assigned. Turning the idle
+  // trigger on is an explicit opt-in (GATEWAY_HANDBACK_IDLE_ENABLED=true) that
+  // contradicts the ratified contract.
   handbackSweeper = createHandbackSweeper({
     exec: ledger,
     chatwoot: gateway.chatwoot,
@@ -223,6 +226,10 @@ async function boot(): Promise<void> {
     // The idle clock. Without it the sweeper depends on `conversations#show`,
     // which 500s for a bot token exactly when a team has been assigned.
     turnStore: ledger,
+    // OFF unless GATEWAY_HANDBACK_IDLE_ENABLED=true. With it off this loop only
+    // detects the explicit gesture (status already `pending`); it decides
+    // nothing from a clock. See HandbackSweeperDeps.idleHandbackEnabled.
+    idleHandbackEnabled: config.handbackIdleEnabled,
     idleMs: config.handbackIdleMs,
     intervalMs: config.handbackSweepIntervalMs,
     batch: config.handbackSweepBatch,
@@ -248,6 +255,7 @@ async function boot(): Promise<void> {
   logger.info({
     event: "boot",
     outcome: "handback_sweeper_started",
+    idleHandbackEnabled: config.handbackIdleEnabled,
     idleMs: config.handbackIdleMs,
     intervalMs: config.handbackSweepIntervalMs,
   });

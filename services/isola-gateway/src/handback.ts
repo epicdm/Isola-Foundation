@@ -14,12 +14,18 @@
  * transition below is an existing exported function, called in its documented
  * order.
  *
+ * SUPERSEDED 2026-10-02 (pivot packet ISOLA-PIVOT-20261002-01): the ratified
+ * contract is EXPLICIT-ONLY handback. The idle trigger below is now OFF BY
+ * DEFAULT and exists only as an explicit opt-in (`idleHandbackEnabled` /
+ * GATEWAY_HANDBACK_IDLE_ENABLED). The historical description that follows is
+ * kept because the opt-in path still behaves exactly as described.
+ *
  * TWO TRIGGERS, ONE PATH:
  *   1. MANUAL — a human presses "Mark as pending" in Chatwoot. Already in the
  *      UI, already the exact inverse of the takeover gesture, and already what
  *      the gateway's own `status_not_pending` guard keys on. Nothing new for a
  *      human to learn.
- *   2. IDLE — no message in the conversation for `handbackIdleMs`.
+ *   2. IDLE (OPT-IN ONLY) — no message in the conversation for `handbackIdleMs`.
  *
  * IDLE MEANS IDLE, NOT ELAPSED. The clock runs from the LAST MESSAGE in the
  * conversation, not from the moment of takeover. A human who is actively
@@ -383,6 +389,23 @@ export function readLastActivityMs(record: unknown): number | null {
 
 /** Everything the sweeper needs to turn an ownership row into a Chatwoot call. */
 export interface HandbackSweeperDeps extends HandbackDeps {
+  /**
+   * OPT-IN idle handback. DEFAULT OFF (absent = false).
+   *
+   * The ratified contract is EXPLICIT-ONLY handback: a human who holds a
+   * conversation gives it back by an explicit, verified Chatwoot transition
+   * ("Mark as pending"), never by going quiet. Idleness is not consent — a human
+   * at lunch has not handed the customer back
+   * (def-idle-timeout-handback-contradicts-ratified-explicit-contract-2026-08-20).
+   * With this off the sweeper still detects the explicit gesture (status already
+   * `pending` while the store says a human holds it) and hands back on THAT; it
+   * simply never reads a clock to decide.
+   *
+   * Kept as an explicit opt-in (GATEWAY_HANDBACK_IDLE_ENABLED) only because a
+   * deployment may depend on the old behaviour; turning it on contradicts the
+   * ratified contract and should carry its own recorded decision.
+   */
+  idleHandbackEnabled?: boolean;
   idleMs: number;
   intervalMs: number;
   batch: number;
@@ -463,7 +486,17 @@ export function createHandbackSweeper(deps: HandbackSweeperDeps): HandbackSweepe
         // silent. An explicit gesture is not subject to the idle clock.
         const manual = recordReadable && readConversationStatus(record) === "pending";
 
-        // TRIGGER 2 — IDLE, on OUR clock. Measured from the last thing the
+        // IDLE HANDBACK IS OFF UNLESS EXPLICITLY OPTED IN. Not an explicit
+        // gesture and not opted in: leave the conversation with the human, and
+        // SAY SO — a skip nobody can see is indistinguishable from a dead loop.
+        // No clock is read: the turn store and the Chatwoot activity are not
+        // consulted to decide something this loop is no longer allowed to decide.
+        if (!manual && deps.idleHandbackEnabled !== true) {
+          skip("idle_handback_disabled", { recordReadable });
+          continue;
+        }
+
+        // TRIGGER 2 — IDLE, on OUR clock (opt-in only; see above). Measured from the last thing the
         // BUSINESS said, so a customer chasing for an answer no longer pushes
         // their own handback away. Falls back to Chatwoot's activity, then to
         // when the human took the conversation — a conversation escalated

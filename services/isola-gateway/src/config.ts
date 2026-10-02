@@ -85,6 +85,14 @@ export interface GatewayConfig {
    * not seeking an optimum — do not tune it in the same change that ships it.
    */
   handbackIdleMs: number;
+  /**
+   * Whether the IDLE trigger may hand a conversation back. DEFAULT FALSE: the
+   * ratified contract is explicit-only handback (a human presses "Mark as
+   * pending"); idleness is not consent. `handbackIdleMs` above only matters when
+   * this is true. Set GATEWAY_HANDBACK_IDLE_ENABLED=true only as a deliberate,
+   * recorded decision to depart from that contract.
+   */
+  handbackIdleEnabled: boolean;
   handbackSweepIntervalMs: number;
   handbackSweepBatch: number;
   /** Set false ONLY for a deliberate, temporary, in-memory-only fallback. */
@@ -303,6 +311,7 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
       "GATEWAY_HANDBACK_IDLE_MS",
       DEFAULT_HANDBACK_IDLE_MS,
     ),
+    handbackIdleEnabled: bool(env, "GATEWAY_HANDBACK_IDLE_ENABLED", false),
     handbackSweepIntervalMs: int(
       env,
       "GATEWAY_HANDBACK_SWEEP_INTERVAL_MS",

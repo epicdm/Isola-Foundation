@@ -6,6 +6,17 @@
  * The helpers were never the defect: the loop's four silent `continue`s were.
  * These tests drive `createHandbackSweeper` end to end against fakes.
  *
+ * CHANGED 2026-10-02 (pivot packet ISOLA-PIVOT-20261002-01, same commit as the
+ * fix). The ratified contract is EXPLICIT-ONLY handback, so the idle trigger is
+ * OFF by default and `test/pivot-explicit-handback-only.test.ts` pins that. The
+ * cases below tested idle handback as THE behaviour; they are not wrong tests,
+ * they are tests of a decision the contract has since overturned. They are kept
+ * as tests of the explicit OPT-IN path (`idleHandbackEnabled: true`, i.e.
+ * GATEWAY_HANDBACK_IDLE_ENABLED=true), because that path must still behave
+ * exactly as described for any deployment that deliberately turns it on. The
+ * default-off behaviour is asserted at the end of this file, against the same
+ * harness, so the opt-in flag is the ONLY difference.
+ *
  * Measured on 66.118.37.110, 2026-08-17 — conversation cw:2:2, HUMAN_REQUESTED
  * since 01:59:54, still stranded at 12:51 with the customer's message suppressed
  * as `status_not_pending`. `conversations#show` answered 500 for the AgentBot
@@ -47,6 +58,7 @@ function harness(opts: {
   lastActivityAt?: number | null;
   lastBusinessTurnAt?: number | null;
   withTurnStore?: boolean;
+  idleHandbackEnabled?: boolean;
 }): Harness {
   const logs: Array<Record<string, unknown>> = [];
   const claimed: Array<Record<string, unknown>> = [];
@@ -117,6 +129,8 @@ function harness(opts: {
     now: () => NOW,
     resolveTarget: () => ({ accountId: 2, conversationId: 2, accessToken: "t" }),
     ...(opts.withTurnStore === false ? {} : { turnStore }),
+    // OPT-IN idle handback (default is OFF; see the header of this file).
+    idleHandbackEnabled: opts.idleHandbackEnabled ?? true,
   } as unknown as HandbackSweeperDeps;
 
   return { deps, logs, claimed };
@@ -126,7 +140,7 @@ function skips(logs: Array<Record<string, unknown>>): Array<Record<string, unkno
   return logs.filter((l) => l["outcome"] === "sweep_skipped");
 }
 
-describe("A BROKEN conversations#show MUST NOT STRAND THE CUSTOMER", () => {
+describe("[OPT-IN idle handback] A BROKEN conversations#show MUST NOT STRAND THE CUSTOMER", () => {
   /**
    * THE REGRESSION. Before the fix this threw, hit `continue`, and the
    * conversation stayed HUMAN_REQUESTED for ever — silently.
@@ -155,7 +169,7 @@ describe("A BROKEN conversations#show MUST NOT STRAND THE CUSTOMER", () => {
   });
 });
 
-describe("THE CLOCK MEASURES THE SIDE THAT OWES A REPLY", () => {
+describe("[OPT-IN idle handback] THE CLOCK MEASURES THE SIDE THAT OWES A REPLY", () => {
   /**
    * `last_activity_at` moves on ANY message, so a customer sending "are you
    * still there?" reset their own handback clock — the more they chased, the
@@ -225,5 +239,32 @@ describe("the manual trigger still works", () => {
     await sweeper.sweep();
 
     expect(h.claimed, "handback must have been attempted").toHaveLength(1);
+  });
+});
+
+describe("DEFAULT: idle handback is OFF — the same harness, the flag is the only difference", () => {
+  it("CONTROL: with idle handback opted in, the long-idle conversation IS handed back", async () => {
+    const h = harness({ lastBusinessTurnAt: NOW - 3 * 60 * 60 * 1000, idleHandbackEnabled: true });
+    await createHandbackSweeper(h.deps).sweep();
+
+    expect(h.claimed, "the opt-in path must still hand back").toHaveLength(1);
+  });
+
+  it("with the flag OFF the very same conversation is NOT handed back, and the skip says why", async () => {
+    const h = harness({ lastBusinessTurnAt: NOW - 3 * 60 * 60 * 1000, idleHandbackEnabled: false });
+    await createHandbackSweeper(h.deps).sweep();
+
+    expect(h.claimed).toHaveLength(0);
+    const s = skips(h.logs);
+    expect(s).toHaveLength(1);
+    expect(s[0]!["reason"]).toBe("idle_handback_disabled");
+  });
+
+  it("with the flag ABSENT (the shape of every deployment that never set it) it is off", async () => {
+    const h = harness({ lastBusinessTurnAt: NOW - 3 * 60 * 60 * 1000 });
+    delete (h.deps as unknown as Record<string, unknown>)["idleHandbackEnabled"];
+    await createHandbackSweeper(h.deps).sweep();
+
+    expect(h.claimed).toHaveLength(0);
   });
 });
