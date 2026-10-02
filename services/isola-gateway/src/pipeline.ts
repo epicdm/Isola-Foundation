@@ -17,6 +17,11 @@
  *     could not be recorded, the customer is told nothing at all.
  */
 import type { Binding } from "./bindings.js";
+import {
+  resolveCustomerScope,
+  type CustomerScopeResolver,
+  type CustomerScopeVerdict,
+} from "./customer-scope.js";
 import { readTurnHistory } from "./turns.js";
 import { detectHumanPromise } from "./promise.js";
 import type { ChatwootApi, ChatwootTarget, ConversationHistory } from "./chatwoot.js";
@@ -76,7 +81,13 @@ export type DeliveryOutcome =
    * so nothing was sent and no business write fired. Distinct from `human_owned`,
    * where the model was never called: here it was, and its output was discarded.
    */
-  | "suppressed_in_flight";
+  | "suppressed_in_flight"
+  /**
+   * The sender could not be resolved to a verified customer (or to a prospect),
+   * so the model was never called and nothing AI-composed was sent. A human was
+   * shown the conversation. See `src/customer-scope.ts`.
+   */
+  | "customer_scope_unresolved";
 
 /**
  * `answer` invokes the model. `handoff` never does — not once, not to describe
@@ -134,6 +145,8 @@ export const FAILURE_EXPLANATIONS: Readonly<Record<string, string>> = Object.fre
   unauthorized: "the AI runtime rejected this gateway's credential",
   runtime_unreachable: "the AI runtime could not be reached",
   runtime_error: "the AI runtime returned an unexpected error",
+  customer_scope_unresolved:
+    "the sender could not be matched to exactly one verified customer account; the model was not called and no customer data was looked up",
   reply_failed: "the answer could not be delivered to the customer",
   reply_unresolved:
     "the answer may or may not have reached the customer and could not be reconciled; nothing was re-sent",
@@ -171,9 +184,14 @@ export function buildRuntimeContext(
   binding: Binding,
   payload: WebhookPayload,
   history?: ConversationHistory,
+  customerScope?: CustomerScopeVerdict,
 ): Record<string, unknown> {
   return {
     source: "chatwoot",
+    // The server-resolved customer scope, or ABSENT when no resolver is
+    // configured (today's behaviour). Never copied from `customAttributes` or the
+    // message — those stay below as untrusted event data.
+    ...(customerScope === undefined ? {} : { customerScope }),
     tenantId: binding.tenantId,
     companyId: binding.paperclipCompanyId,
     chatwoot: {
@@ -246,6 +264,12 @@ export interface PipelineDeps {
    * supplies an in-memory double.
    */
   ownership: OwnershipGate;
+  /**
+   * Server-side customer-scope resolution (see `src/customer-scope.ts`). Absent
+   * means the gateway behaves exactly as it did before the seam existed. Applied
+   * to PUBLIC bindings only: an INTERNAL line is staff, gated by its allowlist.
+   */
+  customerScope?: CustomerScopeResolver;
   /** Test-only; `DISARMED` in every production deployment. */
   failpoint: Failpoint;
   now: () => number;
@@ -561,6 +585,63 @@ export async function processDelivery(
     return handoff;
   }
 
+  // ---- THE CUSTOMER SCOPE ---------------------------------------------------
+  //
+  // WHICH customer is this? Resolved here, server-side, from the signed sender
+  // identity only — never from `customAttributes`, the message text or the
+  // model. Consulted AFTER the ownership gate (a human-held conversation needs no
+  // lookup) and BEFORE the model, so an unresolved sender costs no model call.
+  //
+  // FAIL CLOSED. `unresolved` — and a resolver that rejects, which
+  // `resolveCustomerScope` reports as unresolved — never becomes `anonymous`:
+  // the model is not called, nothing AI-composed is sent, and a human is shown
+  // the conversation through the ordinary escalation path. An `anonymous`
+  // prospect IS answered; failing closed must not mean refusing everyone.
+  let customerScope: CustomerScopeVerdict | undefined;
+  if (deps.customerScope !== undefined && binding.exposure === "PUBLIC") {
+    const resolved = await resolveCustomerScope(deps.customerScope, {
+      tenantId: binding.tenantId,
+      chatwootAccountId: binding.chatwootAccountId,
+      chatwootInboxId: binding.chatwootInboxId,
+      chatwootConversationId: job.conversationId,
+      senderPhone: payload.senderPhone,
+    });
+    if (resolved.verdict.kind === "unresolved") {
+      deps.logger.error({
+        ...base,
+        event: "customer_scope",
+        alert: true,
+        alertCode: "customer_scope_unresolved",
+        outcome: "customer_scope_unresolved",
+        unresolvedReason: resolved.reason,
+        customerMessageSent: false,
+        durationMs: deps.now() - job.startedAtMs,
+        detail:
+          "the sender could not be resolved to a verified customer; the model was not called and nothing was sent to the customer",
+      });
+      const visible = await escalate(
+        deps,
+        job,
+        target,
+        writeDeps,
+        writes,
+        "customer_scope_unresolved",
+      );
+      // Not closed when the escalation never became visible: the AI is suppressed
+      // and no human has been shown the conversation, so the sweeper must retry.
+      if (visible) await finish("customer_scope_unresolved");
+      return {
+        outcome: "customer_scope_unresolved",
+        runtimeOutcome: RUNTIME_NOT_INVOKED,
+        customerMessageSent: false,
+        escalated: true,
+        handoffBlocked: false,
+        needsRetry: !visible,
+      };
+    }
+    customerScope = resolved.verdict;
+  }
+
   // Chatwoot retries the same delivery id, so reusing it as the run id makes
   // the runtime call idempotent across those retries too.
   const runId = job.deliveryId ?? correlationId;
@@ -613,7 +694,7 @@ export async function processDelivery(
     exposure: binding.exposure,
     agentId: binding.paperclipAgentId,
     runId,
-    context: buildRuntimeContext(binding, payload, history),
+    context: buildRuntimeContext(binding, payload, history, customerScope),
   });
 
   // ---- THE IN-FLIGHT OWNERSHIP RECHECK ------------------------------------

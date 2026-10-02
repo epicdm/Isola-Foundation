@@ -10,6 +10,7 @@ import { createServer } from "node:http";
 
 import { createGateway } from "./app.js";
 import { bootErrors, bootWarnings, configuredBindings, loadConfig } from "./config.js";
+import { customerScopeFromEnv } from "./customer-scope.js";
 import { createLedger } from "./ledger.js";
 import { createPostgresOwnershipGate, migrateOwnershipStore } from "./ownership-store.js";
 import { createLogger } from "./log.js";
@@ -82,6 +83,20 @@ if (config.ledgerUrl === null && config.ledgerRequired) {
   process.exit(1);
 }
 
+// CUSTOMER SCOPE is a boot gate for the same reason: a typo in the mode must not
+// read as "off" and quietly remove a control that was asked for.
+const customerScopeConfig = customerScopeFromEnv(process.env);
+if (!customerScopeConfig.ok) {
+  logger.error({ event: "boot", outcome: "invalid_config", detail: customerScopeConfig.error });
+  logger.error({
+    event: "boot",
+    outcome: "boot_refused",
+    detail: "customer scope configuration failed validation; refusing to start",
+  });
+  process.exit(1);
+}
+const customerScope = customerScopeConfig.resolver;
+
 const bindings = configuredBindings(config);
 
 logger.info({
@@ -113,6 +128,8 @@ logger.info({
   chatwootTimeoutMs: config.chatwootTimeoutMs,
   applyLabels: config.applyLabels,
   applyCustomAttributes: config.applyCustomAttributes,
+  // The MODE only ("off" | "fail_closed" | "fixture"); never a fixture value.
+  customerScopeMode: customerScopeConfig.mode,
   toolPolicy: "no shell, no child processes, no filesystem, no mcp, no custom tools",
 });
 
@@ -138,6 +155,7 @@ const gateway = createGateway({
   ownership,
   turnStore: ledger,
   ownershipExec: ledger,
+  ...(customerScope === undefined ? {} : { customerScope }),
 });
 const server = createServer(gateway.handler);
 
@@ -147,6 +165,7 @@ const sweeper = createSweeper({
   config,
   ledger,
   ownership,
+  ...(customerScope === undefined ? {} : { customerScope }),
   bindingStore: gateway.bindingStore,
   chatwoot: gateway.chatwoot,
   runtime: gateway.runtime,

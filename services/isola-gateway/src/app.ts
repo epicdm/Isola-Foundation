@@ -43,6 +43,7 @@ import { createFailpoint, DISARMED, type Failpoint } from "./failpoint.js";
 import { idempotencyKey } from "./idempotency.js";
 import { handleManualHandbackWebhook } from "./handback.js";
 import type { Ledger, ReserveResult, SqlClient, SqlExecutor } from "./ledger.js";
+import type { CustomerScopeResolver } from "./customer-scope.js";
 import type { ConversationRef, OwnershipGate } from "./ownership.js";
 import { recordHumanReply } from "./ownership-store.js";
 import { constantTimeEquals } from "./signature.js";
@@ -529,6 +530,13 @@ export interface GatewayDeps {
    * `exec` directly.
    */
   ownershipExec?: SqlExecutor;
+  /**
+   * Server-side customer-scope resolution (`src/customer-scope.ts`). Absent
+   * means no scope is resolved and the gateway behaves exactly as before; present
+   * means every PUBLIC delivery resolves its sender first and fails closed on
+   * `unresolved`. `server.ts` builds it from GATEWAY_CUSTOMER_SCOPE_MODE.
+   */
+  customerScope?: CustomerScopeResolver;
   safeFetch?: SafeFetch;
   /** Injected in tests; defaults to the allowlisted signed Magnus client. */
   personalLineSource?: PersonalLineSource;
@@ -1121,7 +1129,18 @@ export function createGateway(deps: GatewayDeps): Gateway {
 
     track(
       processDelivery(
-        { config, chatwoot, runtime, logger, ledger, ownership: deps.ownership, failpoint, now, turnStore: deps.turnStore },
+        {
+          config,
+          chatwoot,
+          runtime,
+          logger,
+          ledger,
+          ownership: deps.ownership,
+          failpoint,
+          now,
+          turnStore: deps.turnStore,
+          ...(deps.customerScope === undefined ? {} : { customerScope: deps.customerScope }),
+        },
         job,
       ).catch(
         (err: unknown) => {

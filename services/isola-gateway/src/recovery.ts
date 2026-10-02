@@ -25,6 +25,7 @@ import { isRoutableLifecycle } from "./bindings.js";
 import type { Binding, BindingStore } from "./bindings.js";
 import type { ChatwootApi } from "./chatwoot.js";
 import type { GatewayConfig } from "./config.js";
+import type { CustomerScopeResolver } from "./customer-scope.js";
 import {
   bindingIdentity,
   DELIVERY_ACTION,
@@ -64,6 +65,15 @@ export interface RecoveryDeps {
    * the sweeper, rather than the webhook, is the one driving it.
    */
   ownership: OwnershipGate;
+  /**
+   * The same customer-scope resolver the live path uses (Law 21: a control on
+   * one path and not the other is a moved problem). NOTE: a rebuilt payload has
+   * `senderPhone: null` (see `rebuildPayload`), so with a resolver configured a
+   * RESUMED delivery resolves `unresolved` and is escalated to a human rather
+   * than answered — fail closed, by design, until the rebuild can carry a
+   * signed sender.
+   */
+  customerScope?: CustomerScopeResolver;
   bindingStore: BindingStore;
   chatwoot: ChatwootApi;
   runtime: AgentRuntime;
@@ -451,6 +461,7 @@ export function createSweeper(deps: RecoveryDeps): Sweeper {
         logger: deps.logger,
         ledger: deps.ledger,
         ownership: deps.ownership,
+        ...(deps.customerScope === undefined ? {} : { customerScope: deps.customerScope }),
         failpoint: deps.failpoint,
         now: deps.now,
       },
