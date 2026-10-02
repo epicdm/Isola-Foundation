@@ -294,6 +294,9 @@ export class PaperclipAgentRuntime implements AgentRuntime {
   private async createIssue(request: AgentRuntimeRequest, key: string, deadlineAt: number): Promise<CreateResult> {
     const { title, description } = describeContext(request);
     const url = `${this.base()}/api/companies/${encodeURIComponent(this.options.companyId)}/issues`;
+    // A base URL with userinfo can never be fetched: it throws BEFORE a byte is sent,
+    // so it is a configuration defect with nothing sent, not an uncertain create (Codex R5).
+    if (!this.baseIsSendable()) return { kind: "config_defect", detail: "the base url cannot be fetched (userinfo or unparseable)" };
     const auth = this.authHeaders();
     if (auth === null) return { kind: "config_defect", detail: "the credential supplies a run id header" };
     let response: Exchange;
@@ -475,6 +478,16 @@ export class PaperclipAgentRuntime implements AgentRuntime {
 
   private base(): string {
     return this.options.baseUrl.replace(/\/+$/, "");
+  }
+
+  /** False when a request to this base can never be built (unparseable, or carries userinfo). */
+  private baseIsSendable(): boolean {
+    try {
+      const u = new URL(this.options.baseUrl);
+      return u.username === "" && u.password === "";
+    } catch {
+      return false;
+    }
   }
 
   /** The credential's headers, or null when they would carry a run id (or cannot be produced): REFUSED, nothing is sent. */

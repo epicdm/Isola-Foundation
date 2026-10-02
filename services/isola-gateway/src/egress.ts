@@ -13,7 +13,7 @@
  * plain http (`http://isola_isola-runtime:3000`), so http is permitted — but
  * only to an explicitly allowlisted hostname.
  */
-import { EgressBlockedError } from "./errors.js";
+import { EgressBlockedError, EgressRedirectBlockedError } from "./errors.js";
 
 export type SafeFetch = (
   input: string | URL,
@@ -89,8 +89,24 @@ export function createSafeFetch(options: SafeFetchOptions): SafeFetch {
     if (!isAllowedHost(host, allowlist)) {
       throw new EgressBlockedError(host);
     }
-    return transport(parsed.toString(), init);
+    // The guard owns the redirect mode (Codex R1). A platform fetch follows a 307/308
+    // on its own and re-sends the body, and that second hop never passes back through
+    // this function, so only the FIRST url was ever checked against the allowlist.
+    // "manual" returns the 3xx to us; any 3xx is then refused rather than followed.
+    const response = await transport(parsed.toString(), { ...init, redirect: "manual" });
+    if (
+      (response.status >= 300 && response.status < 400) ||
+      (response as { type?: string }).type === "opaqueredirect"
+    ) {
+      try {
+        void response.body?.cancel().catch(() => undefined);
+      } catch {
+        /* nothing to release */
+      }
+      throw new EgressRedirectBlockedError(host, response.status);
+    }
+    return response;
   };
 }
 
-export { EgressBlockedError };
+export { EgressBlockedError, EgressRedirectBlockedError };

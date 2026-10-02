@@ -478,6 +478,17 @@ function paperclipBootErrors(config: GatewayConfig): string[] {
     if (protocol !== "http:" && protocol !== "https:") {
       errors.push("GATEWAY_PAPERCLIP_BASE_URL must be an http:// or https:// URL: safeFetch blocks every other scheme, so every turn would fail after boot.");
     }
+    // A URL with userinfo passes the hostname check but fetch throws BEFORE sending it
+    // (Codex R5), so every turn would fail after boot. Credentials come only through
+    // the injected PaperclipAuth. The refusal never echoes the userinfo.
+    try {
+      const parsedBase = new URL(p.baseUrl);
+      if (parsedBase.username !== "" || parsedBase.password !== "") {
+        errors.push("GATEWAY_PAPERCLIP_BASE_URL must not contain userinfo (user:password@): credentials are supplied only through GATEWAY_PAPERCLIP_BEARER.");
+      }
+    } catch {
+      /* hostOf already parsed it */
+    }
     if (!config.egressAllowlist.includes(paperclipHost)) {
       errors.push("The host of GATEWAY_PAPERCLIP_BASE_URL is not in the effective egress allowlist (EGRESS_ALLOWLIST): safeFetch would block every Paperclip request after boot.");
     }

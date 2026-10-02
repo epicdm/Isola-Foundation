@@ -14,6 +14,24 @@ export class EgressBlockedError extends Error {
 }
 
 /**
+ * An allowed host answered with a 3xx. The redirect is NOT followed (Codex R1: a
+ * followed 307/308 re-sent the customer-bearing body to a host the allowlist never
+ * checked). It is an EgressBlockedError so every existing caller already treats it as
+ * a configuration defect (nothing was sent to the redirect target), never as an
+ * uncertain send. The message carries the status only: never the Location, which can
+ * carry a token, and never a body.
+ */
+export class EgressRedirectBlockedError extends EgressBlockedError {
+  readonly status: number;
+  constructor(host: string, status: number) {
+    super(host);
+    this.name = "EgressRedirectBlockedError";
+    this.status = status;
+    this.message = `egress blocked: host "${host}" answered a redirect (${status}); redirects are never followed`;
+  }
+}
+
+/**
  * A Chatwoot Application API call failed.
  *
  * `detail` is a category string built by this service. Chatwoot response bodies
