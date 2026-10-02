@@ -40,8 +40,19 @@
 --   Existing rows read NULL. No existing column, key or index is touched.
 --
 -- NO CUSTOMER CONTENT
---   Each column holds an opaque Paperclip identifier only. Neither can hold a
---   message body, an answer, an attachment name or a URL.
+--   Each column is INTENDED to hold an opaque Paperclip identifier only. That is an
+--   application contract, not a database constraint: the columns are plain text and
+--   nothing in the database stops a caller writing a longer value into them.
+--
+-- IF THIS IS EVER WIRED (review notes from Codex round 1)
+--   1. The ALTER must come AFTER the CREATE TABLE IF NOT EXISTS in LEDGER_SCHEMA_SQL,
+--      so it works for both a brand-new database and an existing one.
+--   2. IF NOT EXISTS does NOT verify the type or nullability of an existing column of
+--      the same name: a column that already exists with a different type would be
+--      silently kept. Check the live column definition before relying on it.
+--   3. Nothing at this commit writes or reads these columns, the production wiring uses
+--      the in-memory IssueStore, and the Dockerfile does not copy drafts/: there is no
+--      migration pickup mechanism for this file.
 
 ALTER TABLE delivery_ledger
   ADD COLUMN IF NOT EXISTS paperclip_issue_id text NULL,
