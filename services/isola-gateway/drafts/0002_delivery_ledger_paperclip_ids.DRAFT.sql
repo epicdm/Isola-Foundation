@@ -1,0 +1,56 @@
+-- 0002_delivery_ledger_paperclip_ids.DRAFT.sql
+--
+-- DRAFT FOR REVIEW - NOT APPLIED - UAT ONLY - applying needs its own
+-- authorisation - no db push - no _prisma_migrations edits
+--
+-- WHY THIS IS IN drafts/ AND NOT IN migrations/
+--   This service has no migration runner and no ORM. The ledger DDL that runs is
+--   `LEDGER_SCHEMA_SQL` in `src/ledger.ts`, executed idempotently at boot.
+--   `migrations/0001_conversation_ownership.sql` is a byte-identical COPY of
+--   `OWNERSHIP_SCHEMA_SQL` (asserted by test/ownership-migration.test.ts).
+--   delivery_ledger has no migrations/ file, and this draft is not in use, so it
+--   must not sit next to a file that claims to mirror the live schema. Nothing
+--   reads this file. Nothing runs it. If it is approved, the reviewed form is
+--   moved into `LEDGER_SCHEMA_SQL` as a separately authorised change.
+--
+-- AUTHORITY
+--   Lane A (Delivery PM), packet ISOLA-PIVOT-20261002-01, 2026-10-02: approved
+--   as a draft migration file for review only. UAT database only.
+--
+-- LANE A'S APPROVED DDL, VERBATIM (for comparison with the form below)
+--   ALTER TABLE delivery_ledger
+--     ADD COLUMN paperclip_issue_id text NULL,
+--     ADD COLUMN paperclip_run_id   text NULL;
+--
+-- DIFFERENCE FROM THE APPROVED TEXT
+--   The form below adds IF NOT EXISTS, because every DDL statement in this
+--   service is idempotent (it runs on every boot). The columns, types and
+--   nullability are identical to the approved text.
+--
+-- WHAT IT IS FOR
+--   The Paperclip-governed execution seam (src/paperclip-runtime.ts, default
+--   OFF) keeps the Paperclip issue id in an in-memory IssueStore, so a restart
+--   forgets it. These two nullable columns would let the id survive a restart.
+--   Until a reviewed, separately authorised change applies them, the in-memory
+--   store stands and the sandbox slice must not be used with real runs across
+--   restarts.
+--
+-- SAFETY
+--   Additive. Two nullable text columns, no default, no index, no constraint.
+--   Existing rows read NULL. No existing column, key or index is touched.
+--
+-- NO CUSTOMER CONTENT
+--   Each column holds an opaque Paperclip identifier only. Neither can hold a
+--   message body, an answer, an attachment name or a URL.
+
+ALTER TABLE delivery_ledger
+  ADD COLUMN IF NOT EXISTS paperclip_issue_id text NULL,
+  ADD COLUMN IF NOT EXISTS paperclip_run_id   text NULL;
+
+-- ROLLBACK (NOT EXECUTED - for review only; do not run unless separately authorised)
+--   ALTER TABLE delivery_ledger
+--     DROP COLUMN IF EXISTS paperclip_issue_id,
+--     DROP COLUMN IF EXISTS paperclip_run_id;
+--   Dropping the columns discards the stored issue and run ids, after which
+--   recovery depends again on the Paperclip server honouring the idempotency key
+--   (unverified).
