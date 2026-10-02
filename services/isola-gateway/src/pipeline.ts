@@ -69,7 +69,14 @@ export type DeliveryOutcome =
    * Distinct from `escalated`, which is this delivery HANDING the conversation
    * over. This is a delivery arriving at a conversation somebody already holds.
    */
-  | "human_owned";
+  | "human_owned"
+  /**
+   * A human took (or took and returned) the conversation WHILE the model was
+   * running. The answer was composed for a conversation that has since moved on,
+   * so nothing was sent and no business write fired. Distinct from `human_owned`,
+   * where the model was never called: here it was, and its output was discarded.
+   */
+  | "suppressed_in_flight";
 
 /**
  * `answer` invokes the model. `handoff` never does — not once, not to describe
@@ -608,6 +615,71 @@ export async function processDelivery(
     runId,
     context: buildRuntimeContext(binding, payload, history),
   });
+
+  // ---- THE IN-FLIGHT OWNERSHIP RECHECK ------------------------------------
+  //
+  // The gate above answered "may the AI speak" BEFORE the model ran. The model
+  // can run for up to the runtime deadline (90 s), and a human can take the
+  // conversation in that window. Writing the reply on the strength of a read
+  // that old talks over them, and the escalation / annotation writes that
+  // follow would mutate a conversation a person now holds.
+  //
+  // So ownership is read AGAIN, here: after the runtime has returned and before
+  // ANYTHING is written — the reply, an escalation (status, assignment, note),
+  // a failure note, a label or an attribute. Two things must still hold:
+  //   1. the state still gives the AI authority (or this delivery is finishing
+  //      the very hold it recorded, unchanged); and
+  //   2. the EPISODE is the one the run started under. A human who took the
+  //      conversation and handed it back leaves the state AI-authorised again
+  //      with a later episode — the answer was still composed for a
+  //      conversation that has moved on, so state alone is not enough.
+  //
+  // FAIL CLOSED. If this read rejects, the rejection propagates exactly as the
+  // pre-run gate's does: nothing is written, the row is left unfinished, the
+  // lease expires and the recovery sweeper re-runs the delivery (whose own
+  // pre-run gate and this recheck then decide with a fresh read). "I could not
+  // find out who holds this" is never treated as "nobody does".
+  //
+  // RESIDUAL WINDOW, stated rather than hidden: this is a read then a write, not
+  // a compare-and-set inside the Chatwoot write. A takeover landing in the few
+  // milliseconds between this read and the post cannot be caught here; it is
+  // narrowed from "the whole model run" to "one network round trip".
+  const recheck = await deps.ownership.read(conversationRefOf(job));
+  const stillMine =
+    !recheck.diverged &&
+    recheck.episode === ownership.episode &&
+    (finishingOwnWork
+      ? recheck.state === ownership.state &&
+        recheck.escalationOperationId === ownership.escalationOperationId
+      : !suppressesAutomatedReply(recheck.state));
+
+  if (!stillMine) {
+    deps.logger.warn({
+      ...base,
+      event: "ownership",
+      outcome: "suppressed_in_flight",
+      ownershipState: recheck.state,
+      episode: recheck.episode,
+      episodeAtStart: ownership.episode,
+      runtimeOutcome: result.outcome,
+      runtimeCorrelationId: result.correlationId,
+      customerMessageSent: false,
+      detail:
+        "ownership changed while the model was running; the answer was discarded and nothing was written to the customer or to Chatwoot",
+    });
+    // Closed, not left to the sweeper: a retry would re-run the model into a
+    // conversation a human holds. The delivery row is the ONLY ledger row — no
+    // write was claimed, so there is nothing for reconciliation to resend.
+    await finish("suppressed_in_flight");
+    return {
+      outcome: "suppressed_in_flight",
+      runtimeOutcome: result.outcome,
+      customerMessageSent: false,
+      escalated: false,
+      handoffBlocked: false,
+      needsRetry: false,
+    };
+  }
 
   // `result.outcome` has already been derived from the runtime's structured
   // `completionState` where it supplied one (see src/runtime.ts), so
