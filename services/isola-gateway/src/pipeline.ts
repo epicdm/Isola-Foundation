@@ -586,6 +586,18 @@ export async function processDelivery(
     return handoff;
   }
 
+  // The ONE predicate for "the AI still has authority over this conversation",
+  // used by the rechecks below (after the customer scope, and after the model) AND
+  // handed to a long-running runtime so it can stop early on a takeover. Same
+  // state, same episode, same rule.
+  const ownershipStillMine = (read: Awaited<ReturnType<typeof deps.ownership.read>>): boolean =>
+    !read.diverged &&
+    read.episode === ownership.episode &&
+    (finishingOwnWork
+      ? read.state === ownership.state &&
+        read.escalationOperationId === ownership.escalationOperationId
+      : !suppressesAutomatedReply(read.state));
+
   // ---- THE CUSTOMER SCOPE ---------------------------------------------------
   //
   // WHICH customer is this? Resolved here, server-side, from the signed sender
@@ -607,6 +619,40 @@ export async function processDelivery(
       chatwootConversationId: job.conversationId,
       channelSubject: payload.channelSubject,
     });
+
+    // OWNERSHIP MAY HAVE MOVED WHILE THE RESOLVER RAN (Codex D5). The gate above is
+    // older than this lookup, and the unresolved branch below WRITES (a note, a
+    // status change, an assignment) before the post-run recheck can see anything.
+    // So ownership is read again here, before either branch acts: a conversation a
+    // person took in the meantime gets no escalation writes and no model call. Same
+    // predicate, same fail-closed read as the post-run recheck (a rejected read
+    // propagates: nothing is written and the sweeper retries).
+    const afterScope = await deps.ownership.read(conversationRefOf(job));
+    if (!ownershipStillMine(afterScope)) {
+      deps.logger.warn({
+        ...base,
+        event: "ownership",
+        outcome: "suppressed_in_flight",
+        stage: "customer_scope",
+        ownershipState: afterScope.state,
+        episode: afterScope.episode,
+        episodeAtStart: ownership.episode,
+        scopeVerdict: resolved.verdict.kind,
+        customerMessageSent: false,
+        detail:
+          "ownership changed while the customer scope was being resolved; no escalation write was made, the model was not called and nothing was sent",
+      });
+      await finish("suppressed_in_flight");
+      return {
+        outcome: "suppressed_in_flight",
+        runtimeOutcome: RUNTIME_NOT_INVOKED,
+        customerMessageSent: false,
+        escalated: false,
+        handoffBlocked: false,
+        needsRetry: false,
+      };
+    }
+
     if (resolved.verdict.kind === "unresolved") {
       deps.logger.error({
         ...base,
@@ -686,17 +732,6 @@ export async function processDelivery(
     historyMessageCount: history?.turns.length ?? 0,
     historyTruncated: history?.truncated ?? false,
   });
-
-  // The ONE predicate for "the AI still has authority over this conversation",
-  // used by the post-run recheck below AND handed to a long-running runtime so it
-  // can stop early on a takeover. Same state, same episode, same rule.
-  const ownershipStillMine = (read: Awaited<ReturnType<typeof deps.ownership.read>>): boolean =>
-    !read.diverged &&
-    read.episode === ownership.episode &&
-    (finishingOwnWork
-      ? read.state === ownership.state &&
-        read.escalationOperationId === ownership.escalationOperationId
-      : !suppressesAutomatedReply(read.state));
 
   const result = await deps.runtime.invoke({
     templateId: binding.templateId,
