@@ -463,14 +463,44 @@ function paperclipBootErrors(config: GatewayConfig): string[] {
   const p = config.paperclip;
   if (p.agentIds.length === 0) return [];
   const errors: string[] = [];
-  if (p.baseUrl === null || hostOf(p.baseUrl) === null) {
+  const paperclipHost = hostOf(p.baseUrl);
+  if (p.baseUrl === null || paperclipHost === null) {
     errors.push("GATEWAY_PAPERCLIP_AGENT_IDS is set but GATEWAY_PAPERCLIP_BASE_URL is missing or not a URL.");
+  } else {
+    // A destination safeFetch will refuse is a destination that fails EVERY turn
+    // after startup (Codex D6). Refuse at boot instead.
+    let protocol = "";
+    try {
+      protocol = new URL(p.baseUrl).protocol;
+    } catch {
+      /* hostOf already parsed it */
+    }
+    if (protocol !== "http:" && protocol !== "https:") {
+      errors.push("GATEWAY_PAPERCLIP_BASE_URL must be an http:// or https:// URL: safeFetch blocks every other scheme, so every turn would fail after boot.");
+    }
+    if (!config.egressAllowlist.includes(paperclipHost)) {
+      errors.push("The host of GATEWAY_PAPERCLIP_BASE_URL is not in the effective egress allowlist (EGRESS_ALLOWLIST): safeFetch would block every Paperclip request after boot.");
+    }
   }
   if (p.companyId === null) {
     errors.push("GATEWAY_PAPERCLIP_AGENT_IDS is set but GATEWAY_PAPERCLIP_COMPANY_ID is missing.");
   }
   if (p.bearer === null) {
     errors.push("GATEWAY_PAPERCLIP_AGENT_IDS is set but GATEWAY_PAPERCLIP_BEARER (the credential) is missing.");
+  }
+  // ONE gateway process talks to exactly ONE Paperclip company (Codex D3). An enabled
+  // binding that declares a different company would have its customer's scope sent to
+  // GATEWAY_PAPERCLIP_COMPANY_ID's issues, which is a re-route of customer data, not a
+  // setting. Refuse rather than let either side silently win.
+  if (p.companyId !== null) {
+    const enabled = new Set(p.agentIds);
+    for (const binding of configuredBindings(config)) {
+      if (enabled.has(binding.paperclipAgentId) && binding.paperclipCompanyId !== p.companyId) {
+        errors.push(
+          `An enabled binding (account ${binding.chatwootAccountId}, inbox ${binding.chatwootInboxId}) declares a paperclipCompanyId that differs from GATEWAY_PAPERCLIP_COMPANY_ID: one gateway talks to one Paperclip company.`,
+        );
+      }
+    }
   }
   if (p.pollDeadlineMs > MAX_PAPERCLIP_POLL_DEADLINE_MS) {
     errors.push(`GATEWAY_PAPERCLIP_POLL_DEADLINE_MS exceeds the ${MAX_PAPERCLIP_POLL_DEADLINE_MS} ms ceiling.`);

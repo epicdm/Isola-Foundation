@@ -55,6 +55,7 @@ import { createHash } from "node:crypto";
 
 import type { LedgerIdentity } from "./deliveryref.js";
 import type { SafeFetch } from "./egress.js";
+import { EgressBlockedError } from "./errors.js";
 import {
   isAgentEscalationReason,
   type AgentRuntime,
@@ -256,6 +257,15 @@ export class PaperclipAgentRuntime implements AgentRuntime {
       // could not be replayed safely.
       return failure(request.runId, PAPERCLIP_OUTCOMES.configDefect);
     }
+    // The turn must be FOR the company this runtime is configured for (Codex D3). The
+    // pipeline stamps the binding's own paperclipCompanyId into the context; a turn
+    // for another company, or one that does not say, is refused before anything is
+    // sent: customer scope must never land in a company it was not bound to.
+    const ctx = isRecord(request.context) ? request.context : {};
+    const turnCompany = str(ctx["companyId"]);
+    if (turnCompany === null || turnCompany !== this.options.companyId) {
+      return failure(request.runId, PAPERCLIP_OUTCOMES.configDefect);
+    }
     const store = this.options.issueStore;
     // ONE absolute deadline for the whole turn (create + polls + body reads). The
     // ledger lease is sized against it at boot; nothing here may outlive it.
@@ -298,7 +308,10 @@ export class PaperclipAgentRuntime implements AgentRuntime {
         deadlineAt,
         true,
       );
-    } catch {
+    } catch (err) {
+      // The egress guard refused BEFORE a socket was opened: nothing was sent, so
+      // this is a configuration defect, not an uncertain create (Codex D6).
+      if (err instanceof EgressBlockedError) return { kind: "config_defect", detail: "create blocked by egress" };
       // Includes the deadline / request timeout firing while the BODY was still being
       // read: the issue may exist and we never learned its id, so this is an
       // UNCERTAIN create (never re-created), not a failure we can retry.
@@ -400,7 +413,8 @@ export class PaperclipAgentRuntime implements AgentRuntime {
         deadlineAt,
         true,
       );
-    } catch {
+    } catch (err) {
+      if (err instanceof EgressBlockedError) return { kind: "config_defect" };
       return { kind: "transient" };
     }
     // EVERY 4xx is a configuration defect (401/403 refused credential, 400/404/422

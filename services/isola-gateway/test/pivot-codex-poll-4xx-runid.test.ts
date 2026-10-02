@@ -32,6 +32,8 @@ function request(): AgentRuntimeRequest {
     idempotencyKey: KEY,
     context: {
       source: "chatwoot",
+      // the pipeline stamps the binding's own company; the runtime refuses a turn for another (Codex D3)
+      companyId: "company-1",
       customerScope: { kind: "verified", customerId: "cust-a", serviceIds: ["svc-1"] },
       chatwoot: { accountId: 1, inboxId: 7, conversationDisplayId: 42, messageId: 9001 },
       message: { role: "customer", content: "What does the 600 minute plan cost?" },
