@@ -106,6 +106,14 @@ export const PAPERCLIP_OUTCOMES = {
   timeout: "model_timeout",
 } as const;
 
+/**
+ * A run id is ISSUED by Paperclip when it wakes an agent. A gateway that is not that
+ * agent must never present one (Law 10: a retry that changes the request is a
+ * different request; an invented or stale id is a 500, a missing one a 401). A
+ * credential whose headers carry one is therefore a CONFIG DEFECT and nothing is sent.
+ */
+const FORBIDDEN_AUTH_HEADER = "x-paperclip-run-id";
+
 /** Paperclip's documented ceiling for `idempotencyKey` (SOURCE: Lane A relay: 1-255). */
 const MAX_IDEMPOTENCY_KEY = 255;
 const MAX_MESSAGE_CHARS = 4000;
@@ -276,13 +284,15 @@ export class PaperclipAgentRuntime implements AgentRuntime {
   private async createIssue(request: AgentRuntimeRequest, key: string, deadlineAt: number): Promise<CreateResult> {
     const { title, description } = describeContext(request);
     const url = `${this.base()}/api/companies/${encodeURIComponent(this.options.companyId)}/issues`;
+    const auth = this.authHeaders();
+    if (auth === null) return { kind: "config_defect", detail: "the credential supplies a run id header" };
     let response: Exchange;
     try {
       response = await this.exchange(
         url,
         {
           method: "POST",
-          headers: { "content-type": "application/json", accept: "application/json", ...this.options.auth.headers() },
+          headers: { "content-type": "application/json", accept: "application/json", ...auth },
           body: JSON.stringify({ title, description, assigneeAgentId: request.agentId, idempotencyKey: key }),
         },
         deadlineAt,
@@ -380,18 +390,23 @@ export class PaperclipAgentRuntime implements AgentRuntime {
     const query = new URLSearchParams({ order: "asc", limit: "50" });
     if (after !== null) query.set("after", after);
     const url = `${this.base()}/api/issues/${encodeURIComponent(issueId)}/comments?${query.toString()}`;
+    const auth = this.authHeaders();
+    if (auth === null) return { kind: "config_defect" };
     let response: Exchange;
     try {
       response = await this.exchange(
         url,
-        { method: "GET", headers: { accept: "application/json", ...this.options.auth.headers() } },
+        { method: "GET", headers: { accept: "application/json", ...auth } },
         deadlineAt,
         true,
       );
     } catch {
       return { kind: "transient" };
     }
-    if (response.status === 401 || response.status === 403) return { kind: "config_defect" };
+    // EVERY 4xx is a configuration defect (401/403 refused credential, 400/404/422
+    // wrong route or shape, 429 a limit we must not hammer): one request, no retry,
+    // no customer message (Codex D4). Only transport errors and 5xx are weather.
+    if (response.status >= 400 && response.status < 500) return { kind: "config_defect" };
     if (response.status < 200 || response.status >= 300) return { kind: "transient" };
     if (response.json === undefined) return { kind: "transient" };
     const body: unknown = response.json;
@@ -422,6 +437,8 @@ export class PaperclipAgentRuntime implements AgentRuntime {
   private async cancelRun(issueId: string): Promise<void> {
     const runId = this.runIds.get(issueId);
     if (runId === undefined) return;
+    const auth = this.authHeaders();
+    if (auth === null) return; // never send a run id header, not even to cancel
     try {
       // Its own small budget: the turn deadline may be nearly spent when a takeover
       // is noticed, and a cancel is best effort either way.
@@ -429,7 +446,7 @@ export class PaperclipAgentRuntime implements AgentRuntime {
         `${this.base()}/api/heartbeat-runs/${encodeURIComponent(runId)}/cancel`,
         {
           method: "POST",
-          headers: { "content-type": "application/json", accept: "application/json", ...this.options.auth.headers() },
+          headers: { "content-type": "application/json", accept: "application/json", ...auth },
           body: "{}",
         },
         Date.now() + this.options.requestTimeoutMs,
@@ -444,6 +461,20 @@ export class PaperclipAgentRuntime implements AgentRuntime {
 
   private base(): string {
     return this.options.baseUrl.replace(/\/+$/, "");
+  }
+
+  /** The credential's headers, or null when they would carry a run id (or cannot be produced): REFUSED, nothing is sent. */
+  private authHeaders(): Record<string, string> | null {
+    let headers: Record<string, string>;
+    try {
+      headers = this.options.auth.headers();
+    } catch {
+      return null;
+    }
+    for (const name of Object.keys(headers)) {
+      if (name.trim().toLowerCase() === FORBIDDEN_AUTH_HEADER) return null;
+    }
+    return headers;
   }
 
   /**
