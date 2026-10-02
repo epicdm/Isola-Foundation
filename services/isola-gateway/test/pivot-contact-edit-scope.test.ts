@@ -38,6 +38,7 @@ import { parseWebhookPayload } from "../src/webhook.js";
 import {
   CapturingLogger,
   CONVERSATION_DISPLAY_ID,
+  INBOX_ID,
   messageCreatedPayload,
   postWebhook,
   signRequest,
@@ -69,7 +70,7 @@ function body(args: { channelSubject: string | null; contactPhone: string }): Re
     custom_attributes: {},
   };
   if (args.channelSubject !== null) {
-    conversation["contact_inbox"] = { id: 9, contact_id: 55, inbox_id: 3, source_id: args.channelSubject };
+    conversation["contact_inbox"] = { id: 9, contact_id: 55, inbox_id: INBOX_ID, source_id: args.channelSubject };
   }
   return messageCreatedPayload({
     content: "what is my balance?",

@@ -18,6 +18,7 @@
  */
 import type { Binding } from "./bindings.js";
 import {
+  coherentChannelSubject,
   resolveCustomerScope,
   type CustomerScopeResolver,
   type CustomerScopeVerdict,
@@ -617,7 +618,14 @@ export async function processDelivery(
       chatwootAccountId: binding.chatwootAccountId,
       chatwootInboxId: binding.chatwootInboxId,
       chatwootConversationId: job.conversationId,
-      channelSubject: payload.channelSubject,
+      channelSubject: coherentChannelSubject({
+        channelSubject: payload.channelSubject,
+        senderType: payload.senderType,
+        senderId: payload.senderId ?? null,
+        contactInboxContactId: payload.contactInboxContactId ?? null,
+        contactInboxInboxId: payload.contactInboxInboxId ?? null,
+        routedInboxId: binding.chatwootInboxId,
+      }),
     });
 
     // OWNERSHIP MAY HAVE MOVED WHILE THE RESOLVER RAN (Codex D5). The gate above is

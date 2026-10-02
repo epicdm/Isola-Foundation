@@ -173,11 +173,49 @@ export function createFailClosedCustomerScopeResolver(): CustomerScopeResolver {
   return { resolve: async () => ({ kind: "unresolved" }) };
 }
 
+/**
+ * The channel-bound subject, but only when the `contact_inbox` it came from is
+ * coherent with this delivery: its `contact_id` is the sender (when both are
+ * present) and its `inbox_id` is the inbox the binding routed (when present). A
+ * `contact_inbox` that is not the sender's, or not this inbox's, is not a subject
+ * channel-bound FOR THIS CONVERSATION, so the scope fails closed exactly as it does
+ * for an absent one. STATED LIMIT: an id that is absent cannot be cross-checked and
+ * is not treated as a mismatch; we refuse a MISMATCH, not an absence.
+ */
+export function coherentChannelSubject(args: {
+  channelSubject: string | null;
+  senderType: string | null;
+  senderId: number | null;
+  contactInboxContactId: number | null;
+  contactInboxInboxId: number | null;
+  routedInboxId: number;
+}): string | null {
+  if (args.channelSubject === null) return null;
+  if (
+    args.senderType === "contact" &&
+    args.senderId !== null &&
+    args.contactInboxContactId !== null &&
+    args.senderId !== args.contactInboxContactId
+  ) {
+    return null;
+  }
+  if (args.contactInboxInboxId !== null && args.contactInboxInboxId !== args.routedInboxId) return null;
+  return args.channelSubject;
+}
+
 /** One known fixture account. Never a real customer. */
 export interface CustomerScopeFixture {
   senderPhone: string;
   customerId: string;
   serviceIds: string[];
+  /**
+   * Bind the fixture to ONE (tenant, account, inbox). Enforced WHEN PRESENT; the env
+   * wiring (the only production-reachable one) REQUIRES all three, so a fixture
+   * account cannot verify on an inbox it was not declared for.
+   */
+  tenantId?: string;
+  chatwootAccountId?: number;
+  chatwootInboxId?: number;
   liteAccountId?: string;
   magnusUserId?: string | null;
   odooPartnerId?: string | null;
@@ -217,6 +255,13 @@ export function createFixtureCustomerScopeResolver(
       if (key === null) return { kind: "unresolved" };
       const fixture = byPhone.get(key);
       if (fixture === undefined) return { kind: "unresolved" };
+      if (fixture.tenantId !== undefined && fixture.tenantId !== query.tenantId) return { kind: "unresolved" };
+      if (fixture.chatwootAccountId !== undefined && fixture.chatwootAccountId !== query.chatwootAccountId) {
+        return { kind: "unresolved" };
+      }
+      if (fixture.chatwootInboxId !== undefined && fixture.chatwootInboxId !== query.chatwootInboxId) {
+        return { kind: "unresolved" };
+      }
       const verified: VerifiedCustomerScope = {
         kind: "verified",
         customerId: fixture.customerId,
@@ -296,10 +341,23 @@ export function customerScopeFromEnv(
       if (!Array.isArray(serviceIds) || !serviceIds.every(isNonEmptyString)) {
         throw new Error(`fixture[${index}].serviceIds must be an array of non-empty strings`);
       }
+      // A fixture is declared for ONE (tenant, account, inbox) and must say which.
+      if (
+        !isNonEmptyString(e["tenantId"]) ||
+        typeof e["chatwootAccountId"] !== "number" ||
+        !Number.isInteger(e["chatwootAccountId"]) ||
+        typeof e["chatwootInboxId"] !== "number" ||
+        !Number.isInteger(e["chatwootInboxId"])
+      ) {
+        throw new Error(`fixture[${index}] needs tenantId, chatwootAccountId and chatwootInboxId`);
+      }
       const fixture: CustomerScopeFixture = {
         senderPhone: e["senderPhone"],
         customerId: e["customerId"],
         serviceIds: [...serviceIds],
+        tenantId: e["tenantId"],
+        chatwootAccountId: e["chatwootAccountId"],
+        chatwootInboxId: e["chatwootInboxId"],
       };
       if (isNonEmptyString(e["liteAccountId"])) fixture.liteAccountId = e["liteAccountId"];
       if (e["magnusUserId"] === null || isNonEmptyString(e["magnusUserId"])) {

@@ -58,6 +58,15 @@ export interface WebhookPayload {
    * `contact_inbox` on `message_created` is UNVERIFIED (docs/payload shape only).
    */
   channelSubject: string | null;
+  /**
+   * `sender.id`: the contact's primary key when `senderType` is `contact`. Used ONLY to
+   * cross-check `contact_inbox.contact_id` (see `coherentChannelSubject`); never a scope key.
+   */
+  senderId?: number | null;
+  /** `conversation.contact_inbox.contact_id`, for the cross-check only (absent = cannot be cross-checked). */
+  contactInboxContactId?: number | null;
+  /** `conversation.contact_inbox.inbox_id`, for the cross-check only (absent = cannot be cross-checked). */
+  contactInboxInboxId?: number | null;
   accountId: number | null;
   inboxId: number | null;
   /**
@@ -105,6 +114,13 @@ function readChannelSubject(conversation: Record<string, unknown> | null): strin
   if (contactInbox === null) return null;
   const sourceId = readString(contactInbox["source_id"]);
   return sourceId !== null && sourceId.trim().length > 0 ? sourceId : null;
+}
+
+/** An integer under `conversation.contact_inbox`, or null when the node or the field is absent. */
+function readContactInboxInt(conversation: Record<string, unknown> | null, key: string): number | null {
+  if (conversation === null) return null;
+  const contactInbox = child(conversation, "contact_inbox");
+  return contactInbox === null ? null : readInt(contactInbox[key]);
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +432,9 @@ export function parseWebhookPayload(raw: Buffer): WebhookPayload | null {
         ? null
         : (readString(sender["phone_number"]) ?? readString(sender["identifier"])),
     channelSubject: readChannelSubject(conversation),
+    senderId: sender === null ? null : readInt(sender["id"]),
+    contactInboxContactId: readContactInboxInt(conversation, "contact_id"),
+    contactInboxInboxId: readContactInboxInt(conversation, "inbox_id"),
     accountId: account.value,
     inboxId: inbox.value,
     conversationDisplayId:

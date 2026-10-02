@@ -27,6 +27,10 @@ const QUERY: CustomerScopeQuery = {
 };
 
 const FIXTURE = {
+  // a fixture is declared for ONE (tenant, account, inbox): the same ones QUERY carries
+  tenantId: "tenant-acme",
+  chatwootAccountId: 1,
+  chatwootInboxId: 7,
   senderPhone: "+17675550101",
   customerId: "fixture-owner-test-account",
   serviceIds: ["fixture-line-1"],

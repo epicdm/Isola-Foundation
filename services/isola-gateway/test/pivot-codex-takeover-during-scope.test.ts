@@ -20,6 +20,7 @@ import {
   ACCOUNT_ID,
   CapturingLogger,
   CONVERSATION_DISPLAY_ID,
+  INBOX_ID,
   InMemoryOwnershipGate,
   messageCreatedPayload,
   postWebhook,
@@ -45,7 +46,7 @@ function signedBody(): string {
         id: CONVERSATION_DISPLAY_ID,
         status: "pending",
         meta: { assignee: null },
-        contact_inbox: { id: 9, contact_id: 55, inbox_id: 3, source_id: SUBJECT },
+        contact_inbox: { id: 9, contact_id: 55, inbox_id: INBOX_ID, source_id: SUBJECT },
       },
     }),
   );
