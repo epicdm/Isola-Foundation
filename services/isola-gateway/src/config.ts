@@ -481,6 +481,13 @@ function paperclipBootErrors(config: GatewayConfig): string[] {
   if (p.pollDeadlineMs >= config.ledgerLeaseMs) {
     errors.push("GATEWAY_PAPERCLIP_POLL_DEADLINE_MS must be inside GATEWAY_LEDGER_LEASE_MS, or the recovery sweeper can take a delivery that is still running.");
   }
+  // The turn's real execution budget is the deadline PLUS one request timeout: the
+  // deadline bounds create + polls + body reads, and the reply write that follows is
+  // itself a request. Checking the deadline alone let a 600000 ms request timeout
+  // boot against a 300000 ms lease (Codex D2).
+  if (p.pollDeadlineMs + p.requestTimeoutMs >= config.ledgerLeaseMs) {
+    errors.push("GATEWAY_PAPERCLIP_POLL_DEADLINE_MS plus GATEWAY_PAPERCLIP_REQUEST_TIMEOUT_MS must be inside GATEWAY_LEDGER_LEASE_MS, or a turn plus its reply write can outlive the lease and the recovery sweeper can run a second handler.");
+  }
   return errors;
 }
 

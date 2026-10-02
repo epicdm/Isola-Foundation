@@ -135,11 +135,21 @@ export interface PaperclipRuntimeOptions {
   auth: PaperclipAuth;
   safeFetch: SafeFetch;
   issueStore: IssueStore;
-  /** Hard ceiling on the whole poll. Validated at boot against the ledger lease and the runtime timeout. */
+  /**
+   * ABSOLUTE ceiling on the WHOLE turn: the create, every poll and every response
+   * body read all run under it (Codex D1/D2). Validated at boot against the ledger
+   * lease and the runtime timeout.
+   */
   pollDeadlineMs: number;
   pollIntervalMs: number;
-  /** Per-HTTP-request timeout. */
+  /** Per-HTTP-request timeout, covering the response BODY read too; each request is also capped to the time left on the turn. */
   requestTimeoutMs: number;
+}
+
+/** One finished HTTP exchange; `json` is undefined when no body was read or it did not parse. */
+interface Exchange {
+  status: number;
+  json: unknown;
 }
 
 type CreateResult =
@@ -239,12 +249,15 @@ export class PaperclipAgentRuntime implements AgentRuntime {
       return failure(request.runId, PAPERCLIP_OUTCOMES.configDefect);
     }
     const store = this.options.issueStore;
+    // ONE absolute deadline for the whole turn (create + polls + body reads). The
+    // ledger lease is sized against it at boot; nothing here may outlive it.
+    const deadlineAt = Date.now() + this.options.pollDeadlineMs;
 
     let issueId = await store.get(key);
     if (issueId === null) {
       // NEVER re-create an uncertain create. The issue may well exist.
       if (await store.isUncertain(key)) return failure(request.runId, PAPERCLIP_OUTCOMES.createUncertain);
-      const created = await this.createIssue(request, key);
+      const created = await this.createIssue(request, key, deadlineAt);
       if (created.kind === "config_defect") return failure(request.runId, PAPERCLIP_OUTCOMES.configDefect);
       if (created.kind === "uncertain") {
         await store.markUncertain(key);
@@ -255,22 +268,30 @@ export class PaperclipAgentRuntime implements AgentRuntime {
       if (created.runId !== null) this.runIds.set(issueId, created.runId);
     }
 
-    return this.pollForResult(request, issueId);
+    return this.pollForResult(request, issueId, deadlineAt);
   }
 
   // ---- create ---------------------------------------------------------------
 
-  private async createIssue(request: AgentRuntimeRequest, key: string): Promise<CreateResult> {
+  private async createIssue(request: AgentRuntimeRequest, key: string, deadlineAt: number): Promise<CreateResult> {
     const { title, description } = describeContext(request);
     const url = `${this.base()}/api/companies/${encodeURIComponent(this.options.companyId)}/issues`;
-    let response: Response;
+    let response: Exchange;
     try {
-      response = await this.send(url, {
-        method: "POST",
-        headers: { "content-type": "application/json", accept: "application/json", ...this.options.auth.headers() },
-        body: JSON.stringify({ title, description, assigneeAgentId: request.agentId, idempotencyKey: key }),
-      });
+      response = await this.exchange(
+        url,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", accept: "application/json", ...this.options.auth.headers() },
+          body: JSON.stringify({ title, description, assigneeAgentId: request.agentId, idempotencyKey: key }),
+        },
+        deadlineAt,
+        true,
+      );
     } catch {
+      // Includes the deadline / request timeout firing while the BODY was still being
+      // read: the issue may exist and we never learned its id, so this is an
+      // UNCERTAIN create (never re-created), not a failure we can retry.
       return { kind: "uncertain", detail: "create failed in transport" };
     }
     if (response.status === 401 || response.status === 403) {
@@ -280,12 +301,7 @@ export class PaperclipAgentRuntime implements AgentRuntime {
     if (response.status < 200 || response.status >= 300) {
       return { kind: "config_defect", detail: `create rejected (${response.status})` };
     }
-    let body: unknown = null;
-    try {
-      body = await response.json();
-    } catch {
-      body = null;
-    }
+    const body: unknown = response.json ?? null;
     const issueId = isRecord(body) ? str(body["id"]) : null;
     if (issueId === null) return { kind: "uncertain", detail: "create 2xx without an issue id" };
     const runId = isRecord(body) ? (str(body["executionRunId"]) ?? str(body["runId"])) : null;
@@ -294,10 +310,14 @@ export class PaperclipAgentRuntime implements AgentRuntime {
 
   // ---- poll -----------------------------------------------------------------
 
-  private async pollForResult(request: AgentRuntimeRequest, issueId: string): Promise<AgentRuntimeResult> {
-    const deadline = Date.now() + this.options.pollDeadlineMs;
+  private async pollForResult(
+    request: AgentRuntimeRequest,
+    issueId: string,
+    deadline: number,
+  ): Promise<AgentRuntimeResult> {
     let after: string | null = null;
     for (;;) {
+      if (Date.now() >= deadline) return failure(request.runId, PAPERCLIP_OUTCOMES.timeout);
       if (request.isStillOwned !== undefined) {
         let owned: boolean;
         try {
@@ -311,8 +331,11 @@ export class PaperclipAgentRuntime implements AgentRuntime {
         }
       }
 
-      const polled = await this.fetchComments(issueId, after);
+      const polled = await this.fetchComments(issueId, after, deadline);
       if (polled.kind === "config_defect") return failure(request.runId, PAPERCLIP_OUTCOMES.configDefect);
+      // A response that arrived AFTER the deadline is not a result, however well-formed
+      // (Codex D2: a 30 ms deadline accepted a comment returned at 100 ms).
+      if (Date.now() > deadline) return failure(request.runId, PAPERCLIP_OUTCOMES.timeout);
       if (polled.kind === "ok") {
         for (const comment of polled.comments) {
           after = comment.id;
@@ -348,6 +371,7 @@ export class PaperclipAgentRuntime implements AgentRuntime {
   private async fetchComments(
     issueId: string,
     after: string | null,
+    deadlineAt: number,
   ): Promise<
     | { kind: "ok"; comments: Array<{ id: string; body: string; authorAgentId: string | null }> }
     | { kind: "config_defect" }
@@ -356,23 +380,21 @@ export class PaperclipAgentRuntime implements AgentRuntime {
     const query = new URLSearchParams({ order: "asc", limit: "50" });
     if (after !== null) query.set("after", after);
     const url = `${this.base()}/api/issues/${encodeURIComponent(issueId)}/comments?${query.toString()}`;
-    let response: Response;
+    let response: Exchange;
     try {
-      response = await this.send(url, {
-        method: "GET",
-        headers: { accept: "application/json", ...this.options.auth.headers() },
-      });
+      response = await this.exchange(
+        url,
+        { method: "GET", headers: { accept: "application/json", ...this.options.auth.headers() } },
+        deadlineAt,
+        true,
+      );
     } catch {
       return { kind: "transient" };
     }
     if (response.status === 401 || response.status === 403) return { kind: "config_defect" };
     if (response.status < 200 || response.status >= 300) return { kind: "transient" };
-    let body: unknown;
-    try {
-      body = await response.json();
-    } catch {
-      return { kind: "transient" };
-    }
+    if (response.json === undefined) return { kind: "transient" };
+    const body: unknown = response.json;
     const list = Array.isArray(body)
       ? body
       : isRecord(body)
@@ -401,11 +423,18 @@ export class PaperclipAgentRuntime implements AgentRuntime {
     const runId = this.runIds.get(issueId);
     if (runId === undefined) return;
     try {
-      await this.send(`${this.base()}/api/heartbeat-runs/${encodeURIComponent(runId)}/cancel`, {
-        method: "POST",
-        headers: { "content-type": "application/json", accept: "application/json", ...this.options.auth.headers() },
-        body: "{}",
-      });
+      // Its own small budget: the turn deadline may be nearly spent when a takeover
+      // is noticed, and a cancel is best effort either way.
+      await this.exchange(
+        `${this.base()}/api/heartbeat-runs/${encodeURIComponent(runId)}/cancel`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", accept: "application/json", ...this.options.auth.headers() },
+          body: "{}",
+        },
+        Date.now() + this.options.requestTimeoutMs,
+        false,
+      );
     } catch {
       /* best effort */
     }
@@ -417,12 +446,39 @@ export class PaperclipAgentRuntime implements AgentRuntime {
     return this.options.baseUrl.replace(/\/+$/, "");
   }
 
-  private async send(url: string, init: RequestInit): Promise<Response> {
+  /**
+   * ONE bounded HTTP exchange: the request AND, for a 2xx, the response BODY read
+   * both run under the same AbortSignal, capped to the time left on the turn
+   * (Codex D1: the timer used to be cleared as soon as the headers arrived, so a
+   * body that never completed could hold a turn open past the ledger lease).
+   * Non-2xx and body-less exchanges never read their body; it is cancelled so the
+   * socket is released. Throws on abort / transport failure / an exhausted deadline.
+   */
+  private async exchange(url: string, init: RequestInit, deadlineAt: number, readBody: boolean): Promise<Exchange> {
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) throw new Error("paperclip: the turn deadline is exhausted before the request");
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.requestTimeoutMs);
+    const timer = setTimeout(() => controller.abort(), Math.min(this.options.requestTimeoutMs, remaining));
     if (typeof timer.unref === "function") timer.unref();
     try {
-      return await this.options.safeFetch(url, { ...init, signal: controller.signal });
+      const response = await this.options.safeFetch(url, { ...init, signal: controller.signal });
+      const ok = response.status >= 200 && response.status < 300;
+      if (!ok || !readBody) {
+        try {
+          void response.body?.cancel().catch(() => undefined);
+        } catch {
+          /* nothing to release */
+        }
+        return { status: response.status, json: undefined };
+      }
+      const text = await response.text(); // under the SAME signal and timer
+      let json: unknown;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = undefined;
+      }
+      return { status: response.status, json };
     } finally {
       clearTimeout(timer);
     }

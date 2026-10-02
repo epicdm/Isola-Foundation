@@ -34,7 +34,7 @@ export interface LoggedRequest {
   body: Record<string, unknown> | null;
 }
 
-export type CreateMode = "ok" | "401_task_bridge" | "403" | "500" | "drop_after_create" | "hang";
+export type CreateMode = "ok" | "401_task_bridge" | "403" | "500" | "drop_after_create" | "hang" | "stall_body" | "400";
 
 export class StubPaperclip {
   readonly issues = new Map<string, StubIssue>();
@@ -44,6 +44,14 @@ export class StubPaperclip {
   honourReplay = true;
   createMode: CreateMode = "ok";
   cancelStatus = 200;
+  /** Delay (ms) before the stub answers a create: models a slow upstream. */
+  createDelayMs = 0;
+  /** Delay (ms) before the stub answers a comments poll: models a slow upstream. */
+  pollDelayMs = 0;
+  /** When set, every comments poll answers with this status and an error body. */
+  commentsStatus: number | null = null;
+  /** When true, a comments poll sends 200 headers and a partial body, then never finishes it. */
+  pollStallBody = false;
   /** The run id the stub reports on a created issue; null = the run id is not discoverable. */
   runId: string | null = "run-1";
   /** Called right after an issue is created; the 'employee' may post comments from here. */
@@ -138,7 +146,18 @@ export class StubPaperclip {
         const idx = list.findIndex((c) => c.id === after);
         list = idx === -1 ? list : list.slice(idx + 1);
       }
-      return this.json(res, 200, { comments: list });
+      const answer = (): void => {
+        if (this.commentsStatus !== null) return this.json(res, this.commentsStatus, { error: "stub: forced status" });
+        if (this.pollStallBody) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.write('{"comments":[');
+          return; // headers are out, the body never completes
+        }
+        return this.json(res, 200, { comments: list });
+      };
+      if (this.pollDelayMs > 0) setTimeout(answer, this.pollDelayMs);
+      else answer();
+      return;
     }
     const cancel = /^\/api\/heartbeat-runs\/([^/]+)\/cancel$/.exec(url);
     if (method === "POST" && cancel !== null) {
@@ -149,6 +168,14 @@ export class StubPaperclip {
   }
 
   private create(req: IncomingMessage, res: ServerResponse, body: Record<string, unknown>): void {
+    if (this.createDelayMs > 0) {
+      setTimeout(() => this.createNow(req, res, body), this.createDelayMs);
+      return;
+    }
+    this.createNow(req, res, body);
+  }
+
+  private createNow(req: IncomingMessage, res: ServerResponse, body: Record<string, unknown>): void {
     const mode = this.createMode;
     if (mode === "401_task_bridge") {
       return this.json(res, 401, { error: "Task bridge key cannot use this API action" });
@@ -156,6 +183,12 @@ export class StubPaperclip {
     if (mode === "403") return this.json(res, 403, { error: "forbidden" });
     if (mode === "500") return this.json(res, 500, { error: "boom" });
     if (mode === "hang") return; // never answers
+    if (mode === "400") return this.json(res, 400, { error: "bad request" });
+    if (mode === "stall_body") {
+      res.writeHead(201, { "content-type": "application/json" });
+      res.write('{"id":'); // headers are out, the body never completes
+      return;
+    }
 
     const key = typeof body["idempotencyKey"] === "string" ? (body["idempotencyKey"] as string) : null;
     let issue: StubIssue | undefined;
