@@ -508,7 +508,30 @@ export function decideDelivery(args: DecideArgs): DecideResult {
  */
 export const STAFF_TURN_RECORD_TIMEOUT_MS = 2_000;
 
+/**
+ * The same bound for the CUSTOMER-turn transcript write (Codex, round 5): it runs before the
+ * acknowledgement and before the delivery is reserved, so a pending INSERT held both. A write that has
+ * not finished by then is treated as NOT recorded (hole + alert).
+ */
+export const CUSTOMER_TURN_RECORD_TIMEOUT_MS = 2_000;
+
+/** Resolves when `writing` does; rejects when it rejects, or after `boundMs` (the late settlement of an abandoned write is handled). */
+async function boundedWrite(writing: Promise<unknown>, boundMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race([
+    writing.then(() => "done" as const),
+    new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), boundMs);
+      if (typeof timer.unref === "function") timer.unref();
+    }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+  if (outcome === "timeout") throw new Error(`the transcript write did not finish within ${boundMs} ms (timed out)`);
+}
+
 export interface GatewayDeps {
+  /** Override of `CUSTOMER_TURN_RECORD_TIMEOUT_MS` (tests). */
+  customerTurnRecordTimeoutMs?: number;
   /** Override of `STAFF_TURN_RECORD_TIMEOUT_MS` (tests). */
   staffTurnRecordTimeoutMs?: number;
   config: GatewayConfig;
@@ -827,21 +850,37 @@ export function createGateway(deps: GatewayDeps): Gateway {
         );
         if (b.kind === "ok") {
           try {
-            await recordTurn(deps.turnStore, {
-              tenantId: b.binding.tenantId,
-              accountId: b.binding.chatwootAccountId,
-              conversationId: decision.payload.conversationDisplayId,
-              messageId: decision.payload.messageId as number,
-              role: turn.role,
-              author: turn.author,
-              content: turn.content,
-            });
+            // BOUNDED (Codex, round 5): this write runs before the acknowledgement and before the
+            // delivery is reserved, so a store blocked on a lock must not hold either.
+            await boundedWrite(
+              recordTurn(deps.turnStore, {
+                tenantId: b.binding.tenantId,
+                accountId: b.binding.chatwootAccountId,
+                conversationId: decision.payload.conversationDisplayId,
+                messageId: decision.payload.messageId as number,
+                role: turn.role,
+                author: turn.author,
+                content: turn.content,
+              }),
+              deps.customerTurnRecordTimeoutMs ?? CUSTOMER_TURN_RECORD_TIMEOUT_MS,
+            );
           } catch (err) {
-            logger.warn({
+            // A turn that is not in the transcript is a HOLE in what the model will read: mark it, so the
+            // next AI turn in this conversation answers nothing from an incomplete history (the same mark
+            // the staff-reply write uses) and a person is asked instead.
+            historyGaps.mark(b.binding.chatwootAccountId, decision.payload.conversationDisplayId);
+            logger.error({
               event: "turn",
               correlationId,
+              alert: true,
+              alertCode: "customer_turn_not_recorded",
+              accountId: b.binding.chatwootAccountId,
+              conversationId: decision.payload.conversationDisplayId,
+              tenantId: b.binding.tenantId,
               outcome: "turn_record_failed",
-              detail: err instanceof Error ? err.message : "unknown",
+              detail:
+                (err instanceof Error ? err.message : "unknown") +
+                " -- the turn is missing from the transcript; the next AI turn in this conversation will not answer from a history with a hole",
             });
           }
         }
