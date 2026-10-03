@@ -228,6 +228,18 @@ export function provablyComplete(actions: readonly DeliveryActionRow[]): boolean
   return !actions.some((a) => a.state === "in_progress" && !ANNOTATION_ACTIONS.includes(a.action));
 }
 
+/**
+ * A handoff whose PUBLICATION is durably complete (Codex R6 G6-4): the status change, the private
+ * note and the customer acknowledgement are all COMPLETED rows. Such a delivery was interrupted
+ * only at the close; recovery must close it, not escalate it again (its own hold is the handoff's
+ * hold, not an unfinished escalation). Anything less than all three is an unfinished own hold and
+ * is still escalated.
+ */
+export function handoffPublicationComplete(actions: readonly DeliveryActionRow[]): boolean {
+  const done = (name: string): boolean => actions.some((a) => a.action === name && a.state === "completed");
+  return done(WRITE.handoffStatus) && done(WRITE.handoffNote) && done(WRITE.handoffAck);
+}
+
 function summarise(actions: readonly DeliveryActionRow[]): Record<string, string> {
   const out: Record<string, string> = {};
   for (const a of actions) {
@@ -418,7 +430,14 @@ export async function recoverDelivery(
     return "left_open";
   };
 
-  if (!ownHold && !view.diverged && provablyComplete(actions)) {
+  // An own hold stops a delivery counting as complete -- unless it is the HANDOFF's hold and the
+  // handoff's publication is durably complete (Codex R6 G6-4).
+  const handoffPublished =
+    ownHold &&
+    view.escalationOperationId === `handoff:${identity.eventId}` &&
+    handoffPublicationComplete(actions);
+
+  if ((!ownHold || handoffPublished) && !view.diverged && provablyComplete(actions)) {
     const settled = await settleOpenActions(deps, identity, () => DISPOSITION.abandoned, base);
     if (unsettled(settled).length > 0) return keepOpenUnsettled(settled);
     await deps.ledger.complete(identity, DELIVERY_ACTION, null);
