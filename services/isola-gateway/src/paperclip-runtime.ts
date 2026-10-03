@@ -51,11 +51,10 @@
  *   including the literal "Task bridge key cannot use this API action" — is a
  *   CONFIG DEFECT: one request, no retry, no customer message.
  */
-import { createHash } from "node:crypto";
-
 import type { LedgerIdentity } from "./deliveryref.js";
 import type { SafeFetch } from "./egress.js";
 import { EgressBlockedError } from "./errors.js";
+import { turnIdempotencyKey } from "./idempotency.js";
 import {
   isAgentEscalationReason,
   type AgentRuntime,
@@ -223,23 +222,12 @@ async function readCappedText(response: Response, signal: AbortSignal, cap: numb
 }
 
 /**
- * The stable idempotency key: the ledger key `(tenant, binding, account, inbox,
- * event id, action)`. Replays, sweeper retries and worker retries all compute the
- * same value. Over 255 characters it is replaced by a sha256 of itself, which is
- * still deterministic and still unique per ledger key.
+ * The stable idempotency key: the ledger key. MOVED to `idempotency.ts` as
+ * `turnIdempotencyKey` (direct Hermes path, Step A commit 1) so the shared pipeline no
+ * longer imports this module; this is the same function under its old name, kept so the
+ * Paperclip seam and its tests are untouched.
  */
-export function paperclipIdempotencyKey(identity: LedgerIdentity, mode: string): string {
-  const raw = [
-    `isolagw:${identity.tenantId}`,
-    identity.bindingId,
-    String(identity.chatwootAccountId),
-    String(identity.chatwootInboxId),
-    identity.eventId,
-    mode,
-  ].join("|");
-  if (raw.length <= MAX_IDEMPOTENCY_KEY) return raw;
-  return `isolagw:sha256:${createHash("sha256").update(raw).digest("hex")}`;
-}
+export const paperclipIdempotencyKey: (identity: LedgerIdentity, mode: string) => string = turnIdempotencyKey;
 
 export interface PaperclipRuntimeOptions {
   baseUrl: string;

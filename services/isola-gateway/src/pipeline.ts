@@ -43,7 +43,7 @@ import { DELIVERY_ACTION, deliveryRef, type LedgerIdentity } from "./deliveryref
 import type { Failpoint } from "./failpoint.js";
 import type { Ledger, SqlClient } from "./ledger.js";
 import type { Logger } from "./log.js";
-import { paperclipIdempotencyKey } from "./paperclip-runtime.js";
+import { turnIdempotencyKey } from "./idempotency.js";
 import { isAgentEscalationReason, type AgentRuntime } from "./runtime.js";
 import {
   isReasonCode,
@@ -999,7 +999,7 @@ export async function processDelivery(
     agentId: binding.paperclipAgentId,
     runId,
     context: buildRuntimeContext(binding, payload, history, customerScope),
-    idempotencyKey: paperclipIdempotencyKey(job.identity, job.mode),
+    idempotencyKey: turnIdempotencyKey(job.identity, job.mode),
     isStillOwned: async () => ownershipStillMine(await deps.ownership.read(conversationRefOf(job))),
     signal: turnAbort.signal,
   });
