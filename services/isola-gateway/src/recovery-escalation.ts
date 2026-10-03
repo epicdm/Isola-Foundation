@@ -73,7 +73,9 @@ export const DISPOSITION = {
 export type RecoveryAlertCode =
   | "recovery_escalated_to_human"
   | "recovery_escalation_not_visible"
-  | "recovery_abandoned";
+  | "recovery_abandoned"
+  /** A disposition could not be recorded, so the delivery was left open to be swept again (Codex R6 G6-2). */
+  | "recovery_disposition_not_recorded";
 
 export interface RecoveryAlert {
   alertCode: RecoveryAlertCode;
@@ -206,7 +208,17 @@ function summarise(actions: readonly DeliveryActionRow[]): Record<string, string
   return out;
 }
 
-/** Close every action still in_progress with a disposition chosen by `codeFor`. Best effort per row. */
+/** The actions of a delivery that still have NO recorded disposition (Codex R6 G6-2). */
+function unsettled(actions: readonly DeliveryActionRow[]): string[] {
+  return actions.filter((a) => a.state === "in_progress").map((a) => a.action);
+}
+
+/**
+ * Close every action still in_progress with a disposition chosen by `codeFor`. Best effort per
+ * row, and the RESULT IS THE CONTRACT: the caller must look at what is still unsettled
+ * (`unsettled()`) before it closes the delivery, because the sweeper selects unfinished DELIVERY
+ * rows, so an in_progress action beneath a closed delivery is never looked at again.
+ */
 async function settleOpenActions(
   deps: Pick<RecoveryEscalationDeps, "ledger" | "logger">,
   identity: LedgerIdentity,
@@ -237,6 +249,10 @@ async function settleOpenActions(
  * Give up on a delivery that cannot be recovered at all (the attempt cap, a retired binding...).
  * Every open action ends `abandoned`, the delivery fails with a code, and an alert is raised.
  * NEVER silent: the alert is the handle a person picks it up by.
+ *
+ * Returns whether the delivery row was CLOSED. If any action's disposition cannot be recorded
+ * (or the rows cannot be read back to prove they were), the delivery is NOT closed: it stays
+ * recoverable and the next sweep tries again (Codex R6 G6-2).
  */
 export async function abandonDelivery(
   deps: Pick<RecoveryEscalationDeps, "ledger" | "logger" | "alertSink">,
@@ -244,7 +260,7 @@ export async function abandonDelivery(
   identity: LedgerIdentity,
   failureCode: string,
   detail: string,
-): Promise<void> {
+): Promise<boolean> {
   const base = {
     correlationId: row.correlationId,
     tenantId: row.tenantId,
@@ -253,19 +269,15 @@ export async function abandonDelivery(
     conversationId: row.conversationId,
   };
   let dispositions: Record<string, string> = {};
+  let settledOk = false;
   try {
     const settled = await settleOpenActions(deps, identity, () => DISPOSITION.abandoned, base);
     dispositions = summarise(settled);
+    settledOk = unsettled(settled).length === 0;
   } catch {
-    // The ledger is the thing that failed; the alert below still goes out.
+    // The ledger is the thing that failed; the delivery is left open and the alert below says so.
   }
-  try {
-    await deps.ledger.fail(identity, DELIVERY_ACTION, failureCode);
-  } catch {
-    // See above.
-  }
-  deps.alertSink.raise({
-    alertCode: "recovery_abandoned",
+  const alertBase = {
     correlationId: row.correlationId,
     tenantId: row.tenantId,
     accountId: row.chatwootAccountId,
@@ -273,8 +285,24 @@ export async function abandonDelivery(
     conversationId: row.conversationId,
     attempts: row.attempts,
     dispositions,
-    detail,
-  });
+  };
+  if (!settledOk) {
+    deps.alertSink.raise({
+      ...alertBase,
+      alertCode: "recovery_disposition_not_recorded",
+      detail: `${detail}; an action's disposition could not be recorded, so the delivery is left open and swept again`,
+    });
+    return false;
+  }
+  let closed = false;
+  try {
+    await deps.ledger.fail(identity, DELIVERY_ACTION, failureCode);
+    closed = true;
+  } catch {
+    // The delivery stays open; the alert below still goes out.
+  }
+  deps.alertSink.raise({ ...alertBase, alertCode: "recovery_abandoned", detail });
+  return closed;
 }
 
 /**
@@ -349,8 +377,21 @@ export async function recoverDelivery(
     view.escalationOperationId !== null &&
     ownOperations.includes(view.escalationOperationId);
 
+  // A disposition that could not be recorded keeps the delivery OPEN (Codex R6 G6-2): the sweeper
+  // only ever looks at unfinished DELIVERY rows, so an in_progress action under a closed
+  // delivery would be invisible forever. The next sweep tries again.
+  const keepOpenUnsettled = (settled: readonly DeliveryActionRow[]): RecoveryOutcome => {
+    alertFor(
+      "recovery_disposition_not_recorded",
+      settled,
+      `the disposition of ${unsettled(settled).join(", ")} could not be recorded; the delivery is left open and swept again`,
+    );
+    return "left_open";
+  };
+
   if (!ownHold && !view.diverged && provablyComplete(actions)) {
-    await settleOpenActions(deps, identity, () => DISPOSITION.abandoned, base);
+    const settled = await settleOpenActions(deps, identity, () => DISPOSITION.abandoned, base);
+    if (unsettled(settled).length > 0) return keepOpenUnsettled(settled);
     await deps.ledger.complete(identity, DELIVERY_ACTION, null);
     deps.logger.info({ ...base, event: "recovery", outcome: "provably_complete" });
     return "completed";
@@ -359,6 +400,7 @@ export async function recoverDelivery(
   // ---- 2. SUPERSEDED: a person (or another delivery's hold) already has the conversation ----
   const supersede = async (why: string, suppressionReason?: string): Promise<RecoveryOutcome> => {
     const settled = await settleOpenActions(deps, identity, () => DISPOSITION.superseded, base);
+    if (unsettled(settled).length > 0) return keepOpenUnsettled(settled);
     await deps.ledger.complete(identity, DELIVERY_ACTION, null);
     deps.logger.info({
       ...base,
@@ -546,6 +588,7 @@ export async function recoverDelivery(
     (action) => (MESSAGE_ACTIONS.includes(action) ? DISPOSITION.notSentEscalated : DISPOSITION.abandoned),
     base,
   );
+  if (unsettled(finalActions).length > 0) return keepOpenUnsettled(finalActions);
   await deps.ledger.complete(identity, DELIVERY_ACTION, null);
   alertFor(
     "recovery_escalated_to_human",
