@@ -378,6 +378,22 @@ function unreadableConversationRecord(record: unknown): string | null {
   const last = record["last_non_activity_message"];
   if (last !== null && readScannedMessage(last) === null) return "last_non_activity_message has no readable id";
 
+  // ONE ID NAMES ONE MESSAGE (Codex R6 G6-1). Validate representation consistency BEFORE any
+  // de-duplication: `readVisibleMessages` keeps the first representation of an id, so an id that
+  // is an activity line in one place and a real message in another would silently lose its real
+  // representation, leave no real message, and read as ABSENT -- a second copy of a message that
+  // may be committed. An id with conflicting representations is evidence of nothing.
+  const representation = new Map<number, boolean>();
+  for (const entry of [...messages, ...(last === null ? [] : [last])]) {
+    const parsed = readScannedMessage(entry);
+    if (parsed === null) continue;
+    const seen = representation.get(parsed.id);
+    if (seen !== undefined && seen !== parsed.isActivity) {
+      return `message ${parsed.id} is represented both as an activity line and as a real message`;
+    }
+    representation.set(parsed.id, parsed.isActivity);
+  }
+
   const lastMessage = last === null ? null : readScannedMessage(last);
   if (lastMessage !== null && lastMessage.isActivity) {
     return "last_non_activity_message is an activity line";
