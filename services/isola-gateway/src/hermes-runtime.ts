@@ -26,19 +26,32 @@
  * STILL UNVERIFIED: run-state loss on a Hermes restart (modelled as a 404), the poll-only 429
  * (irrelevant here: every stream is read), and the exact layout of the lines the charter expects.
  *
- * RULES THIS FILE ENFORCES (each pinned by tests, with a sabotage):
- *   1. NEVER POST /v1/runs twice for one ledger key: the header is ignored by the service, so the
- *      guard is HERE (and the ledger's, before this is reached). No Idempotency-Key is sent.
- *   2. EVERY run's event stream is read to the end, under the same absolute deadline and a byte cap.
- *   3. On a takeover or a spent turn the run is STOPPED and its id is remembered as CANCELLED; any
- *      output of a cancelled run, or of a run that is not the one this turn created, is DISCARDED.
- *      A 404 on /stop means "maybe finished": the output is still discarded.
- *   4. ONE absolute deadline covers the create, every poll, the stream and every body read; a
- *      response body is capped; a redirect is a config defect (the egress guard refuses it).
- *   5. Anything that is not a conforming end is NO model text and one outcome (Law 12): failed /
- *      cancelled / lost (404) / stream closed without a terminal event / no or bad envelope.
- *
- * DELIBERATE DEVIATION, flagged for review: AgentRuntimeRequest.signal says a runtime MUST start no
+ * RULES THIS FILE ENFORCES (each pinned by tests, with a sabotage). What each one does NOT promise is
+ * stated beside it (Codex DH1-DH9 round); see BRANCH-NOTES-direct-hermes-2026-10-03.md for the full list.
+ *   1. ONE POST /v1/runs per ledger key, with exactly ONE exception: a 429 on the create is retried once
+ *      with the IDENTICAL body (the service refused the first, so no run exists). The service ignores
+ *      Idempotency-Key, so the guard is ours, in three layers: the ledger's own delivery de-duplication
+ *      (before this is reached); a DURABLE `model_run` marker the pipeline claims through the ledger
+ *      immediately BEFORE the POST (survives a restart and a second instance: AgentRuntimeRequest.claimDispatch);
+ *      and an in-memory set (this process only, capped at 10,000, forgotten on restart). RESIDUAL: a crash
+ *      after the marker and before the POST escalates that turn and never retries it. No Idempotency-Key is sent.
+ *   2. Every run's event stream is read to the end WHEN IT ENDS NORMALLY. A stream that breaks mid-way lets
+ *      polling answer, but the service keeps counting that run until its own sweep, so this adapter keeps its
+ *      LOCAL slot for what is left of `remoteSweepMs` (default 300 s). A stream that ended normally without a
+ *      terminal event, or an events route that answered 404, is never an answer.
+ *   3. On a takeover or a spent turn the run is STOPPED and its id is remembered as CANCELLED; any output of a
+ *      cancelled run, or of a run that is not the one this turn created, is DISCARDED. A 404 on /stop means
+ *      "maybe finished": the output is still discarded. Ownership is looked at before each poll and once more in
+ *      finalize(), AFTER the stream has been drained; a takeover landing after that last look is caught only by
+ *      the pipeline's own recheck and write fence (a residual window, not zero).
+ *   4. The create, every poll, the event stream and the final drain run under the turn's ABSOLUTE deadline
+ *      (the drain is bounded by min(deadline, now + grace)); a response body is capped; a redirect is a config
+ *      defect (the egress guard refuses it). NOT under that deadline: the best-effort /stop has its own short
+ *      timeout (the request timeout, 3 s once the turn signal has fired). The final acceptance decision is made
+ *      AFTER the drain.
+ *   5. Anything that is not a conforming end is NO model text and one outcome (Law 12): failed / cancelled /
+ *      lost (404) / stream closed without a terminal event / no or bad envelope / no durable dispatch claim.
+ * * DELIBERATE DEVIATION, flagged for review: AgentRuntimeRequest.signal says a runtime MUST start no
  * request once it fires. This runtime sends ONE best-effort POST /stop after it, because a stop is a
  * cancellation (it removes work), not a dispatch, and the alternative is a model call that keeps
  * running after its turn is spent. It starts no create, poll or stream after the signal.
