@@ -89,6 +89,15 @@ export interface AgentRuntimeRequest {
    * went on polling under its own fresh deadline was still dispatching when another
    * worker had become eligible. So a runtime MUST start no request once this fires,
    * abort the one in flight, and stop polling.
+   *
+   * THE ONE ACCEPTED EXCEPTION (Lane A ruling, Step A+): a runtime that holds a remote run may
+   * send ONE best-effort cancellation for THAT run after the signal fires (the direct Hermes
+   * runtime sends a single `POST /v1/runs/{id}/stop`). A stop is a CANCELLATION, not a
+   * DISPATCH: it removes work, and the alternative is a model call that keeps running after its
+   * turn is spent (Step B measured that /stop halts model execution). It is sent once, never
+   * retried, and its failure changes nothing. Everything else stays forbidden after the signal:
+   * no create, no poll, no event stream, no second stop, and no write to the customer
+   * (pinned by test/direct-hermes-post-signal.test.ts).
    */
   signal?: AbortSignal;
 }
