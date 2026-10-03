@@ -45,6 +45,8 @@ Already protecting customers: the time budget, a re-check that a human has not t
 ## 6. At-most-once or at-least-once for a reply we cannot confirm
 When a send was cut off and the next worker cannot see the message, we either **never resend and hand the thread to a person (at-most-once)** or **resend automatically (at-least-once)**. At-most-once: the customer never gets the same answer twice, but now and then waits for a human to reply (no silence, since a person is asked). At-least-once: nobody is left without an answer, but a rare duplicate message appears, how rare unmeasured. **Recommendation, for your decision, not mine: at-most-once for customer-facing replies**, because a human follow-up is the fail-closed answer.
 
-Interim rule until you decide: the Paperclip path stays OFF; any sandbox test runs ONE gateway copy and ONE sweeper, test conversations only.
+Interim rule until you decide: the Paperclip path stays OFF and nothing from this branch is used in production. Running one gateway copy and one sweeper is NOT a mitigation: the code does not enforce it, and even then a live handler can overlap a recovery handler after the lease expires. Only keeping the path off protects customers.
+
+Status after Codex round 4: it found three further code defects (a delivery closed while its hand-over to a colleague was unpublished; a replay adopting another delivery's hold; an unreadable Chatwoot answer taken as proof a message was missing, which caused a second send). They are now fixed on the branch with tests. The exclusivity gap above (two workers acting, a late send) is NOT fixed and remains open pending your decision.
 
 **Nothing has been applied or deployed.**
