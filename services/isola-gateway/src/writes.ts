@@ -49,6 +49,8 @@ export { DISARMED };
 export interface WriteAuthority {
   heldEpisode: number | null;
   fenced: boolean;
+  /** The fence was closed because the TURN BUDGET ran out (not because a person took the conversation). */
+  deadlineExceeded: boolean;
 }
 
 /**
@@ -76,6 +78,8 @@ export interface WriteContext {
    */
   fence?: (action: string) => Promise<boolean>;
   authority?: WriteAuthority;
+  /** True once the delivery's turn budget is spent: no durable mutation may START after it. */
+  turnExpired?: () => boolean;
   identity: LedgerIdentity;
   /** The signed-body digest this delivery was reserved under. */
   digest: string;

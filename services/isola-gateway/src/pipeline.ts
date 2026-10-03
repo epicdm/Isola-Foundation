@@ -101,15 +101,43 @@ export type DeliveryMode = "answer" | "handoff";
 /** The runtime outcome recorded on a path that deliberately never called it. */
 export const RUNTIME_NOT_INVOKED = "not_invoked";
 
-/** A delivery that stopped because a person took the conversation: nothing further was written. */
-const SUPPRESSED_RESULT: DeliveryResult = {
-  outcome: "suppressed_in_flight",
-  runtimeOutcome: RUNTIME_NOT_INVOKED,
-  customerMessageSent: false,
-  escalated: false,
-  handoffBlocked: false,
-  needsRetry: false,
-};
+/**
+ * A delivery that stopped because a person took the conversation, or because its turn
+ * budget ran out: nothing further was written. A spent budget asks for a retry (the
+ * row stays open for the worker that resumes it after the lease); a person who holds
+ * the conversation does not.
+ */
+function suppressedResult(writes: WriteContext, runtimeOutcome: string = RUNTIME_NOT_INVOKED): DeliveryResult {
+  return {
+    outcome: "suppressed_in_flight",
+    runtimeOutcome,
+    customerMessageSent: false,
+    escalated: false,
+    handoffBlocked: false,
+    needsRetry: writes.authority?.deadlineExceeded === true,
+  };
+}
+
+const TURN_TIMEOUT = Symbol("turn_timeout");
+
+/** The value, or `TURN_TIMEOUT` when the turn budget runs out first. A rejection propagates. */
+function raceTurn<T>(promise: Promise<T>, remainingMs: number): Promise<T | typeof TURN_TIMEOUT> {
+  if (remainingMs <= 0) return Promise.resolve(TURN_TIMEOUT);
+  return new Promise<T | typeof TURN_TIMEOUT>((resolve, reject) => {
+    const timer = setTimeout(() => resolve(TURN_TIMEOUT), remainingMs);
+    if (typeof timer.unref === "function") timer.unref();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
 
 /**
  * Write names for the per-delivery idempotency guard. One constant per write so
@@ -439,12 +467,21 @@ export async function processDelivery(
   job: DeliveryJob,
 ): Promise<DeliveryResult> {
   const { binding, payload, correlationId } = job;
+  // THE TURN BUDGET (Codex R2): this delivery performs no durable mutation that STARTS
+  // after `turnDeadlineAt`, no request outlives it, and its row is not completed after
+  // it. The budget is sized at boot to end before the ledger lease does, and the
+  // recovery sweeper takes a delivery only once its lease has expired, so this worker
+  // is finished with the conversation before any other worker may begin.
+  const turnDeadlineAt = job.startedAtMs + deps.config.turnBudgetMs;
+  const turnExpired = (): boolean => deps.now() >= turnDeadlineAt;
   const target: ChatwootTarget = {
     accountId: binding.chatwootAccountId,
     conversationId: job.conversationId,
     accessToken: binding.agentBotAccessToken,
     // The tenant's own Chatwoot, when the binding names one.
     ...(binding.chatwootBaseUrl === undefined ? {} : { baseUrl: binding.chatwootBaseUrl }),
+    // Every Chatwoot request of this turn ends at the turn deadline (Codex R2).
+    remainingMs: () => Math.max(0, turnDeadlineAt - deps.now()),
   };
 
   const base = {
@@ -474,6 +511,22 @@ export async function processDelivery(
   };
 
   const finish = async (outcome: string): Promise<void> => {
+    // A late completion is REJECTED (Codex R2). After the turn budget this worker may no
+    // longer be the one that owns the delivery: the lease is about to expire, the sweeper
+    // will resume the row, and closing it here would take a delivery from the worker
+    // that is resuming it (or hide that this one never finished).
+    if (turnExpired() || writes.authority?.deadlineExceeded === true) {
+      deps.logger.error({
+        ...base,
+        event: "delivery",
+        alert: true,
+        alertCode: "turn_budget_exhausted_completion_rejected",
+        outcome,
+        detail:
+          "the turn budget was spent before this delivery could be closed; the row is left open for the worker that resumes it after the lease expires",
+      });
+      return;
+    }
     try {
       await deps.ledger.complete(job.identity, DELIVERY_ACTION, null);
     } catch (err) {
@@ -623,11 +676,34 @@ export async function processDelivery(
   // After one denial the fence latches: this delivery writes nothing more.
   // A rejected read propagates (nothing written, the sweeper retries): "I could not
   // find out who holds this" is never "nobody does".
-  const authority: NonNullable<WriteContext["authority"]> = { heldEpisode: null, fenced: false };
+  const authority: NonNullable<WriteContext["authority"]> = { heldEpisode: null, fenced: false, deadlineExceeded: false };
   writes.authority = authority;
+  writes.turnExpired = turnExpired;
+  // The turn budget closes the fence for good: the one place every wire write passes
+  // through also refuses at/after the deadline, and an ownership read that does not
+  // return before it is a denial (fail closed), never an indefinite wait.
+  const budgetSpent = (stage: string): false => {
+    authority.fenced = true;
+    authority.deadlineExceeded = true;
+    deps.logger.error({
+      ...base,
+      event: "delivery",
+      alert: true,
+      alertCode: "turn_budget_exhausted",
+      outcome: "turn_budget_exhausted",
+      stage,
+      customerMessageSent: false,
+      detail:
+        "the turn budget was spent before this write; it and every later write of this delivery were not made, and the row is left open for the worker that resumes it after the lease expires",
+    });
+    return false;
+  };
   writes.fence = async (stage: string): Promise<boolean> => {
     if (authority.fenced) return false;
-    const read = await deps.ownership.read(conversationRefOf(job));
+    if (turnExpired()) return budgetSpent(stage);
+    const raced = await raceTurn(deps.ownership.read(conversationRefOf(job)), turnDeadlineAt - deps.now());
+    if (raced === TURN_TIMEOUT) return budgetSpent(stage);
+    const read = raced;
     const mine =
       authority.heldEpisode === null
         ? ownershipStillMine(read)
@@ -830,10 +906,10 @@ export async function processDelivery(
   // (Codex R3: a takeover during readTurnHistory() still reached the runtime).
   if (!(await writes.fence?.("runtime_invoke") ?? true)) {
     await finish("suppressed_in_flight");
-    return { ...SUPPRESSED_RESULT };
+    return suppressedResult(writes);
   }
 
-  const result = await deps.runtime.invoke({
+  const invoked = deps.runtime.invoke({
     templateId: binding.templateId,
     // THE BINDING'S exposure, not a constant. A hardcoded "PUBLIC" here made
     // every INTERNAL invocation fail closed with 403 exposure_mismatch — see
@@ -845,6 +921,17 @@ export async function processDelivery(
     idempotencyKey: paperclipIdempotencyKey(job.identity, job.mode),
     isStillOwned: async () => ownershipStillMine(await deps.ownership.read(conversationRefOf(job))),
   });
+  // The runtime call is raced against the turn deadline: a runtime that never returns
+  // (or returns after the budget) must not hold the turn open past the lease. Giving up
+  // is "no answer" and the row stays open for the worker that resumes it; the abandoned
+  // call is allowed to finish on its own and its result is discarded.
+  const ran = await raceTurn(invoked, turnDeadlineAt - deps.now());
+  if (ran === TURN_TIMEOUT) {
+    invoked.catch(() => undefined);
+    budgetSpent("runtime_result");
+    return suppressedResult(writes, "model_timeout");
+  }
+  const result = ran;
 
   // ---- THE IN-FLIGHT OWNERSHIP RECHECK ------------------------------------
   //
@@ -891,7 +978,7 @@ export async function processDelivery(
       detail:
         "ownership changed while the model was running; the answer was discarded and nothing was written to the customer or to Chatwoot",
     });
-    // Closed, not left to the sweeper: a retry would re-run the model into a
+    // Closed (unless the turn budget is spent), not left to the sweeper: a retry would re-run the model into a
     // conversation a human holds. The delivery row is the ONLY ledger row — no
     // write was claimed, so there is nothing for reconciliation to resend.
     await finish("suppressed_in_flight");
@@ -943,7 +1030,7 @@ export async function processDelivery(
       // Ownership moved between the post-run recheck and the wire (the claim and any
       // reconciliation sit in between). Nothing was sent and the fence has said so.
       await finish("suppressed_in_flight");
-      return { ...SUPPRESSED_RESULT, runtimeOutcome: result.outcome };
+      return suppressedResult(writes, result.outcome);
     }
 
     if (sent.kind === "failed") {
@@ -1270,7 +1357,7 @@ async function processHandoff(
   // AI's. A person who already has it gets none of the handoff writes.
   if (hold.state !== "HUMAN_REQUESTED") {
     stopForPerson(deps, writes, base, "handoff_hold", hold);
-    return { ...SUPPRESSED_RESULT };
+    return suppressedResult(writes);
   }
   if (writes.authority !== undefined) writes.authority.heldEpisode = hold.episode;
 
@@ -1280,7 +1367,7 @@ async function processHandoff(
       deps.chatwoot.openConversation(target),
     );
   } catch (err) {
-    if (err instanceof WriteFencedError) return { ...SUPPRESSED_RESULT };
+    if (err instanceof WriteFencedError) return suppressedResult(writes);
     return blockHandoff(deps, job, target, writeDeps, writes, context, classification, teamId, {
       failedStep: "toggle_status",
       detail: err instanceof Error ? err.message : "unknown chatwoot failure",
@@ -1294,7 +1381,7 @@ async function processHandoff(
         deps.chatwoot.assignTeam(target, teamId),
       );
     } catch (err) {
-      if (err instanceof WriteFencedError) return { ...SUPPRESSED_RESULT };
+      if (err instanceof WriteFencedError) return suppressedResult(writes);
       // The conversation stays open — that half succeeded and undoing it would
       // only hide the problem from the human who has to pick this up.
       return blockHandoff(deps, job, target, writeDeps, writes, context, classification, teamId, {
@@ -1327,7 +1414,7 @@ async function processHandoff(
     note,
     true,
   );
-  if (notePosted.kind === "fenced") return { ...SUPPRESSED_RESULT }; // a person has it
+  if (notePosted.kind === "fenced") return suppressedResult(writes); // a person has it
   const noteRecorded = notePosted.kind !== "failed" && notePosted.kind !== "ambiguous";
   if (!noteRecorded) {
     // A missing note does not make the acknowledgement untrue — the
@@ -1396,7 +1483,7 @@ async function processHandoff(
     false,
   );
 
-  if (ack.kind === "fenced") return { ...SUPPRESSED_RESULT }; // a person has it; nothing was said
+  if (ack.kind === "fenced") return suppressedResult(writes); // a person has it; nothing was said
   if (ack.kind === "failed" || ack.kind === "ambiguous") {
     // Never re-sent blind: `sendGuardedMessage` has already reconciled, and
     // either proved the acknowledgement absent (failed) or could not resolve it
@@ -1553,6 +1640,14 @@ async function escalate(
   // The operation id is the delivery's own ledger identity, so a redelivery of
   // THIS webhook presents the same id and claims once — one escalation, one
   // note, one assignment, however many times Chatwoot retries.
+  // Recording the hold is itself a durable mutation: not after the turn budget.
+  if (writes.turnExpired?.() === true) {
+    if (writes.authority !== undefined) {
+      writes.authority.fenced = true;
+      writes.authority.deadlineExceeded = true;
+    }
+    return true;
+  }
   const hold = await establishHumanHold(deps, job, base, {
     operationId: `escalate:${job.identity.eventId}`,
     // `outcome` can originate from the runtime's response body, which is an

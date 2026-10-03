@@ -65,6 +65,16 @@ export interface GatewayConfig {
    * run gets picked up twice.
    */
   ledgerLeaseMs: number;
+  /**
+   * The HARD end-to-end budget of ONE delivery turn, measured from when the turn
+   * started (Codex R2). Every Chatwoot request, the runtime call, the ownership read
+   * and the write fence are bounded by `startedAt + turnBudgetMs`; after it the worker
+   * writes nothing and completes nothing. Boot refuses a budget that does not leave
+   * `TURN_LEASE_MARGIN_MS` before the ledger lease expires, because the recovery
+   * sweeper takes a delivery only AFTER its lease expired: a turn that cannot outlive
+   * its lease cannot overlap the worker that resumes it.
+   */
+  turnBudgetMs: number;
   /** How often the recovery sweeper looks for expired leases. */
   ledgerRecoveryIntervalMs: number;
   /** Maximum deliveries recovered per sweep. */
@@ -192,6 +202,14 @@ export const DEFAULT_ANSWERED_LABEL = "isola-ai-answered";
 export const DEFAULT_ESCALATED_LABEL = "isola-ai-escalated";
 /** Comfortably longer than DEFAULT_RUNTIME_TIMEOUT_MS, or a slow run is stolen. */
 export const DEFAULT_LEDGER_LEASE_MS = 5 * 60 * 1000;
+/**
+ * What the turn budget must leave before the lease expires: the lease is stamped by the
+ * database clock when the delivery is RESERVED (before the turn starts, and rounded UP
+ * to whole seconds), the budget is measured on this process's clock, a resumed turn
+ * starts after its reserve round trip, and a write can only be aborted, not recalled.
+ * 30 s is generous for all of those and cheap against a 5 minute lease.
+ */
+export const TURN_LEASE_MARGIN_MS = 30_000;
 export const DEFAULT_LEDGER_RECOVERY_INTERVAL_MS = 60 * 1000;
 export const DEFAULT_LEDGER_RECOVERY_BATCH = 20;
 /** 10 minutes — the value the previous implementation used and staff behaviour
@@ -344,6 +362,14 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
 
     ledgerUrl: str(env, "GATEWAY_LEDGER_URL"),
     ledgerLeaseMs: int(env, "GATEWAY_LEDGER_LEASE_MS", DEFAULT_LEDGER_LEASE_MS),
+    turnBudgetMs: int(
+      env,
+      "GATEWAY_TURN_BUDGET_MS",
+      Math.max(
+        1,
+        int(env, "GATEWAY_LEDGER_LEASE_MS", DEFAULT_LEDGER_LEASE_MS) - TURN_LEASE_MARGIN_MS,
+      ),
+    ),
     ledgerRecoveryIntervalMs: int(
       env,
       "GATEWAY_LEDGER_RECOVERY_INTERVAL_MS",
@@ -448,6 +474,29 @@ export function bootErrors(config: GatewayConfig): string[] {
     }
   }
 
+  // THE TURN BUDGET (Codex R2). The recovery sweeper takes a delivery only after its
+  // lease has EXPIRED, so a turn that cannot outlive its lease cannot overlap the
+  // worker that resumes it. Every awaited operation of a turn (Chatwoot requests, the
+  // runtime call, the ownership read) is bounded by `turnBudgetMs`, so the budget and
+  // each per-operation timeout are what must fit, not a sum of guesses.
+  if (config.ledgerLeaseMs <= TURN_LEASE_MARGIN_MS) {
+    errors.push(
+      `GATEWAY_LEDGER_LEASE_MS must be longer than the ${TURN_LEASE_MARGIN_MS} ms safety margin, or no turn budget can fit inside the lease.`,
+    );
+  } else if (config.turnBudgetMs <= 0) {
+    errors.push("GATEWAY_TURN_BUDGET_MS must be a positive number of milliseconds.");
+  } else if (config.turnBudgetMs + TURN_LEASE_MARGIN_MS > config.ledgerLeaseMs) {
+    errors.push(
+      `GATEWAY_TURN_BUDGET_MS plus the ${TURN_LEASE_MARGIN_MS} ms safety margin must not exceed GATEWAY_LEDGER_LEASE_MS, or a turn can still be writing when the recovery sweeper resumes the same delivery.`,
+    );
+  }
+  if (config.runtimeTimeoutMs >= config.turnBudgetMs) {
+    errors.push("GATEWAY_RUNTIME_TIMEOUT_MS must be inside GATEWAY_TURN_BUDGET_MS, or the turn is cut off before its own runtime call can finish.");
+  }
+  if (config.chatwootTimeoutMs >= config.turnBudgetMs) {
+    errors.push("GATEWAY_CHATWOOT_TIMEOUT_MS must be inside GATEWAY_TURN_BUDGET_MS: the reply and every note, status change, assignment, label and attribute are Chatwoot requests that follow the runtime.");
+  }
+
   errors.push(...paperclipBootErrors(config));
 
   return errors;
@@ -518,6 +567,12 @@ function paperclipBootErrors(config: GatewayConfig): string[] {
   }
   if (p.pollDeadlineMs >= config.runtimeTimeoutMs) {
     errors.push("GATEWAY_PAPERCLIP_POLL_DEADLINE_MS must be inside GATEWAY_RUNTIME_TIMEOUT_MS.");
+  }
+  if (p.pollDeadlineMs >= config.turnBudgetMs) {
+    errors.push("GATEWAY_PAPERCLIP_POLL_DEADLINE_MS must be inside GATEWAY_TURN_BUDGET_MS.");
+  }
+  if (p.requestTimeoutMs >= config.turnBudgetMs) {
+    errors.push("GATEWAY_PAPERCLIP_REQUEST_TIMEOUT_MS must be inside GATEWAY_TURN_BUDGET_MS.");
   }
   if (p.pollDeadlineMs >= config.ledgerLeaseMs) {
     errors.push("GATEWAY_PAPERCLIP_POLL_DEADLINE_MS must be inside GATEWAY_LEDGER_LEASE_MS, or the recovery sweeper can take a delivery that is still running.");

@@ -45,6 +45,12 @@ export interface ChatwootTarget {
    * platform rather than an exception.
    */
   baseUrl?: string;
+  /**
+   * Milliseconds left in the delivery's TURN BUDGET (Codex R2). Every request made
+   * for this target is capped to it, so no Chatwoot call can outlive the budget that
+   * is sized to fit inside the ledger lease. Absent = only the per-request timeout.
+   */
+  remainingMs?: () => number;
 }
 
 /**
@@ -359,14 +365,25 @@ export class HttpChatwootApi implements ChatwootApi {
     accessToken: string,
     /** Per-binding Chatwoot origin. Absent falls back to the configured default. */
     baseUrl?: string,
+    /** Milliseconds left in the delivery's turn budget (Codex R2). Absent = only the per-request timeout. */
+    remainingMs?: () => number,
   ): Promise<unknown> {
+    // The request ends at the per-request timeout OR at the end of the turn budget,
+    // whichever is sooner, and a request is never even sent once the budget is spent.
+    const left = remainingMs?.();
+    if (left !== undefined && left <= 0) throw new ChatwootApiError("turn budget exhausted", null);
     const controller = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, this.timeoutMs);
+    }, left === undefined ? this.timeoutMs : Math.min(this.timeoutMs, left));
     if (typeof timer.unref === "function") timer.unref();
+    // The timer stays armed through the BODY read and is cleared once, in `finally`
+    // (Codex R2: it used to be cleared as soon as the headers arrived, so a stalled body
+    // outlived every budget), and the body read is also raced against the abort signal
+    // because a body that ignores the signal must still end the request.
+    try {
 
     const headers: Record<string, string> = {
       accept: "application/json",
@@ -397,8 +414,6 @@ export class HttpChatwootApi implements ChatwootApi {
       }
       const name = err instanceof Error ? err.name : "unknown";
       throw new ChatwootApiError(`transport failure (${name})`, null);
-    } finally {
-      clearTimeout(timer);
     }
 
     if (!response.ok) {
@@ -406,11 +421,26 @@ export class HttpChatwootApi implements ChatwootApi {
       throw new ChatwootApiError(`returned HTTP ${response.status}`, response.status);
     }
 
+    let onAbort: (() => void) | null = null;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(new Error("aborted while reading the body"));
+      if (controller.signal.aborted) onAbort();
+      else controller.signal.addEventListener("abort", onAbort, { once: true });
+    });
+    aborted.catch(() => undefined);
     try {
-      return await response.json();
+      return await Promise.race([response.json(), aborted]);
     } catch {
+      // The budget ended while the body was still arriving: a timeout, not an empty
+      // body (an unread GET must not look like an empty list).
+      if (timedOut) throw new ChatwootApiError("call timed out", null);
       // A 2xx with an empty or non-JSON body is fine for the write calls.
       return null;
+    } finally {
+      if (onAbort !== null) controller.signal.removeEventListener("abort", onAbort);
+    }
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -445,6 +475,7 @@ export class HttpChatwootApi implements ChatwootApi {
       },
       target.accessToken,
       target.baseUrl,
+      target.remainingMs,
     );
     return readMessageId(payload);
   }
@@ -525,7 +556,7 @@ export class HttpChatwootApi implements ChatwootApi {
   }
 
   async getConversationRecord(target: ChatwootTarget): Promise<unknown> {
-    return this.request("GET", this.conversationPath(target, ""), undefined, target.accessToken, target.baseUrl);
+    return this.request("GET", this.conversationPath(target, ""), undefined, target.accessToken, target.baseUrl, target.remainingMs);
   }
 
   async openConversation(target: ChatwootTarget): Promise<void> {
@@ -535,6 +566,7 @@ export class HttpChatwootApi implements ChatwootApi {
       { status: "open" },
       target.accessToken,
       target.baseUrl,
+      target.remainingMs,
     );
   }
 
@@ -553,6 +585,7 @@ export class HttpChatwootApi implements ChatwootApi {
       { status: "pending" },
       target.accessToken,
       target.baseUrl,
+      target.remainingMs,
     );
   }
 
@@ -563,6 +596,7 @@ export class HttpChatwootApi implements ChatwootApi {
       { team_id: teamId },
       target.accessToken,
       target.baseUrl,
+      target.remainingMs,
     );
   }
 
@@ -573,6 +607,7 @@ export class HttpChatwootApi implements ChatwootApi {
       undefined,
       target.accessToken,
       target.baseUrl,
+      target.remainingMs,
     );
     const list = isRecord(payload) ? payload["payload"] : payload;
     if (!Array.isArray(list)) return [];
@@ -586,6 +621,7 @@ export class HttpChatwootApi implements ChatwootApi {
       { labels },
       target.accessToken,
       target.baseUrl,
+      target.remainingMs,
     );
   }
 
@@ -596,6 +632,7 @@ export class HttpChatwootApi implements ChatwootApi {
       undefined,
       target.accessToken,
       target.baseUrl,
+      target.remainingMs,
     );
     if (!isRecord(payload)) return {};
     const attributes = payload["custom_attributes"];
@@ -612,6 +649,7 @@ export class HttpChatwootApi implements ChatwootApi {
       { custom_attributes: attributes },
       target.accessToken,
       target.baseUrl,
+      target.remainingMs,
     );
   }
 }
