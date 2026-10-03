@@ -120,6 +120,14 @@ export interface HermesRuntimeOptions {
   historyMaxChars?: number;
   /** How long to wait for a finished run's stream to close before giving up on it. Default min(requestTimeoutMs, 2000). */
   streamDrainGraceMs?: number;
+  /**
+   * How long the service keeps counting a run whose event stream was NOT read to its end (Codex DH4).
+   * The service releases such a run only with its own sweep (contract s.5: runs older than 300 s). Until
+   * then the remote concurrency slot is taken, so this adapter keeps its LOCAL slot too: the gauge
+   * (`inflight()`) tells the truth and a turn that cannot get a slot is `hermes_busy`, not a request
+   * that meets a remote 429. Measured from when the run was created. Default 300 000 ms.
+   */
+  remoteSweepMs?: number;
   assertions?: HermesAssertionProvider;
   logger?: Logger;
   /**
@@ -506,6 +514,7 @@ export class HermesDirectRuntime implements AgentRuntime {
       return this.fail(request, spent(request.signal) ? HERMES_OUTCOMES.timeout : HERMES_OUTCOMES.busy);
     }
     try {
+      const hold = { holdMs: 0 };
       const releaseGlobal = await this.global.acquire(deadlineAt, request.signal);
       if (releaseGlobal === null) return this.fail(request, spent(request.signal) ? HERMES_OUTCOMES.timeout : HERMES_OUTCOMES.busy);
       try {
@@ -532,9 +541,10 @@ export class HermesDirectRuntime implements AgentRuntime {
           session_id: label,
           ...(history.messages.length > 0 ? { conversation_history: history.messages } : {}),
         };
-        return await this.execute(request, body, deadlineAt, info);
+        return await this.execute(request, body, deadlineAt, info, hold);
       } finally {
-        releaseGlobal();
+        // DH4: a run whose stream was not drained keeps its slot until the service's own sweep.
+        this.releaseSlot(releaseGlobal, hold.holdMs);
       }
     } finally {
       releaseConversation();
@@ -561,6 +571,7 @@ export class HermesDirectRuntime implements AgentRuntime {
     body: Record<string, unknown>,
     deadlineAt: number,
     info: Record<string, unknown>,
+    hold: { holdMs: number },
   ): Promise<AgentRuntimeResult> {
     const created = await this.createRun(body, deadlineAt, request.signal);
     if (created.kind === "config_defect") return this.fail(request, HERMES_OUTCOMES.configDefect);
@@ -569,6 +580,7 @@ export class HermesDirectRuntime implements AgentRuntime {
     if (created.kind === "timeout") return this.fail(request, HERMES_OUTCOMES.timeout);
 
     const runId = created.runId;
+    const createdAt = Date.now();
     info["runId"] = runId;
     const state: RunState = {
       runId,
@@ -611,8 +623,26 @@ export class HermesDirectRuntime implements AgentRuntime {
       request.signal?.removeEventListener("abort", onTurnAbort);
       info["polls"] = state.polls;
       info["stream"] = state.stream;
+      // DH4: the service counts this run until its stream is read to the end. If it was not (the
+      // connection broke, the grace ran out, the cap aborted it), the remote slot stays taken until the
+      // service's own sweep, so the local slot is held for what is left of that window.
+      if (state.stream !== "clean") {
+        const sweep = this.options.remoteSweepMs ?? 300_000;
+        hold.holdMs = Math.max(0, sweep - (Date.now() - createdAt));
+        info["slotHeldMs"] = hold.holdMs;
+      }
     }
     return result as AgentRuntimeResult;
+  }
+
+  /** Release a global slot now, or after `holdMs` (the service's own sweep window) when its run was not drained. */
+  private releaseSlot(release: () => void, holdMs: number): void {
+    if (holdMs <= 0) {
+      release();
+      return;
+    }
+    const timer = setTimeout(release, holdMs);
+    if (typeof timer.unref === "function") timer.unref();
   }
 
   private drainGraceMs(): number {

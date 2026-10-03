@@ -48,6 +48,8 @@ export class FakeRun {
   error: string | null = null;
   lost = false;
   drained = false;
+  /** When the run was created, so a server-side sweep (see FakeHermes.sweepMs) can age it out. */
+  readonly createdAt = Date.now();
   streamAttached = 0;
   streamCancelled = false;
   readonly stopCalls: number[] = [];
@@ -213,9 +215,15 @@ export class FakeHermes {
   get streams(): LoggedRequest[] {
     return this.log.filter((r) => r.method === "GET" && /^\/v1\/runs\/[^/]+\/events$/.test(r.path));
   }
+  /**
+   * The real service sweeps runs older than 300 s out of its concurrency count (contract s.5). When set,
+   * a run older than this many ms no longer counts, so a test can model the sweep without waiting 300 s.
+   */
+  sweepMs: number | null = null;
   /** Runs still counted against the concurrency cap. */
   get counted(): number {
-    return [...this.runs.values()].filter((r) => !r.drained).length;
+    const now = Date.now();
+    return [...this.runs.values()].filter((r) => !r.drained && (this.sweepMs === null || now - r.createdAt < this.sweepMs)).length;
   }
 
   private json(status: number, body: unknown, headers: Record<string, string> = {}): Response {

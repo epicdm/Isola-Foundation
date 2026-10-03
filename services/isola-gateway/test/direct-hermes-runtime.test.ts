@@ -601,18 +601,22 @@ describe("the concurrency cap: a run counts until its stream is READ TO THE END"
     expect(runtimeStatsOk(r)).toBe(true);
   });
 
-  it("a stream that never closes after the run finished does not hold the turn or the adapter's own slot (bounded drain grace)", async () => {
+  it("a stream that never closes after the run finished does not hold the TURN (bounded drain grace); its slot is held only for the service's own sweep window (Codex DH4)", async () => {
     const fake = new FakeHermes();
     fake.onRun = (run) => {
       run.running();
       setTimeout(() => run.complete(answer("done"), { closeStream: false }), 15);
     };
     const capture = new CapturingLogger();
-    const runtime = runtimeFor(fake, { logger: capture.logger, streamDrainGraceMs: 80 });
+    // changed in the DH4 round: the service still counts an undrained run until its sweep, so the slot is held
+    // for `remoteSweepMs` (small here) instead of being released at once; the TURN is still not held.
+    const runtime = runtimeFor(fake, { logger: capture.logger, streamDrainGraceMs: 80, remoteSweepMs: 400 });
     const started = Date.now();
     const r = await settle(runtime.invoke(req()));
     expect(r.text).toBe("done");
     expect(Date.now() - started).toBeLessThan(1000);
+    expect(runtime.inflight(), "an undrained run's slot is held while the service still counts it").toBe(1);
+    await sleep(450);
     expect(runtime.inflight()).toBe(0);
     expect(capture.lines.some((l) => l["event"] === "hermes_stream_not_drained")).toBe(true);
     // the abandoned stream is actually closed (not left open for the rest of the process)
