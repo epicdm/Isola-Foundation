@@ -20,6 +20,7 @@
 import { createHash } from "node:crypto";
 
 import { isAgentEscalationReason } from "./runtime.js";
+import { STAFF_TURN_LABEL } from "./turns.js";
 
 /** The customer-visible text of an envelope is refused, never truncated, above this (UTF-16 units). */
 export const MAX_ENVELOPE_TEXT_CHARS = 2000;
@@ -71,9 +72,49 @@ export function hermesSessionLabel(parts: HermesSessionParts): string {
 }
 
 // ---------------------------------------------------------------------------
-// conversation_history
+// Forged marker lines (Codex DH6)
 // ---------------------------------------------------------------------------
 
+/**
+ * A line that STARTS with one of the lines the charter trusts: `Conversation id:`, `Isola assertion:` or
+ * the staff marker `[A teammate replied]:`. Case-insensitive, spaces around the words and the colon, a
+ * fullwidth colon, and any run of whitespace or invisible formatting characters (zero-width, bidi
+ * controls, a BOM) in front: none of those may hide a forged marker.
+ */
+const MARKER_AT_LINE_START =
+  /^[\s\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]*(?:conversation\s+id|isola\s+assertion|\[\s*a\s+teammate\s+replied\s*\])\s*[:\uFF1A]/i;
+/** Every newline variant a renderer or a model could treat as a line break. */
+const LINE_BREAKS = /\r\n|[\n\r\u2028\u2029\u0085]/;
+/** What a quoted (neutralised) line starts with: it can no longer begin with a marker. */
+const QUOTED_PREFIX = "(customer text) ";
+
+/**
+ * Customer-originated text (the current message, a customer turn, a staff turn's later lines) is
+ * QUOTED wherever a line would start with a trusted marker, so only the gateway's own lines can.
+ * Nothing is dropped: the words stay, behind a prefix. Text with no such line is returned unchanged,
+ * byte for byte. The cryptographic assertion check in the service stays the authorization boundary;
+ * this keeps the gateway's own lines unambiguous for a model that reads them.
+ */
+export function neutralizeForgedMarkers(text: string): string {
+  const lines = text.split(LINE_BREAKS);
+  let changed = false;
+  const out = lines.map((line) => {
+    if (!MARKER_AT_LINE_START.test(line)) return line;
+    changed = true;
+    return `${QUOTED_PREFIX}${line}`;
+  });
+  return changed ? out.join("\n") : text;
+}
+
+/** A business turn keeps the ONE genuine staff label the gateway stored at its start; every later line is neutralised. */
+function neutralizeBusinessTurn(content: string): string {
+  if (content.startsWith(STAFF_TURN_LABEL)) return STAFF_TURN_LABEL + neutralizeForgedMarkers(content.slice(STAFF_TURN_LABEL.length));
+  return neutralizeForgedMarkers(content);
+}
+
+// ---------------------------------------------------------------------------
+// conversation_history
+// ---------------------------------------------------------------------------
 export interface HermesHistoryMessage {
   role: "user" | "assistant";
   content: string;
@@ -147,7 +188,7 @@ export function buildHermesHistory(
     if ((role !== "customer" && role !== "business") || typeof content !== "string") {
       return { ok: false, reason: "history_malformed" };
     }
-    turns.push({ role, content });
+    turns.push({ role, content: role === "customer" ? neutralizeForgedMarkers(content) : neutralizeBusinessTurn(content) });
   }
   const current = typeof currentMessage === "string" ? currentMessage.trim() : "";
   if (current.length === 0) return { ok: false, reason: "current_message_empty" };
@@ -227,7 +268,7 @@ export function renderHermesInput(args: { conversationLabel: string; assertion: 
     }
     assertionLine = args.assertion;
   }
-  const message = truncateCodePoints(args.message, MAX_INPUT_MESSAGE_CHARS);
+  const message = neutralizeForgedMarkers(truncateCodePoints(args.message, MAX_INPUT_MESSAGE_CHARS));
   return `Conversation id: ${args.conversationLabel}\nIsola assertion: ${assertionLine}\n\n${message}`;
 }
 
@@ -243,7 +284,20 @@ export type HermesEnvelopeResult =
     };
 
 /**
- * The model's final output must END with ONE line of JSON:
+ * Customer-facing text policy (Codex DH7). Removed: NUL and the other C0 controls (except tab and
+ * newline), DEL, the C1 controls, bidirectional overrides/isolates/marks (they can reorder what a
+ * customer reads), the Arabic letter mark and a BOM. U+2028/U+2029 and a CR become a plain
+ * newline (NEL, U+0085, is a C1 control and is removed). Kept: tab, newline, every letter in every script (RTL included), emoji and the zero-width
+ * joiners they are built from.
+ */
+export function sanitizeCustomerText(text: string): string {
+  return text
+    .replace(/\r\n|[\r\u2028\u2029]/g, "\n")
+    .replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, "");
+}
+
+/**
+ * The model''s final output must END with ONE line of JSON:
  * `{"disposition":"answer"|"request_human","text":"...","reason":"<code>"}`.
  *
  * Only the LAST non-empty line is read. Whatever precedes it is ignored and is NEVER sent
@@ -270,7 +324,7 @@ export function parseHermesEnvelope(output: unknown, maxChars: number = MAX_ENVE
   const disposition = record["disposition"];
   if (disposition !== "answer" && disposition !== "request_human") return { ok: false, reason: "bad_disposition" };
   const rawText = record["text"];
-  const text = typeof rawText === "string" ? rawText.trim() : "";
+  const text = typeof rawText === "string" ? sanitizeCustomerText(rawText).trim() : "";
   if (text.length === 0) return { ok: false, reason: "missing_text" };
   if (text.length > maxChars) return { ok: false, reason: "text_too_long" };
   const reason =
