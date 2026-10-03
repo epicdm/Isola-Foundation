@@ -894,6 +894,17 @@ export async function processDelivery(
   // the model is not called, nothing AI-composed is sent, and a human is shown
   // the conversation through the ordinary escalation path. An `anonymous`
   // prospect IS answered; failing closed must not mean refusing everyone.
+  // The channel-bound subject, only when it is coherent with this delivery. Computed once: the scope resolver
+  // is asked about it, and (only when the scope comes back VERIFIED) the runtime is handed the very same value
+  // so the optional assertion provider decides from the same evidence and nothing else.
+  const coherentSubject = coherentChannelSubject({
+    channelSubject: payload.channelSubject,
+    senderType: payload.senderType,
+    senderId: payload.senderId ?? null,
+    contactInboxContactId: payload.contactInboxContactId ?? null,
+    contactInboxInboxId: payload.contactInboxInboxId ?? null,
+    routedInboxId: binding.chatwootInboxId,
+  });
   let customerScope: CustomerScopeVerdict | undefined;
   if (deps.customerScope !== undefined && binding.exposure === "PUBLIC") {
     const resolved = await resolveCustomerScope(deps.customerScope, {
@@ -901,14 +912,7 @@ export async function processDelivery(
       chatwootAccountId: binding.chatwootAccountId,
       chatwootInboxId: binding.chatwootInboxId,
       chatwootConversationId: job.conversationId,
-      channelSubject: coherentChannelSubject({
-        channelSubject: payload.channelSubject,
-        senderType: payload.senderType,
-        senderId: payload.senderId ?? null,
-        contactInboxContactId: payload.contactInboxContactId ?? null,
-        contactInboxInboxId: payload.contactInboxInboxId ?? null,
-        routedInboxId: binding.chatwootInboxId,
-      }),
+      channelSubject: coherentSubject,
     });
 
     // OWNERSHIP MAY HAVE MOVED WHILE THE RESOLVER RAN (Codex D5). The gate above is
@@ -1074,6 +1078,7 @@ export async function processDelivery(
     idempotencyKey: turnIdempotencyKey(job.identity, job.mode),
     ...(history?.messageIds === undefined ? {} : { historyMessageIds: history.messageIds }),
     claimDispatch,
+    ...(customerScope?.kind === "verified" && coherentSubject !== null ? { channelSubject: coherentSubject } : {}),
     isStillOwned: async () => ownershipStillMine(await deps.ownership.read(conversationRefOf(job))),
     signal: turnAbort.signal,
   });

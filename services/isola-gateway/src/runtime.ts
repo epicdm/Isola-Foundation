@@ -95,6 +95,14 @@ export interface AgentRuntimeRequest {
    */
   claimDispatch?: () => Promise<boolean>;
   /**
+   * The channel-bound subject of THIS conversation (`conversation.contact_inbox.source_id` from the SIGNED
+   * webhook payload, after the customer-scope coherence checks), present ONLY when the customer scope for this
+   * turn is VERIFIED. It lets the optional assertion provider decide "this conversation IS the fixture" from
+   * the same evidence the scope used and from nothing else (never message text, the transcript, the editable
+   * contact phone or a model argument). Absent = no subject; the other runtimes ignore it.
+   */
+  channelSubject?: string;
+  /**
    * Whether the gateway STILL owns this conversation (the same predicate as the
    * post-run recheck). A long-running runtime may poll it and stop early on a
    * takeover; it rejects when ownership cannot be read, which means "unknown".

@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 
 import { createGateway } from "./app.js";
+import { assertionBootErrors, assertionMinterFromEnv, createFixtureAssertionProvider } from "./assertion-minter.js";
 import { bootErrors, bootWarnings, configuredBindings, loadConfig } from "./config.js";
 import { customerScopeFromEnv } from "./customer-scope.js";
 import { createLedger } from "./ledger.js";
@@ -97,6 +98,31 @@ if (!customerScopeConfig.ok) {
 }
 const customerScope = customerScopeConfig.resolver;
 
+// THE UAT FIXTURE ASSERTION MINTER is a boot gate too, and DEFAULT OFF: with no GATEWAY_ASSERTION_* variable
+// it is "off" and nothing changes. The key and the fixture wa_id were materialised from mounted Swarm secrets
+// by entrypoint.sh (`*_FILE` -> value); this process reads no file. A half-configured minter, a non-"uat"
+// environment, a minter with no direct Hermes employee, or one while customer scope is not "fixture" REFUSES
+// to start, naming variables only. Nothing in the log carries a value.
+const assertionMinter = assertionMinterFromEnv(process.env);
+const assertionErrors = assertionBootErrors({
+  minter: assertionMinter,
+  hermesAgentIds: config.hermes.agentIds,
+  customerScopeMode: customerScopeConfig.mode,
+});
+if (assertionErrors.length > 0) {
+  for (const detail of assertionErrors) {
+    logger.error({ event: "boot", outcome: "invalid_config", detail });
+  }
+  logger.error({
+    event: "boot",
+    outcome: "boot_refused",
+    detail: "assertion minter configuration failed validation; refusing to start",
+  });
+  process.exit(1);
+}
+const assertionProvider =
+  assertionMinter.mode === "fixture" ? createFixtureAssertionProvider({ minter: assertionMinter.minter, logger }) : undefined;
+
 const bindings = configuredBindings(config);
 
 logger.info({
@@ -130,6 +156,8 @@ logger.info({
   applyCustomAttributes: config.applyCustomAttributes,
   // The MODE only ("off" | "fail_closed" | "fixture"); never a fixture value.
   customerScopeMode: customerScopeConfig.mode,
+  // The MODE only ("off" | "fixture"); never a key, a wa_id or a token.
+  assertionMinterMode: assertionMinter.mode,
   toolPolicy: "no shell, no child processes, no filesystem, no mcp, no custom tools",
 });
 
@@ -156,6 +184,7 @@ const gateway = createGateway({
   turnStore: ledger,
   ownershipExec: ledger,
   ...(customerScope === undefined ? {} : { customerScope }),
+  ...(assertionProvider === undefined ? {} : { assertions: assertionProvider }),
 });
 const server = createServer(gateway.handler);
 

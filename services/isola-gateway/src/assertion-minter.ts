@@ -36,6 +36,10 @@
  */
 import { createHmac, randomBytes as nodeRandomBytes } from "node:crypto";
 
+import { hermesSessionLabel } from "./hermes-input.js";
+import type { HermesAssertionInput, HermesAssertionProvider } from "./hermes-runtime.js";
+import type { Logger } from "./log.js";
+
 export const ASSERTION_ENV = {
   environment: "GATEWAY_ASSERTION_ENV",
   key: "GATEWAY_ASSERTION_KEY",
@@ -297,4 +301,92 @@ export function assertionMinterFromEnv(
   // A still-set *_FILE variable is reported against the variable it should have become.
   if (r.mode === "off") return { mode: "invalid", problems: [ASSERTION_ENV.environment, ASSERTION_ENV.kid, ASSERTION_ENV.pnid, ASSERTION_ENV.key, ASSERTION_ENV.fixtureWaId] };
   return r;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The provider: "this conversation IS the fixture"
+// ---------------------------------------------------------------------------------------------
+
+/** What the Hermes runtime hands the provider. `channelSubject` is the coherent, signed-payload subject. */
+export interface FixtureAssertionInput extends HermesAssertionInput {
+  /**
+   * `conversation.contact_inbox.source_id` from the SIGNED webhook payload, after the same coherence checks the
+   * customer scope uses (sender is the contact, the contact_inbox is this contact's and this inbox's). Null/absent
+   * = no channel-bound subject. It is NEVER taken from the message text, the transcript, the editable contact
+   * phone or a model/tool argument.
+   */
+  channelSubject?: string | null;
+}
+
+/**
+ * The `Isola assertion:` provider for the FIXTURE slice. The conversation IS the fixture only when its
+ * channel-bound subject equals the minter's configured wa_id (digits, one leading '+' tolerated); any other
+ * sender, a missing subject, a missing message id, an unusable conversation identity or ANY minter failure
+ * yields `null`, which the runtime renders as `Isola assertion: none` and the business tools then refuse.
+ * A failure here never fails the turn and never produces a half token. The rid it signs is the very label the
+ * `Conversation id:` line carries (the verifier compares rid with the X-Conversation-Id the tool sends).
+ * Log lines carry reason CODES only.
+ */
+export function createFixtureAssertionProvider(args: { minter: AssertionMinter; logger?: Logger }): HermesAssertionProvider {
+  const note = (outcome: string, reason: string, level: "info" | "warn"): void => {
+    args.logger?.[level]({ event: "assertion", outcome, reason });
+  };
+  return {
+    async assertionFor(input: HermesAssertionInput): Promise<string | null> {
+      const subject = (input as FixtureAssertionInput).channelSubject;
+      if (typeof input.messageId !== "number" || !Number.isSafeInteger(input.messageId) || input.messageId <= 0) {
+        note("no_assertion", "no_message_id", "info");
+        return null;
+      }
+      let rid: string;
+      try {
+        rid = hermesSessionLabel({
+          tenantId: input.tenantId,
+          accountId: input.accountId,
+          inboxId: input.inboxId,
+          conversationId: input.conversationId,
+        });
+      } catch {
+        note("no_assertion", "no_conversation_identity", "warn");
+        return null;
+      }
+      try {
+        const token = args.minter.mintForSubject({ subject: subject ?? null, rid, mid: String(input.messageId) });
+        note("minted", "fixture_subject", "info");
+        return token;
+      } catch (e) {
+        if (e instanceof AssertionRefused) {
+          // not the fixture is the ordinary case for every other customer; the others are worth a warning
+          note("no_assertion", e.code, e.code === "subject_not_fixture" || e.code === "no_subject" ? "info" : "warn");
+        } else {
+          note("no_assertion", "mint_error", "warn");
+        }
+        return null;
+      }
+    },
+  };
+}
+
+/**
+ * Boot cross-checks that need more than the minter's own variables (pure; server.ts calls it and refuses to
+ * start on any entry). NAMES only. `off` checks nothing: with no GATEWAY_ASSERTION_* variable the gateway is
+ * byte-for-byte what it was.
+ */
+export function assertionBootErrors(args: {
+  minter: MinterFromEnv;
+  hermesAgentIds: readonly string[];
+  customerScopeMode: "off" | "fail_closed" | "fixture";
+}): string[] {
+  if (args.minter.mode === "off") return [];
+  if (args.minter.mode === "invalid") {
+    return [`The assertion minter is half-configured or invalid; fix these variables (names only): ${args.minter.problems.join(", ")}.`];
+  }
+  const errors: string[] = [];
+  if (args.hermesAgentIds.length === 0) {
+    errors.push("The assertion minter is configured but GATEWAY_HERMES_AGENT_IDS is empty: only the direct Hermes path uses an assertion, so nothing could ever use it.");
+  }
+  if (args.customerScopeMode !== "fixture") {
+    errors.push("The assertion minter is configured but GATEWAY_CUSTOMER_SCOPE_MODE is not \"fixture\": an assertion is minted only for a sender whose customer scope is verified, so no sender would ever get one.");
+  }
+  return errors;
 }

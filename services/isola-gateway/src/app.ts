@@ -57,7 +57,7 @@ import {
   // RoutingAgentRuntime is generic: "these agent ids go to that runtime, the rest to the fallback".
   RoutingAgentRuntime,
 } from "./paperclip-runtime.js";
-import { HermesDirectRuntime } from "./hermes-runtime.js";
+import { HermesDirectRuntime, type HermesAssertionProvider } from "./hermes-runtime.js";
 import { createAgentRuntime, type AgentRuntime } from "./runtime.js";
 import {
   createMagnusPersonalLineSource,
@@ -562,6 +562,11 @@ export interface GatewayDeps {
    * `unresolved`. `server.ts` builds it from GATEWAY_CUSTOMER_SCOPE_MODE.
    */
   customerScope?: CustomerScopeResolver;
+  /**
+   * The optional `Isola assertion:` provider for the direct Hermes path (the UAT FIXTURE minter, built by
+   * server.ts from GATEWAY_ASSERTION_*). Absent = no assertion is ever produced (`Isola assertion: none`).
+   */
+  assertions?: HermesAssertionProvider;
   safeFetch?: SafeFetch;
   /** Injected in tests; defaults to the allowlisted signed Magnus client. */
   personalLineSource?: PersonalLineSource;
@@ -675,6 +680,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
           historyMaxTurns: hermesCfg.historyMaxTurns,
           historyMaxChars: hermesCfg.historyMaxChars,
           logger,
+          ...(deps.assertions === undefined ? {} : { assertions: deps.assertions }),
           // Production wiring: no POST /v1/runs without the durable ledger claim (Codex DH1).
           requireDurableDispatch: true,
         }),

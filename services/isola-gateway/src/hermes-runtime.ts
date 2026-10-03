@@ -103,6 +103,8 @@ export interface HermesAssertionInput {
   inboxId: number;
   conversationId: number;
   messageId: number | null;
+  /** The channel-bound subject (see AgentRuntimeRequest.channelSubject); null when there is none. */
+  channelSubject?: string | null;
 }
 export interface HermesAssertionProvider {
   assertionFor(input: HermesAssertionInput): Promise<string | null>;
@@ -512,6 +514,7 @@ export class HermesDirectRuntime implements AgentRuntime {
             inboxId: identity.inboxId,
             conversationId: identity.conversationId,
             messageId: identity.messageId,
+            ...(request.channelSubject === undefined ? {} : { channelSubject: request.channelSubject }),
           })
         : null;
       input = renderHermesInput({ conversationLabel: label, assertion, message: identity.content });
