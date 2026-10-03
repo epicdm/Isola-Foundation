@@ -499,7 +499,18 @@ export function decideDelivery(args: DecideArgs): DecideResult {
 // Assembly
 // ---------------------------------------------------------------------------
 
+/**
+ * How long the handler waits for the STAFF-reply transcript write before it proceeds without it (Codex
+ * DH9). The write is awaited before the acknowledgement and before the takeover is recorded; a store
+ * blocked on a lock must not delay either, so it is bounded, well inside Chatwoot's 5 s delivery
+ * timeout. A write that has not finished by then is treated as NOT recorded: the conversation is
+ * marked as having a hole and an alert is logged.
+ */
+export const STAFF_TURN_RECORD_TIMEOUT_MS = 2_000;
+
 export interface GatewayDeps {
+  /** Override of `STAFF_TURN_RECORD_TIMEOUT_MS` (tests). */
+  staffTurnRecordTimeoutMs?: number;
   config: GatewayConfig;
   logger?: Logger;
   /** Injected in tests; defaults to the env-configured static store. */
@@ -862,7 +873,9 @@ export function createGateway(deps: GatewayDeps): Gateway {
       });
       if (turn !== null) {
         try {
-          await recordTurn(deps.turnStore, {
+          // BOUNDED (Codex DH9): the takeover below must not wait on a store that is blocked.
+          const boundMs = deps.staffTurnRecordTimeoutMs ?? STAFF_TURN_RECORD_TIMEOUT_MS;
+          const writing = recordTurn(deps.turnStore, {
             tenantId: decision.binding.tenantId,
             accountId: decision.binding.chatwootAccountId,
             conversationId: decision.conversationId,
@@ -871,6 +884,17 @@ export function createGateway(deps: GatewayDeps): Gateway {
             author: turn.author,
             content: `${STAFF_TURN_LABEL}${turn.content}`,
           });
+          // (the race below keeps a handler attached to `writing`, so a LATE rejection of an abandoned write is handled; pinned by a test)
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const outcome = await Promise.race([
+            writing.then(() => "done" as const),
+            new Promise<"timeout">((resolve) => {
+              timer = setTimeout(() => resolve("timeout"), boundMs);
+              if (typeof timer.unref === "function") timer.unref();
+            }),
+          ]);
+          if (timer !== undefined) clearTimeout(timer);
+          if (outcome === "timeout") throw new Error(`the transcript write did not finish within ${boundMs} ms (timed out)`);
         } catch (err) {
           historyGaps.mark(decision.binding.chatwootAccountId, decision.conversationId);
           logger.error({

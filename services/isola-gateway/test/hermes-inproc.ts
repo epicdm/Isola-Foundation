@@ -60,6 +60,8 @@ export class FakeTurnSql implements SqlClient {
   readonly rows: Array<Record<string, unknown>> = [];
   /** Test hook: the next N INSERTs throw (a transcript store that is down for a moment). */
   failNextInserts = 0;
+  /** Test hook: the next N INSERTs NEVER SETTLE (a transcript store blocked on a lock; Codex DH9). */
+  stallNextInserts = 0;
   /** Every INSERT attempted, including the failed ones (so a test can prove the write was TRIED). */
   insertAttempts = 0;
   /** The SQL text of every INSERT attempted, so a test can pin the PRODUCTION statement (the model below is not proof of it). */
@@ -69,6 +71,10 @@ export class FakeTurnSql implements SqlClient {
     if (/INSERT INTO conversation_turn/.test(sql)) {
       this.insertAttempts += 1;
       this.insertStatements.push(sql);
+      if (this.stallNextInserts > 0) {
+        this.stallNextInserts -= 1;
+        return new Promise<QueryResult<T>>(() => undefined);
+      }
       if (this.failNextInserts > 0) {
         this.failNextInserts -= 1;
         throw new Error("FakeTurnSql: simulated transcript store outage");
