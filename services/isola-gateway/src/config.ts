@@ -151,6 +151,13 @@ export interface GatewayConfig {
    */
   paperclip: PaperclipConfig;
 
+  /**
+   * THE DIRECT HERMES PATH (customer turns run through the long-lived public Hermes runtime via
+   * /v1/runs, no Paperclip in the loop). DEFAULT OFF: with no agent id listed, every message keeps
+   * its existing runtime and the Hermes host is not allowed out. Per employee, never global.
+   */
+  hermes: HermesConfig;
+
   // -- Personal-line voice read (read-only projection) ----------------------
   /**
    * KILL SWITCH. Defaults to FALSE, so the endpoint deploys inert and is
@@ -182,6 +189,44 @@ export interface PaperclipConfig {
   pollIntervalMs: number;
   requestTimeoutMs: number;
 }
+
+export interface HermesConfig {
+  /** paperclipAgentIds (the binding's registered employee) whose turns run directly through Hermes. Empty = the path is OFF. */
+  agentIds: string[];
+  /** e.g. http://isola_hermes-public:8642 . NEVER the owner-privileged operator gateway. */
+  baseUrl: string | null;
+  /** The service API key VALUE, from a Swarm secret attached by name (GATEWAY_HERMES_BEARER_FILE). Never logged. */
+  bearer: string | null;
+  /** Ceiling on the WHOLE turn after the slots are won (create + polls + stream + bodies). */
+  runDeadlineMs: number;
+  pollIntervalMs: number;
+  /** Per request. Measured: the API server answers nothing for up to ~6 s while a run starts. */
+  requestTimeoutMs: number;
+  /** In-flight runs this gateway allows; Hermes' own cap is 10 and counts a run until its stream is drained. */
+  maxInflight: number;
+  rateLimitBackoffMs: number;
+  historyMaxTurns: number;
+  historyMaxChars: number;
+}
+
+export const MAX_HERMES_RUN_DEADLINE_MS = 85_000;
+export const DEFAULT_HERMES_RUN_DEADLINE_MS = 75_000;
+export const DEFAULT_HERMES_POLL_INTERVAL_MS = 1_000;
+export const DEFAULT_HERMES_REQUEST_TIMEOUT_MS = 20_000;
+/** Below this, the measured start-up wait (a status GET can take ~6 s after idle) risks spurious timeouts: a warning. */
+export const HERMES_REQUEST_TIMEOUT_ADVISORY_MS = 15_000;
+export const HERMES_HARD_MAX_INFLIGHT = 10;
+export const DEFAULT_HERMES_MAX_INFLIGHT = 8;
+export const DEFAULT_HERMES_RATE_LIMIT_BACKOFF_MS = 1_000;
+/** The transcript store's window (src/turns.ts): a larger cap would claim history the store never returns. */
+export const HERMES_HISTORY_STORE_MAX_TURNS = 20;
+export const HERMES_HISTORY_STORE_MAX_CHARS = 8_000;
+/**
+ * The owner-privileged operator gateway and its bridge: the toolset reaches Odoo, grant_minutes and
+ * provision_tenant. NOTHING customer-facing may route through them.
+ */
+const PRIVILEGED_HERMES_HOSTS: readonly string[] = ["hermes-tunnel", "isolahb_bridge", "isola-hermes-bridge", "isolahb_bridge.local"];
+const PRIVILEGED_HERMES_PORT = "8645";
 
 /** The poll ceiling, agreed with Lane A (2026-10-02): <= 80 s. */
 export const MAX_PAPERCLIP_POLL_DEADLINE_MS = 80_000;
@@ -303,6 +348,23 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
     requestTimeoutMs: int(env, "GATEWAY_PAPERCLIP_REQUEST_TIMEOUT_MS", DEFAULT_PAPERCLIP_REQUEST_TIMEOUT_MS),
   };
 
+  const hermesBaseRaw = str(env, "GATEWAY_HERMES_BASE_URL");
+  const hermes: HermesConfig = {
+    agentIds: (str(env, "GATEWAY_HERMES_AGENT_IDS") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0),
+    baseUrl: hermesBaseRaw === null ? null : stripTrailingSlash(hermesBaseRaw),
+    bearer: str(env, "GATEWAY_HERMES_BEARER"),
+    runDeadlineMs: int(env, "GATEWAY_HERMES_RUN_DEADLINE_MS", DEFAULT_HERMES_RUN_DEADLINE_MS),
+    pollIntervalMs: int(env, "GATEWAY_HERMES_POLL_INTERVAL_MS", DEFAULT_HERMES_POLL_INTERVAL_MS),
+    requestTimeoutMs: int(env, "GATEWAY_HERMES_REQUEST_TIMEOUT_MS", DEFAULT_HERMES_REQUEST_TIMEOUT_MS),
+    maxInflight: int(env, "GATEWAY_HERMES_MAX_INFLIGHT", DEFAULT_HERMES_MAX_INFLIGHT),
+    rateLimitBackoffMs: int(env, "GATEWAY_HERMES_RATE_LIMIT_BACKOFF_MS", DEFAULT_HERMES_RATE_LIMIT_BACKOFF_MS),
+    historyMaxTurns: int(env, "GATEWAY_HERMES_HISTORY_MAX_TURNS", HERMES_HISTORY_STORE_MAX_TURNS),
+    historyMaxChars: int(env, "GATEWAY_HERMES_HISTORY_MAX_CHARS", HERMES_HISTORY_STORE_MAX_CHARS),
+  };
+
   const explicitAllowlist = parseAllowlist(env["EGRESS_ALLOWLIST"]);
   const derivedAllowlist = [
     hostOf(chatwootBaseUrl),
@@ -317,6 +379,8 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
     // The same stance as Magnus: a disabled path expands no capability, egress
     // included. The Paperclip host is allowed out ONLY once an employee is enabled.
     paperclip.agentIds.length > 0 ? hostOf(paperclip.baseUrl) : null,
+    // Likewise the public Hermes host: allowed out ONLY once an employee is enabled for it.
+    hermes.agentIds.length > 0 ? hostOf(hermes.baseUrl) : null,
   ].filter((h): h is string => h !== null);
   const egressAllowlist =
     explicitAllowlist.length > 0
@@ -420,6 +484,7 @@ export function loadConfig(env: EnvRecord): GatewayConfig {
     ),
 
     paperclip,
+    hermes,
 
     // The SAME boolean the egress derivation above used. Do not re-read it.
     voiceReadEnabled,
@@ -499,7 +564,98 @@ export function bootErrors(config: GatewayConfig): string[] {
   }
 
   errors.push(...paperclipBootErrors(config));
+  errors.push(...hermesBootErrors(config));
 
+  return errors;
+}
+
+/**
+ * The direct Hermes path is OFF unless an employee is listed. Once it is on, a misconfiguration
+ * REFUSES to boot: a base URL the egress guard will not admit fails every turn after startup, a
+ * missing credential turns every turn into an escalation, a run that can outlive the ledger lease
+ * lets the recovery sweeper take a delivery that is still running, and an employee enabled for
+ * BOTH execution owners would be run twice. Names only; never a value.
+ */
+function hermesBootErrors(config: GatewayConfig): string[] {
+  const h = config.hermes;
+  if (h.agentIds.length === 0) return [];
+  const errors: string[] = [];
+  const host = hostOf(h.baseUrl);
+  if (h.baseUrl === null || host === null) {
+    errors.push("GATEWAY_HERMES_AGENT_IDS is set but GATEWAY_HERMES_BASE_URL is missing or not a URL.");
+  } else {
+    let parsed: URL | null = null;
+    try {
+      parsed = new URL(h.baseUrl);
+    } catch {
+      /* hostOf already parsed it */
+    }
+    if (parsed !== null && parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      errors.push("GATEWAY_HERMES_BASE_URL must be an http:// or https:// URL: safeFetch blocks every other scheme, so every turn would fail after boot.");
+    }
+    if (parsed !== null && (parsed.username !== "" || parsed.password !== "")) {
+      errors.push("GATEWAY_HERMES_BASE_URL must not contain userinfo (user:password@): the credential is supplied only through GATEWAY_HERMES_BEARER.");
+    }
+    if (h.baseUrl.includes("?") || h.baseUrl.includes("#")) {
+      errors.push("GATEWAY_HERMES_BASE_URL must not contain a query (?) or a fragment (#): the route is appended to it, so it would become query or fragment text.");
+    }
+    if (!config.egressAllowlist.includes(host)) {
+      errors.push("The host of GATEWAY_HERMES_BASE_URL is not in the effective egress allowlist (EGRESS_ALLOWLIST): safeFetch would block every Hermes request after boot.");
+    }
+    if (PRIVILEGED_HERMES_HOSTS.includes(host) || parsed?.port === PRIVILEGED_HERMES_PORT) {
+      errors.push("GATEWAY_HERMES_BASE_URL points at the owner-privileged operator gateway or its bridge (hermes-tunnel, isolahb_bridge, port 8645): nothing customer-facing may route through it.");
+    }
+  }
+  if (h.bearer === null) {
+    errors.push("GATEWAY_HERMES_AGENT_IDS is set but GATEWAY_HERMES_BEARER (the service API key) is missing.");
+  }
+  if (config.ledgerUrl === null) {
+    errors.push("GATEWAY_HERMES_AGENT_IDS is set but GATEWAY_LEDGER_URL is missing: the conversation history sent to Hermes is the gateway's own recorded transcript, which lives in the ledger.");
+  }
+  // ONE execution owner: an employee listed for both would be run by both.
+  const paperclipIds = new Set(config.paperclip.agentIds);
+  for (const id of h.agentIds) {
+    if (paperclipIds.has(id)) {
+      errors.push("An employee is enabled for both GATEWAY_HERMES_AGENT_IDS and GATEWAY_PAPERCLIP_AGENT_IDS: one execution owner per employee.");
+      break;
+    }
+  }
+  // A PUBLIC employee only: the public Hermes runtime must never carry a staff (INTERNAL) line.
+  const enabled = new Set(h.agentIds);
+  for (const binding of configuredBindings(config)) {
+    if (enabled.has(binding.paperclipAgentId) && binding.exposure !== "PUBLIC") {
+      errors.push(`An enabled binding (account ${binding.chatwootAccountId}, inbox ${binding.chatwootInboxId}) is not PUBLIC: the public Hermes runtime serves PUBLIC employees only.`);
+    }
+  }
+  if (h.runDeadlineMs > MAX_HERMES_RUN_DEADLINE_MS) {
+    errors.push(`GATEWAY_HERMES_RUN_DEADLINE_MS exceeds the ${MAX_HERMES_RUN_DEADLINE_MS} ms ceiling.`);
+  }
+  if (h.runDeadlineMs >= config.runtimeTimeoutMs) {
+    errors.push("GATEWAY_HERMES_RUN_DEADLINE_MS must be inside GATEWAY_RUNTIME_TIMEOUT_MS.");
+  }
+  if (h.runDeadlineMs >= config.turnBudgetMs) {
+    errors.push("GATEWAY_HERMES_RUN_DEADLINE_MS must be inside GATEWAY_TURN_BUDGET_MS.");
+  }
+  if (h.requestTimeoutMs >= config.turnBudgetMs) {
+    errors.push("GATEWAY_HERMES_REQUEST_TIMEOUT_MS must be inside GATEWAY_TURN_BUDGET_MS.");
+  }
+  // The turn's real budget is the deadline PLUS one request timeout: the deadline bounds the create, the
+  // polls, the stream and every body, and the best-effort stop that follows it is itself a request.
+  if (h.runDeadlineMs + h.requestTimeoutMs >= config.ledgerLeaseMs) {
+    errors.push("GATEWAY_HERMES_RUN_DEADLINE_MS plus GATEWAY_HERMES_REQUEST_TIMEOUT_MS must be inside GATEWAY_LEDGER_LEASE_MS, or a turn plus its stop can outlive the lease and the recovery sweeper can run a second handler.");
+  }
+  if (h.maxInflight > HERMES_HARD_MAX_INFLIGHT) {
+    errors.push(`GATEWAY_HERMES_MAX_INFLIGHT exceeds Hermes' own cap of ${HERMES_HARD_MAX_INFLIGHT} concurrent runs.`);
+  }
+  if (h.pollIntervalMs < 100) {
+    errors.push("GATEWAY_HERMES_POLL_INTERVAL_MS must be at least 100 ms.");
+  }
+  if (h.historyMaxTurns > HERMES_HISTORY_STORE_MAX_TURNS) {
+    errors.push(`GATEWAY_HERMES_HISTORY_MAX_TURNS exceeds the ${HERMES_HISTORY_STORE_MAX_TURNS} turns the transcript store keeps.`);
+  }
+  if (h.historyMaxChars > HERMES_HISTORY_STORE_MAX_CHARS) {
+    errors.push(`GATEWAY_HERMES_HISTORY_MAX_CHARS exceeds the ${HERMES_HISTORY_STORE_MAX_CHARS} characters the transcript store keeps.`);
+  }
   return errors;
 }
 
@@ -649,6 +805,13 @@ export function bootWarnings(config: GatewayConfig): string[] {
   }
   if (hostOf(config.runtimeBaseUrl) === null) {
     warnings.push("RUNTIME_BASE_URL is not a valid URL: the runtime can never be reached.");
+  }
+  // MEASURED (Step B, 2026-10-03): while a Hermes run starts, the API server answers nothing for ~1 s
+  // warm and ~6 s after idle. A per-request timeout under 15 s turns that into a spurious escalation.
+  if (config.hermes.agentIds.length > 0 && config.hermes.requestTimeoutMs < HERMES_REQUEST_TIMEOUT_ADVISORY_MS) {
+    warnings.push(
+      `GATEWAY_HERMES_REQUEST_TIMEOUT_MS is under ${HERMES_REQUEST_TIMEOUT_ADVISORY_MS} ms: the Hermes API server can take ~6 s to answer a request while a run starts, so a shorter timeout can escalate a healthy turn.`,
+    );
   }
 
   if (config.ledgerUrl === null) {

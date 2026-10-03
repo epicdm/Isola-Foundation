@@ -54,8 +54,10 @@ import { processDelivery, type DeliveryJob, type DeliveryMode } from "./pipeline
 import {
   inMemoryIssueStore,
   PaperclipAgentRuntime,
+  // RoutingAgentRuntime is generic: "these agent ids go to that runtime, the rest to the fallback".
   RoutingAgentRuntime,
 } from "./paperclip-runtime.js";
+import { HermesDirectRuntime } from "./hermes-runtime.js";
 import { createAgentRuntime, type AgentRuntime } from "./runtime.js";
 import {
   createMagnusPersonalLineSource,
@@ -630,7 +632,33 @@ export function createGateway(deps: GatewayDeps): Gateway {
         new Set(paperclipCfg.agentIds),
       )
     : isolaRuntime;
-  const runtime = deps.runtime ?? configuredRuntime;
+
+  // THE DIRECT HERMES PATH, per employee and DEFAULT OFF (Step A). When an employee is listed its turns
+  // run through the public Hermes runtime and ONLY there (one execution owner; `bootErrors` refuses an
+  // employee listed for both owners). Every other employee keeps whatever it had. No Paperclip is involved:
+  // work reporting to Paperclip, if any, is asynchronous and never blocks or repeats a reply.
+  const hermesCfg = config.hermes;
+  const hermesEnabled = hermesCfg.agentIds.length > 0 && hermesCfg.baseUrl !== null && hermesCfg.bearer !== null;
+  const withHermes: AgentRuntime = hermesEnabled
+    ? new RoutingAgentRuntime(
+        configuredRuntime,
+        new HermesDirectRuntime({
+          baseUrl: hermesCfg.baseUrl as string,
+          bearer: hermesCfg.bearer as string,
+          safeFetch,
+          runDeadlineMs: hermesCfg.runDeadlineMs,
+          pollIntervalMs: hermesCfg.pollIntervalMs,
+          requestTimeoutMs: hermesCfg.requestTimeoutMs,
+          maxInflight: hermesCfg.maxInflight,
+          rateLimitBackoffMs: hermesCfg.rateLimitBackoffMs,
+          historyMaxTurns: hermesCfg.historyMaxTurns,
+          historyMaxChars: hermesCfg.historyMaxChars,
+          logger,
+        }),
+        new Set(hermesCfg.agentIds),
+      )
+    : configuredRuntime;
+  const runtime = deps.runtime ?? withHermes;
 
   const ledger = deps.ledger;
 

@@ -207,6 +207,35 @@ export const FAILURE_EXPLANATIONS: Readonly<Record<string, string>> = Object.fre
   // was interrupted could not be proven complete. The gateway does not resume it; a person does.
   recovery_escalated:
     "this conversation was interrupted (a restart or a timeout) before the gateway could confirm it was finished; the gateway did not resume it and re-sent nothing",
+  // The direct Hermes path (src/hermes-runtime.ts). None of these ever sent model text to the customer.
+  hermes_config_defect:
+    "the public Hermes runtime could not be asked (a credential, address or request defect); nothing was sent to the customer and no retry was made",
+  hermes_create_uncertain:
+    "starting the AI run failed in a way that leaves it unknown whether a run exists; it was not started again and nothing was sent",
+  hermes_duplicate_invoke:
+    "this message had already started an AI run; a second run was refused so the customer cannot be answered twice",
+  hermes_rate_limited:
+    "the AI runtime was at its concurrency limit and was still at it after one retry",
+  hermes_busy:
+    "no AI run slot became free inside the deadline (another turn for this conversation, or the runtime's cap); nothing was started",
+  hermes_history_unavailable:
+    "the conversation transcript could not be built or did not contain the message being answered; the AI does not answer without it",
+  hermes_run_failed: "the AI run ended in an error",
+  hermes_run_cancelled: "the AI run was cancelled before it produced an answer",
+  hermes_run_lost:
+    "the AI runtime no longer knows this run (it restarted, or the run expired); the run was not started again",
+  hermes_run_mismatch:
+    "the AI runtime answered about a different run than the one this turn started; that answer was not used",
+  hermes_stream_closed_early:
+    "the AI run's event stream ended without saying how the run finished; no answer was used",
+  hermes_response_too_large:
+    "a response from the AI runtime exceeded the size limit; the run was stopped",
+  hermes_envelope_invalid:
+    "the AI answered, but not in the required one-line format, so none of its text was sent to the customer",
+  hermes_envelope_text_too_long:
+    "the AI's reply was longer than the allowed length and was not sent",
+  hermes_ownership_lost:
+    "a person took the conversation while the AI was working; the run was stopped and its answer discarded",
 });
 
 /** What the note says about opening the conversation: an intention and a way to check, never a past fact. */

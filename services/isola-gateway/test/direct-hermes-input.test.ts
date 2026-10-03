@@ -23,8 +23,8 @@ import {
   renderHermesInput,
   truncateCodePoints,
 } from "../src/hermes-input.js";
-import type { QueryResult, SqlClient } from "../src/ledger.js";
 import { classifyTurn, readTurnHistory, recordTurn } from "../src/turns.js";
+import { FakeTurnSql } from "./hermes-inproc.js";
 
 const PARTS = { tenantId: "tenant-acme", accountId: 1, inboxId: 7, conversationId: 42 };
 const GOLDEN = "igw1-4a1fcf7f60b568d1021060c3b82275b44c4dc2f98d39c9921be0860b94cdf03a";
@@ -211,28 +211,6 @@ describe("buildHermesHistory: the same conversation's recorded transcript, minus
     expect(solo).toEqual({ ok: true, messages: [], droppedForCaps: true });
   });
 });
-
-// A faithful in-memory model of the two statements the store runs (NOT proof of the SQL text).
-class FakeTurnSql implements SqlClient {
-  readonly rows: Array<Record<string, unknown>> = [];
-  async query<T = Record<string, unknown>>(sql: string, params: readonly unknown[] = []): Promise<QueryResult<T>> {
-    if (/INSERT INTO conversation_turn/.test(sql)) {
-      const [tenant, account, conversation, message, role, author, content] = params as unknown as [string, number, number, number, string, string, string];
-      const exists = this.rows.some((r) => r["account"] === account && r["message"] === message);
-      if (!exists) this.rows.push({ tenant, account, conversation, message, role, author, content });
-      return { rows: [] as unknown as T[], rowCount: exists ? 0 : 1 };
-    }
-    if (/FROM conversation_turn/.test(sql) && /ORDER BY chatwoot_message_id DESC/.test(sql)) {
-      const [account, conversation, limit] = params as unknown as [number, number, number];
-      const picked = this.rows
-        .filter((r) => r["account"] === account && r["conversation"] === conversation)
-        .sort((a, b) => (b["message"] as number) - (a["message"] as number))
-        .slice(0, limit);
-      return { rows: picked.map((r) => ({ role: r["role"], content: r["content"] })) as unknown as T[], rowCount: picked.length };
-    }
-    throw new Error("FakeTurnSql: unexpected statement");
-  }
-}
 
 describe("the transcript source: private notes, activity lines and OTHER conversations never reach the history", () => {
   async function record(store: FakeTurnSql, conversationId: number, messageId: number, payload: Parameters<typeof classifyTurn>[0]): Promise<void> {
