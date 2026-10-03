@@ -341,6 +341,29 @@ export function readVisibleMessages(record: unknown): ScannedMessage[] {
   return out;
 }
 
+/**
+ * Why a `conversations#show` body cannot be trusted to PROVE a message absent, or null when
+ * it is well formed. Well formed means: an object whose `messages` is an array and which
+ * carries the `last_non_activity_message` field (null is legitimate: a conversation with no
+ * real message yet), and every message in either place has a finite numeric `id`.
+ *
+ * The presence of `last_non_activity_message` is UNVERIFIED against the installed 4.18
+ * build (the 4.16.1 partial was read, and always emitted it). If 4.18 omits it, every
+ * reconciliation becomes inconclusive: loud (a human is asked), never a duplicate.
+ */
+function unreadableConversationRecord(record: unknown): string | null {
+  if (!isRecord(record)) return "not an object";
+  const messages = record["messages"];
+  if (!Array.isArray(messages)) return "messages is not a list";
+  if (!("last_non_activity_message" in record)) return "last_non_activity_message is missing";
+  for (const entry of messages) {
+    if (readScannedMessage(entry) === null) return "a message has no readable id";
+  }
+  const last = record["last_non_activity_message"];
+  if (last !== null && readScannedMessage(last) === null) return "last_non_activity_message has no readable id";
+  return null;
+}
+
 export class HttpChatwootApi implements ChatwootApi {
   private readonly baseUrl: string;
   private readonly safeFetch: SafeFetch;
@@ -529,6 +552,19 @@ export class HttpChatwootApi implements ChatwootApi {
       if (message.deliveryRef === deliveryRef) {
         return { kind: "found", messageId: message.id };
       }
+    }
+
+    // ONLY A WELL-FORMED RECORD CAN PROVE ABSENCE (Codex R4 G4-3). `request()` returns
+    // `null` for a 2xx whose body is empty or not JSON, and a lenient reader turns every
+    // unreadable shape into "no visible messages" -- which the code below would call
+    // ABSENT, and the caller would then send a second copy of a message that may well be
+    // there. An instrument that could not read is not a negative finding (Laws 11, 23).
+    const unreadable = unreadableConversationRecord(payload);
+    if (unreadable !== null) {
+      return {
+        kind: "inconclusive",
+        detail: `the conversation record could not be read as a conversation (${unreadable}); absence cannot be proven`,
+      };
     }
 
     if (pivotMessageId === null) {
