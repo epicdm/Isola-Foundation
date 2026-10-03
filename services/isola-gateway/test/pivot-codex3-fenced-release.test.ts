@@ -159,8 +159,13 @@ function sweeperFor(deps: PipelineDeps, chatwoot: StubChatwootApi, capture: Capt
   });
 }
 
-describe("F4 (the PATH): a reply the turn budget fenced is sent by the worker that resumes the delivery", () => {
-  it("A's budget runs out after it claimed the reply and before it sent: ZERO messages from A; the sweeper then sends EXACTLY ONE and closes the reply row as completed", async () => {
+// CHANGED (Codex R5, Lane A direction): the sweeper no longer RESUMES a delivery, so it no longer
+// sends the reply a fenced worker did not send. What F4 protected still holds and is asserted
+// below: the fenced reply is never reported as completed (a failed row is terminal and would have
+// been), nothing is lost silently, and the delivery ends with a recorded disposition and a person
+// asked. The reply itself is a human's job now.
+describe("F4 (the PATH): a reply the turn budget fenced is NOT reported completed; the sweeper escalates it, recorded, and sends nothing", () => {
+  it("A's budget runs out after it claimed the reply and before it sent: ZERO messages from A and from the sweeper; the reply row ends not_sent_escalated (never 'completed'); a person is asked", async () => {
     const { deps, chatwoot, ledger, capture } = build(true);
     const job = makeJob(0);
     await reserve(ledger, job);
@@ -175,8 +180,12 @@ describe("F4 (the PATH): a reply the turn budget fenced is sent by the worker th
     const resumed = await sweeperFor(deps, chatwoot, capture).sweep();
 
     expect(resumed).toBe(1);
-    expect(chatwoot.customerMessages, "Codex's probe: the resumed delivery sent ZERO customer messages").toHaveLength(1);
-    expect(rowState(ledger, job, "reply")).toBe("completed");
+    expect(chatwoot.customerMessages, "recovery never sends a customer message").toHaveLength(0);
+    // The F4 regression guard: a fenced, unsent reply must never read as completed.
+    expect(rowState(ledger, job, "reply")).not.toBe("completed");
+    expect(rowState(ledger, job, "reply")).toBe("failed");
+    expect(chatwoot.privateNotes, "a person is told").toHaveLength(1);
+    expect(chatwoot.statusToggles, "and shown the conversation").toHaveLength(1);
     expect(rowState(ledger, job, "delivery")).toBe("completed");
   });
 

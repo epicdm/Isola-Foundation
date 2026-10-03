@@ -28,11 +28,10 @@
 import { describe, expect, it } from "vitest";
 
 import { bindingIdentity, deliveryRef } from "../src/deliveryref.js";
+import { ChatwootApiError } from "../src/errors.js";
 import { DISARMED } from "../src/failpoint.js";
 import { PostgresLedger, type QueryResult } from "../src/ledger.js";
-import { processDelivery, type DeliveryJob, type PipelineDeps } from "../src/pipeline.js";
 import { createSweeper, MAX_RECOVERY_ATTEMPTS } from "../src/recovery.js";
-import { parseWebhookPayload } from "../src/webhook.js";
 import { sendGuardedMessage, type WriteContext, type WriteDeps } from "../src/writes.js";
 import {
   ACCOUNT_ID,
@@ -43,7 +42,6 @@ import {
   INBOX_ID,
   InMemoryOwnershipGate,
   makeBinding,
-  messageCreatedPayload,
   StubAgentRuntime,
   StubChatwootApi,
   TENANT_ID,
@@ -365,100 +363,42 @@ describe("PostgresLedger (production SQL): unsettledActions", () => {
 // 4. The cap: repeated release cannot loop forever, and cannot reset the delivery cap
 // ---------------------------------------------------------------------------
 
-class ClockAdvancingLedger extends FakeLedger {
-  onClaim: ((action: string) => void) | null = null;
-  override async claimAction(...args: Parameters<FakeLedger["claimAction"]>): ReturnType<FakeLedger["claimAction"]> {
-    const result = await super.claimAction(...args);
-    this.onClaim?.(args[1]);
-    return result;
-  }
-}
-
-describe("the delivery attempts cap is not reset by repeated release", () => {
-  it("a delivery whose reply is fenced and released on EVERY attempt is abandoned and alerted at the cap; no reply is ever sent", async () => {
+// CHANGED (Codex R5, Lane A direction): recovery no longer re-drives a delivery, so a delivery can no
+// longer be fenced and released on every attempt by the sweeper. What the cap protected is still
+// true and is asserted here against the thing that CAN now repeat: an escalation that never becomes
+// visible (the status change fails every time). It must end at the cap, ALERTED, with a single
+// note across every attempt and no customer message, never an endless quiet loop.
+describe("the delivery attempts cap is not reset by repeated recovery attempts", () => {
+  it("a delivery whose escalation is NEVER visible is abandoned and alerted at the cap; one note in total; no reply is ever sent", async () => {
     const chatwoot = new StubChatwootApi();
-    const ledger = new ClockAdvancingLedger();
+    const ledger = new FakeLedger();
     const capture = new CapturingLogger();
-    let t = 0;
-    const now = () => t;
     const config = envConfig({ GATEWAY_LEDGER_LEASE_MS: "300000" });
-    // Every claim of the reply moves the clock past the turn budget: the write is fenced and released.
-    ledger.onClaim = (action) => {
-      if (action === "reply") t += config.turnBudgetMs + 1_000;
-    };
     const ownership = new InMemoryOwnershipGate();
     const binding = makeBinding();
-    const job: DeliveryJob = {
-      correlationId: "corr-cap",
-      deliveryId: "delivery-cap",
-      identity: { ...IDENTITY, eventId: "delivery:cap" },
-      digest: "digest-cap",
-      binding,
-      payload: parseWebhookPayload(Buffer.from(JSON.stringify(messageCreatedPayload())))!,
-      conversationId: CONVERSATION_DISPLAY_ID,
-      startedAtMs: 0,
-      mode: "answer",
-      classification: null,
-    };
-    chatwoot.conversationRecord = {
-      id: CONVERSATION_DISPLAY_ID,
-      status: "pending",
-      meta: { assignee: null },
-      custom_attributes: {},
-      messages: [
-        {
-          id: job.payload.messageId,
-          content: "hi",
-          content_type: "text",
-          message_type: 0,
-          private: false,
-          created_at: 1_786_459_000,
-          sender: { type: "contact", id: 55 },
-          attachments: [],
-          content_attributes: {},
-        },
-      ],
-      last_non_activity_message: {
-        id: job.payload.messageId,
-        content: "hi",
-        content_type: "text",
-        message_type: 0,
-        private: false,
-        created_at: 1_786_459_000,
-        content_attributes: {},
-      },
-    };
-    const deps: PipelineDeps = {
-      config,
-      chatwoot,
-      runtime: StubAgentRuntime.answering("Nine to five."),
-      logger: capture.logger,
-      ledger,
-      ownership,
-      failpoint: DISARMED,
-      now,
-    };
+    chatwoot.openConversationFailure = new ChatwootApiError("returned HTTP 500", 500);
+    const identity = { ...IDENTITY, eventId: "delivery:cap" };
     await ledger.reserve({
-      identity: job.identity,
-      digest: job.digest,
-      correlationId: job.correlationId,
-      conversationId: job.conversationId,
-      messageId: job.payload.messageId,
+      identity,
+      digest: "digest-cap",
+      correlationId: "corr-cap",
+      conversationId: CONVERSATION_DISPLAY_ID,
+      messageId: 9001,
       mode: "answer",
       leaseMs: LEASE,
     });
-    await processDelivery(deps, job);
+    await ledger.claimAction(identity, "reply", "digest-cap", "corr-cap", LEASE);
 
     const sweeper = createSweeper({
       config,
       ledger,
       bindingStore: { list: () => [binding] },
       chatwoot,
-      runtime: StubAgentRuntime.answering("Nine to five."),
+      runtime: StubAgentRuntime.answering("must not be called"),
       logger: capture.logger,
       ownership,
       failpoint: DISARMED,
-      now,
+      now: () => Date.now(),
     });
     let sweeps = 0;
     for (; sweeps < MAX_RECOVERY_ATTEMPTS + 4; sweeps += 1) {
@@ -468,10 +408,13 @@ describe("the delivery attempts cap is not reset by repeated release", () => {
       if (delivery?.[1].state === "failed") break;
     }
 
-    expect(chatwoot.customerMessages, "a reply was sent although every attempt was fenced").toHaveLength(0);
+    expect(chatwoot.customerMessages, "a reply was sent by recovery").toHaveLength(0);
+    expect(chatwoot.privateNotes, "the note must be posted once across every attempt, not once per attempt").toHaveLength(1);
     const abandoned = capture.lines.filter((r) => r["alertCode"] === "recovery_attempts_exhausted");
-    expect(abandoned, "repeated release must end in the cap, with an alert").toHaveLength(1);
+    expect(abandoned, "repeated failure must end in the cap, with an alert").toHaveLength(1);
     expect(sweeps, "the cap did not bound the loop").toBeLessThanOrEqual(MAX_RECOVERY_ATTEMPTS);
+    const replyRow = [...ledger.rows.entries()].find(([k]) => k.endsWith("|reply") && k.includes("delivery:cap"));
+    expect(replyRow?.[1].state, "the open reply action must not stay in_progress under a failed delivery").toBe("failed");
   });
 
   it("DISTINCTNESS: release never touches the delivery row's attempts", async () => {

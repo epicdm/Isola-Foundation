@@ -140,7 +140,10 @@ describe("2. a duplicate after a gateway restart", () => {
 });
 
 describe("3. a restart after durable enqueue but before processing", () => {
-  it("eventually produces exactly one reply, via the recovery sweeper", async () => {
+  // CHANGED (Codex R5, Lane A direction): recovery no longer RESUMES a delivery (re-reads the
+  // message, re-runs the model, sends a reply). It escalates it ONCE to a person. These tests used
+  // to assert the automatic reply; they now assert the escalation and that NOTHING is sent.
+  it("is escalated to a person exactly once by the recovery sweeper, and NOT answered automatically", async () => {
     const ledger = new FakeLedger();
     const chatwoot = new StubChatwootApi();
     chatwoot.conversationRecord = conversationRecord();
@@ -176,12 +179,15 @@ describe("3. a restart after durable enqueue but before processing", () => {
     });
 
     expect(await sweeper.sweep()).toBe(1);
-    expect(runtime.requests).toHaveLength(1);
-    expect(chatwoot.customerMessages).toHaveLength(1);
+    expect(runtime.requests, "the model is never re-driven").toHaveLength(0);
+    expect(chatwoot.customerMessages, "no automatic reply after a restart").toHaveLength(0);
+    expect(chatwoot.privateNotes, "one note for the person").toHaveLength(1);
+    expect(chatwoot.statusToggles, "the conversation is opened").toHaveLength(1);
 
-    // And sweeping again does not answer a second time.
+    // And sweeping again does nothing more.
     expect(await sweeper.sweep()).toBe(0);
-    expect(chatwoot.customerMessages).toHaveLength(1);
+    expect(chatwoot.privateNotes).toHaveLength(1);
+    expect(chatwoot.customerMessages).toHaveLength(0);
   });
 
   it("does NOT answer when a human took the conversation over during the outage", async () => {
@@ -221,10 +227,12 @@ describe("3. a restart after durable enqueue but before processing", () => {
 
     expect(runtime.requests).toHaveLength(0);
     expect(chatwoot.customerMessages).toHaveLength(0);
+    expect(chatwoot.privateNotes, "a person already holds it: nothing is written").toHaveLength(0);
+    expect(chatwoot.statusToggles).toHaveLength(0);
     // `status_not_pending` is evaluated before `human_assigned` — the existing,
     // deliberate predicate order. Either is a correct refusal; what matters is
-    // that the resumed delivery was suppressed rather than answered.
-    expect(logger.withOutcome("suppressed_on_resume")[0]?.["suppressionReason"]).toBe(
+    // that the recovered delivery was superseded rather than answered or re-escalated.
+    expect(logger.withOutcome("escalation_superseded")[0]?.["suppressionReason"]).toBe(
       "status_not_pending",
     );
   });
@@ -265,7 +273,8 @@ describe("3. a restart after durable enqueue but before processing", () => {
 
     expect(runtime.requests).toHaveLength(0);
     expect(chatwoot.customerMessages).toHaveLength(0);
-    expect(logger.withOutcome("suppressed_on_resume")[0]?.["suppressionReason"]).toBe(
+    expect(chatwoot.privateNotes).toHaveLength(0);
+    expect(logger.withOutcome("escalation_superseded")[0]?.["suppressionReason"]).toBe(
       "human_assigned",
     );
   });
@@ -324,9 +333,9 @@ describe("4a. the crash window itself, made deterministic by the failpoint", () 
     expect(line?.["chatwootMessageId"]).toBe(4242);
   });
 
-  it("still answers when the reply is genuinely absent, not merely unrecorded", async () => {
+  it("does NOT answer when the reply is genuinely absent; it escalates to a person (CHANGED, Codex R5)", async () => {
     // The mirror case: same claimed-but-incomplete state, but Chatwoot does
-    // NOT have the message. Recovery must go on to answer.
+    // NOT have the message. Recovery used to go on to answer; it now asks a person.
     const ledger = new FakeLedger();
     const chatwoot = new StubChatwootApi();
     chatwoot.conversationRecord = conversationRecord();
@@ -356,8 +365,10 @@ describe("4a. the crash window itself, made deterministic by the failpoint", () 
       now: () => Date.now(),
     }).sweep();
 
-    expect(runtime.requests).toHaveLength(1);
-    expect(chatwoot.customerMessages).toHaveLength(1);
+    expect(runtime.requests).toHaveLength(0);
+    expect(chatwoot.customerMessages).toHaveLength(0);
+    expect(chatwoot.privateNotes).toHaveLength(1);
+    expect(chatwoot.statusToggles).toHaveLength(1);
   });
 });
 
@@ -641,11 +652,13 @@ describe("9. lifecycle enforcement on the recovery path", () => {
 
   // Positive control: the refusals above must be caused by lifecycle, not by a
   // broken sweeper. Same fixture, accepted lifecycle, and the reply goes out.
-  it("positive control — an accepted agent IS replayed exactly once", async () => {
+  it("positive control — an accepted agent IS recovered exactly once (escalated to a person, not replayed: CHANGED, Codex R5)", async () => {
     const r = await sweepWith(makeBinding({ lifecycle: "accepted" }));
     expect(r.swept).toBe(1);
-    expect(r.runtime.requests).toHaveLength(1);
-    expect(r.chatwoot.customerMessages).toHaveLength(1);
+    expect(r.runtime.requests).toHaveLength(0);
+    expect(r.chatwoot.customerMessages).toHaveLength(0);
+    expect(r.chatwoot.privateNotes).toHaveLength(1);
+    expect(r.chatwoot.statusToggles).toHaveLength(1);
   });
 });
 
@@ -693,9 +706,10 @@ describe("10. recovery sweeper applies the same precedence", () => {
     expect(r.chatwoot.customerMessages).toHaveLength(0);
   });
 
-  it("active + accepted DOES replay — the refusals above are lifecycle/status, not breakage", async () => {
+  it("active + accepted IS recovered (escalated once) — the refusals above are lifecycle/status, not breakage", async () => {
     const r = await reasonFor(makeBinding({ status: "active", lifecycle: "accepted" }));
     expect(r.swept).toBe(1);
-    expect(r.chatwoot.customerMessages).toHaveLength(1);
+    expect(r.chatwoot.customerMessages).toHaveLength(0);
+    expect(r.chatwoot.statusToggles).toHaveLength(1);
   });
 });
