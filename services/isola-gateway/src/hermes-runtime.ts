@@ -540,13 +540,17 @@ export class HermesDirectRuntime implements AgentRuntime {
         if (request.claimDispatch === undefined) {
           if (this.options.requireDurableDispatch === true) return this.fail(request, HERMES_OUTCOMES.dispatchUnrecorded);
         } else {
-          let first: boolean;
-          try {
-            first = await request.claimDispatch();
-          } catch {
-            return this.fail(request, HERMES_OUTCOMES.dispatchUnrecorded);
-          }
-          if (!first) return this.fail(request, HERMES_OUTCOMES.duplicateInvoke);
+          // BOUNDED (Codex N1): a claim that never settles must not hold this turn, its slots, or the
+          // capacity of every later turn. It ends at the deadline or at the turn's cancellation; a
+          // claim that resolves LATE changes nothing here (this method has already returned, so no
+          // POST can follow) and whatever it recorded durably STAYS recorded, so a redelivery
+          // escalates and never POSTs.
+          const claimed = await this.boundedClaim(request.claimDispatch, request.signal, deadlineAt);
+          if (claimed === "stalled") return this.fail(request, HERMES_OUTCOMES.timeout);
+          if (claimed === "error") return this.fail(request, HERMES_OUTCOMES.dispatchUnrecorded);
+          if (claimed === "already") return this.fail(request, HERMES_OUTCOMES.duplicateInvoke);
+          // (A fresh claim that answers after the deadline in the same tick is stopped by `createRun`, which
+          // sends nothing past `deadlineAt`; the marker stays. Pinned by a test that blocks past the deadline.)
         }
         const body: Record<string, unknown> = {
           input,
@@ -563,6 +567,49 @@ export class HermesDirectRuntime implements AgentRuntime {
       releaseConversation();
       this.dropIdleConversation(label);
     }
+  }
+
+  /**
+   * The durable dispatch claim, bounded by the absolute deadline and by the turn's cancellation (Codex N1).
+   * "first": a fresh claim, "already": an earlier attempt claimed it, "error": the ledger could not record
+   * it, "stalled": it did not answer in time (the claim is NOT undone: if it lands later it stays recorded).
+   * The abandoned promise keeps the `.then(..., reject handler)` attached below, so a late rejection is never
+   * an unhandled rejection.
+   */
+  private boundedClaim(
+    claim: () => Promise<boolean>,
+    signal: AbortSignal | undefined,
+    deadlineAt: number,
+  ): Promise<"first" | "already" | "error" | "stalled"> {
+    let pending: Promise<boolean>;
+    try {
+      pending = Promise.resolve(claim());
+    } catch {
+      return Promise.resolve("error");
+    }
+    return new Promise((resolve) => {
+      let done = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const onAbort = (): void => end("stalled");
+      const end = (verdict: "first" | "already" | "error" | "stalled"): void => {
+        if (done) return;
+        done = true;
+        if (timer !== undefined) clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(verdict);
+      };
+      if (spent(signal)) {
+        end("stalled");
+        return;
+      }
+      timer = setTimeout(() => end("stalled"), Math.max(0, deadlineAt - Date.now()));
+      if (typeof timer.unref === "function") timer.unref();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      pending.then(
+        (first) => end(first ? "first" : "already"),
+        () => end("error"),
+      );
+    });
   }
 
   private conversationSemaphore(label: string): Semaphore {
