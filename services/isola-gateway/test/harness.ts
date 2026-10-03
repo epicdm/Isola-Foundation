@@ -8,13 +8,14 @@ import type { AddressInfo } from "node:net";
 
 import { createGateway, type Gateway, type GatewayDeps } from "../src/app.js";
 import type { Binding } from "../src/bindings.js";
-import type { ChatwootApi, ChatwootTarget, ReconcileResult } from "../src/chatwoot.js";
-import { DELIVERY_ACTION, type LedgerIdentity } from "../src/deliveryref.js";
+import { reconcileFromRecord, type ChatwootApi, type ChatwootTarget, type ReconcileResult } from "../src/chatwoot.js";
+import { DELIVERY_ACTION, DELIVERY_REF_ATTRIBUTE, type LedgerIdentity } from "../src/deliveryref.js";
 import type { SafeFetch } from "../src/egress.js";
 import { ChatwootApiError } from "../src/errors.js";
 import {
   LedgerUnavailableError,
   type ClaimResult,
+  type DeliveryActionRow,
   type DeliveryState,
   type Ledger,
   type RecoverableDelivery,
@@ -512,6 +513,78 @@ export class StubChatwootApi implements ChatwootApi {
 
   private nextMessageId = 5000;
 
+  /**
+   * THE REAL VISIBILITY WINDOW (Codex R5 G5-2). The default stub answers a reconciliation by
+   * searching `stored`, an UNRESTRICTED map of every reference ever posted: stronger visibility
+   * than any AgentBot has, which is how a test passed while the production client could not
+   * prove a released note absent. An AgentBot sees exactly two messages on a conversation
+   * record: the single NEWEST message (which may be an activity line) and the newest
+   * NON-activity message (which includes private notes). A newer message HIDES an older one.
+   *
+   * `useVisibilityWindow(inboundId)` switches this stub to model that: every message posted
+   * (and every status/assignment activity line) is appended to a conversation, the record the
+   * bot reads is built from its newest two, and a reconciliation makes the SAME decision the
+   * production client makes (`reconcileFromRecord`) from that record. Message ids stay
+   * monotone and above the inbound id, as Chatwoot's are. Tests that make claims about
+   * visibility MUST use it.
+   */
+  private windowMessages: Array<{
+    id: number;
+    messageType: 0 | 1 | 2;
+    isPrivate: boolean;
+    ref: string | null;
+  }> | null = null;
+
+  /**
+   * Serve an ARBITRARY body as the conversation record (e.g. `{}` or `null`: a 200 that is
+   * not a conversation, Codex R5 G5-4). Reconciliation then makes the PRODUCTION decision over
+   * exactly that body. Undefined = off.
+   */
+  servedRecord: unknown = undefined;
+
+  useVisibilityWindow(inboundMessageId: number): void {
+    this.windowMessages = [{ id: inboundMessageId, messageType: 0, isPrivate: false, ref: null }];
+    this.nextMessageId = Math.max(this.nextMessageId, inboundMessageId + 100);
+  }
+
+  /** What the production client's `getConversationRecord` returns under the window model. */
+  visibleConversationRecord(): unknown {
+    const all = this.windowMessages ?? [];
+    const render = (m: { id: number; messageType: number; isPrivate: boolean; ref: string | null }) => ({
+      id: m.id,
+      message_type: m.messageType,
+      private: m.isPrivate,
+      created_at: 1_786_459_000 + m.id,
+      content_attributes: m.ref === null ? {} : { [DELIVERY_REF_ATTRIBUTE]: m.ref },
+    });
+    const newest = all.length === 0 ? null : all.reduce((a, b) => (b.id > a.id ? b : a));
+    const newestReal = all.filter((m) => m.messageType !== 2).reduce<(typeof all)[number] | null>(
+      (a, b) => (a === null || b.id > a.id ? b : a),
+      null,
+    );
+    return {
+      messages: newest === null ? [] : [render(newest)],
+      last_non_activity_message: newestReal === null ? null : render(newestReal),
+      custom_attributes: {},
+    };
+  }
+
+  /** Append an inbound customer message (the customer wrote again). */
+  addInboundMessage(): number {
+    const id = this.nextMessageId++;
+    this.windowMessages?.push({ id, messageType: 0, isPrivate: false, ref: null });
+    return id;
+  }
+
+  private recordWindowMessage(id: number, isPrivate: boolean, ref: string | undefined): void {
+    this.windowMessages?.push({ id, messageType: 1, isPrivate, ref: ref ?? null });
+  }
+
+  private recordWindowActivity(): void {
+    if (this.windowMessages === null) return;
+    this.windowMessages.push({ id: this.nextMessageId++, messageType: 2, isPrivate: false, ref: null });
+  }
+
   async postMessage(
     target: ChatwootTarget,
     content: string,
@@ -537,6 +610,7 @@ export class StubChatwootApi implements ChatwootApi {
     if (deliveryRef !== undefined) {
       this.stored.set(deliveryRef, { id, createdAt: Math.floor(Date.now() / 1000) });
     }
+    this.recordWindowMessage(id, isPrivate, deliveryRef);
     if (failing) {
       throw (isPrivate ? this.privateNoteFailure : this.postMessageFailure) as ChatwootApiError;
     }
@@ -561,6 +635,13 @@ export class StubChatwootApi implements ChatwootApi {
     if (this.reconcileInconclusive) {
       return { kind: "inconclusive", detail: "page budget exhausted" };
     }
+    if (this.servedRecord !== undefined) {
+      return reconcileFromRecord(this.servedRecord, deliveryRef, _pivotMessageId);
+    }
+    // Under the window model the decision is the PRODUCTION decision over what a bot can see.
+    if (this.windowMessages !== null) {
+      return reconcileFromRecord(this.visibleConversationRecord(), deliveryRef, _pivotMessageId);
+    }
     const found = this.stored.get(deliveryRef);
     return found === undefined
       ? { kind: "absent" }
@@ -574,6 +655,8 @@ export class StubChatwootApi implements ChatwootApi {
       conversationId: target.conversationId,
       accessToken: target.accessToken,
     });
+    if (this.servedRecord !== undefined) return this.servedRecord;
+    if (this.windowMessages !== null) return this.visibleConversationRecord();
     return this.conversationRecord;
   }
 
@@ -586,6 +669,7 @@ export class StubChatwootApi implements ChatwootApi {
       accessToken: target.accessToken,
     });
     if (this.openConversationFailure) throw this.openConversationFailure;
+    this.recordWindowActivity();
   }
 
   /** Handback's Chatwoot half. Recorded as its own call kind so a test can tell
@@ -611,6 +695,7 @@ export class StubChatwootApi implements ChatwootApi {
       teamId,
     });
     if (this.assignTeamFailure) throw this.assignTeamFailure;
+    this.recordWindowActivity();
   }
 
   async getLabels(target: ChatwootTarget): Promise<string[]> {
@@ -675,6 +760,8 @@ interface FakeRow {
   mode: string | null;
   correlationId: string;
   chatwootMessageId: number | null;
+  /** `failure_code` of a failed row: a recorded disposition (Codex R5). */
+  failureCode?: string | null;
   /** The instance that holds the lease (an ACTION row claimed or taken over); null = released or unowned. */
   owner?: string | null;
 }
@@ -817,12 +904,26 @@ export class FakeLedger implements Ledger {
     if (chatwootMessageId !== null) row.chatwootMessageId = chatwootMessageId;
   }
 
-  async fail(identity: LedgerIdentity, action: string): Promise<void> {
+  async fail(identity: LedgerIdentity, action: string, failureCode?: string): Promise<void> {
     this.guard();
     const row = this.rows.get(this.key(identity, action));
     if (row === undefined) return;
     row.state = "failed";
     row.leaseExpiresAt = null;
+    row.failureCode = failureCode ?? null;
+  }
+
+  async deliveryActions(identity: LedgerIdentity): Promise<DeliveryActionRow[]> {
+    this.guard();
+    const prefix = this.key(identity, "");
+    const out: DeliveryActionRow[] = [];
+    for (const [key, row] of this.rows) {
+      if (!key.startsWith(prefix)) continue;
+      const action = key.slice(prefix.length);
+      if (action === DELIVERY_ACTION) continue;
+      out.push({ action, state: row.state, failureCode: row.failureCode ?? null });
+    }
+    return out.sort((a, b) => (a.action < b.action ? -1 : 1));
   }
 
   async release(identity: LedgerIdentity, action: string, attempts: number): Promise<boolean> {

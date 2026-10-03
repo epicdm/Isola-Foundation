@@ -119,6 +119,18 @@ export type ClaimResult =
    */
   | { kind: "ambiguous"; attempts: number; owned: boolean };
 
+/**
+ * One ACTION row beneath a delivery, as recovery needs to see it (Codex R5): its state and the
+ * disposition code recorded when it was closed without being performed. Reads existing
+ * columns only; no schema change.
+ */
+export interface DeliveryActionRow {
+  action: string;
+  state: DeliveryState;
+  /** `failure_code` of a `failed` row (a recorded disposition), else null. */
+  failureCode: string | null;
+}
+
 /** A delivery whose lease expired before it finished. */
 export interface RecoverableDelivery {
   tenantId: string;
@@ -239,6 +251,12 @@ export interface Ledger {
    * annotation that was never published. Reads existing columns only; no schema change.
    */
   unsettledActions(identity: LedgerIdentity): Promise<string[]>;
+  /**
+   * EVERY action row of one delivery with its state and recorded disposition (Codex R5).
+   * Recovery decides from these durable rows -- never from what is visible in a Chatwoot
+   * message window -- whether a delivery is provably complete or must be escalated.
+   */
+  deliveryActions(identity: LedgerIdentity): Promise<DeliveryActionRow[]>;
   /** Extend the lease on a long-running delivery. */
   heartbeat(identity: LedgerIdentity, action: string, leaseMs: number): Promise<void>;
   dueForRecovery(limit: number): Promise<RecoverableDelivery[]>;
@@ -689,6 +707,36 @@ export class PostgresLedger implements Ledger, SqlExecutor {
       ],
     );
     return result.rows.map((r) => r.action_type);
+  }
+
+  async deliveryActions(identity: LedgerIdentity): Promise<DeliveryActionRow[]> {
+    const result = await this.query<{
+      action_type: string;
+      delivery_state: DeliveryState;
+      failure_code: string | null;
+    }>(
+      `
+      SELECT action_type, delivery_state, failure_code
+        FROM delivery_ledger
+       WHERE tenant_id = $1 AND binding_id = $2 AND chatwoot_account_id = $3
+         AND chatwoot_inbox_id = $4 AND event_id = $5
+         AND action_type <> $6
+       ORDER BY action_type
+      `,
+      [
+        identity.tenantId,
+        identity.bindingId,
+        identity.chatwootAccountId,
+        identity.chatwootInboxId,
+        identity.eventId,
+        DELIVERY_ACTION,
+      ],
+    );
+    return result.rows.map((r) => ({
+      action: r.action_type,
+      state: r.delivery_state,
+      failureCode: r.failure_code,
+    }));
   }
 
   async heartbeat(

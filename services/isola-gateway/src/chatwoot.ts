@@ -396,6 +396,64 @@ function unreadableConversationRecord(record: unknown): string | null {
   return null;
 }
 
+/**
+ * The reconciliation DECISION, as a pure function of the conversation record an AgentBot can
+ * see (Codex R5: extracted so the test double makes the SAME decision from the SAME visibility
+ * window the production client has, instead of searching a map no bot can see).
+ *
+ * FOUND needs our reference on a message that is visible. ABSENT needs a well-formed record
+ * whose newest real message is at or before the pivot. Anything else is INCONCLUSIVE, and an
+ * inconclusive means nothing is re-sent.
+ */
+export function reconcileFromRecord(
+  payload: unknown,
+  deliveryRef: string,
+  pivotMessageId: number | null,
+): ReconcileResult {
+  const visible = readVisibleMessages(payload);
+  for (const message of visible) {
+    if (message.deliveryRef === deliveryRef) {
+      return { kind: "found", messageId: message.id };
+    }
+  }
+
+  // ONLY A WELL-FORMED RECORD CAN PROVE ABSENCE (Codex R4 G4-3). `request()` returns
+  // `null` for a 2xx whose body is empty or not JSON, and a lenient reader turns every
+  // unreadable shape into "no visible messages" -- which the code below would call
+  // ABSENT, and the caller would then send a second copy of a message that may well be
+  // there. An instrument that could not read is not a negative finding (Laws 11, 23).
+  const unreadable = unreadableConversationRecord(payload);
+  if (unreadable !== null) {
+    return {
+      kind: "inconclusive",
+      detail: `the conversation record could not be read as a conversation (${unreadable}); absence cannot be proven`,
+    };
+  }
+
+  if (pivotMessageId === null) {
+    return {
+      kind: "inconclusive",
+      detail: "no inbound message id to pivot on, so absence cannot be proven",
+    };
+  }
+
+  const newestReal = visible
+    .filter((m) => !m.isActivity)
+    .reduce<number | null>((max, m) => (max === null || m.id > max ? m.id : max), null);
+
+  if (newestReal === null) {
+    // No real message at all, so ours certainly is not there.
+    return { kind: "absent" };
+  }
+  if (newestReal <= pivotMessageId) {
+    return { kind: "absent" };
+  }
+  return {
+    kind: "inconclusive",
+    detail: `a newer message (${newestReal}) exists that is not ours; absence cannot be proven`,
+  };
+}
+
 export class HttpChatwootApi implements ChatwootApi {
   private readonly baseUrl: string;
   private readonly safeFetch: SafeFetch;
@@ -578,49 +636,7 @@ export class HttpChatwootApi implements ChatwootApi {
         detail: err instanceof Error ? err.message : "conversation read failed",
       };
     }
-
-    const visible = readVisibleMessages(payload);
-    for (const message of visible) {
-      if (message.deliveryRef === deliveryRef) {
-        return { kind: "found", messageId: message.id };
-      }
-    }
-
-    // ONLY A WELL-FORMED RECORD CAN PROVE ABSENCE (Codex R4 G4-3). `request()` returns
-    // `null` for a 2xx whose body is empty or not JSON, and a lenient reader turns every
-    // unreadable shape into "no visible messages" -- which the code below would call
-    // ABSENT, and the caller would then send a second copy of a message that may well be
-    // there. An instrument that could not read is not a negative finding (Laws 11, 23).
-    const unreadable = unreadableConversationRecord(payload);
-    if (unreadable !== null) {
-      return {
-        kind: "inconclusive",
-        detail: `the conversation record could not be read as a conversation (${unreadable}); absence cannot be proven`,
-      };
-    }
-
-    if (pivotMessageId === null) {
-      return {
-        kind: "inconclusive",
-        detail: "no inbound message id to pivot on, so absence cannot be proven",
-      };
-    }
-
-    const newestReal = visible
-      .filter((m) => !m.isActivity)
-      .reduce<number | null>((max, m) => (max === null || m.id > max ? m.id : max), null);
-
-    if (newestReal === null) {
-      // No real message at all, so ours certainly is not there.
-      return { kind: "absent" };
-    }
-    if (newestReal <= pivotMessageId) {
-      return { kind: "absent" };
-    }
-    return {
-      kind: "inconclusive",
-      detail: `a newer message (${newestReal}) exists that is not ours; absence cannot be proven`,
-    };
+    return reconcileFromRecord(payload, deliveryRef, pivotMessageId);
   }
 
   async getConversationRecord(target: ChatwootTarget): Promise<unknown> {
