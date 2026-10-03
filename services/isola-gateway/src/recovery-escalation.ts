@@ -120,6 +120,34 @@ export function loggerAlertSink(logger: Logger): AlertSink {
   };
 }
 
+/**
+ * Raise an alert and say whether the sink took it (Codex R6 G6-5). A sink that throws is logged
+ * at ERROR (the log line is the only trace) and reported as `false`, so the caller can keep the
+ * delivery OPEN and let the next sweep raise the alert again, instead of closing a delivery whose
+ * required alert was never seen. The alert is therefore AT-LEAST-ONCE: a crash between a
+ * successful alert and the close raises it again.
+ */
+function raiseAlert(deps: Pick<RecoveryEscalationDeps, "alertSink" | "logger">, alert: RecoveryAlert): boolean {
+  try {
+    deps.alertSink.raise(alert);
+    return true;
+  } catch (err) {
+    deps.logger.error({
+      event: "recovery",
+      alert: true,
+      alertCode: "recovery_alert_sink_failed",
+      correlationId: alert.correlationId,
+      tenantId: alert.tenantId,
+      accountId: alert.accountId,
+      inboxId: alert.inboxId,
+      conversationId: alert.conversationId,
+      failedAlertCode: alert.alertCode,
+      detail: err instanceof Error ? err.message : "unknown alert sink failure",
+    });
+    return false;
+  }
+}
+
 /** The reason code recorded on the ownership hold (a code, never prose; see ownership.ts). */
 export const RECOVERY_REASON = "recovery_escalated";
 
@@ -287,22 +315,23 @@ export async function abandonDelivery(
     dispositions,
   };
   if (!settledOk) {
-    deps.alertSink.raise({
+    raiseAlert(deps, {
       ...alertBase,
       alertCode: "recovery_disposition_not_recorded",
       detail: `${detail}; an action's disposition could not be recorded, so the delivery is left open and swept again`,
     });
     return false;
   }
-  let closed = false;
+  // ALERT BEFORE CLOSE (Codex R6 G6-5): a sink that failed leaves the delivery open, so the next
+  // sweep raises the alert again. Closing first would make the required alert un-retryable.
+  if (!raiseAlert(deps, { ...alertBase, alertCode: "recovery_abandoned", detail })) return false;
   try {
     await deps.ledger.fail(identity, DELIVERY_ACTION, failureCode);
-    closed = true;
+    return true;
   } catch {
-    // The delivery stays open; the alert below still goes out.
+    // The delivery stays open; the next sweep raises the alert again (at-least-once).
+    return false;
   }
-  deps.alertSink.raise({ ...alertBase, alertCode: "recovery_abandoned", detail });
-  return closed;
 }
 
 /**
@@ -333,8 +362,8 @@ export async function recoverDelivery(
     alertCode: RecoveryAlertCode,
     actions: readonly DeliveryActionRow[],
     detail: string,
-  ): void =>
-    deps.alertSink.raise({
+  ): boolean =>
+    raiseAlert(deps, {
       alertCode,
       correlationId: row.correlationId,
       tenantId: row.tenantId,
@@ -589,11 +618,14 @@ export async function recoverDelivery(
     base,
   );
   if (unsettled(finalActions).length > 0) return keepOpenUnsettled(finalActions);
-  await deps.ledger.complete(identity, DELIVERY_ACTION, null);
-  alertFor(
+  // ALERT BEFORE CLOSE (Codex R6 G6-5): a sink that failed leaves the delivery open and the next
+  // sweep raises the alert again (publication is idempotent by claim, so nothing is re-sent).
+  const alerted = alertFor(
     "recovery_escalated_to_human",
     finalActions,
     "a delivery that could not be proven complete was escalated to a person once; nothing was resent to the customer",
   );
+  if (!alerted) return "left_open";
+  await deps.ledger.complete(identity, DELIVERY_ACTION, null);
   return "completed";
 }
