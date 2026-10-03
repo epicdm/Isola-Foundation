@@ -621,6 +621,25 @@ export async function processDelivery(
     base,
   };
 
+  // THE DISPATCH MARKER (Codex DH1/N2). `claimed` once the runtime took the durable `model_run` claim;
+  // `settled` once that action row has been completed. A delivery is NOT closed while a claimed marker is
+  // unsettled: the sweeper selects unfinished DELIVERY rows only, so closing the delivery over an in-progress
+  // marker made the marker invisible to recovery (Codex N2). Settlement is bounded by the turn budget.
+  const dispatch = { claimed: false, settled: false };
+  const settleMarker = async (): Promise<boolean> => {
+    if (!dispatch.claimed || dispatch.settled) return true;
+    try {
+      const done = await raceTurn(deps.ledger.complete(job.identity, WRITE.modelRun, null), turnDeadlineAt - deps.now(), turnExpired);
+      if (done !== TURN_TIMEOUT) {
+        dispatch.settled = true;
+        return true;
+      }
+    } catch {
+      // fall through: unsettled
+    }
+    return false;
+  };
+
   const finish = async (outcome: string): Promise<void> => {
     // A late completion is REJECTED (Codex R2). After the turn budget this worker may no
     // longer be the one that owns the delivery: the lease is about to expire, the sweeper
@@ -637,6 +656,21 @@ export async function processDelivery(
         outcome,
         detail:
           "the turn budget was spent before this delivery could be closed; the row is left open for the worker that resumes it after the lease expires",
+      });
+      return;
+    }
+    // N2: never close the delivery over an in-progress dispatch marker. One more bounded attempt to
+    // settle it; if it still cannot be settled the delivery is LEFT OPEN so recovery sees it (it cannot
+    // prove the delivery complete, so it escalates once and never re-drives the turn).
+    if (!(await settleMarker())) {
+      deps.logger.error({
+        ...base,
+        event: "delivery",
+        alert: true,
+        alertCode: "model_run_marker_unsettled",
+        outcome,
+        detail:
+          "the dispatch marker (model_run) could not be settled; the delivery is left open so the recovery sweeper finds it and escalates it once. The turn is never re-run",
       });
       return;
     }
@@ -1049,7 +1083,6 @@ export async function processDelivery(
   // on its own side calls it, so no marker row exists for the other runtimes. It is claimed through the
   // ledger BEFORE the runtime's request is sent; only a FRESH claim (`claimed`) may dispatch. Any other
   // answer (an earlier attempt claimed it, completed or not) means a run may already exist.
-  let dispatchClaimed = false;
   const claimDispatch = async (): Promise<boolean> => {
     const claim = await writeDeps.ledger.claimAction(
       job.identity,
@@ -1059,7 +1092,7 @@ export async function processDelivery(
       writeDeps.leaseMs,
     );
     if (claim.kind !== "claimed") return false;
-    dispatchClaimed = true;
+    dispatch.claimed = true;
     return true;
   };
   const invoked = deps.runtime.invoke({
@@ -1090,15 +1123,10 @@ export async function processDelivery(
   }
   const result = ran;
   // The turn has ended (a result or a failure, not an abandoned wait): settle the dispatch marker so
-  // nothing is left in progress under the delivery. Best effort: a marker left unsettled is read by
-  // recovery as "cannot prove complete" and escalated, which is the safe direction.
-  if (dispatchClaimed) {
-    try {
-      await writeDeps.ledger.complete(job.identity, WRITE.modelRun, null);
-    } catch {
-      // see above
-    }
-  }
+  // nothing is left in progress under the delivery. A failure here is NOT swallowed (Codex N2): the
+  // marker stays unsettled, `finish()` retries once and then leaves the delivery OPEN, where the
+  // recovery sweeper finds it and escalates it once.
+  await settleMarker();
 
   // ---- THE IN-FLIGHT OWNERSHIP RECHECK ------------------------------------
   //
