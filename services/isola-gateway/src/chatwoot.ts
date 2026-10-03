@@ -236,6 +236,8 @@ export interface HistoryTurn {
 
 export interface ConversationHistory {
   turns: HistoryTurn[];
+  /** The Chatwoot message id of each turn, same order (Codex DH3). Never part of `context.history`. */
+  messageIds?: number[];
   /** True when older turns were dropped to fit the window. */
   truncated: boolean;
 }

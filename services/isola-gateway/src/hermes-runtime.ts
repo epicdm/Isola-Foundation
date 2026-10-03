@@ -442,10 +442,16 @@ export class HermesDirectRuntime implements AgentRuntime {
       if (oldest !== undefined) this.started.delete(oldest);
     }
 
-    const history = buildHermesHistory(identity.history, identity.content, {
-      maxTurns: Math.min(this.options.historyMaxTurns ?? HERMES_HISTORY_HARD_MAX_TURNS, HERMES_HISTORY_HARD_MAX_TURNS),
-      maxChars: Math.min(this.options.historyMaxChars ?? HERMES_HISTORY_HARD_MAX_CHARS, HERMES_HISTORY_HARD_MAX_CHARS),
-    });
+    const history = buildHermesHistory(
+      identity.history,
+      identity.content,
+      {
+        maxTurns: Math.min(this.options.historyMaxTurns ?? HERMES_HISTORY_HARD_MAX_TURNS, HERMES_HISTORY_HARD_MAX_TURNS),
+        maxChars: Math.min(this.options.historyMaxChars ?? HERMES_HISTORY_HARD_MAX_CHARS, HERMES_HISTORY_HARD_MAX_CHARS),
+      },
+      // The current message is found by its Chatwoot message id (Codex DH3), never by its text.
+      { currentMessageId: identity.messageId, historyMessageIds: request.historyMessageIds },
+    );
     if (!history.ok) {
       info["historyReason"] = history.reason;
       return this.fail(request, HERMES_OUTCOMES.historyUnavailable);

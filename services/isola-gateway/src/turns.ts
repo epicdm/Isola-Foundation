@@ -57,6 +57,12 @@ export interface Turn {
 
 export interface TurnHistory {
   turns: Turn[];
+  /**
+   * The Chatwoot message id of each turn, in the same order (Codex DH3): the direct Hermes path finds
+   * the CURRENT message by id. Kept beside the turns, not inside them, because the turns are sent
+   * verbatim to the isola-runtime as `context.history` and that payload must not change.
+   */
+  messageIds: number[];
   /** True when older turns were dropped to fit the window. */
   truncated: boolean;
 }
@@ -192,7 +198,7 @@ export async function readTurnHistory(
   conversationId: number,
 ): Promise<TurnHistory> {
   const res: QueryResult<Record<string, unknown>> = await exec.query(
-    `SELECT role, content
+    `SELECT role, content, chatwoot_message_id
        FROM conversation_turn
       WHERE chatwoot_account_id = $1 AND chatwoot_conversation_id = $2
       ORDER BY chatwoot_message_id DESC
@@ -209,14 +215,18 @@ export async function readTurnHistory(
       content: String(r["content"]),
     }))
     .reverse();
+  // `chatwoot_message_id` is a bigint (the driver returns it as a string). A value that is not a
+  // positive safe integer becomes NaN, which the history builder refuses: it never guesses an id.
+  let messageIds: number[] = newestFirst.map((r: Record<string, unknown>) => Number(r["chatwoot_message_id"])).reverse();
 
   let total = turns.reduce((n, t) => n + t.content.length, 0);
   while (total > TURN_MAX_CHARS && turns.length > 1) {
     total -= turns[0]!.content.length;
     turns = turns.slice(1);
+    messageIds = messageIds.slice(1);
     truncated = true;
   }
-  return { turns, truncated };
+  return { turns, messageIds, truncated };
 }
 
 /**

@@ -79,12 +79,32 @@ export class FakeTurnSql implements SqlClient {
       return { rows: [] as unknown as T[], rowCount: exists ? 0 : 1 };
     }
     if (/FROM conversation_turn/.test(sql) && /ORDER BY chatwoot_message_id DESC/.test(sql)) {
-      const [account, conversation, limit] = params as unknown as [number, number, number];
+      // CODEX DH8: the WHERE clause is EVALUATED from the production SQL text, not re-implemented
+      // here. A statement whose scope was widened (`AND 1 = 1`), reordered into something this
+      // cannot read, or stripped of the account or conversation predicate is REFUSED, so a test
+      // that reads through it fails when the production scope is removed.
+      const where = /\bWHERE\b([\s\S]*?)\bORDER BY\b/i.exec(sql)?.[1];
+      if (where === undefined) throw new Error("FakeTurnSql: no readable WHERE clause (predicate)");
+      const COLUMN: Record<string, string> = { chatwoot_account_id: "account", chatwoot_conversation_id: "conversation" };
+      const wanted = new Map<string, unknown>();
+      for (const conjunct of where.split(/\bAND\b/i)) {
+        const m = /^\s*(chatwoot_account_id|chatwoot_conversation_id)\s*=\s*\$(\d+)\s*$/.exec(conjunct);
+        if (m === null) throw new Error(`FakeTurnSql: unsupported predicate "${conjunct.trim()}"`);
+        wanted.set(COLUMN[m[1]!]!, params[Number(m[2]) - 1]);
+      }
+      if (!wanted.has("account") || !wanted.has("conversation")) {
+        throw new Error("FakeTurnSql: the account AND the conversation predicate are both required (predicate missing)");
+      }
+      const limitAt = /\bLIMIT\s+\$(\d+)/i.exec(sql);
+      const limit = limitAt === null ? Number.POSITIVE_INFINITY : Number(params[Number(limitAt[1]) - 1]);
       const picked = this.rows
-        .filter((r) => r["account"] === account && r["conversation"] === conversation)
+        .filter((r) => [...wanted].every(([column, value]) => r[column] === value))
         .sort((a, b) => (b["message"] as number) - (a["message"] as number))
         .slice(0, limit);
-      return { rows: picked.map((r) => ({ role: r["role"], content: r["content"] })) as unknown as T[], rowCount: picked.length };
+      return {
+        rows: picked.map((r) => ({ role: r["role"], content: r["content"], chatwoot_message_id: r["message"] })) as unknown as T[],
+        rowCount: picked.length,
+      };
     }
     if (/max\(created_at\)/.test(sql)) return { rows: [{ last_business: null }] as unknown as T[], rowCount: 1 };
     throw new Error("FakeTurnSql: unexpected statement");

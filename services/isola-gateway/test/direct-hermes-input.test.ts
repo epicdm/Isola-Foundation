@@ -12,7 +12,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  buildHermesHistory,
+  buildHermesHistory as buildHermesHistoryById,
   HERMES_HISTORY_HARD_MAX_CHARS,
   HERMES_HISTORY_HARD_MAX_TURNS,
   hermesSessionLabel,
@@ -90,6 +90,28 @@ describe("hermesSessionLabel: a stable per-conversation label, never a loader an
 
 const turn = (role: "customer" | "business", content: string) => ({ role, content });
 const CAPS = { maxTurns: 20, maxChars: 8000 };
+
+/**
+ * TEST WRAPPER (Codex DH3 migration). The production builder now finds the current message by its
+ * Chatwoot message id; these older tests were written when it matched on text. This wrapper gives the
+ * turns sequential ids and names as "current" the LAST customer turn whose text matches (what the old
+ * builder did), so each old test keeps asserting the same behaviour. The DH3 behaviour itself (id, not
+ * text) is pinned in test/direct-hermes-dh3-dh8-history.test.ts, which calls the builder directly.
+ */
+function buildHermesHistory(raw: unknown, currentMessage: string, caps: { maxTurns: number; maxChars: number }) {
+  if (!Array.isArray(raw)) return buildHermesHistoryById(raw, currentMessage, caps, { currentMessageId: 1, historyMessageIds: [] });
+  const turns = raw as Array<{ role?: unknown; content?: unknown }>;
+  const ids = turns.map((_t, i) => 100 + i);
+  let current = -1;
+  for (let i = turns.length - 1; i >= 0; i -= 1) {
+    const x = turns[i]!;
+    if (x.role === "customer" && typeof x.content === "string" && x.content.trim() === currentMessage.trim()) {
+      current = i;
+      break;
+    }
+  }
+  return buildHermesHistoryById(raw, currentMessage, caps, { currentMessageId: current === -1 ? 99_999 : ids[current]!, historyMessageIds: ids });
+}
 
 describe("buildHermesHistory: the same conversation's recorded transcript, minus the current message, mapped to user/assistant", () => {
   it("maps customer->user and EVERY business turn (the AI, a human agent, a handback line) -> assistant, and does NOT duplicate the current message", () => {
@@ -231,7 +253,8 @@ describe("the transcript source: private notes, activity lines and OTHER convers
     await record(store, 42, 7, { ...base, messageType: "incoming", private: false, content: "customer line 2 (current)", messageId: 7, senderType: "contact" });
 
     const history = await readTurnHistory(store, 1, 42);
-    const built = buildHermesHistory(history.turns, "customer line 2 (current)", CAPS);
+    // the REAL ids from the real read: the current message is message 7
+    const built = buildHermesHistoryById(history.turns, "customer line 2 (current)", CAPS, { currentMessageId: 7, historyMessageIds: history.messageIds });
     expect(built).toEqual({
       ok: true,
       messages: [

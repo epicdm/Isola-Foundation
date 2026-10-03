@@ -83,8 +83,28 @@ export type HermesHistoryResult =
   | { ok: true; messages: HermesHistoryMessage[]; droppedForCaps: boolean }
   | {
       ok: false;
-      reason: "history_absent" | "history_malformed" | "current_message_empty" | "current_message_not_in_history";
+      reason:
+        | "history_absent"
+        | "history_malformed"
+        | "current_message_empty"
+        | "current_message_not_in_history"
+        | "current_message_id_missing"
+        | "history_ids_missing";
     };
+
+/**
+ * WHICH message is the current one (Codex DH3). The webhook's Chatwoot message id and the Chatwoot
+ * message id of every transcript turn, in the same order. Equal text is NOT identity: an older
+ * identical "hello" must not stand in for a current one whose row is missing.
+ */
+export interface HermesHistoryIdentity {
+  currentMessageId: number | null;
+  historyMessageIds: readonly number[] | undefined;
+}
+
+function isMessageId(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
 
 export interface HermesHistoryCaps {
   maxTurns: number;
@@ -101,16 +121,22 @@ export interface HermesHistoryCaps {
  * any text.
  *
  * THE CURRENT MESSAGE IS NOT IN THE HISTORY. The webhook path records every turn BEFORE the
- * pipeline runs, so the newest customer turn IS the message being answered. It is located
- * (the LAST customer turn whose text equals the current message), it and everything after
- * it are removed, and it is sent only as `input`. A transcript in which it cannot be found
- * is not provably this conversation's current state, so the result is a refusal.
+ * pipeline runs, so the newest customer turn IS the message being answered. It is located BY
+ * ITS CHATWOOT MESSAGE ID (Codex DH3: never by text: an older identical line cannot stand in
+ * for a current message whose row is missing), it and everything after it are removed, and it
+ * is sent only as `input`. A transcript in which it cannot be found is not provably this
+ * conversation's current state, so the result is a refusal.
  *
- * FAIL CLOSED: a missing or malformed transcript is `ok: false`; the caller answers
- * NOTHING and escalates once. An empty history for a first message is a positive result
- * (`messages: []`), never an error.
+ * FAIL CLOSED: a missing or malformed transcript, a missing current id, or ids that do not line
+ * up with the turns is `ok: false`; the caller answers NOTHING and escalates once. An empty
+ * history for a first message is a positive result (`messages: []`), never an error.
  */
-export function buildHermesHistory(raw: unknown, currentMessage: string, caps: HermesHistoryCaps): HermesHistoryResult {
+export function buildHermesHistory(
+  raw: unknown,
+  currentMessage: string,
+  caps: HermesHistoryCaps,
+  identity: HermesHistoryIdentity,
+): HermesHistoryResult {
   if (raw === undefined || raw === null) return { ok: false, reason: "history_absent" };
   if (!Array.isArray(raw)) return { ok: false, reason: "history_malformed" };
   const turns: Array<{ role: "customer" | "business"; content: string }> = [];
@@ -126,11 +152,16 @@ export function buildHermesHistory(raw: unknown, currentMessage: string, caps: H
   const current = typeof currentMessage === "string" ? currentMessage.trim() : "";
   if (current.length === 0) return { ok: false, reason: "current_message_empty" };
 
+  if (!isMessageId(identity.currentMessageId)) return { ok: false, reason: "current_message_id_missing" };
+  const ids = identity.historyMessageIds;
+  if (ids === undefined) return { ok: false, reason: "history_ids_missing" };
+  if (ids.length !== turns.length || !ids.every(isMessageId)) return { ok: false, reason: "history_malformed" };
+
   let at = -1;
   for (let i = turns.length - 1; i >= 0; i -= 1) {
-    const t = turns[i]!;
-    if (t.role === "customer" && t.content.trim() === current) {
-      at = i;
+    if (ids[i] === identity.currentMessageId) {
+      // the id must point at a CUSTOMER turn: the message being answered is the customer's.
+      if (turns[i]!.role === "customer") at = i;
       break;
     }
   }

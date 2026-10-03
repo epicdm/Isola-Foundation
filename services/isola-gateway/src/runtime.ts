@@ -77,6 +77,14 @@ export interface AgentRuntimeRequest {
    */
   idempotencyKey?: string;
   /**
+   * The Chatwoot message ids of `context.history`, in the same order (Codex DH3). The direct Hermes
+   * runtime identifies the CURRENT customer message in the transcript by id, never by text, so an
+   * older identical line cannot stand in for a current message whose row is missing. Carried HERE and
+   * not inside `context`, so what the isola-runtime client sends is unchanged (it ignores this field).
+   * Absent when the transcript was not read.
+   */
+  historyMessageIds?: readonly number[];
+  /**
    * Whether the gateway STILL owns this conversation (the same predicate as the
    * post-run recheck). A long-running runtime may poll it and stop early on a
    * takeover; it rejects when ownership cannot be read, which means "unknown".

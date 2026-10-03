@@ -71,13 +71,35 @@ function context(over: CtxOver = {}): Record<string, unknown> {
   };
 }
 
+/**
+ * The Chatwoot message ids of the history the helper above builds (Codex DH3: the current message is
+ * found by ID). The LAST customer turn whose text is the current message gets the webhook's id (9001),
+ * its neighbours the ids around it; a history that does not contain the current message gets ids that
+ * do not include 9001.
+ */
+function historyIdsOf(history: unknown, content: string): number[] | undefined {
+  if (!Array.isArray(history)) return undefined;
+  const turns = history as Array<{ role?: unknown; content?: unknown }>;
+  let at = -1;
+  for (let i = turns.length - 1; i >= 0; i -= 1) {
+    if (turns[i]!.role === "customer" && typeof turns[i]!.content === "string" && (turns[i]!.content as string).trim() === content.trim()) {
+      at = i;
+      break;
+    }
+  }
+  return turns.map((_t, i) => (at === -1 ? 7000 + i : 9001 + (i - at)));
+}
+
 function req(over: CtxOver & { key?: string | null; signal?: AbortSignal; isStillOwned?: () => Promise<boolean> } = {}): AgentRuntimeRequest {
+  const built = context(over);
+  const ids = historyIdsOf(built["history"], over.content ?? MESSAGE);
   return {
     templateId: "tpl@v1",
     exposure: "PUBLIC",
     agentId: "agent-1",
     runId: "delivery-1",
-    context: context(over),
+    context: built,
+    ...(ids === undefined ? {} : { historyMessageIds: ids }),
     ...(over.key === null ? {} : { idempotencyKey: over.key ?? nextKey() }),
     ...(over.signal === undefined ? {} : { signal: over.signal }),
     ...(over.isStillOwned === undefined ? {} : { isStillOwned: over.isStillOwned }),

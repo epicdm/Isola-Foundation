@@ -33,6 +33,7 @@ function request(signal: AbortSignal): AgentRuntimeRequest {
     agentId: "agent-1",
     runId: "delivery-1",
     idempotencyKey: `isolagw:tenant-acme|b1|1|7|delivery:post-signal-${n}|answer`,
+    historyMessageIds: [9001],
     signal,
     context: {
       source: "chatwoot",

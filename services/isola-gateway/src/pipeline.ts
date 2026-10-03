@@ -1000,7 +1000,7 @@ export async function processDelivery(
         binding.chatwootAccountId,
         job.conversationId,
       );
-      history = { turns: h.turns, truncated: h.truncated };
+      history = { turns: h.turns, messageIds: h.messageIds, truncated: h.truncated };
     } catch (err) {
       deps.logger.warn({
         ...base,
@@ -1045,6 +1045,7 @@ export async function processDelivery(
     runId,
     context: buildRuntimeContext(binding, payload, history, customerScope),
     idempotencyKey: turnIdempotencyKey(job.identity, job.mode),
+    ...(history?.messageIds === undefined ? {} : { historyMessageIds: history.messageIds }),
     isStillOwned: async () => ownershipStillMine(await deps.ownership.read(conversationRefOf(job))),
     signal: turnAbort.signal,
   });
