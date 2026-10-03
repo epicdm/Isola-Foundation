@@ -207,6 +207,17 @@ export interface Ledger {
     chatwootMessageId: number | null,
   ): Promise<void>;
   fail(identity: LedgerIdentity, action: string, failureCode: string): Promise<void>;
+  /**
+   * Give back an action that was CLAIMED and then NOT PERFORMED because the turn budget
+   * ran out (Codex R3 F4). It is NOT `fail`: a failed row is terminal and `claimAction`
+   * reports it as completed, so the worker that resumes the delivery would skip an
+   * action that never happened. A released row stays `in_progress` with its lease
+   * expired, which `claimAction` reports as `ambiguous` -- the existing, tested
+   * "claimed and never recorded" path: a message is reconciled against Chatwoot and sent
+   * only if proven absent; an idempotent write is simply re-run. No schema change.
+   * Only an `in_progress` row is touched: a completed or failed row is never reopened.
+   */
+  release(identity: LedgerIdentity, action: string): Promise<void>;
   /** Extend the lease on a long-running delivery. */
   heartbeat(identity: LedgerIdentity, action: string, leaseMs: number): Promise<void>;
   dueForRecovery(limit: number): Promise<RecoverableDelivery[]>;
@@ -596,6 +607,20 @@ export class PostgresLedger implements Ledger, SqlExecutor {
        WHERE ${KEY_PREDICATE}
       `,
       [...keyParams(identity, action), failureCode],
+    );
+  }
+
+  async release(identity: LedgerIdentity, action: string): Promise<void> {
+    await this.query(
+      `
+      UPDATE delivery_ledger
+         SET lease_owner      = NULL,
+             lease_expires_at = now(),
+             updated_at       = now()
+       WHERE ${KEY_PREDICATE}
+         AND delivery_state = 'in_progress'
+      `,
+      keyParams(identity, action),
     );
   }
 

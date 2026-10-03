@@ -213,11 +213,7 @@ export async function sendGuardedMessage(
   // The last read before the wire: ownership is checked HERE, after the claim and any
   // reconciliation, so no ledger or Chatwoot read can age the decision (Codex R3).
   if (context.fence !== undefined && !(await context.fence(action))) {
-    try {
-      await deps.ledger.fail(context.identity, action, "fenced");
-    } catch {
-      // Releasing the claim is best effort; the delivery is closed as suppressed.
-    }
+    await closeFencedClaim(deps, context, action);
     return { kind: "fenced" };
   }
   let messageId: number | null;
@@ -345,14 +341,34 @@ export async function runGuardedWrite(
   return true;
 }
 
+/**
+ * What happens to a claim whose write the fence refused (Codex R3 F4). Two different
+ * reasons, two different fates:
+ *   - the TURN BUDGET ran out: the action was not performed and the delivery stays open
+ *     for the worker that resumes it, so the claim is RELEASED (retryable). Marking it
+ *     failed would make `claimAction` report it as completed and the resumed delivery
+ *     would skip a reply that was never sent.
+ *   - a PERSON took the conversation: that is a decision, not a retry. The action is
+ *     closed as suppressed, and the delivery closes with it.
+ * Best effort either way: a ledger that cannot be written leaves the claim as it is,
+ * which a later attempt treats as claimed-and-unrecorded (reconcile, never blind resend).
+ */
+async function closeFencedClaim(deps: WriteDeps, context: WriteContext, action: string): Promise<void> {
+  try {
+    if (context.authority?.deadlineExceeded === true) {
+      await deps.ledger.release(context.identity, action);
+    } else {
+      await deps.ledger.fail(context.identity, action, "fenced");
+    }
+  } catch {
+    // See above.
+  }
+}
+
 /** The last read before the wire for a non-message write; throws `WriteFencedError` when denied. */
 async function fenceOrThrow(deps: WriteDeps, context: WriteContext, action: string): Promise<void> {
   if (context.fence === undefined) return;
   if (await context.fence(action)) return;
-  try {
-    await deps.ledger.fail(context.identity, action, "fenced");
-  } catch {
-    // Releasing the claim is best effort; the delivery is closed as suppressed.
-  }
+  await closeFencedClaim(deps, context, action);
   throw new WriteFencedError(action);
 }

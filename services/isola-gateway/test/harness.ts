@@ -797,6 +797,13 @@ export class FakeLedger implements Ledger {
     row.leaseExpiresAt = null;
   }
 
+  async release(identity: LedgerIdentity, action: string): Promise<void> {
+    this.guard();
+    const row = this.rows.get(this.key(identity, action));
+    if (row === undefined || row.state !== "in_progress") return;
+    row.leaseExpiresAt = 0;
+  }
+
   async heartbeat(
     identity: LedgerIdentity,
     action: string,
