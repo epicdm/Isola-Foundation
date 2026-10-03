@@ -116,6 +116,11 @@ export class FakeRun {
     this.push(CLOSE);
   }
 
+  /** An ORDINARY end of the stream (EOF) with no terminal event and no `: stream closed` comment (Codex DH5). */
+  eof(): void {
+    this.push(CLOSE);
+  }
+
   /** The connection dies mid-stream. */
   breakStream(): void {
     this.push(BREAK);
@@ -185,6 +190,8 @@ export class FakeHermes {
   createPlan: CreatePlan[] = [];
   /** Consumed per GET /v1/runs/{id}: a forced status, an oversized body, or a hang. */
   pollPlan: Array<number | "big" | "hang"> = [];
+  /** Consumed per GET /v1/runs/{id}/events: a forced HTTP status (404, 401, 500) instead of a stream (Codex DH5). */
+  eventsPlan: number[] = [];
   /** When set, every status object reports THIS run id (a non-current run). */
   statusRunIdOverride: string | null = null;
   stopStatus = 200;
@@ -258,6 +265,8 @@ export class FakeHermes {
     const events = /^\/v1\/runs\/([^/]+)\/events$/.exec(u.pathname);
     if (method === "GET" && events !== null) {
       const run = this.runs.get(events[1]!);
+      const forced = this.eventsPlan.shift();
+      if (typeof forced === "number") return this.json(forced, { error: { message: `fake: events forced ${forced}` } });
       if (run === undefined) return this.json(404, { error: { message: "Run not found", code: "run_not_found" } });
       return new Response(run.streamBody(signal), { status: 200, headers: { "content-type": "text/event-stream" } });
     }

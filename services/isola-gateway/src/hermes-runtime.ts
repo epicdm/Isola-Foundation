@@ -343,9 +343,17 @@ interface RunState {
   eventOutput: string | null;
   deltas: string[];
   deltaChars: number;
+  /**
+   * How the event stream ended (Codex DH2/DH5): `clean` = it ended normally (EOF), whether or not
+   * it carried the closing comment; `broken` = the connection failed mid-stream (a transport
+   * fault; polling may still answer); `oversize` = it exceeded the byte cap; `open` = still reading.
+   */
   stream: "open" | "clean" | "broken" | "oversize";
+  /** The HTTP status when the events route REFUSED to open a stream (404 = the run is unknown to the service). */
+  streamRejected: number | null;
   sawTerminalEvent: boolean;
   sawClosedComment: boolean;
+  /** The stream ended NORMALLY without a terminal event: an anomaly that is never an answer, whatever a poll says. */
   closedEarly: boolean;
   ignoredForeignEvents: number;
   polls: number;
@@ -569,6 +577,7 @@ export class HermesDirectRuntime implements AgentRuntime {
       deltas: [],
       deltaChars: 0,
       stream: "open",
+      streamRejected: null,
       sawTerminalEvent: false,
       sawClosedComment: false,
       closedEarly: false,
@@ -577,23 +586,38 @@ export class HermesDirectRuntime implements AgentRuntime {
     };
     const notifier = new Notifier();
     // RULE 2: this run's stream is read to the end. It is aborted by the turn signal, or when the
-    // drain grace runs out; its lifetime is otherwise the run's.
+    // drain grace runs out; its lifetime is otherwise the run's. The turn signal's listener stays
+    // attached until the drain is over (Codex DH2): a turn spent DURING the drain aborts it.
     const streamCtl = new AbortController();
     const onTurnAbort = (): void => streamCtl.abort();
     request.signal?.addEventListener("abort", onTurnAbort, { once: true });
     const streamTask = this.readEvents(state, notifier, streamCtl.signal);
-    let result: AgentRuntimeResult;
+    let result: AgentRuntimeResult | undefined;
+    let drained = false;
     try {
-      result = await this.awaitEnd(request, state, notifier, streamTask, deadlineAt);
+      const end = await this.awaitEnd(request, state, notifier, deadlineAt);
+      if (end === "terminal") {
+        // DH2: the run is over. DRAIN FIRST, bounded by the ABSOLUTE deadline, and only then decide:
+        // every acceptance check (signal, deadline, byte cap, ownership, envelope) runs AFTER the drain,
+        // so nothing that happens while the stream is closing can slip past a decision already made.
+        await this.settleStream(state, streamTask, streamCtl, request, Math.min(deadlineAt, Date.now() + this.drainGraceMs()));
+        drained = true;
+        result = await this.finalize(request, state, deadlineAt);
+      } else {
+        result = end;
+      }
     } finally {
+      if (!drained) await this.settleStream(state, streamTask, streamCtl, request, Date.now() + this.drainGraceMs());
       request.signal?.removeEventListener("abort", onTurnAbort);
-      await this.settleStream(state, streamTask, streamCtl, request);
       info["polls"] = state.polls;
       info["stream"] = state.stream;
     }
-    return result;
+    return result as AgentRuntimeResult;
   }
 
+  private drainGraceMs(): number {
+    return this.options.streamDrainGraceMs ?? Math.min(this.options.requestTimeoutMs, 2000);
+  }
   // ---- create ------------------------------------------------------------------
 
   private async createRun(body: Record<string, unknown>, deadlineAt: number, turnSignal: AbortSignal | undefined): Promise<CreateResult> {
@@ -646,6 +670,9 @@ export class HermesDirectRuntime implements AgentRuntime {
         } catch {
           /* nothing to release */
         }
+        // 404 = the service does not know the run; another 4xx = a request/credential defect; both are
+        // decided by the turn (DH5). A 5xx or a body-less 200 is a server fault: polling may still answer.
+        if (response.status >= 400 && response.status < 500) state.streamRejected = response.status;
         state.stream = "broken";
         return;
       }
@@ -681,9 +708,11 @@ export class HermesDirectRuntime implements AgentRuntime {
         }
         buffer += decoder.decode();
         if (buffer.trim().length > 0) this.onBlock(state, buffer);
-        state.stream = state.sawClosedComment ? "clean" : "broken";
-        // The server always sends the terminal event BEFORE closing: a clean close without one is an anomaly.
-        if (state.stream === "clean" && !state.sawTerminalEvent && state.terminal === null) state.closedEarly = true;
+        // The stream ENDED NORMALLY (EOF). The server always sends the terminal event BEFORE it closes, so an
+        // end without one is an anomaly (DH5): it is never an answer, whatever a poll later says, and it
+        // does not matter whether the closing comment was seen or whether a poll got there first.
+        state.stream = "clean";
+        if (!state.sawTerminalEvent) state.closedEarly = true;
       } finally {
         if (onAbort !== null) signal.removeEventListener("abort", onAbort);
         void reader.cancel().catch(() => undefined);
@@ -743,10 +772,15 @@ export class HermesDirectRuntime implements AgentRuntime {
     }
   }
 
-  /** Wait (bounded) for the stream to finish; give up on it after the grace and say so. */
-  private async settleStream(state: RunState, streamTask: Promise<void>, streamCtl: AbortController, request: AgentRuntimeRequest): Promise<void> {
-    const grace = this.options.streamDrainGraceMs ?? Math.min(this.options.requestTimeoutMs, 2000);
-    const finished = await raceDeadline<boolean>(streamTask.then(() => true), Date.now() + grace, false);
+  /** Wait (bounded by `boundAt`) for the stream to finish; give up on it then and say so. */
+  private async settleStream(
+    state: RunState,
+    streamTask: Promise<void>,
+    streamCtl: AbortController,
+    request: AgentRuntimeRequest,
+    boundAt: number,
+  ): Promise<void> {
+    const finished = await raceDeadline<boolean>(streamTask.then(() => true), boundAt, false);
     if (finished === "deadline" || finished === false) {
       if (state.stream === "open") {
         this.log("hermes_stream_not_drained", "warn", request, { runId: state.runId });
@@ -755,16 +789,14 @@ export class HermesDirectRuntime implements AgentRuntime {
       await raceDeadline<void>(streamTask, Date.now() + 50, undefined);
     }
   }
-
   // ---- waiting for the end of the run ------------------------------------------
 
   private async awaitEnd(
     request: AgentRuntimeRequest,
     state: RunState,
     notifier: Notifier,
-    streamTask: Promise<void>,
     deadlineAt: number,
-  ): Promise<AgentRuntimeResult> {
+  ): Promise<AgentRuntimeResult | "terminal"> {
     for (;;) {
       if (spent(request.signal)) {
         await this.stopRun(state.runId, request.signal);
@@ -778,7 +810,10 @@ export class HermesDirectRuntime implements AgentRuntime {
         await this.stopRun(state.runId, request.signal);
         return this.fail(request, HERMES_OUTCOMES.responseTooLarge, state.runId);
       }
-      if (state.closedEarly && state.terminal === null) return this.fail(request, HERMES_OUTCOMES.streamClosedEarly, state.runId);
+      const rejected = this.rejectedStream(request, state);
+      if (rejected !== null) return rejected;
+      // A stream that ENDED NORMALLY without a terminal event is never an answer (DH5), whatever a poll says.
+      if (state.closedEarly) return this.fail(request, HERMES_OUTCOMES.streamClosedEarly, state.runId);
 
       // OWNERSHIP, before anything is accepted from the run. A rejection is "could not find out",
       // which is never "nobody holds it".
@@ -792,7 +827,7 @@ export class HermesDirectRuntime implements AgentRuntime {
         return this.fail(request, HERMES_OUTCOMES.ownershipLost, state.runId);
       }
 
-      if (state.terminal !== null) return this.conclude(request, state, notifier, streamTask, deadlineAt);
+      if (state.terminal !== null) return "terminal";
 
       const polled = await this.pollStatus(state, notifier, deadlineAt, request.signal);
       switch (polled.kind) {
@@ -817,6 +852,13 @@ export class HermesDirectRuntime implements AgentRuntime {
     }
   }
 
+  /** A refused events route is decided by the turn (DH5): 404 = the service does not know the run; another 4xx = a defect. */
+  private rejectedStream(request: AgentRuntimeRequest, state: RunState): AgentRuntimeResult | null {
+    if (state.streamRejected === null) return null;
+    if (state.streamRejected === 404) return this.fail(request, HERMES_OUTCOMES.runLost, state.runId);
+    return this.fail(request, HERMES_OUTCOMES.configDefect, state.runId);
+  }
+
   private async stillOwned(request: AgentRuntimeRequest, deadlineAt: number): Promise<boolean | "deadline"> {
     if (request.isStillOwned === undefined) return true;
     return raceDeadline(
@@ -826,30 +868,24 @@ export class HermesDirectRuntime implements AgentRuntime {
     );
   }
 
-  private async conclude(
-    request: AgentRuntimeRequest,
-    state: RunState,
-    notifier: Notifier,
-    streamTask: Promise<void>,
-    deadlineAt: number,
-  ): Promise<AgentRuntimeResult> {
+  /**
+   * THE ACCEPTANCE DECISION (Codex DH2): it runs AFTER the stream has been drained, so everything that
+   * could change while the stream was closing is looked at HERE, last: the turn signal, a refused or
+   * oversized stream, a stream that ended without a terminal event, the absolute deadline, then
+   * ownership, and only then the envelope. Anything that is not a clean yes is no model text.
+   */
+  private async finalize(request: AgentRuntimeRequest, state: RunState, deadlineAt: number): Promise<AgentRuntimeResult> {
     const terminal = state.terminal as Terminal;
     if (terminal.kind === "failed") return this.fail(request, HERMES_OUTCOMES.runFailed, state.runId);
     if (terminal.kind === "cancelled") return this.fail(request, HERMES_OUTCOMES.runCancelled, state.runId);
 
-    // RULE 3 is STRUCTURAL: every path that stops a run returns its failure on the spot, so a run that
-    // was cancelled is never concluded here, whatever its status would later say.
-    let output = terminal.output !== null && terminal.output.length > 0 ? terminal.output : null;
-    if (output === null) {
-      // The status carried no output: the event stream's final events are the next source.
-      const grace = this.options.streamDrainGraceMs ?? Math.min(this.options.requestTimeoutMs, 2000);
-      await raceDeadline<void>(streamTask, Math.min(deadlineAt, Date.now() + grace), undefined);
-      output =state.eventOutput !== null && state.eventOutput.length > 0 ? state.eventOutput : null;
-      if (output === null) {
-        const joined = state.deltas.join("");
-        output = joined.length > 0 ? joined : null;
-      }
+    const rejected = this.rejectedStream(request, state);
+    if (rejected !== null) return rejected;
+    if (state.stream === "oversize") {
+      await this.stopRun(state.runId, request.signal);
+      return this.fail(request, HERMES_OUTCOMES.responseTooLarge, state.runId);
     }
+    if (state.closedEarly) return this.fail(request, HERMES_OUTCOMES.streamClosedEarly, state.runId);
 
     // The last ownership look before text leaves this adapter. (The pipeline rechecks again.)
     const owned = await this.stillOwned(request, deadlineAt);
@@ -857,6 +893,24 @@ export class HermesDirectRuntime implements AgentRuntime {
     if (!owned) {
       await this.stopRun(state.runId, request.signal);
       return this.fail(request, HERMES_OUTCOMES.ownershipLost, state.runId);
+    }
+    // The signal and the absolute deadline are judged HERE, after the drain AND after the ownership look
+    // (which can itself have taken until either): the last check before any text leaves the adapter.
+    if (spent(request.signal) || Date.now() >= deadlineAt) {
+      await this.stopRun(state.runId, request.signal);
+      return this.fail(request, HERMES_OUTCOMES.timeout, state.runId);
+    }
+
+    // RULE 3 is STRUCTURAL: every path that stops a run returns its failure on the spot, so a run that
+    // was cancelled is never finalized here, whatever its status would later say.
+    let output = terminal.kind === "completed" && terminal.output !== null && terminal.output.length > 0 ? terminal.output : null;
+    if (output === null) {
+      // The status carried no output: the event stream's final events (already drained) are the next source.
+      output = state.eventOutput !== null && state.eventOutput.length > 0 ? state.eventOutput : null;
+      if (output === null) {
+        const joined = state.deltas.join("");
+        output = joined.length > 0 ? joined : null;
+      }
     }
 
     const parsed = parseHermesEnvelope(output);
@@ -880,7 +934,6 @@ export class HermesDirectRuntime implements AgentRuntime {
       contractVersion: 2,
     };
   }
-
   // ---- poll ------------------------------------------------------------------------
 
   private async pollStatus(state: RunState, notifier: Notifier, deadlineAt: number, turnSignal: AbortSignal | undefined): Promise<PollResult> {
