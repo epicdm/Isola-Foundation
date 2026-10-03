@@ -2,7 +2,8 @@
 
 Branch `feat/direct-hermes-adapter-2026-10-03`, cut from `c577eed` (the reviewed pivot branch head). The pivot branch
 `feat/pivot-gateway-thin-connector-2026-10-02` is untouched. **Status: built and tested against a fake Hermes. NOT deployed,
-NOT reviewed by Codex, NOT approved, no PR.** Owner-approved priority change (2026-10-03): customer conversations run
+NOT approved, no PR. Codex reviewed `d810455` (REQUEST CHANGES: DH1-DH9); the Codex-DH round below answers it and is itself NOT yet
+re-reviewed.** Owner-approved priority change (2026-10-03): customer conversations run
 DIRECTLY through the long-lived `isola_hermes-public` service; Paperclip is not in the reply path.
 
 ## What it is
@@ -22,6 +23,13 @@ unchanged. It is selected per employee (`GATEWAY_HERMES_AGENT_IDS`), default OFF
 | `fcf8b22` | **Step A+ 1:** staff replies reach the history (labelled, idempotent, fail closed); the pinned known-gap test is flipped |
 | `7e9ffc9` | **Step A+ 2:** webhook retry semantics over the direct route (13 tests, regression guards) |
 | `d810455` | **Step A+ 3:** the post-signal `/stop` is a cancellation, not a dispatch (comment + 4 tests) |
+| `b512f7d` | **Codex DH3 + DH8:** the current message is found by its Chatwoot message id; the transcript fake evaluates the production WHERE |
+| `06d4478` | **Codex DH1:** a durable `model_run` ledger marker is claimed before the POST (survives a restart / a second instance) |
+| `b6a910a` | **Codex DH2 + DH5:** the answer is accepted only AFTER the stream is drained; an abnormal end of the stream is never an answer |
+| `5bb1afd` | **Codex DH4:** an undrained run keeps its local slot until the service's own sweep |
+| `f9ed1af` | **Codex DH6 + DH7:** forged marker lines in customer text are quoted; the envelope text is sanitised |
+| `d52f61c` | **Codex DH9:** the staff-transcript write is bounded (2 s), so a blocked store cannot delay the takeover |
+| `bd5b8f5` | the runtime header states what each rule does and does not promise (comment-only) |
 
 ## Configuration (names only, never values)
 
@@ -64,31 +72,58 @@ Step B on 2026-10-03 06:10-06:12Z** (9 model-bound requests). The fake follows i
 (so it is not sent); the `session_id` label does not load history (so continuity is `conversation_history`); the cap of 10 is
 released only when the stream is read to the end (so every run's stream is consumed).
 
-## Rules the adapter enforces (each has tests and a sabotage)
+## Rules the adapter enforces (each has tests and a sabotage), and what each does NOT promise
 
-1. **Never POST `/v1/runs` twice for one ledger key.** The service cannot dedupe; the ledger refuses a redelivery before this
-   is reached, and the adapter refuses a second invoke of the same key, even after a failed first attempt.
-2. **Every run's event stream is read to the end** under the same deadline and a 1 MiB cap; a stream that breaks falls back to
-   polling; a stream that never closes after the run finished is abandoned after a grace and logged.
-3. **Takeover, spent turn or deadline: `POST /stop`, and the run id is remembered as cancelled**; output of a cancelled run, or
-   of a run this turn did not create (a status or event carrying another run id), is never used. A 404 on `/stop` means "maybe
-   finished": the output is still discarded. The adapter looks at ownership again right before text leaves it.
-4. **One absolute deadline** over create, polls, stream and every body; redirects are refused by the egress guard; 4xx is a
-   config defect with no retry; a 5xx or a dropped connection on the create is an uncertain create, never re-created; a 429
-   gets ONE identical retry that fits inside the deadline, then escalates.
-5. **Fail closed, no model text:** failed / cancelled / 404 / a stream closed without a terminal event / no or bad envelope /
-   no history / a missing identity = one outcome and an escalation through the existing path.
-6. **One run per conversation at a time; a global cap below Hermes' 10.** A wait that outlasts the deadline is `hermes_busy`
-   and nothing is sent.
-7. **Continuity** is the gateway's own transcript for the SAME conversation: customer -> `user`, every business turn -> `assistant`
+The first version of this section over-claimed in six places (Codex DH round). What is true now:
+
+1. **One `POST /v1/runs` per ledger key, with exactly one exception.** A 429 on the create is retried ONCE with the identical body
+   (the service refused the first, so no run exists); that is the only repeat. The service cannot dedupe (`Idempotency-Key` is
+   ignored, and not sent), so the guard is ours, in three layers: the ledger's delivery de-duplication (a redelivery of an accepted
+   delivery never reaches the adapter); a **durable `model_run` marker** the pipeline claims through the ledger immediately BEFORE
+   the POST (an ordinary action row, `action_type` is free text, no schema change; it survives a restart and a second instance:
+   `AgentRuntimeRequest.claimDispatch`, Codex DH1); and an in-memory set (this process only, capped at 10,000). A redelivery of a
+   delivery whose marker is claimed escalates WITHOUT contacting Hermes (`hermes_duplicate_invoke`); a ledger that cannot record the
+   claim sends nothing (`hermes_dispatch_unrecorded`); the production wiring REQUIRES the claim. **Residual:** a crash after the
+   marker and before the POST means that turn is escalated and never retried.
+2. **Event streams.** A stream is read to the end WHEN IT ENDS NORMALLY. If the connection breaks mid-way, polling may still
+   answer, but the service keeps counting that run until its own 300 s sweep, so the adapter keeps its LOCAL slot for what is left
+   of `remoteSweepMs` (default 300000, measured from the run''s creation; `inflight()` tells the truth and a turn that cannot get a
+   slot is `hermes_busy`, no request sent; Codex DH4). A stream that ended normally (EOF) WITHOUT a terminal event is
+   `hermes_stream_closed_early` whatever a poll says; an events route that answers 404 is `hermes_run_lost`, another 4xx a config
+   defect (Codex DH5). A 5xx on the events route or a transport break still lets polling answer (unchanged policy). The "remote
+   count" is modelled by the fake; the installed service''s behaviour is only as verified in Step B (consumed streams).
+3. **Takeover, spent turn or deadline: `POST /stop`, and the run id is remembered as cancelled**; output of a cancelled run, or of
+   a run this turn did not create, is never used; a 404 on `/stop` means "maybe finished": the output is still discarded.
+   **Ownership** is looked at before each poll and once more in `finalize()`, AFTER the stream has been drained and together with
+   the signal and the absolute deadline (Codex DH2: the acceptance decision used to be taken BEFORE the drain). A takeover landing
+   after that last look is caught only by the pipeline''s own recheck and write fence: a residual window, not zero.
+4. **Deadlines.** The create, every poll, the event stream and the final drain run under the turn''s absolute deadline (the drain
+   is bounded by `min(deadline, now + grace)` and is aborted by the turn signal); a response body is capped at 1 MiB; a redirect is
+   a config defect; 4xx is a config defect with no retry; a 5xx or a dropped connection on the create is an uncertain create,
+   never re-created. **Not** under that deadline: the best-effort `/stop` (its own short timeout: the request timeout, 3 s once
+   the signal has fired). There is no single deadline over "everything".
+5. **Fail closed, no model text:** failed / cancelled / 404 / a stream closed without a terminal event / no or bad envelope / no
+   history / a missing or non-matching current message / no durable dispatch claim = one outcome and an escalation through the
+   existing path.
+6. **One run per conversation at a time; a global cap below Hermes'' 10.** A wait that outlasts the deadline is `hermes_busy` and
+   nothing is sent.
+7. **Continuity** is the gateway''s own transcript for the SAME conversation: customer -> `user`, every business turn -> `assistant`
    (the store collapses the AI and staff into one voice; the only marker is the `[A teammate replied]: ` label stored with a
-   dashboard user's public reply, see Step A+), the current message is located as the LAST
-   matching customer turn, removed and sent only as `input`, newer turns dropped, newest 20 turns / 8000 characters, oldest
-   dropped first. No transcript, or one that does not contain the current message = no request and an escalation.
-8. **The envelope:** the model's output must END with one JSON line `{"disposition":"answer"|"request_human","text","reason"}`.
-   Only that `text` is ever sent (<= 2000 UTF-16 units, refused above, never truncated); a `reason` is kept only if it is in the
-   closed set. `hermes_envelope_parse_failure` (stable event name) and `stats()` expose the parse-failure rate.
-
+   dashboard user''s public reply, see Step A+). **The current message is found by its Chatwoot MESSAGE ID** (Codex DH3), carried
+   through the transcript read beside the turns (`TurnHistory.messageIds` -> `AgentRuntimeRequest.historyMessageIds`; it is NOT
+   inside `context.history`, so the isola-runtime payload is unchanged); equal text is not identity, and a missing current row,
+   a missing id or ids that do not line up with the turns is a refusal (`hermes_history_unavailable`), no request. Newer turns are
+   dropped, newest 20 turns / 8000 characters, oldest dropped first. **"No partial history" is NOT promised:** the transcript
+   can have gaps the gateway cannot see (a staff turn whose write failed is marked, but the mark is IN MEMORY: **after a gateway
+   restart the first AI turn on a conversation that has a gap in its transcript cannot be proved**, and a gap in an AI or staff
+   turn recorded before the restart is invisible). Customer text is quoted wherever a line would start with `Conversation id:`,
+   `Isola assertion:` or `[A teammate replied]:` (Codex DH6); the cryptographic assertion check in the service stays the
+   authorization boundary.
+8. **The envelope:** the model''s output must END with one JSON line `{"disposition":"answer"|"request_human","text","reason"}`.
+   Only that `text` is ever sent (<= 2000 UTF-16 units AFTER sanitising, refused above, never truncated); it is sanitised first
+   (NUL and other C0 controls except tab/newline, DEL, C1 controls, bidi overrides/isolates/marks, the Arabic letter mark and a BOM
+   removed; CR, U+2028, U+2029 become a newline; Codex DH7). A `reason` is kept only if it is in the closed set.
+   `hermes_envelope_parse_failure` (stable event name) and `stats()` expose the parse-failure rate.
 ## Deviations and choices that need a reviewer
 
 - **A best-effort `/stop` is sent AFTER the turn signal fires. ACCEPTED by Lane A as a CANCELLATION, NOT a DISPATCH.**
@@ -128,7 +163,11 @@ customer. Fixed, minimal and separately reviewable (`src/app.ts`, `src/turns.ts`
   memory (a durable one needs schema, not authorised), so it is lost on a gateway restart, after which the hole is invisible
   again and the alert is the only record; it is per conversation, so one failed write silences the AI in ONE conversation only,
   until the process restarts; a staff message with no text (attachment only) is not representable and is not recorded.
-- The turn-store write happens BEFORE the 200 acknowledgement, as it already did for customer turns.
+- The staff turn-store write happens BEFORE the 200 acknowledgement and the takeover, but is now BOUNDED (Codex DH9):
+  `STAFF_TURN_RECORD_TIMEOUT_MS` = 2 s (under Chatwoot's 5 s delivery timeout). A write that has not finished by then is treated
+  as NOT recorded (alert `human_reply_turn_not_recorded` with a "timed out" detail, the hole is marked, the acknowledgement is
+  sent and the takeover starts); the abandoned write may still settle later and changes nothing. **Not bounded (outside Codex's
+  list, disclosed):** the CUSTOMER-turn write in the accept/suppressed block is still awaited without a bound.
 - Tests: `test/direct-hermes-staff-history.test.ts` (9, route-level; the handback scenario: customer, AI reply, staff reply,
   explicit handback, next customer message: the model request carries all three in order from the SAME conversation only) and the
   flipped test in `test/direct-hermes-route.test.ts`.
@@ -178,7 +217,14 @@ unauthorized -> 403, ledger-down -> 503, the adapter's second-POST guard) each t
    (`isolagwuat_rt`) allowlist observed earlier does not contain it. Not known: whether the UAT gateway shares an overlay network
    with `isola_hermes-public` and whether the service name resolves from inside the container. Lane 59 is checking by DNS only;
    this stays UNVERIFIED until they report. Nothing in this branch proves reachability.
-8. The staff-history mark for a failed write is in memory only (see above).
+8. The staff-history mark for a failed write is in memory only (see above): **after a gateway restart the first AI turn on any
+   conversation with a gap in the transcript cannot be proved.**
+8a. **Durable dispatch residual (DH1):** a crash between the `model_run` claim and the POST escalates that turn and never retries it.
+    The in-memory guard and the cancelled-ids set are forgotten on restart; the marker is not.
+8b. **Remote slot accounting (DH4)** is modelled by the fake and by the Step B facts for CONSUMED streams. How the installed
+    service counts an abandoned stream is UNVERIFIED; the adapter assumes the documented 300 s sweep.
+8c. **Remaining Codex rounds' findings that this slice does not address:** F2 / F3 (above), D8, the unbounded customer-turn write
+    (above), the CRLF-delimited SSE blank line (the supplied contract uses LF), attachment-only staff replies (not representable).
 9. Hermes' cap of 10 runs is shared with any other client of the service.
 10. The business tools are not real yet (service OFF, source gate, dead address, no minter): the assertion provider returns
     nothing by default, so the line says `none` and the tools refuse.
@@ -199,7 +245,12 @@ Paperclip routing stays OFF. Nothing here is deployed or applied.
 
 From `services/isola-gateway`: `OWNERSHIP_PG_TESTS=skip npx vitest run` and `npx tsc --noEmit`. Base 1255 passed / 30 skipped;
 Step A 1451; after Step A+ 1477 passed / 30 skipped / 0 failed, `tsc` 0 (1460 after `fcf8b22`, 1473 after `7e9ffc9`, 1477 after
-`d810455`; the 30 skipped are the real-Postgres tests). All new tests are socket-free:
+`d810455`); after the Codex DH round **1549 passed / 30 skipped / 0 failed, `tsc` 0** (1492 after `b512f7d`, 1505 after `06d4478`,
+1521 after `b6a910a`, 1526 after `5bb1afd`, 1542 after `f9ed1af`, 1549 after `d52f61c`; the comment-only `bd5b8f5` changes nothing).
+The 30 skipped are the real-Postgres tests, NOT run. **These runs are the only full-suite evidence:** Codex's sandbox cannot open
+loopback listeners (280 EPERM) and could not run the suite. The new DH test files are all socket-free (injected fetch / the
+gateway handler driven in-process): `direct-hermes-dh3-dh8-history`, `-dh1-durable-dispatch`, `-dh2-dh5-drain`,
+`-dh4-slot-accounting`, `-dh6-dh7-text`, `-dh9-stalled-staff-record`. All new tests are socket-free:
 the gateway handler is driven in-process (`test/hermes-inproc.ts`) and Hermes is an injected `SafeFetch` (`test/hermes-fake.ts`).
 
 ## Disclosures
@@ -215,6 +266,17 @@ the gateway handler is driven in-process (`test/hermes-inproc.ts`) and Hermes is
 - The route test for a recovered interrupted turn drives `processDelivery` plus the real sweeper (not a gateway built by
   `createGateway`) because the sweeper is created by the server, not by the gateway factory.
 - A temporary debug test file was created and removed during the work; it is not in any commit.
+- **Codex DH round (all red first unless stated):** DH3/DH8 15 tests (10 red), DH1 12 (8 red), DH2/DH5 16 (9 red), DH4 5 (3 red),
+  DH6/DH7 16 (15 red), DH9 7 (4 red). **DH8 is a test defect, so its "red" is by sabotage reproduction:** with the pre-fix
+  self-filtering fake a widened production WHERE leaves 155 tests green (0 red); with the new fake the same widening turns 22 red.
+  **Existing tests changed, with reasons:** the older history tests (the unit tests of the history builder and the runtime tests' request helper) were migrated to identify
+  the current message by id through a test wrapper / helper that numbers the turns (the old tests asserted text matching; the DH3
+  behaviour itself is pinned by `direct-hermes-dh3-dh8-history.test.ts`, which calls the builder directly); the route test that listed the closed ledger rows now expects the
+  `model_run` marker too; one concurrency test that asserted an undrained stream releases the adapter's slot at once now asserts the
+  slot is held for the sweep window (DH4). **Two checks removed because their sabotage was equivalent** (a duplicate early signal
+  /deadline check in `finalize()`, and a redundant `.catch` on the abandoned staff write): the surviving check is the one the
+  tests pin. **A test-writing hazard, fixed:** the file-writing tool unescaped `\uXXXX` sequences in one test file (the regex
+  literal broke); the file was regenerated with explicit escapes.
 - **Step A+:** `fcf8b22` was tests-first (the 8 behaviour tests were red against the pre-change code; the 9th pins the production
   dedupe statement and was added with the fix; sabotage: no recording 8 red, no label 3, mark never set 1, pipeline ignores the
   hole 1, private notes treated as public 1, dedupe statement changed 1; a comment-only change stays green). `7e9ffc9` and
@@ -222,19 +284,18 @@ the gateway handler is driven in-process (`test/hermes-inproc.ts`) and Hermes is
   used a credential-looking literal flagged by the repository's post-edit hook and a fake that expects a specific bearer; both
   were fixed (the value is now built, and the fake is told which bearer to expect).
 
-## PORT-READY paragraph
+## PORT-READY paragraph (refreshed for the Codex DH round)
 
-Direct Hermes path (Step A), branch `feat/direct-hermes-adapter-2026-10-03`: a `HermesDirectRuntime` in `services/isola-gateway`
-runs a customer turn through `isola_hermes-public` with POST `/v1/runs`, no Paperclip in the loop, selected per employee and
-OFF by default. Built to lane 59's Step-B-verified contract: `/v1/runs` ignores Idempotency-Key, so the adapter never POSTs twice
-per ledger key; every run's stream is read to the end; on takeover, a spent turn or the deadline the run is stopped and its output
-discarded; continuity is `conversation_history` from the gateway's own transcript; the model's output must end with a one-line
-JSON envelope and anything else is no text plus one escalation. Step A+ added: staff replies now reach the history, labelled
-`[A teammate replied]:` and idempotent (a failed write marks the conversation and the next AI turn escalates instead of answering
-with a hole); the one `/stop` after the turn signal is documented and tested as a cancellation, not a dispatch; and 13 route
-tests pin the webhook retry semantics (a redelivery of an accepted delivery is a 200 with no second run or reply; 409 for a
-changed body; 401 with no ledger row; 500 only when the ledger is down, never 429). 1477 tests pass against a fake Hermes (no
-socket); not deployed, not reviewed. Known limits for the UAT demo report: late-worker/late-send exclusivity (F2/F3), fixture-only
-customer scope, no person reached out-of-band, Hermes restart loses runs (escalate, never re-drive), parse-failure rate unknown;
-cold start is NOT measured by this branch (lane 59), and reachability of `isola_hermes-public:8642` from the UAT gateway is
-UNVERIFIED. Sandbox only.
+Direct Hermes path, branch `feat/direct-hermes-adapter-2026-10-03`: a `HermesDirectRuntime` in `services/isola-gateway` runs a
+customer turn through `isola_hermes-public` with POST `/v1/runs`, no Paperclip in the loop, selected per employee, OFF by default.
+Codex reviewed `d810455` (REQUEST CHANGES, nine findings); all nine are addressed on the branch: a durable `model_run` ledger
+marker is claimed before the POST so a restart or a second instance cannot start a second run (a crash between claim and POST
+escalates that turn); the current message is found by Chatwoot message id, never by text; the answer is accepted only after the
+event stream is drained, and an abnormal end of the stream (EOF without a terminal event, events 404) is never an answer; an
+undrained run keeps its local slot until the service's own sweep; customer text cannot forge the trusted marker lines and the
+envelope text is sanitised; the staff-transcript write is bounded so a blocked store cannot delay a takeover. 1549 tests pass
+against a fake Hermes (no socket), `tsc` clean; not deployed, not re-reviewed after this round. Known limits for the UAT report:
+late-worker/late-send exclusivity (F2/F3), fixture-only customer scope, no person reached out-of-band, Hermes restart loses runs
+(escalate, never re-drive), after a gateway restart a conversation with a transcript gap cannot be proved on its first AI turn,
+parse-failure rate unknown, cold start NOT measured by this branch (lane 59), reachability of `isola_hermes-public:8642` from the UAT
+gateway UNVERIFIED. Sandbox only.
