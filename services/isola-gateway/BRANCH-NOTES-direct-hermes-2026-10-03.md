@@ -18,6 +18,10 @@ unchanged. It is selected per employee (`GATEWAY_HERMES_AGENT_IDS`), default OFF
 | `f05810e` | pure pieces `src/hermes-input.ts`: session label, `conversation_history`, input lines, envelope |
 | `9cb2826` | `src/hermes-runtime.ts` + the fake Hermes and its tests |
 | `6a12144` | config, boot refusals, routing in `app.ts`, failure explanations, route-level tests |
+| `6d038a8` | these notes (Step A) |
+| `fcf8b22` | **Step A+ 1:** staff replies reach the history (labelled, idempotent, fail closed); the pinned known-gap test is flipped |
+| `7e9ffc9` | **Step A+ 2:** webhook retry semantics over the direct route (13 tests, regression guards) |
+| `d810455` | **Step A+ 3:** the post-signal `/stop` is a cancellation, not a dispatch (comment + 4 tests) |
 
 ## Configuration (names only, never values)
 
@@ -77,7 +81,8 @@ released only when the stream is read to the end (so every run's stream is consu
 6. **One run per conversation at a time; a global cap below Hermes' 10.** A wait that outlasts the deadline is `hermes_busy`
    and nothing is sent.
 7. **Continuity** is the gateway's own transcript for the SAME conversation: customer -> `user`, every business turn -> `assistant`
-   (the store collapses the AI and staff into one voice; no marker is injected), the current message is located as the LAST
+   (the store collapses the AI and staff into one voice; the only marker is the `[A teammate replied]: ` label stored with a
+   dashboard user's public reply, see Step A+), the current message is located as the LAST
    matching customer turn, removed and sent only as `input`, newer turns dropped, newest 20 turns / 8000 characters, oldest
    dropped first. No transcript, or one that does not contain the current message = no request and an escalation.
 8. **The envelope:** the model's output must END with one JSON line `{"disposition":"answer"|"request_human","text","reason"}`.
@@ -86,34 +91,97 @@ released only when the stream is read to the end (so every run's stream is consu
 
 ## Deviations and choices that need a reviewer
 
-- **A best-effort `/stop` is sent AFTER the turn signal fires.** `AgentRuntimeRequest.signal` says a runtime must start no request
-  once it fires; this adapter starts no create/poll/stream after it but does send ONE stop (a cancellation removes work; it is
-  not a dispatch). Reviewed rule vs a runaway model call: decide.
+- **A best-effort `/stop` is sent AFTER the turn signal fires. ACCEPTED by Lane A as a CANCELLATION, NOT a DISPATCH.**
+  `AgentRuntimeRequest.signal` says a runtime must start no request once it fires; this adapter starts no create, poll or stream
+  after it but does send exactly ONE `POST /v1/runs/{id}/stop` for the run this turn created (a cancellation removes work; Step B
+  measured that `/stop` halts model execution). It is sent once, never retried, and its failure (HTTP 500, 404 "maybe finished",
+  a transport error) changes nothing: the run id stays remembered as cancelled and its output is never used. The exception is
+  written into the `signal` doc comment in `src/runtime.ts` and pinned by `test/direct-hermes-post-signal.test.ts`: after the
+  signal the request log gains exactly that one stop and nothing else; an already-aborted signal sends nothing, not even a stop.
+  The route-level proof that no customer write follows a takeover is in `test/direct-hermes-route.test.ts`. Those tests pass on
+  the code as built (regression guards): a second stop (3 red), no stop (3 red) and a signal ignored by every guard (4 red) are
+  caught; removing one single explicit guard, or even the three obvious ones together, is NOT caught, because the signal also
+  aborts requests in flight and `spent()` is checked at several layers. The tests pin the observable property, not one guard.
 - `instructions` (the envelope contract) is sent on every run; whether it appends to or competes with the charter is UNVERIFIED.
 - The customer's current message is cut to 4000 UTF-16 units in `input`.
 - The `request_human` envelope's `text` IS sent to the customer, then the conversation is escalated (the existing behaviour).
 - The Hermes request carries NO ids from the Chatwoot context: only the label, the rendered input and the history.
 
-## KNOWN GAP found while building the route tests (not fixed here)
+## STAFF REPLIES REACH THE HISTORY (Step A+, commit `fcf8b22`; was a known gap)
 
-A signed HUMAN-AGENT reply takes the `human_reply` decision in `app.ts`, which records the takeover in the ownership ledger and
-returns BEFORE the transcript-recording block (that block handles only the accept and suppressed decisions). So what staff
-wrote is NOT in the transcript, although `turns.ts` says human replies are recorded: after a handback the model does not see
-what the person told the customer. The bot's own echoed replies and the customer's messages ARE recorded. A route test pins
-the current behaviour as "KNOWN GAP (pinned, to be flipped when fixed)".
+A signed HUMAN-AGENT reply takes the `human_reply` decision in `app.ts`, which used to record the takeover in the ownership
+ledger and return BEFORE the transcript-recording block, so after a handback the model did not see what the person told the
+customer. Fixed, minimal and separately reviewable (`src/app.ts`, `src/turns.ts`, `src/pipeline.ts`):
 
-## Open risks
+- **Recorded before the ownership branch** (so the "ownership executor not configured" early return cannot skip it), for a real
+  dashboard user's PUBLIC reply only. A private note is never recorded (`classifyTurn` drops anything not explicitly
+  `private=false`); activity lines and other conversations are never in this conversation's history.
+- **Label:** the stored content is `[A teammate replied]: <text>`. SOURCE: the form lane 59's Step B isolation script used
+  (`.checkpoint-out/public-hermes/step_b.sh`); Step B (d) showed the model used such a line correctly. The role in
+  `conversation_history` stays `assistant` (the store has one business voice); the label lives inside the content, once. The AI's
+  own echoed reply and another bot's outgoing message are NOT labelled as a teammate.
+- **Idempotent:** `recordTurn` is keyed on (account, Chatwoot message id) with `ON CONFLICT ... DO NOTHING`; a redelivered staff
+  webhook is a no-op. The route tests pin the PRODUCTION statement text, not just the in-memory model of it.
+- **Fail closed if the write fails:** the takeover acknowledgement is unaffected (still `human_reply`), an ALERT is logged
+  (`human_reply_turn_not_recorded`), and the conversation is marked in memory as having a hole; the pipeline then treats its
+  history as absent, which the direct path turns into "answer nothing, escalate once". **Limits, stated:** the mark is in
+  memory (a durable one needs schema, not authorised), so it is lost on a gateway restart, after which the hole is invisible
+  again and the alert is the only record; it is per conversation, so one failed write silences the AI in ONE conversation only,
+  until the process restarts; a staff message with no text (attachment only) is not representable and is not recorded.
+- The turn-store write happens BEFORE the 200 acknowledgement, as it already did for customer turns.
+- Tests: `test/direct-hermes-staff-history.test.ts` (9, route-level; the handback scenario: customer, AI reply, staff reply,
+  explicit handback, next customer message: the model request carries all three in order from the SAME conversation only) and the
+  flipped test in `test/direct-hermes-route.test.ts`.
 
-- **F2 (late-worker overlap) and F3 (late-send duplicate) from Codex rounds 3-6 apply unchanged** to this path: exclusivity is
-  not provided by timing, a fenced-lease design exists as a proposal and is not authorised.
-- Customer scope is fixture-only; there is no production resolver. `contact_inbox` on Chatwoot 4.18 is unverified. No alert
-  reaches a person out-of-band (log event + private note only).
-- **Hermes restart loses in-flight runs**: a 404 on the run escalates once and is never re-driven (recovery is escalation-only).
-- Cold start 10 s after idle against the 15 s first-answer goal; Hermes' cap of 10 runs is shared with any other client of the service.
-- The business tools are not real yet (service OFF, source gate, dead address, no minter): the assertion provider returns
-  nothing by default, so the line says `none` and the tools refuse.
-- Staff turns are indistinguishable from the AI's in the history.
-- The envelope's parse-failure rate is unknown until a real run; a high rate means moving to a native tool.
+## Webhook retry semantics (Step A+, commit `7e9ffc9`)
+
+Chatwoot retries an agent-bot webhook ONLY on HTTP 429 and 500 (v4.16.1). Statuses the webhook route can return today (read from
+`src/app.ts`): 200 (accepted, `duplicate_suppressed`, suppressed, `human_reply`, ...), 400, 401, 405, 413, 422, 409
+(`ledger_conflict`) and 500. **429 is never returned by this route** (the only 429 in `app.ts` is the separate voice route). **500
+is returned in two places:** `ledger_unavailable` (the ONE intended retry case: the delivery could not be durably recorded; the
+retry then runs exactly once) and the outer catch around `handleWebhook` (an unexpected exception; not reachable for a duplicate,
+which takes `reserve()` -> `duplicate` -> 200 with only pure steps before it). Tests (13, route-level, direct Hermes wired):
+
+- a redelivery of an accepted delivery (same signed body) is 200 `duplicate_suppressed`, with NO second Hermes run, NO second reply
+  and no new ledger row: after completion, while still running, and after a terminal failure;
+- the same delivery id with a different signed body is 409 and runs nothing;
+- an unsigned, wrong, foreign-secret or stale-timestamp request is 401 with no ledger row and no Hermes call (positive control:
+  the correctly signed one is accepted in the same rig);
+- ledger down is 500 with no run and no row; the retry is accepted and runs once; a status table shows no 429 and 500 only there.
+
+**Edge, found by testing and reported honestly:** a redelivery that arrives AFTER the lease expired on a delivery that never
+finished is NOT a plain duplicate: `reserve()` reports `resumed`, the route answers 200 `accepted` and processes it again. It
+still starts NO second Hermes run: the adapter refuses a second `POST /v1/runs` for the same ledger key
+(`hermes_duplicate_invoke`), the conversation is escalated once, and the first run's late answer is discarded (ownership
+changed). Net effect for the customer: no automatic answer and a human follow-up. Chatwoot itself does not retry a 200, so this
+path needs a duplicate that did not come from Chatwoot's retry rule.
+
+These tests describe behaviour that already existed, so they pass on the code as built (regression guards, not red-first); eight
+sabotages of the status codes and guards (duplicate -> 500 or 429, duplicate processed, conflict -> 200 or processed,
+unauthorized -> 403, ledger-down -> 503, the adapter's second-POST guard) each turn them red, and a log-only change stays green.
+
+## Open risks and KNOWN LIMITS (the UAT demo report must show EACH of these)
+
+1. **F2 (late-worker overlap) and F3 (late-send duplicate) from Codex rounds 3-6 apply unchanged** to this path: exclusivity is
+   not provided by timing; a fenced-lease design exists as a proposal and is not authorised.
+2. **Customer scope is fixture-only; there is no production resolver.** `contact_inbox` on Chatwoot 4.18 is unverified.
+3. **No person is reached out-of-band.** An escalation is a private note and a log event (`recovery_escalation`); nothing pages or
+   messages anyone outside Chatwoot.
+4. **Hermes restart loses in-flight runs**: a 404 on the run escalates once and is never re-driven (recovery is escalation-only).
+5. **The envelope's parse-failure rate is unknown** until a real run (`hermes_envelope_parse_failure` / `stats()` expose it); a
+   high rate means moving to a native tool instead of envelope parsing.
+6. **COLD START IS NOT TESTED BY THIS BRANCH.** Every test here runs against a socket-free fake Hermes, so no latency is measured
+   at all. Lane 59 owns the cold / warm / post-idle measurement (Step B, small n: warm 2.9-3.3 s, first run after ~65 min idle
+   10.2 s, the API server unresponsive for ~1 s warm / ~6 s post-idle while a run starts) against the 15 s first-answer goal.
+7. **UNVERIFIED: whether the UAT gateway (`isolagwuat_gateway`) can resolve and reach `isola_hermes-public:8642`.** Known: the UAT
+   gateway's egress allowlist REPLACES the derived list wholesale, so the Hermes host has to be added to it, and the UAT runtime
+   (`isolagwuat_rt`) allowlist observed earlier does not contain it. Not known: whether the UAT gateway shares an overlay network
+   with `isola_hermes-public` and whether the service name resolves from inside the container. Lane 59 is checking by DNS only;
+   this stays UNVERIFIED until they report. Nothing in this branch proves reachability.
+8. The staff-history mark for a failed write is in memory only (see above).
+9. Hermes' cap of 10 runs is shared with any other client of the service.
+10. The business tools are not real yet (service OFF, source gate, dead address, no minter): the assertion provider returns
+    nothing by default, so the line says `none` and the tools refuse.
 - In-memory state only (started keys, cancelled ids): a gateway restart forgets them; recovery then escalates, it never re-POSTs.
 - Session continuity across a Hermes restart is unverified; it does not depend on Hermes memory (the history is re-sent every turn).
 
@@ -130,7 +198,8 @@ Paperclip routing stays OFF. Nothing here is deployed or applied.
 ## Tests
 
 From `services/isola-gateway`: `OWNERSHIP_PG_TESTS=skip npx vitest run` and `npx tsc --noEmit`. Base 1255 passed / 30 skipped;
-final 1451 passed / 30 skipped / 0 failed, `tsc` 0 (the 30 skipped are the real-Postgres tests). All new tests are socket-free:
+Step A 1451; after Step A+ 1477 passed / 30 skipped / 0 failed, `tsc` 0 (1460 after `fcf8b22`, 1473 after `7e9ffc9`, 1477 after
+`d810455`; the 30 skipped are the real-Postgres tests). All new tests are socket-free:
 the gateway handler is driven in-process (`test/hermes-inproc.ts`) and Hermes is an injected `SafeFetch` (`test/hermes-fake.ts`).
 
 ## Disclosures
@@ -146,6 +215,12 @@ the gateway handler is driven in-process (`test/hermes-inproc.ts`) and Hermes is
 - The route test for a recovered interrupted turn drives `processDelivery` plus the real sweeper (not a gateway built by
   `createGateway`) because the sweeper is created by the server, not by the gateway factory.
 - A temporary debug test file was created and removed during the work; it is not in any commit.
+- **Step A+:** `fcf8b22` was tests-first (the 8 behaviour tests were red against the pre-change code; the 9th pins the production
+  dedupe statement and was added with the fix; sabotage: no recording 8 red, no label 3, mark never set 1, pipeline ignores the
+  hole 1, private notes treated as public 1, dedupe statement changed 1; a comment-only change stays green). `7e9ffc9` and
+  `d810455` are NOT red-first: they pin behaviour that already existed (see their sections). The first draft of the retry tests
+  used a credential-looking literal flagged by the repository's post-edit hook and a fake that expects a specific bearer; both
+  were fixed (the value is now built, and the fake is told which bearer to expect).
 
 ## PORT-READY paragraph
 
@@ -154,7 +229,12 @@ runs a customer turn through `isola_hermes-public` with POST `/v1/runs`, no Pape
 OFF by default. Built to lane 59's Step-B-verified contract: `/v1/runs` ignores Idempotency-Key, so the adapter never POSTs twice
 per ledger key; every run's stream is read to the end; on takeover, a spent turn or the deadline the run is stopped and its output
 discarded; continuity is `conversation_history` from the gateway's own transcript; the model's output must end with a one-line
-JSON envelope and anything else is no text plus one escalation. 1451 tests pass against a fake Hermes (no socket); not deployed,
-not reviewed. Open: late-worker/late-send exclusivity (F2/F3), fixture-only customer scope, no out-of-band alert, tools not real,
-Hermes restart loses runs (escalate, never re-drive), parse-failure rate unknown, and a found gap: staff replies are not in the
-transcript. Sandbox only.
+JSON envelope and anything else is no text plus one escalation. Step A+ added: staff replies now reach the history, labelled
+`[A teammate replied]:` and idempotent (a failed write marks the conversation and the next AI turn escalates instead of answering
+with a hole); the one `/stop` after the turn signal is documented and tested as a cancellation, not a dispatch; and 13 route
+tests pin the webhook retry semantics (a redelivery of an accepted delivery is a 200 with no second run or reply; 409 for a
+changed body; 401 with no ledger row; 500 only when the ledger is down, never 429). 1477 tests pass against a fake Hermes (no
+socket); not deployed, not reviewed. Known limits for the UAT demo report: late-worker/late-send exclusivity (F2/F3), fixture-only
+customer scope, no person reached out-of-band, Hermes restart loses runs (escalate, never re-drive), parse-failure rate unknown;
+cold start is NOT measured by this branch (lane 59), and reachability of `isola_hermes-public:8642` from the UAT gateway is
+UNVERIFIED. Sandbox only.
