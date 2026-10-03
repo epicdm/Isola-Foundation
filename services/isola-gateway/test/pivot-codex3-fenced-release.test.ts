@@ -22,6 +22,7 @@ import { bindingIdentity, deliveryRef } from "../src/deliveryref.js";
 import { DISARMED } from "../src/failpoint.js";
 import { processDelivery, type DeliveryJob, type PipelineDeps } from "../src/pipeline.js";
 import { createSweeper } from "../src/recovery.js";
+import { DISPOSITION } from "../src/recovery-escalation.js";
 import { parseWebhookPayload } from "../src/webhook.js";
 import {
   runGuardedWrite,
@@ -113,6 +114,10 @@ const rowState = (ledger: FakeLedger, job: DeliveryJob, action: string): string 
   [...ledger.rows.entries()].find(([key]) => key.endsWith(`|${action}`) && key.includes(job.identity.eventId))?.[1].state ??
   "absent";
 
+const rowFailureCode = (ledger: FakeLedger, job: DeliveryJob, action: string): string | null =>
+  [...ledger.rows.entries()].find(([key]) => key.endsWith(`|${action}`) && key.includes(job.identity.eventId))?.[1]
+    .failureCode ?? null;
+
 function build(advanceOnReply: boolean) {
   const chatwoot = new StubChatwootApi();
   chatwoot.conversationRecord = conversationRecord();
@@ -184,6 +189,8 @@ describe("F4 (the PATH): a reply the turn budget fenced is NOT reported complete
     // The F4 regression guard: a fenced, unsent reply must never read as completed.
     expect(rowState(ledger, job, "reply")).not.toBe("completed");
     expect(rowState(ledger, job, "reply")).toBe("failed");
+    // The title promises not_sent_escalated: assert the EXACT recorded disposition (Codex R6).
+    expect(rowFailureCode(ledger, job, "reply")).toBe(DISPOSITION.notSentEscalated);
     expect(chatwoot.privateNotes, "a person is told").toHaveLength(1);
     expect(chatwoot.statusToggles, "and shown the conversation").toHaveLength(1);
     expect(rowState(ledger, job, "delivery")).toBe("completed");

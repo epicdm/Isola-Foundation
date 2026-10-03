@@ -94,9 +94,10 @@ export interface ChatwootApi {
     pivotMessageId: number | null,
   ): Promise<ReconcileResult>;
   /**
-   * The whole conversation record, verbatim. Used only by restart recovery,
-   * which must rebuild a delivery from the system that actually owns the
-   * message rather than from a copy of it in the ledger.
+   * The whole conversation record, verbatim. Used by restart recovery for the top-level
+   * `status` and `meta.assignee` (is a person holding this conversation?), and by
+   * reconciliation for the visible messages. Recovery no longer rebuilds the inbound
+   * message from it (Codex R5): it escalates a delivery it cannot prove complete.
    */
   getConversationRecord(target: ChatwootTarget): Promise<unknown>;
   openConversation(target: ChatwootTarget): Promise<void>;

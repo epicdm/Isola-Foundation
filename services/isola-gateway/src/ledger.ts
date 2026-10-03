@@ -75,7 +75,7 @@ export {
 } from "./deliveryref.js";
 
 export type DeliveryState =
-  /** Durably accepted, not yet worked. A restart must resume this. */
+  /** Durably accepted, not yet worked. After a restart the recovery sweeper takes this and escalates it unless the ledger proves it complete (it is not re-run). */
   | "reserved"
   /** A worker holds the lease and is running the pipeline. */
   | "in_progress"
@@ -229,11 +229,12 @@ export interface Ledger {
   /**
    * Give back an action that was CLAIMED and then NOT PERFORMED because the turn budget
    * ran out (Codex R3 F4). It is NOT `fail`: a failed row is terminal and `claimAction`
-   * reports it as completed, so the worker that resumes the delivery would skip an
-   * action that never happened. A released row stays `in_progress` with its lease
-   * expired, which `claimAction` reports as `ambiguous` -- the existing, tested
-   * "claimed and never recorded" path: a message is reconciled against Chatwoot and sent
-   * only if proven absent; an idempotent write is simply re-run. No schema change.
+   * reports it as completed, so a later reader would take an action that never happened
+   * for a performed one. A released row stays `in_progress` with its lease expired, which
+   * `claimAction` reports as `ambiguous` -- the existing "claimed and never recorded"
+   * path: a message is reconciled against Chatwoot and sent only if proven absent; an
+   * idempotent write is simply re-run. (Recovery no longer re-drives a delivery: it
+   * escalates it once to a person and records a disposition on the row.) No schema change.
    * Only an `in_progress` row is touched: a completed or failed row is never reopened.
    *
    * HOLDER-FENCED (Codex R4): `attempts` is the token the caller's own `claimAction` returned,

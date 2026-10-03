@@ -72,7 +72,8 @@ export interface GatewayConfig {
    * writes nothing and completes nothing. Boot refuses a budget that does not leave
    * `TURN_LEASE_MARGIN_MS` before the ledger lease expires, because the recovery
    * sweeper takes a delivery only AFTER its lease expired: a turn that cannot outlive
-   * its lease cannot overlap the worker that resumes it.
+   * its lease cannot overlap the sweeper's escalation of it. (Containment, NOT exclusivity:
+   * a request already on the wire at the deadline can still commit; open F2/F3.)
    */
   turnBudgetMs: number;
   /** How often the recovery sweeper looks for expired leases. */
@@ -205,8 +206,8 @@ export const DEFAULT_LEDGER_LEASE_MS = 5 * 60 * 1000;
 /**
  * What the turn budget must leave before the lease expires: the lease is stamped by the
  * database clock when the delivery is RESERVED (before the turn starts, and rounded UP
- * to whole seconds), the budget is measured on this process's clock, a resumed turn
- * starts after its reserve round trip, and a write can only be aborted, not recalled.
+ * to whole seconds), the budget is measured on this process's clock, a turn starts
+ * after its reserve round trip, and a write can only be aborted, not recalled.
  * 30 s is generous for all of those and cheap against a 5 minute lease.
  */
 export const TURN_LEASE_MARGIN_MS = 30_000;
@@ -476,7 +477,7 @@ export function bootErrors(config: GatewayConfig): string[] {
 
   // THE TURN BUDGET (Codex R2). The recovery sweeper takes a delivery only after its
   // lease has EXPIRED, so a turn that cannot outlive its lease cannot overlap the
-  // worker that resumes it. Every awaited operation of a turn (Chatwoot requests, the
+  // sweeper's escalation of it (containment, not exclusivity). Every awaited operation of a turn (Chatwoot requests, the
   // runtime call, the ownership read) is bounded by `turnBudgetMs`, so the budget and
   // each per-operation timeout are what must fit, not a sum of guesses.
   if (config.ledgerLeaseMs <= TURN_LEASE_MARGIN_MS) {

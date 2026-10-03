@@ -103,9 +103,10 @@ export const RUNTIME_NOT_INVOKED = "not_invoked";
 
 /**
  * A delivery that stopped because a person took the conversation, or because its turn
- * budget ran out: nothing further was written. A spent budget asks for a retry (the
- * row stays open for the worker that resumes it after the lease); a person who holds
- * the conversation does not.
+ * budget ran out: nothing further was written. A spent budget leaves the row open; once
+ * the lease expires the recovery sweeper takes it and ESCALATES it to a person once
+ * (src/recovery-escalation.ts). It does not re-run the turn (Codex R5/R6). A person who
+ * holds the conversation needs no retry.
  */
 function suppressedResult(writes: WriteContext, runtimeOutcome: string = RUNTIME_NOT_INVOKED): DeliveryResult {
   return {
@@ -208,6 +209,10 @@ export const FAILURE_EXPLANATIONS: Readonly<Record<string, string>> = Object.fre
     "this conversation was interrupted (a restart or a timeout) before the gateway could confirm it was finished; the gateway did not resume it and re-sent nothing",
 });
 
+/** What the note says about opening the conversation: an intention and a way to check, never a past fact. */
+const OPENING_SENTENCE = (who: string): string =>
+  `The gateway is moving the conversation to **open** so ${who} can take over; if it is still **pending** when you read this, that step failed, so please open it yourself.`;
+
 export function explainFailure(outcome: string): string {
   return FAILURE_EXPLANATIONS[outcome] ?? "the AI runtime did not produce a usable answer";
 }
@@ -239,11 +244,15 @@ export function renderFailureNote(args: {
     `- correlation id: \`${args.correlationId}\``,
     `- tenant: \`${args.tenantId}\``,
     "",
-    args.outcome === "recovery_escalated"
-      ? "The customer may or may not have received an AI reply, and the gateway has NOT re-sent anything. Please read the conversation and answer if it needs an answer. The conversation has been moved to **open** so a human can take over."
+    // The note is posted BEFORE the opening is attempted, and the opening can fail, so it never says
+    // the conversation WAS opened (Codex R6): it says what the gateway is doing and how to tell.
+    // Where the send is UNCERTAIN (recovery, or a reply that could not be reconciled) it never says
+    // "no message was sent" either.
+    args.outcome === "recovery_escalated" || args.outcome === "reply_unresolved"
+      ? `The customer may or may not have received an AI reply, and the gateway has NOT re-sent anything. Please read the conversation and answer if it needs an answer. ${OPENING_SENTENCE("a human")}`
       : args.customerAnswered === true
-        ? "The AI replied to the customer (a reply WAS sent) and then asked for a human. The conversation has been moved to **open** so a colleague can take over; please read the reply before answering."
-        : "No message was sent to the customer. The conversation has been moved to **open** so a human can take over.",
+        ? `The AI replied to the customer (a reply WAS sent) and then asked for a human. ${OPENING_SENTENCE("a colleague")} Please read the reply before answering.`
+        : `No message was sent to the customer. ${OPENING_SENTENCE("a human")}`,
   ].join("\n");
 }
 
@@ -569,8 +578,10 @@ export async function processDelivery(
   const finish = async (outcome: string): Promise<void> => {
     // A late completion is REJECTED (Codex R2). After the turn budget this worker may no
     // longer be the one that owns the delivery: the lease is about to expire, the sweeper
-    // will resume the row, and closing it here would take a delivery from the worker
-    // that is resuming it (or hide that this one never finished).
+    // will take the row (to close it if the ledger proves it complete, otherwise to escalate
+    // it once to a person), and closing it here would take a delivery from the worker that is
+    // handling it (or hide that this one never finished). This is containment, not
+    // exclusivity: a live handler can still overlap the sweeper (open, F2/F3).
     if (turnExpired() || writes.authority?.deadlineExceeded === true) {
       deps.logger.error({
         ...base,
@@ -586,9 +597,9 @@ export async function processDelivery(
     try {
       await deps.ledger.complete(job.identity, DELIVERY_ACTION, null);
     } catch (err) {
-      // The work is done; only the bookkeeping failed. The recovery sweeper
-      // will find the row, reconcile every write as already-present and close
-      // it out without sending anything again.
+      // The work is done; only the bookkeeping failed. The recovery sweeper will find the
+      // row: if the ledger proves the delivery complete it closes it, otherwise it escalates
+      // it once to a person. It never re-runs the turn and never sends anything again.
       deps.logger.error({
         ...base,
         event: "delivery",
@@ -640,6 +651,11 @@ export async function processDelivery(
     });
   }
 
+  // NOTE (Codex R6, comment only): since round 5 NO production caller sets `job.resumed`: the
+  // recovery sweeper no longer re-runs a delivery through this pipeline, it escalates it
+  // (src/recovery-escalation.ts). The exemption below is kept because the tests pin it; in
+  // production `finishingOwnWork` is always false.
+  //
   // A resumed delivery is exempt from the short-circuit ONLY when it is the one
   // that recorded the hold, and the hold has not moved on since.
   //
@@ -989,7 +1005,7 @@ export async function processDelivery(
   });
   // The runtime call is raced against the turn deadline: a runtime that never returns
   // (or returns after the budget) must not hold the turn open past the lease. Giving up
-  // is "no answer" and the row stays open for the worker that resumes it; the abandoned
+  // is "no answer" and the row stays open for the recovery sweeper to escalate; the abandoned
   // call is allowed to finish on its own and its result is discarded.
   const ran = await raceTurn(invoked, turnDeadlineAt - deps.now(), turnExpired);
   if (ran === TURN_TIMEOUT) {

@@ -299,11 +299,11 @@ export interface OwnershipView {
   /**
    * The operation id that opened the CURRENT episode of human involvement.
    *
-   * Read so a resumed delivery can tell "a human holds this because MY OWN
-   * earlier attempt recorded it, and I still owe Chatwoot the writes" apart
-   * from "a different human genuinely took this over". Without that distinction
-   * a resumed delivery either abandons its own half-finished handover or talks
-   * over somebody else, and there is no third option.
+   * Read so recovery can tell "a human holds this because MY OWN earlier attempt
+   * recorded it, and I still owe Chatwoot the writes" apart from "a different human
+   * genuinely took this over". Without that distinction recovery either abandons its
+   * own half-finished handover or writes over somebody else, and there is no third
+   * option.
    */
   escalationOperationId: string | null;
   /**

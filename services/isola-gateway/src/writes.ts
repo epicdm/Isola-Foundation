@@ -354,9 +354,10 @@ export async function runGuardedWrite(
  * What happens to a claim whose write the fence refused (Codex R3 F4). Two different
  * reasons, two different fates:
  *   - the TURN BUDGET ran out: the action was not performed and the delivery stays open
- *     for the worker that resumes it, so the claim is RELEASED (retryable). Marking it
- *     failed would make `claimAction` report it as completed and the resumed delivery
- *     would skip a reply that was never sent.
+ *     for the recovery sweeper, so the claim is RELEASED (never terminal). Marking it
+ *     failed would make `claimAction` report it as completed and a later reader would
+ *     take a reply that was never sent for a performed one. (The sweeper does not retry
+ *     the send: it escalates the delivery once to a person and records a disposition.)
  *   - a PERSON took the conversation: that is a decision, not a retry. The action is
  *     closed as suppressed, and the delivery closes with it.
  * Best effort either way: a ledger that cannot be written leaves the claim as it is,
