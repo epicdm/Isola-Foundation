@@ -162,7 +162,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * predicate reads, taken from the top level of the conversation record, which does not depend
  * on any message window. Returns the reason, or null when nobody holds it OR it cannot be read.
  */
-async function personHoldsInChatwoot(chatwoot: ChatwootApi, target: ChatwootTarget): Promise<string | null> {
+async function personHoldsInChatwoot(
+  chatwoot: ChatwootApi,
+  target: ChatwootTarget,
+  ownHold: boolean,
+): Promise<string | null> {
   let record: unknown;
   try {
     record = await chatwoot.getConversationRecord(target);
@@ -171,9 +175,19 @@ async function personHoldsInChatwoot(chatwoot: ChatwootApi, target: ChatwootTarg
   }
   if (!isRecord(record)) return null;
   const status = record["status"];
-  if (typeof status === "string" && status !== "pending") return "status_not_pending";
   const meta = record["meta"];
-  if (isRecord(meta) && meta["assignee"] !== null && meta["assignee"] !== undefined) return "human_assigned";
+  const assigned = isRecord(meta) && meta["assignee"] !== null && meta["assignee"] !== undefined;
+  if (ownHold) {
+    // THIS delivery's own hold (Codex R6 G6-3). Its own escalation moves the conversation to
+    // `open`, so a plain `open` proves nothing about a person. What a person leaves behind and
+    // the gateway never does: an assignee, or a `resolved` / `snoozed` status. READABLE evidence
+    // of that overrides the stale hold; an unreadable record changes nothing (fail-open).
+    if (assigned) return "human_assigned";
+    if (status === "resolved" || status === "snoozed") return `status_${status}`;
+    return null;
+  }
+  if (typeof status === "string" && status !== "pending") return "status_not_pending";
+  if (assigned) return "human_assigned";
   return null;
 }
 
@@ -370,8 +384,8 @@ export async function recoverDelivery(
   // and assignee are top-level fields of the record): a conversation that is no longer pending, or
   // is assigned to a person, is one a person has. Best effort -- an unreadable record is NOT a
   // reason to leave the customer unattended, so it changes nothing.
-  if (!ownHold) {
-    const heldBy = await personHoldsInChatwoot(deps.chatwoot, target);
+  {
+    const heldBy = await personHoldsInChatwoot(deps.chatwoot, target, ownHold);
     if (heldBy !== null) {
       return supersede(`a person holds the conversation in Chatwoot (${heldBy})`, heldBy);
     }

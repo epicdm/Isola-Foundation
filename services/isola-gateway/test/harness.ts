@@ -542,6 +542,28 @@ export class StubChatwootApi implements ChatwootApi {
    */
   servedRecord: unknown = undefined;
 
+  /**
+   * HUMAN-STATE EVOLUTION (Codex R6). The conversation record an AgentBot reads also carries the
+   * conversation's `status` and `meta.assignee`; a person can change either while the gateway is
+   * down. Under the window model the record reports them, `openConversation` moves the status to
+   * `open` (as the real call does), `pendConversation` back to `pending`, and a test can model a
+   * person with `personTakesOver` / `personResolves`.
+   */
+  conversationStatus: "pending" | "open" | "resolved" | "snoozed" = "pending";
+  conversationAssignee: { id: number; type: string } | null = null;
+
+  /** A person assigns the conversation to themselves (and it is open). */
+  personTakesOver(agentId = 77): void {
+    this.conversationAssignee = { id: agentId, type: "user" };
+    this.conversationStatus = "open";
+  }
+
+  /** A person answers and resolves the conversation. */
+  personResolves(agentId = 77): void {
+    this.conversationAssignee = { id: agentId, type: "user" };
+    this.conversationStatus = "resolved";
+  }
+
   useVisibilityWindow(inboundMessageId: number): void {
     this.windowMessages = [{ id: inboundMessageId, messageType: 0, isPrivate: false, ref: null }];
     this.nextMessageId = Math.max(this.nextMessageId, inboundMessageId + 100);
@@ -563,6 +585,8 @@ export class StubChatwootApi implements ChatwootApi {
       null,
     );
     return {
+      status: this.conversationStatus,
+      meta: { assignee: this.conversationAssignee },
       messages: newest === null ? [] : [render(newest)],
       last_non_activity_message: newestReal === null ? null : render(newestReal),
       custom_attributes: {},
@@ -669,6 +693,7 @@ export class StubChatwootApi implements ChatwootApi {
       accessToken: target.accessToken,
     });
     if (this.openConversationFailure) throw this.openConversationFailure;
+    this.conversationStatus = "open";
     this.recordWindowActivity();
   }
 
@@ -683,6 +708,7 @@ export class StubChatwootApi implements ChatwootApi {
       accessToken: target.accessToken,
     });
     if (this.pendConversationFailure) throw this.pendConversationFailure;
+    this.conversationStatus = "pending";
   }
 
   async assignTeam(target: ChatwootTarget, teamId: number): Promise<void> {
