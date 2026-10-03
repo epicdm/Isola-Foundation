@@ -281,6 +281,14 @@ function str(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
+/**
+ * Whether the delivery's turn signal has fired. A function (not an inline property read)
+ * on purpose: the signal changes while this runtime awaits, and an inline check that
+ * already returned on `false` is narrowed by the compiler to "never true" across awaits.
+ */
+function turnSpent(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
 function failure(runId: string, outcome: string): AgentRuntimeResult {
   return {
     text: null,
@@ -369,6 +377,8 @@ export class PaperclipAgentRuntime implements AgentRuntime {
     if (turnCompany === null || turnCompany !== this.options.companyId) {
       return failure(request.runId, PAPERCLIP_OUTCOMES.configDefect);
     }
+    // A turn whose budget is already spent starts nothing (Codex R3 F1).
+    if (turnSpent(request.signal)) return failure(request.runId, PAPERCLIP_OUTCOMES.timeout);
     const store = this.options.issueStore;
     // ONE absolute deadline for the whole turn (create + polls + body reads). The
     // ledger lease is sized against it at boot; nothing here may outlive it.
@@ -378,7 +388,10 @@ export class PaperclipAgentRuntime implements AgentRuntime {
     if (issueId === null) {
       // NEVER re-create an uncertain create. The issue may well exist.
       if (await store.isUncertain(key)) return failure(request.runId, PAPERCLIP_OUTCOMES.createUncertain);
-      const created = await this.createIssue(request, key, deadlineAt);
+      // Nothing between this check and the first request awaits, so the signal cannot fire in
+      // between (a create that was never sent must not be filed as an UNCERTAIN create).
+      if (turnSpent(request.signal)) return failure(request.runId, PAPERCLIP_OUTCOMES.timeout);
+      const created = await this.createIssue(request, key, deadlineAt, request.signal);
       if (created.kind === "config_defect") return failure(request.runId, PAPERCLIP_OUTCOMES.configDefect);
       if (created.kind === "uncertain") {
         await store.markUncertain(key);
@@ -394,7 +407,12 @@ export class PaperclipAgentRuntime implements AgentRuntime {
 
   // ---- create ---------------------------------------------------------------
 
-  private async createIssue(request: AgentRuntimeRequest, key: string, deadlineAt: number): Promise<CreateResult> {
+  private async createIssue(
+    request: AgentRuntimeRequest,
+    key: string,
+    deadlineAt: number,
+    turnSignal?: AbortSignal,
+  ): Promise<CreateResult> {
     const { title, description } = describeContext(request);
     const url = `${this.base()}/api/companies/${encodeURIComponent(this.options.companyId)}/issues`;
     // A base URL with userinfo can never be fetched: it throws BEFORE a byte is sent,
@@ -413,6 +431,7 @@ export class PaperclipAgentRuntime implements AgentRuntime {
         },
         deadlineAt,
         true,
+        turnSignal,
       );
     } catch (err) {
       // The egress guard refused BEFORE a socket was opened: nothing was sent, so
@@ -446,7 +465,11 @@ export class PaperclipAgentRuntime implements AgentRuntime {
   ): Promise<AgentRuntimeResult> {
     let after: string | null = null;
     for (;;) {
-      if (Date.now() >= deadline) return failure(request.runId, PAPERCLIP_OUTCOMES.timeout);
+      // The turn signal (Codex R3 F1): once the delivery's budget is spent NO further
+      // request is started, whatever this runtime's own deadline still allows.
+      if (Date.now() >= deadline || turnSpent(request.signal)) {
+        return failure(request.runId, PAPERCLIP_OUTCOMES.timeout);
+      }
       if (request.isStillOwned !== undefined) {
         // The ownership read runs under the SAME absolute turn deadline (Codex R4): a
         // pending read must not hold the turn open. A rejection is "I could not find
@@ -458,16 +481,19 @@ export class PaperclipAgentRuntime implements AgentRuntime {
         );
         if (owned === "deadline") return failure(request.runId, PAPERCLIP_OUTCOMES.timeout);
         if (!owned) {
-          await this.cancelRun(issueId, deadline);
+          await this.cancelRun(issueId, deadline, request.signal);
           return failure(request.runId, PAPERCLIP_OUTCOMES.ownershipLost);
         }
       }
 
-      const polled = await this.fetchComments(issueId, after, deadline);
+      const polled = await this.fetchComments(issueId, after, deadline, request.signal);
       if (polled.kind === "config_defect") return failure(request.runId, PAPERCLIP_OUTCOMES.configDefect);
       // A response that arrived AFTER the deadline is not a result, however well-formed
-      // (Codex D2: a 30 ms deadline accepted a comment returned at 100 ms).
-      if (Date.now() > deadline) return failure(request.runId, PAPERCLIP_OUTCOMES.timeout);
+      // (Codex D2: a 30 ms deadline accepted a comment returned at 100 ms) -- and neither
+      // is one that arrived after the delivery's turn signal fired (Codex R3 F1).
+      if (Date.now() > deadline || turnSpent(request.signal)) {
+        return failure(request.runId, PAPERCLIP_OUTCOMES.timeout);
+      }
       if (polled.kind === "ok") {
         for (const comment of polled.comments) {
           after = comment.id;
@@ -504,6 +530,7 @@ export class PaperclipAgentRuntime implements AgentRuntime {
     issueId: string,
     after: string | null,
     deadlineAt: number,
+    turnSignal?: AbortSignal,
   ): Promise<
     | { kind: "ok"; comments: Array<{ id: string; body: string; authorAgentId: string | null }> }
     | { kind: "config_defect" }
@@ -521,6 +548,7 @@ export class PaperclipAgentRuntime implements AgentRuntime {
         { method: "GET", headers: { accept: "application/json", ...auth } },
         deadlineAt,
         true,
+        turnSignal,
       );
     } catch (err) {
       if (err instanceof EgressBlockedError) return { kind: "config_defect" };
@@ -560,7 +588,7 @@ export class PaperclipAgentRuntime implements AgentRuntime {
    * changes the outcome: the takeover is already enforced by the ownership gate.
    * Whether Paperclip's cancel reaches Hermes mid-run is UNVERIFIED.
    */
-  private async cancelRun(issueId: string, deadlineAt: number): Promise<void> {
+  private async cancelRun(issueId: string, deadlineAt: number, turnSignal?: AbortSignal): Promise<void> {
     const runId = this.runIds.get(issueId);
     if (runId === undefined) return;
     const auth = this.authHeaders();
@@ -579,6 +607,7 @@ export class PaperclipAgentRuntime implements AgentRuntime {
         },
         deadlineAt,
         false,
+        turnSignal,
       );
     } catch {
       /* best effort */
@@ -628,12 +657,23 @@ export class PaperclipAgentRuntime implements AgentRuntime {
    * Non-2xx and body-less exchanges never read their body; it is cancelled so the
    * socket is released. Throws on abort / transport failure / an exhausted deadline.
    */
-  private async exchange(url: string, init: RequestInit, deadlineAt: number, readBody: boolean): Promise<Exchange> {
+  private async exchange(
+    url: string,
+    init: RequestInit,
+    deadlineAt: number,
+    readBody: boolean,
+    turnSignal?: AbortSignal,
+  ): Promise<Exchange> {
     const remaining = deadlineAt - Date.now();
     if (remaining <= 0) throw new Error("paperclip: the turn deadline is exhausted before the request");
+    // The delivery's turn signal (Codex R3 F1): nothing starts after it fired, and a
+    // request in flight is aborted by it.
+    if (turnSpent(turnSignal)) throw new Error("paperclip: the turn budget is spent before the request");
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), Math.min(this.options.requestTimeoutMs, remaining));
     if (typeof timer.unref === "function") timer.unref();
+    const onTurnAbort = (): void => controller.abort();
+    turnSignal?.addEventListener("abort", onTurnAbort, { once: true });
     try {
       const response = await this.options.safeFetch(url, { ...init, signal: controller.signal });
       const ok = response.status >= 200 && response.status < 300;
@@ -656,6 +696,7 @@ export class PaperclipAgentRuntime implements AgentRuntime {
       return { status: response.status, json };
     } finally {
       clearTimeout(timer);
+      turnSignal?.removeEventListener("abort", onTurnAbort);
     }
   }
 }

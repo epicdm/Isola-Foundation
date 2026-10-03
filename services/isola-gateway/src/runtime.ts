@@ -83,6 +83,14 @@ export interface AgentRuntimeRequest {
    * The isola-runtime client ignores it.
    */
   isStillOwned?: () => Promise<boolean>;
+  /**
+   * Aborted when the delivery's TURN BUDGET is spent (Codex R3 F1). Giving up on a
+   * runtime call and discarding its result is not cancelling the work: a runtime that
+   * went on polling under its own fresh deadline was still dispatching when another
+   * worker had become eligible. So a runtime MUST start no request once this fires,
+   * abort the one in flight, and stop polling.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -326,6 +334,29 @@ export function readActionReason(payload: unknown): string | null {
     : null;
 }
 
+function runtimeTimeoutResult(runId: string): AgentRuntimeResult {
+  return {
+    text: null,
+    action: null,
+    actionUnrecognised: false,
+    actionReason: null,
+    outcome: "model_timeout",
+    correlationId: runId,
+    completionState: null,
+    contractVersion: null,
+  };
+}
+
+/** Rejects when `signal` aborts (never leaves an unhandled rejection behind). */
+function whenAborted(signal: AbortSignal): Promise<never> {
+  const promise = new Promise<never>((_resolve, reject) => {
+    if (signal.aborted) reject(new Error("aborted"));
+    else signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+  });
+  promise.catch(() => undefined);
+  return promise;
+}
+
 export interface HttpAgentRuntimeOptions {
   baseUrl: string;
   invokePath: string;
@@ -362,6 +393,8 @@ export class HttpAgentRuntime implements AgentRuntime {
       };
     }
 
+    // A turn whose budget is already spent sends nothing (Codex R3 F1).
+    if (request.signal?.aborted === true) return runtimeTimeoutResult(request.runId);
     const controller = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => {
@@ -369,6 +402,16 @@ export class HttpAgentRuntime implements AgentRuntime {
       controller.abort();
     }, this.timeoutMs);
     if (typeof timer.unref === "function") timer.unref();
+    // The turn signal firing mid-request aborts it (and the body read below).
+    const onTurnAbort = (): void => {
+      timedOut = true;
+      controller.abort();
+    };
+    request.signal?.addEventListener("abort", onTurnAbort, { once: true });
+    const release = (): void => {
+      clearTimeout(timer);
+      request.signal?.removeEventListener("abort", onTurnAbort);
+    };
 
     let response: Response;
     try {
@@ -391,6 +434,7 @@ export class HttpAgentRuntime implements AgentRuntime {
         signal: controller.signal,
       });
     } catch (err) {
+      release();
       if (err instanceof EgressBlockedError) {
         return {
           text: null,
@@ -413,16 +457,21 @@ export class HttpAgentRuntime implements AgentRuntime {
         completionState: null,
         contractVersion: null,
       };
-    } finally {
-      clearTimeout(timer);
     }
 
+    // The timer stays armed through the BODY read (Codex R3 F1: it used to be cleared
+    // once the headers arrived, so a body that never completed held the call open past
+    // every budget), and the read is raced against the abort because a body may ignore
+    // the signal.
     let payload: unknown = null;
     try {
-      payload = await response.json();
+      payload = await Promise.race([response.json(), whenAborted(controller.signal)]);
     } catch {
       payload = null;
+    } finally {
+      release();
     }
+    if (timedOut) return runtimeTimeoutResult(request.runId);
 
     const correlationId = readCorrelationId(payload, request.runId);
     const statusOutcome = outcomeForStatus(response.status);

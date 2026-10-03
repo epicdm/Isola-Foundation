@@ -120,8 +120,19 @@ function suppressedResult(writes: WriteContext, runtimeOutcome: string = RUNTIME
 
 const TURN_TIMEOUT = Symbol("turn_timeout");
 
-/** The value, or `TURN_TIMEOUT` when the turn budget runs out first. A rejection propagates. */
-function raceTurn<T>(promise: Promise<T>, remainingMs: number): Promise<T | typeof TURN_TIMEOUT> {
+/**
+ * The value, or `TURN_TIMEOUT` when the turn budget runs out first. A rejection propagates.
+ *
+ * A promise that RESOLVES after the deadline is a timeout too (Codex R3 F1): the timer
+ * only fires if the event loop gets there first, and a value that completes after the
+ * budget -- an ownership read, a runtime result -- must not be admitted just because it
+ * beat the timer callback. `expired` is asked at the moment of resolution.
+ */
+function raceTurn<T>(
+  promise: Promise<T>,
+  remainingMs: number,
+  expired: () => boolean,
+): Promise<T | typeof TURN_TIMEOUT> {
   if (remainingMs <= 0) return Promise.resolve(TURN_TIMEOUT);
   return new Promise<T | typeof TURN_TIMEOUT>((resolve, reject) => {
     const timer = setTimeout(() => resolve(TURN_TIMEOUT), remainingMs);
@@ -129,7 +140,7 @@ function raceTurn<T>(promise: Promise<T>, remainingMs: number): Promise<T | type
     promise.then(
       (value) => {
         clearTimeout(timer);
-        resolve(value);
+        resolve(expired() ? TURN_TIMEOUT : value);
       },
       (err: unknown) => {
         clearTimeout(timer);
@@ -726,7 +737,7 @@ export async function processDelivery(
   writes.fence = async (stage: string): Promise<boolean> => {
     if (authority.fenced) return false;
     if (turnExpired()) return budgetSpent(stage);
-    const raced = await raceTurn(deps.ownership.read(conversationRefOf(job)), turnDeadlineAt - deps.now());
+    const raced = await raceTurn(deps.ownership.read(conversationRefOf(job)), turnDeadlineAt - deps.now(), turnExpired);
     if (raced === TURN_TIMEOUT) return budgetSpent(stage);
     const read = raced;
     const mine =
@@ -934,6 +945,10 @@ export async function processDelivery(
     return suppressedResult(writes);
   }
 
+  // ONE abort signal for the whole runtime call (Codex R3 F1): fired the moment the turn
+  // budget is spent, so a runtime stops starting requests and aborts the one in flight.
+  // Discarding a late result is not cancelling the work that produced it.
+  const turnAbort = new AbortController();
   const invoked = deps.runtime.invoke({
     templateId: binding.templateId,
     // THE BINDING'S exposure, not a constant. A hardcoded "PUBLIC" here made
@@ -945,14 +960,16 @@ export async function processDelivery(
     context: buildRuntimeContext(binding, payload, history, customerScope),
     idempotencyKey: paperclipIdempotencyKey(job.identity, job.mode),
     isStillOwned: async () => ownershipStillMine(await deps.ownership.read(conversationRefOf(job))),
+    signal: turnAbort.signal,
   });
   // The runtime call is raced against the turn deadline: a runtime that never returns
   // (or returns after the budget) must not hold the turn open past the lease. Giving up
   // is "no answer" and the row stays open for the worker that resumes it; the abandoned
   // call is allowed to finish on its own and its result is discarded.
-  const ran = await raceTurn(invoked, turnDeadlineAt - deps.now());
+  const ran = await raceTurn(invoked, turnDeadlineAt - deps.now(), turnExpired);
   if (ran === TURN_TIMEOUT) {
     invoked.catch(() => undefined);
+    turnAbort.abort();
     budgetSpent("runtime_result");
     return suppressedResult(writes, "model_timeout");
   }
