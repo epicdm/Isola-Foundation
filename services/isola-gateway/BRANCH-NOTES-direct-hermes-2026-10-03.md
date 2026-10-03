@@ -199,6 +199,44 @@ These tests describe behaviour that already existed, so they pass on the code as
 sabotages of the status codes and guards (duplicate -> 500 or 429, duplicate processed, conflict -> 200 or processed,
 unauthorized -> 403, ledger-down -> 503, the adapter's second-POST guard) each turn them red, and a log-only change stays green.
 
+## Codex short re-review of `bd5b8f5`: DH9, N1, N2 and two cheap items (this round)
+
+Codex confirmed DH1-DH8 fixed in behaviour and found three blocking defects, all fixed here (tests red first; each fix has a
+sabotage that turns its tests red again, restored hash-identical):
+
+- **DH9 - the takeover starts BEFORE the staff transcript write is awaited** (`b6b262e`). The write was bounded but
+  `recordHumanReply()` still began only after it, so a Hermes answer that completed during a stalled INSERT saw AI ownership and one
+  customer-facing AI reply went out (Codex's probe). The transition is now STARTED (tracked, not awaited) first; the bounded
+  write, its 2 s bound and the hole marker are unchanged. The missing-`ownershipExec` alert moved with it. The webhook is still
+  acknowledged after the bounded write (at most `STAFF_TURN_RECORD_TIMEOUT_MS`, inside Chatwoot's 5 s). Files/functions touched:
+  `src/app.ts` (the `human_reply` pre-block and the `case "human_reply"`).
+- **N1 - the durable dispatch claim is bounded** (`f1808e4`). `claimDispatch()` was awaited without a bound; a claim that never
+  settled held the turn and its slots (repeated up to capacity, all dispatch). It is now raced against the absolute deadline and
+  the turn's cancellation (`HermesDirectRuntime.boundedClaim`); the local slots are released; a claim that resolves LATE changes
+  nothing because the method has already returned (no POST can follow); whatever the ledger recorded STAYS recorded, so a
+  redelivery on any instance still escalates and never POSTs. A fresh claim that answers after the deadline in the same tick is
+  stopped by `createRun`, which sends nothing past the deadline (pinned by a test that blocks the event loop past the deadline).
+  Files/functions touched: `src/hermes-runtime.ts` (`turn`, new `boundedClaim`).
+- **N2 - a delivery is not closed over an unsettled `model_run` marker** (`3b899af`). The marker settlement used to be swallowed:
+  the reply went out, the delivery was COMPLETED, the marker stayed `in_progress` and recovery (which selects unfinished DELIVERY
+  rows) never saw it, so the comment promising recovery was false. Now `finish()` first settles the marker (bounded by the turn
+  budget, one retry at closure); if it still cannot be settled it logs `model_run_marker_unsettled` and LEAVES THE DELIVERY OPEN,
+  where the real sweeper cannot prove it complete and escalates once, never re-driving the turn. Files/functions touched:
+  `src/pipeline.ts` (new `dispatch` state and `settleMarker`, `finish`, `claimDispatch`, the end-of-turn settlement).
+  What this does NOT promise: the reply has already been sent when the marker fails, so the customer was answered AND a person is
+  asked: a conservative duplicate escalation, never a lost one.
+- **The customer-turn transcript write is bounded** (`b700b8f`): `CUSTOMER_TURN_RECORD_TIMEOUT_MS` (2 s); a failure or timeout marks
+  the conversation as having a hole (`customer_turn_not_recorded`), so the next AI turn there answers nothing from an incomplete
+  history and a person is asked. Files/functions touched: `src/app.ts` (the customer-turn block, new `boundedWrite`).
+- **`hermes_rate_limited` explanation** (`8fe0eb8`): the outcome is emitted after one retry OR with no retry (the backoff does not
+  fit the deadline); both real paths are pinned (two creates / one create) and the explanation now says either may have happened.
+  Files touched: `src/pipeline.ts` (`FAILURE_EXPLANATIONS`).
+
+Merge map against `feat/pl-assertion-minter-2026-10-03` (which edits `app.ts`, `hermes-runtime.ts`, `pipeline.ts`, `runtime.ts`,
+`server.ts`): this round touches `app.ts` (two separate regions), `hermes-runtime.ts` (`turn` claim block and one new private
+method) and `pipeline.ts` (the `finish` neighbourhood, `claimDispatch`, the end-of-turn settlement, one explanation string); expect
+textual conflicts only where the minter wiring is near those regions.
+
 ## Open risks and KNOWN LIMITS (the UAT demo report must show EACH of these)
 
 1. **F2 (late-worker overlap) and F3 (late-send duplicate) from Codex rounds 3-6 apply unchanged** to this path: exclusivity is
@@ -223,8 +261,19 @@ unauthorized -> 403, ledger-down -> 503, the adapter's second-POST guard) each t
     The in-memory guard and the cancelled-ids set are forgotten on restart; the marker is not.
 8b. **Remote slot accounting (DH4)** is modelled by the fake and by the Step B facts for CONSUMED streams. How the installed
     service counts an abandoned stream is UNVERIFIED; the adapter assumes the documented 300 s sweep.
-8c. **Remaining Codex rounds' findings that this slice does not address:** F2 / F3 (above), D8, the unbounded customer-turn write
-    (above), the CRLF-delimited SSE blank line (the supplied contract uses LF), attachment-only staff replies (not representable).
+8c. **Remaining Codex findings that this slice does not address, as STATED LIMITS:** F2 / F3 (above), D8 (a pending snapshot is
+    still read as a manual handback; it needs evidence of the transition), and these two the reviewer asked to have written down:
+    - **CRLF-delimited SSE blank lines are NOT parsed.** The event-stream parser splits on `\n\n` (the supplied, Step-B-verified
+      contract uses LF). A stream that delimits events with `\r\n\r\n` can fail to parse (`hermes-runtime.ts` stream reader) and is
+      then treated as an abnormal stream end, which fails closed (escalates; never an answer). Support both delimiters before
+      claiming general SSE compatibility.
+    - **Attachment-only staff replies are NOT recorded.** A staff reply with an empty text body (an image or a file with no
+      caption) is classified as "no turn" and omitted from the history WITHOUT marking a hole, so the model reading the history
+      after a handback does not know the person sent an attachment. Text-only UAT only. The reviewer's correction is to record
+      attachment context or to refuse the next AI turn as an incomplete history; neither is done here.
+8d. **The customer-turn transcript write is now bounded** (see "Codex round 5" below); the earlier "unbounded customer-turn
+    write" limit no longer applies. History reads and the hole marker still key on account + conversation, not inbox (acceptable
+    where an account-scoped conversation id is unique; no cross-inbox disclosure was demonstrated).
 9. Hermes' cap of 10 runs is shared with any other client of the service.
 10. The business tools are not real yet (service OFF, source gate, dead address, no minter): the assertion provider returns
     nothing by default, so the line says `none` and the tools refuse.
@@ -246,7 +295,9 @@ Paperclip routing stays OFF. Nothing here is deployed or applied.
 From `services/isola-gateway`: `OWNERSHIP_PG_TESTS=skip npx vitest run` and `npx tsc --noEmit`. Base 1255 passed / 30 skipped;
 Step A 1451; after Step A+ 1477 passed / 30 skipped / 0 failed, `tsc` 0 (1460 after `fcf8b22`, 1473 after `7e9ffc9`, 1477 after
 `d810455`); after the Codex DH round **1549 passed / 30 skipped / 0 failed, `tsc` 0** (1492 after `b512f7d`, 1505 after `06d4478`,
-1521 after `b6a910a`, 1526 after `5bb1afd`, 1542 after `f9ed1af`, 1549 after `d52f61c`; the comment-only `bd5b8f5` changes nothing).
+1521 after `b6a910a`, 1526 after `5bb1afd`, 1542 after `f9ed1af`, 1549 after `d52f61c`; the comment-only `bd5b8f5` changes nothing);
+after the short re-review round (DH9, N1, N2 and two cheap items) **1581 passed / 30 skipped / 0 failed, `tsc` 0** (1555 after `b6b262e`,
+1566 after `f1808e4`, 1572 after `3b899af`, 1577 after `b700b8f`, 1581 after `8fe0eb8`).
 The 30 skipped are the real-Postgres tests, NOT run. **These runs are the only full-suite evidence:** Codex's sandbox cannot open
 loopback listeners (280 EPERM) and could not run the suite. The new DH test files are all socket-free (injected fetch / the
 gateway handler driven in-process): `direct-hermes-dh3-dh8-history`, `-dh1-durable-dispatch`, `-dh2-dh5-drain`,
@@ -277,6 +328,21 @@ the gateway handler is driven in-process (`test/hermes-inproc.ts`) and Hermes is
   /deadline check in `finalize()`, and a redundant `.catch` on the abandoned staff write): the surviving check is the one the
   tests pin. **A test-writing hazard, fixed:** the file-writing tool unescaped `\uXXXX` sequences in one test file (the regex
   literal broke); the file was regenerated with explicit escapes.
+- **Short re-review round (DH9, N1, N2, customer-turn write, rate-limited text):** all red first. DH9 6 tests (1 red: the
+  stalled-INSERT probe); N1 11 tests in `direct-hermes-codex5-stalled-claim` (7 red, the others are controls and the route tests
+  that pin a property that held before and after: the claim that lands after the turn gave up already made no POST because
+  `createRun` sends nothing past the deadline); N2 6 tests (5 red); customer-turn write 5 tests (4 red); rate-limited text 4 tests
+  (1 red: the two paths are characterisation tests that pass before and after). **Sabotage:** DH9 pre-fix `app.ts` turns the probe
+  red; N1 five mutations (unbounded await 7 red, deadline timer 5 red, abort listener 2 red, rejection handler 1 red, plus the
+  controls); N2 five mutations (no gate 3 red, failure reported as settled 2 red, unbounded settlement 1 red, no end-of-turn
+  settlement 1 red) and ONE EQUIVALENT mutant (treating a timed-out settlement as settled stays green because `finish()` already
+  refuses to close once the turn budget is spent); customer-turn write four mutations caught (no hole 1, unbounded 2, over-long
+  bound 2, no alert 3); the old explanation text turns its test red. **Two redundant lines were removed because their sabotage was
+  equivalent:** a post-claim spent/deadline check in `turn()` (`createRun` already refuses to send past the deadline; the busy-wait
+  test pins that) and an explicit `.catch` on the abandoned claim promise (the `.then(…, reject handler)` attached in
+  `boundedClaim` already handles a late rejection). The N1 and N2 test files were first one file and were split so each commit
+  stays green. The `direct-hermes-codex5-takeover-before-storage` test seeds the in-memory ownership gate from the spy executor
+  (the real transition's visible effect).
 - **Step A+:** `fcf8b22` was tests-first (the 8 behaviour tests were red against the pre-change code; the 9th pins the production
   dedupe statement and was added with the fix; sabotage: no recording 8 red, no label 3, mark never set 1, pipeline ignores the
   hole 1, private notes treated as public 1, dedupe statement changed 1; a comment-only change stays green). `7e9ffc9` and
@@ -284,17 +350,23 @@ the gateway handler is driven in-process (`test/hermes-inproc.ts`) and Hermes is
   used a credential-looking literal flagged by the repository's post-edit hook and a fake that expects a specific bearer; both
   were fixed (the value is now built, and the fake is told which bearer to expect).
 
-## PORT-READY paragraph (refreshed for the Codex DH round)
+## PORT-READY paragraph (refreshed for the short re-review round: DH9, N1, N2)
 
 Direct Hermes path, branch `feat/direct-hermes-adapter-2026-10-03`: a `HermesDirectRuntime` in `services/isola-gateway` runs a
 customer turn through `isola_hermes-public` with POST `/v1/runs`, no Paperclip in the loop, selected per employee, OFF by default.
-Codex reviewed `d810455` (REQUEST CHANGES, nine findings); all nine are addressed on the branch: a durable `model_run` ledger
+Codex reviewed `d810455` (REQUEST CHANGES, nine findings); all nine were addressed, and its short re-review of `bd5b8f5` confirmed
+DH1-DH8 fixed and found three more blocking defects, now also fixed and tested: the takeover starts before the staff transcript
+write is awaited (a stalled INSERT can no longer let an AI answer through), the durable dispatch claim is bounded by the deadline
+and cancellation (a stalled claim no longer holds slots or blocks later turns), and a delivery is not closed over an unsettled
+dispatch marker (it is left open so recovery escalates it once); the customer-turn transcript write is bounded too and a failed
+write marks a hole. The first round's fixes: a durable `model_run` ledger
 marker is claimed before the POST so a restart or a second instance cannot start a second run (a crash between claim and POST
 escalates that turn); the current message is found by Chatwoot message id, never by text; the answer is accepted only after the
 event stream is drained, and an abnormal end of the stream (EOF without a terminal event, events 404) is never an answer; an
 undrained run keeps its local slot until the service's own sweep; customer text cannot forge the trusted marker lines and the
-envelope text is sanitised; the staff-transcript write is bounded so a blocked store cannot delay a takeover. 1549 tests pass
-against a fake Hermes (no socket), `tsc` clean; not deployed, not re-reviewed after this round. Known limits for the UAT report:
+envelope text is sanitised; the staff-transcript write is bounded so a blocked store cannot delay a takeover. 1581 tests pass
+against a fake Hermes (no socket), `tsc` clean; not deployed, not re-reviewed after this round. Known limits for the UAT report
+(also stated: CRLF-delimited SSE is not parsed and fails closed; attachment-only staff replies are not recorded):
 late-worker/late-send exclusivity (F2/F3), fixture-only customer scope, no person reached out-of-band, Hermes restart loses runs
 (escalate, never re-drive), after a gateway restart a conversation with a transcript gap cannot be proved on its first AI turn,
 parse-failure rate unknown, cold start NOT measured by this branch (lane 59), reachability of `isola_hermes-public:8642` from the UAT
