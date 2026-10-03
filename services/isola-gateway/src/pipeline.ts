@@ -202,6 +202,10 @@ export const FAILURE_EXPLANATIONS: Readonly<Record<string, string>> = Object.fre
   reply_failed: "the answer could not be delivered to the customer",
   reply_unresolved:
     "the answer may or may not have reached the customer and could not be reconciled; nothing was re-sent",
+  // The customer WAS answered and told a colleague would follow up; the hand-over was
+  // interrupted (a restart or the turn budget) and recovery completed it (Codex R4 G4-1).
+  escalation_resumed:
+    "the AI answered the customer and asked for a colleague; the hand-over was interrupted and has now been completed by recovery",
 });
 
 export function explainFailure(outcome: string): string {
@@ -227,7 +231,9 @@ export function renderFailureNote(args: {
     `- correlation id: \`${args.correlationId}\``,
     `- tenant: \`${args.tenantId}\``,
     "",
-    "No message was sent to the customer. The conversation has been moved to **open** so a human can take over.",
+    args.outcome === "escalation_resumed"
+      ? "The customer WAS answered and told a colleague would follow up. The conversation has been moved to **open** so that colleague can take over."
+      : "No message was sent to the customer. The conversation has been moved to **open** so a human can take over.",
   ].join("\n");
 }
 
@@ -290,6 +296,14 @@ export interface DeliveryJob {
    * the gate in processDelivery.
    */
   resumed?: boolean;
+  /**
+   * Set by recovery when it found this delivery's REPLY already in Chatwoot but the delivery
+   * still has unfinished work after the reply (Codex R4 G4-1): the escalation it began
+   * (note, status change, assignment) or an annotation. The reply is NOT re-sent and the
+   * model is NOT called -- only that unfinished work is completed, under this delivery's own
+   * hold, and only then is the delivery closed. `escalating` says which kind.
+   */
+  resumeAfterReply?: { escalating: boolean };
   /** display_id, already known to be non-null by the suppression predicate. */
   conversationId: number;
   startedAtMs: number;
@@ -353,6 +367,40 @@ function conversationRefOf(job: DeliveryJob): ConversationRef {
     chatwootInboxId: job.binding.chatwootInboxId,
     bindingId: job.identity.bindingId,
   };
+}
+
+/** Annotation writes: published best-effort after a reply or an escalation. */
+const ANNOTATION_ACTIONS: readonly string[] = [WRITE.labels, WRITE.customAttributes];
+
+/**
+ * What THIS delivery left unfinished AFTER its reply was found already delivered (Codex R4
+ * G4-1), or null when nothing. Finding the reply settles THE REPLY; it does not settle an
+ * escalation the delivery began after it. The decision to escalate is recorded in the
+ * ownership store, not in a message body, so it needs neither the model nor a stored copy:
+ *   - this delivery's own hold (`escalate:<event>`) is still HUMAN_REQUESTED => the
+ *     customer was promised a colleague and the conversation has not been shown to one.
+ *     This is true whether or not an action row exists yet: the hold is recorded before any
+ *     Chatwoot write, so a delivery that died right after it has no row but the same gap.
+ *     Completing the escalation again is idempotent (every write is claimed under this
+ *     delivery's key and a completed one is skipped), so a hold whose writes all landed
+ *     causes a harmless re-check, never a second note.
+ *   - otherwise a claimed-and-unsettled ANNOTATION (labels, custom attributes) is published.
+ * An unsettled escalation action whose hold is NOT ours any more (a person has the
+ * conversation, it was handed back, or another delivery holds it) is MOOT, not unfinished:
+ * the conversation is with a person or back with the AI, and re-escalating it would take
+ * it away from them. That is a deliberate supersession, not an abandonment.
+ */
+export async function unfinishedAfterReply(
+  deps: Pick<PipelineDeps, "ledger" | "ownership">,
+  job: DeliveryJob,
+): Promise<{ escalating: boolean } | null> {
+  const ownership = await deps.ownership.read(conversationRefOf(job));
+  const ownHold =
+    ownership.state === "HUMAN_REQUESTED" && ownership.escalationOperationId === `escalate:${job.identity.eventId}`;
+  if (ownHold) return { escalating: true };
+  const unsettled = await deps.ledger.unsettledActions(job.identity);
+  if (unsettled.some((a) => ANNOTATION_ACTIONS.includes(a))) return { escalating: false };
+  return null;
 }
 
 /**
@@ -791,6 +839,41 @@ export async function processDelivery(
     }
     await finish(handoff.outcome);
     return handoff;
+  }
+
+  // ---- THE REPLY IS ALREADY WITH THE CUSTOMER: FINISH WHAT CAME AFTER IT --------------
+  //
+  // Recovery found this delivery's reply in Chatwoot and the delivery still has unfinished
+  // work after it (Codex R4 G4-1). Nothing is re-sent and the model is NOT called: the
+  // decision to escalate was already made and is recorded (this delivery's own hold, its
+  // claimed note/status/assignment rows). The writes below are the ordinary escalation
+  // writes: each is claimed under this delivery's ledger key, reconciled and fenced like
+  // any other, so finishing them cannot produce a second note or a second assignment.
+  // The delivery is closed only when the escalation is VISIBLE to a human.
+  if (job.resumeAfterReply !== undefined) {
+    if (job.resumeAfterReply.escalating) {
+      const visible = await escalate(deps, job, target, writeDeps, writes, "escalation_resumed");
+      await annotate(deps, job, target, writeDeps, writes, "escalated");
+      if (visible) await finish("replied");
+      return {
+        outcome: "replied",
+        runtimeOutcome: RUNTIME_NOT_INVOKED,
+        customerMessageSent: false,
+        escalated: true,
+        handoffBlocked: false,
+        needsRetry: !visible,
+      };
+    }
+    await annotate(deps, job, target, writeDeps, writes, "replied");
+    await finish("replied");
+    return {
+      outcome: "replied",
+      runtimeOutcome: RUNTIME_NOT_INVOKED,
+      customerMessageSent: false,
+      escalated: false,
+      handoffBlocked: false,
+      needsRetry: false,
+    };
   }
 
   // (`ownershipStillMine` and the write fence are defined above the handoff branch.)

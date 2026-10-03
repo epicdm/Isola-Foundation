@@ -36,7 +36,7 @@ import type { Failpoint } from "./failpoint.js";
 import type { Ledger, RecoverableDelivery } from "./ledger.js";
 import type { OwnershipGate } from "./ownership.js";
 import type { Logger } from "./log.js";
-import { processDelivery, type DeliveryJob } from "./pipeline.js";
+import { processDelivery, unfinishedAfterReply, type DeliveryJob } from "./pipeline.js";
 import type { AgentRuntime } from "./runtime.js";
 import {
   classifyNoText,
@@ -178,6 +178,37 @@ export function rebuildPayload(
       typeof record["status"] === "string" ? (record["status"] as string) : null,
     assignee: meta === null ? null : (meta["assignee"] ?? null),
     customAttributes: attributes,
+  };
+}
+
+/**
+ * A payload for a delivery whose reply is ALREADY with the customer (Codex R4 G4-1). The
+ * customer's message is not needed (the model is not called and nothing is re-sent) and is
+ * deliberately not re-read: once our own reply is the newest message, the inbound one is no
+ * longer visible and `rebuildPayload` would give up on exactly the deliveries that most need
+ * finishing. Only the routing identifiers and the pivot message id carry meaning.
+ */
+function replyAlreadyDeliveredPayload(row: RecoverableDelivery): WebhookPayload {
+  return {
+    event: REPLYABLE_EVENT,
+    messageId: row.messageId,
+    content: null,
+    messageType: "incoming",
+    attachmentTypes: [],
+    contentType: null,
+    private: false,
+    senderPhone: null,
+    channelSubject: null,
+    senderId: null,
+    contactInboxContactId: null,
+    contactInboxInboxId: null,
+    senderType: null,
+    accountId: row.chatwootAccountId,
+    inboxId: row.chatwootInboxId,
+    conversationDisplayId: row.conversationId,
+    conversationStatus: null,
+    assignee: null,
+    customAttributes: {},
   };
 }
 
@@ -351,10 +382,62 @@ export function createSweeper(deps: RecoveryDeps): Sweeper {
           conversationId: row.conversationId,
           chatwootMessageId: already.messageId,
           detail:
-            "the reply was already in Chatwoot; the ledger had not recorded it. Completed without sending.",
+            "the reply was already in Chatwoot; the ledger had not recorded it. The reply is settled without sending.",
         });
         await deps.ledger.complete(identity, "reply", already.messageId);
-        await deps.ledger.complete(identity, DELIVERY_ACTION, null);
+
+        // FINDING THE REPLY SETTLES THE REPLY, NOT THE DELIVERY (Codex R4 G4-1). This used to
+        // complete the delivery on the spot, which abandoned an escalation the delivery had
+        // begun after its reply: a released failure note, an unpublished status change or
+        // assignment. The customer had been promised a colleague and nobody was ever told.
+        // The delivery closes here only when nothing it started is left unfinished.
+        const afterReplyJob: DeliveryJob = {
+          correlationId: row.correlationId,
+          deliveryId: null,
+          identity,
+          digest: row.payloadDigest,
+          binding,
+          // The reply is delivered; nothing below reads the customer's message (the model is
+          // not called). Only the pivot message id is used, to reconcile the escalation note.
+          payload: replyAlreadyDeliveredPayload(row),
+          conversationId: row.conversationId,
+          startedAtMs: startedAt,
+          resumed: true,
+          mode: "answer",
+          classification: null,
+        };
+        const unfinished = await unfinishedAfterReply(
+          { ledger: deps.ledger, ownership: deps.ownership },
+          afterReplyJob,
+        );
+        if (unfinished === null) {
+          await deps.ledger.complete(identity, DELIVERY_ACTION, null);
+          return true;
+        }
+        deps.logger.warn({
+          event: "recovery",
+          outcome: "resuming_unfinished_after_reply",
+          correlationId: row.correlationId,
+          tenantId: row.tenantId,
+          conversationId: row.conversationId,
+          escalating: unfinished.escalating,
+          detail:
+            "the reply was delivered but this delivery left work unfinished after it; completing that work (the model is not called and nothing is re-sent)",
+        });
+        await processDelivery(
+          {
+            config: deps.config,
+            chatwoot: deps.chatwoot,
+            runtime: deps.runtime,
+            logger: deps.logger,
+            ledger: deps.ledger,
+            ownership: deps.ownership,
+            ...(deps.customerScope === undefined ? {} : { customerScope: deps.customerScope }),
+            failpoint: deps.failpoint,
+            now: deps.now,
+          },
+          { ...afterReplyJob, resumeAfterReply: unfinished },
+        );
         return true;
       }
     }

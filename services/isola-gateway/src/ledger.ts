@@ -218,6 +218,14 @@ export interface Ledger {
    * Only an `in_progress` row is touched: a completed or failed row is never reopened.
    */
   release(identity: LedgerIdentity, action: string): Promise<void>;
+  /**
+   * The ACTIONS (never the delivery row) of one delivery that are claimed and not settled:
+   * `in_progress`, whether still leased, released or expired (Codex R4 G4-1). A delivery
+   * whose reply was found in Chatwoot is NOT finished while any of these remains: it
+   * ordinarily means a released escalation (note, status change, assignment) or an
+   * annotation that was never published. Reads existing columns only; no schema change.
+   */
+  unsettledActions(identity: LedgerIdentity): Promise<string[]>;
   /** Extend the lease on a long-running delivery. */
   heartbeat(identity: LedgerIdentity, action: string, leaseMs: number): Promise<void>;
   dueForRecovery(limit: number): Promise<RecoverableDelivery[]>;
@@ -622,6 +630,29 @@ export class PostgresLedger implements Ledger, SqlExecutor {
       `,
       keyParams(identity, action),
     );
+  }
+
+  async unsettledActions(identity: LedgerIdentity): Promise<string[]> {
+    const result = await this.query<{ action_type: string }>(
+      `
+      SELECT action_type
+        FROM delivery_ledger
+       WHERE tenant_id = $1 AND binding_id = $2 AND chatwoot_account_id = $3
+         AND chatwoot_inbox_id = $4 AND event_id = $5
+         AND action_type <> $6
+         AND delivery_state = 'in_progress'
+       ORDER BY action_type
+      `,
+      [
+        identity.tenantId,
+        identity.bindingId,
+        identity.chatwootAccountId,
+        identity.chatwootInboxId,
+        identity.eventId,
+        DELIVERY_ACTION,
+      ],
+    );
+    return result.rows.map((r) => r.action_type);
   }
 
   async heartbeat(

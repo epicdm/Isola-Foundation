@@ -817,6 +817,19 @@ export class FakeLedger implements Ledger {
     row.leaseExpiresAt = 0;
   }
 
+  async unsettledActions(identity: LedgerIdentity): Promise<string[]> {
+    this.guard();
+    const prefix = this.key(identity, "");
+    const out: string[] = [];
+    for (const [key, row] of this.rows) {
+      if (!key.startsWith(prefix)) continue;
+      const action = key.slice(prefix.length);
+      if (action === DELIVERY_ACTION || row.state !== "in_progress") continue;
+      out.push(action);
+    }
+    return out.sort();
+  }
+
   async heartbeat(
     identity: LedgerIdentity,
     action: string,
