@@ -222,9 +222,17 @@ export function renderFailureNote(args: {
   outcome: string;
   correlationId: string;
   tenantId: string;
+  /**
+   * The customer WAS sent a reply before this escalation (the agent asked for a colleague after
+   * answering). The note must say so: telling a colleague that nothing was sent to a customer who
+   * was answered is a false statement about what happened (Codex R5).
+   */
+  customerAnswered?: boolean;
 }): string {
   return [
-    "**Isola AI could not answer this conversation.**",
+    args.customerAnswered === true
+      ? "**Isola AI replied to the customer and asked for a colleague.**"
+      : "**Isola AI could not answer this conversation.**",
     "",
     `- failure: \`${args.outcome}\``,
     `- what that means: ${explainFailure(args.outcome)}`,
@@ -233,7 +241,9 @@ export function renderFailureNote(args: {
     "",
     args.outcome === "recovery_escalated"
       ? "The customer may or may not have received an AI reply, and the gateway has NOT re-sent anything. Please read the conversation and answer if it needs an answer. The conversation has been moved to **open** so a human can take over."
-      : "No message was sent to the customer. The conversation has been moved to **open** so a human can take over.",
+      : args.customerAnswered === true
+        ? "The AI replied to the customer (a reply WAS sent) and then asked for a human. The conversation has been moved to **open** so a colleague can take over; please read the reply before answering."
+        : "No message was sent to the customer. The conversation has been moved to **open** so a human can take over.",
   ].join("\n");
 }
 
@@ -507,13 +517,17 @@ export async function processDelivery(
   job: DeliveryJob,
 ): Promise<DeliveryResult> {
   const { binding, payload, correlationId } = job;
-  // THE TURN BUDGET (Codex R2): this delivery performs no durable mutation that STARTS
-  // after `turnDeadlineAt`, no request outlives it, and its row is not completed after
-  // it. The budget is sized at boot to end before the ledger lease does. That is
-  // CONTAINMENT, NOT EXCLUSIVITY (Codex R3/R4, F2/F3, open by design): a durable write
-  // already in flight at the deadline can still commit, `ledger.complete()` carries no
-  // owner or lease predicate, and a live handler can overlap a recovery handler after the
-  // lease expires. Do not read this budget as proof that no other worker has begun.
+  // THE TURN BUDGET (Codex R2/R5) is CONTAINMENT, NOT A GUARANTEE. What it enforces: every
+  // Chatwoot request carries the remaining budget and ends at it; the write fence
+  // (`writes.fence`) refuses a Chatwoot write, and `escalate()` refuses to record its hold,
+  // once the deadline has passed; an ownership read or a runtime result that has not arrived
+  // by it is a timeout; `finish()` refuses to complete the row after it. What it does NOT
+  // enforce: the handoff path records its ownership hold without a deadline check; a durable
+  // write already in flight at the deadline can still commit; `ledger.complete()` carries no
+  // owner or lease predicate; and a live handler can overlap a recovery handler after the
+  // lease expires (Codex F2/F3, open by design). Do NOT read this budget as proof that no
+  // durable mutation starts after the deadline, or that no other worker has begun. The budget
+  // is sized at boot to end before the ledger lease does.
   const turnDeadlineAt = job.startedAtMs + deps.config.turnBudgetMs;
   const turnExpired = (): boolean => deps.now() >= turnDeadlineAt;
   const target: ChatwootTarget = {
@@ -1243,6 +1257,8 @@ export async function processDelivery(
         writeDeps,
         writes,
         escalationReason,
+        // The reply was sent (or was already there) before this escalation.
+        { customerAnswered: true },
       );
       await annotate(deps, job, target, writeDeps, writes, "escalated");
       deps.logger.info({
@@ -1670,6 +1686,7 @@ async function escalate(
   writeDeps: WriteDeps,
   writes: WriteContext,
   outcome: string,
+  opts: { customerAnswered?: boolean } = {},
 ): Promise<boolean> {
   const base = {
     correlationId: job.correlationId,
@@ -1744,6 +1761,7 @@ async function escalate(
     outcome,
     correlationId: job.correlationId,
     tenantId: job.binding.tenantId,
+    ...(opts.customerAnswered === true ? { customerAnswered: true } : {}),
   });
 
   const posted: SendOutcome = await sendGuardedMessage(
