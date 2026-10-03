@@ -196,11 +196,15 @@ export function coherentChannelSubject(args: {
   routedInboxId: number;
 }): string | null {
   if (args.channelSubject === null) return null;
-  if (args.senderType === "contact") {
-    // Both must be PRESENT to be compared at all, and equal.
-    if (args.senderId === null || args.contactInboxContactId === null) return null;
-    if (args.senderId !== args.contactInboxContactId) return null;
-  }
+  // Codex round 3 (F6): the comparison used to run ONLY when the sender type was exactly
+  // "contact", so a payload whose sender type was missing, "Contact" or "user" skipped it.
+  // The sender type is a closed vocabulary, so it is normalised (trim, case-insensitive)
+  // and anything that is not a contact cannot be a channel-bound customer: fail closed.
+  const senderType = typeof args.senderType === "string" ? args.senderType.trim().toLowerCase() : null;
+  if (senderType !== "contact") return null;
+  // Both must be PRESENT to be compared at all, and equal.
+  if (args.senderId === null || args.contactInboxContactId === null) return null;
+  if (args.senderId !== args.contactInboxContactId) return null;
   if (args.contactInboxInboxId === null || args.contactInboxInboxId !== args.routedInboxId) return null;
   return args.channelSubject;
 }
