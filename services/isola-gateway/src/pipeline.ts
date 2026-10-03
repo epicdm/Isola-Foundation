@@ -166,6 +166,14 @@ export const WRITE = {
   handoffAck: "handoff_customer_message",
   labels: "labels",
   customAttributes: "custom_attributes",
+  /**
+   * The DURABLE "a model run was started for this delivery" marker (Codex DH1). An ordinary action
+   * row, claimed by a runtime that does not de-duplicate (the direct Hermes runtime) immediately
+   * BEFORE it sends the request that starts the run, and completed when the turn has ended. It is a
+   * claim, never a customer-facing write: it exists so that a redelivery on a fresh instance finds it
+   * and escalates instead of starting a second run. `action_type` is free text: no schema change.
+   */
+  modelRun: "model_run",
 } as const;
 
 /**
@@ -214,6 +222,8 @@ export const FAILURE_EXPLANATIONS: Readonly<Record<string, string>> = Object.fre
     "starting the AI run failed in a way that leaves it unknown whether a run exists; it was not started again and nothing was sent",
   hermes_duplicate_invoke:
     "this message had already started an AI run; a second run was refused so the customer cannot be answered twice",
+  hermes_dispatch_unrecorded:
+    "the gateway could not record that it was about to start an AI run, so it did not start one (a run that cannot be recorded could be repeated); nothing was sent to the customer",
   hermes_rate_limited:
     "the AI runtime was at its concurrency limit and was still at it after one retry",
   hermes_busy:
@@ -1035,6 +1045,23 @@ export async function processDelivery(
   // budget is spent, so a runtime stops starting requests and aborts the one in flight.
   // Discarding a late result is not cancelling the work that produced it.
   const turnAbort = new AbortController();
+  // The DURABLE dispatch claim (Codex DH1), offered lazily: only a runtime that cannot de-duplicate
+  // on its own side calls it, so no marker row exists for the other runtimes. It is claimed through the
+  // ledger BEFORE the runtime's request is sent; only a FRESH claim (`claimed`) may dispatch. Any other
+  // answer (an earlier attempt claimed it, completed or not) means a run may already exist.
+  let dispatchClaimed = false;
+  const claimDispatch = async (): Promise<boolean> => {
+    const claim = await writeDeps.ledger.claimAction(
+      job.identity,
+      WRITE.modelRun,
+      job.digest,
+      correlationId,
+      writeDeps.leaseMs,
+    );
+    if (claim.kind !== "claimed") return false;
+    dispatchClaimed = true;
+    return true;
+  };
   const invoked = deps.runtime.invoke({
     templateId: binding.templateId,
     // THE BINDING'S exposure, not a constant. A hardcoded "PUBLIC" here made
@@ -1046,6 +1073,7 @@ export async function processDelivery(
     context: buildRuntimeContext(binding, payload, history, customerScope),
     idempotencyKey: turnIdempotencyKey(job.identity, job.mode),
     ...(history?.messageIds === undefined ? {} : { historyMessageIds: history.messageIds }),
+    claimDispatch,
     isStillOwned: async () => ownershipStillMine(await deps.ownership.read(conversationRefOf(job))),
     signal: turnAbort.signal,
   });
@@ -1061,6 +1089,16 @@ export async function processDelivery(
     return suppressedResult(writes, "model_timeout");
   }
   const result = ran;
+  // The turn has ended (a result or a failure, not an abandoned wait): settle the dispatch marker so
+  // nothing is left in progress under the delivery. Best effort: a marker left unsettled is read by
+  // recovery as "cannot prove complete" and escalated, which is the safe direction.
+  if (dispatchClaimed) {
+    try {
+      await writeDeps.ledger.complete(job.identity, WRITE.modelRun, null);
+    } catch {
+      // see above
+    }
+  }
 
   // ---- THE IN-FLIGHT OWNERSHIP RECHECK ------------------------------------
   //

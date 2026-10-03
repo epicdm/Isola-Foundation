@@ -664,6 +664,8 @@ export function createGateway(deps: GatewayDeps): Gateway {
           historyMaxTurns: hermesCfg.historyMaxTurns,
           historyMaxChars: hermesCfg.historyMaxChars,
           logger,
+          // Production wiring: no POST /v1/runs without the durable ledger claim (Codex DH1).
+          requireDurableDispatch: true,
         }),
         new Set(hermesCfg.agentIds),
       )

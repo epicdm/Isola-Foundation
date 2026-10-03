@@ -63,6 +63,8 @@ export const HERMES_OUTCOMES = {
   createUncertain: "hermes_create_uncertain",
   /** This ledger key already started a run (or tried to): never a second POST. */
   duplicateInvoke: "hermes_duplicate_invoke",
+  /** The durable "this key may dispatch" claim could not be recorded (or was not offered): nothing was sent. */
+  dispatchUnrecorded: "hermes_dispatch_unrecorded",
   rateLimited: "hermes_rate_limited",
   /** No slot (per conversation or global) inside the deadline: nothing was sent. */
   busy: "hermes_busy",
@@ -120,6 +122,12 @@ export interface HermesRuntimeOptions {
   streamDrainGraceMs?: number;
   assertions?: HermesAssertionProvider;
   logger?: Logger;
+  /**
+   * Refuse to send unless the request carries the DURABLE dispatch claim (Codex DH1). The in-memory
+   * guard alone does not survive a restart or a second instance. The production wiring (src/app.ts)
+   * sets this true; a direct unit use of the class may leave it false.
+   */
+  requireDurableDispatch?: boolean;
 }
 
 export interface HermesStats {
@@ -495,6 +503,21 @@ export class HermesDirectRuntime implements AgentRuntime {
       try {
         // Slots won after the deadline are worth nothing: nothing is sent.
         if (Date.now() >= deadlineAt) return this.fail(request, HERMES_OUTCOMES.busy);
+        // THE DURABLE CLAIM (Codex DH1), taken after the last reason not to send and immediately
+        // BEFORE the POST: /v1/runs ignores Idempotency-Key and the in-memory guard dies with this
+        // process, so a redelivery on a fresh instance would start a second run. RESIDUAL, stated: a
+        // crash after the claim and before the POST escalates that turn and never retries it.
+        if (request.claimDispatch === undefined) {
+          if (this.options.requireDurableDispatch === true) return this.fail(request, HERMES_OUTCOMES.dispatchUnrecorded);
+        } else {
+          let first: boolean;
+          try {
+            first = await request.claimDispatch();
+          } catch {
+            return this.fail(request, HERMES_OUTCOMES.dispatchUnrecorded);
+          }
+          if (!first) return this.fail(request, HERMES_OUTCOMES.duplicateInvoke);
+        }
         const body: Record<string, unknown> = {
           input,
           instructions: HERMES_ENVELOPE_INSTRUCTIONS,

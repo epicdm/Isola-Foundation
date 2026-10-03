@@ -85,6 +85,16 @@ export interface AgentRuntimeRequest {
    */
   historyMessageIds?: readonly number[];
   /**
+   * THE DURABLE "this key may dispatch" CLAIM (Codex DH1). A runtime whose remote service does NOT
+   * de-duplicate (the direct Hermes runtime: /v1/runs ignores Idempotency-Key) calls this IMMEDIATELY
+   * BEFORE it sends the request that starts the work. It resolves true exactly once per ledger key,
+   * across gateway instances and restarts (it is a ledger action row, claimed before the send); false
+   * means an earlier attempt already claimed it, and the runtime MUST NOT send. It rejects when the
+   * ledger cannot record the claim, which also means do not send. Runtimes that de-duplicate on their
+   * own side (isola-runtime, Paperclip) never call it, so no row is written for them.
+   */
+  claimDispatch?: () => Promise<boolean>;
+  /**
    * Whether the gateway STILL owns this conversation (the same predicate as the
    * post-run recheck). A long-running runtime may poll it and stop early on a
    * takeover; it rejects when ownership cannot be read, which means "unknown".

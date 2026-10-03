@@ -309,7 +309,8 @@ describe("takeover and fail-closed over the route", () => {
     expect(writes).toEqual([]);
     expect(r.capture.withOutcome("suppressed_in_flight")).toHaveLength(1);
     expect(r.fake.stops).toHaveLength(1);
-    expect([...r.ledger.rows.values()].map((row) => row.state)).toEqual(["completed"]);
+    // the delivery row AND the durable dispatch marker (Codex DH1, `model_run`) are both closed; nothing else was claimed
+    expect([...r.ledger.rows.entries()].map(([key, row]) => `${key.split("|").pop()}:${row.state}`).sort()).toEqual(["delivery:completed", "model_run:completed"]);
   });
 
   it("the same takeover when the run had ALREADY finished (stop answers 404): the finished text is still never sent", async () => {
