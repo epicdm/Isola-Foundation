@@ -24,7 +24,7 @@
 import type { ChatwootApi, ChatwootTarget } from "./chatwoot.js";
 import { deliveryRef, type LedgerIdentity } from "./deliveryref.js";
 import { DISARMED, type Failpoint } from "./failpoint.js";
-import type { Ledger } from "./ledger.js";
+import type { ClaimResult, Ledger } from "./ledger.js";
 import { LedgerUnavailableError } from "./ledger.js";
 import type { Logger } from "./log.js";
 
@@ -191,6 +191,9 @@ export async function sendGuardedMessage(
 
   // ---- 2. already finished ----------------------------------------------
   if (claim.kind === "completed") return { kind: "skipped" };
+  // The claim THIS call holds, if any (Codex R4): a fresh claim, or an expired/released one it
+  // took over. A claim another worker still holds under a live lease is not ours to release.
+  const held = heldClaim(claim);
 
   // ---- 3. an earlier attempt claimed it and never recorded an outcome ----
   if (claim.kind === "ambiguous") {
@@ -219,7 +222,7 @@ export async function sendGuardedMessage(
   // The last read before the wire: ownership is checked HERE, after the claim and any
   // reconciliation, so no ledger or Chatwoot read can age the decision (Codex R3).
   if (context.fence !== undefined && !(await context.fence(action))) {
-    await closeFencedClaim(deps, context, action);
+    await closeFencedClaim(deps, context, action, held);
     return { kind: "fenced" };
   }
   let messageId: number | null;
@@ -334,14 +337,14 @@ export async function runGuardedWrite(
       outcome: "proceeding_unguarded",
       detail: detailOf(err),
     });
-    await fenceOrThrow(deps, context, action);
+    await fenceOrThrow(deps, context, action, null); // no ledger: no claim to release
     await fn();
     return true;
   }
 
   if (claim.kind === "completed") return false;
 
-  await fenceOrThrow(deps, context, action);
+  await fenceOrThrow(deps, context, action, heldClaim(claim));
   await fn();
   await settle(deps, context, action, null);
   return true;
@@ -359,10 +362,24 @@ export async function runGuardedWrite(
  * Best effort either way: a ledger that cannot be written leaves the claim as it is,
  * which a later attempt treats as claimed-and-unrecorded (reconcile, never blind resend).
  */
-async function closeFencedClaim(deps: WriteDeps, context: WriteContext, action: string): Promise<void> {
+/** The token of the claim a call holds, or null when it holds none (see ClaimResult). */
+function heldClaim(claim: ClaimResult): { attempts: number } | null {
+  if (claim.kind === "claimed") return { attempts: claim.attempts };
+  if (claim.kind === "ambiguous" && claim.owned) return { attempts: claim.attempts };
+  return null;
+}
+
+async function closeFencedClaim(
+  deps: WriteDeps,
+  context: WriteContext,
+  action: string,
+  held: { attempts: number } | null,
+): Promise<void> {
   try {
     if (context.authority?.deadlineExceeded === true) {
-      await deps.ledger.release(context.identity, action);
+      // Release only a claim this call holds, at the token it was given (Codex R4): a claim
+      // another worker took over is not ours, and clearing it would undo that worker's lease.
+      if (held !== null) await deps.ledger.release(context.identity, action, held.attempts);
     } else {
       await deps.ledger.fail(context.identity, action, "fenced");
     }
@@ -372,9 +389,14 @@ async function closeFencedClaim(deps: WriteDeps, context: WriteContext, action: 
 }
 
 /** The last read before the wire for a non-message write; throws `WriteFencedError` when denied. */
-async function fenceOrThrow(deps: WriteDeps, context: WriteContext, action: string): Promise<void> {
+async function fenceOrThrow(
+  deps: WriteDeps,
+  context: WriteContext,
+  action: string,
+  held: { attempts: number } | null,
+): Promise<void> {
   if (context.fence === undefined) return;
   if (await context.fence(action)) return;
-  await closeFencedClaim(deps, context, action);
+  await closeFencedClaim(deps, context, action, held);
   throw new WriteFencedError(action);
 }

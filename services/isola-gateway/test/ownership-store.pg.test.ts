@@ -30,7 +30,7 @@ import pgPkg from "pg";
 import type { Client as PgClient, Pool as PgPool } from "pg";
 
 import { createLedger } from "../src/ledger.js";
-import type { SqlExecutor } from "../src/ledger.js";
+import type { Ledger, SqlExecutor } from "../src/ledger.js";
 import { conversationKey } from "../src/ownership.js";
 import {
   applyOwnershipTransition,
@@ -862,5 +862,99 @@ maybe("tenants cannot see or move each other's conversations", () => {
     const view = await readConversationOwnership(exec, impostor);
     expect(view.state).toBe("AI_OWNED");
     expect(view.episode).toBe(0);
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// The delivery ledger's action claim and release (Codex R4)
+// ---------------------------------------------------------------------------
+// The socket-free proof of the SQL TEXT and of the in-memory semantics is
+// test/pivot-codex4-ledger-release-claim.test.ts. Only a database proves that the predicates
+// actually FILTER rows, so these run here (and are skipped without one).
+
+maybe("the delivery ledger: action claim is insert-or-acquire and release is holder-fenced", () => {
+  const identity = () => ({
+    tenantId: `t-${randomUUID()}`,
+    bindingId: "binding-under-test",
+    chatwootAccountId: 1,
+    chatwootInboxId: 46,
+    eventId: `delivery:${randomUUID()}`,
+  });
+  const ledger = (): Ledger => exec as unknown as Ledger;
+
+  it("fresh claim, live re-claim (not owned), then release + re-acquire (owned, attempts + 1)", async () => {
+    await ledger().migrate();
+    const id = identity();
+    expect(await ledger().claimAction(id, "reply", "d", "c", 60_000)).toEqual({ kind: "claimed", attempts: 1 });
+    expect(await ledger().claimAction(id, "reply", "d", "c", 60_000)).toEqual({
+      kind: "ambiguous",
+      attempts: 1,
+      owned: false,
+    });
+    expect(await ledger().release(id, "reply", 1)).toBe(true);
+    expect(await ledger().claimAction(id, "reply", "d", "c", 60_000)).toEqual({
+      kind: "ambiguous",
+      attempts: 2,
+      owned: true,
+    });
+  }, 30_000);
+
+  it("a STALE token cannot release a claim that was taken over", async () => {
+    await ledger().migrate();
+    const id = identity();
+    await ledger().claimAction(id, "reply", "d", "c", 60_000);
+    expect(await ledger().release(id, "reply", 1)).toBe(true);
+    const taken = await ledger().claimAction(id, "reply", "d", "c", 60_000); // attempts 2, live lease
+    expect(taken).toMatchObject({ kind: "ambiguous", attempts: 2, owned: true });
+
+    expect(await ledger().release(id, "reply", 1)).toBe(false); // the old holder's token
+    expect(await ledger().claimAction(id, "reply", "d", "c", 60_000)).toMatchObject({ owned: false });
+  }, 30_000);
+
+  it("ANOTHER process (another lease owner) cannot release this process's claim", async () => {
+    await ledger().migrate();
+    const id = identity();
+    await ledger().claimAction(id, "reply", "d", "c", 60_000);
+    const other = createLedger({ connectionString: URL, instanceId: "some-other-process" });
+    try {
+      expect(await other.release(id, "reply", 1)).toBe(false);
+    } finally {
+      await other.close();
+    }
+    expect(await ledger().release(id, "reply", 1)).toBe(true);
+  }, 30_000);
+
+  it("an EXPIRED lease is acquired without a release", async () => {
+    await ledger().migrate();
+    const id = identity();
+    await ledger().claimAction(id, "reply", "d", "c", 1); // one-second lease
+    await new Promise((resolve) => setTimeout(resolve, 1_300));
+    expect(await ledger().claimAction(id, "reply", "d", "c", 60_000)).toMatchObject({
+      kind: "ambiguous",
+      attempts: 2,
+      owned: true,
+    });
+  }, 30_000);
+
+  it("a completed row is never reopened by release or by a claim", async () => {
+    await ledger().migrate();
+    const id = identity();
+    await ledger().claimAction(id, "reply", "d", "c", 60_000);
+    await ledger().complete(id, "reply", 123);
+    expect(await ledger().release(id, "reply", 1)).toBe(false);
+    expect(await ledger().claimAction(id, "reply", "d", "c", 60_000)).toEqual({
+      kind: "completed",
+      chatwootMessageId: 123,
+    });
+  }, 30_000);
+
+  it("unsettledActions lists this delivery's in-progress action rows only", async () => {
+    await ledger().migrate();
+    const id = identity();
+    await ledger().claimAction(id, "failure_note", "d", "c", 60_000);
+    await ledger().claimAction(id, "labels", "d", "c", 60_000);
+    await ledger().claimAction(id, "reply", "d", "c", 60_000);
+    await ledger().complete(id, "reply", 9);
+    expect(await ledger().unsettledActions(id)).toEqual(["failure_note", "labels"]);
   }, 30_000);
 });

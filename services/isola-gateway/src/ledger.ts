@@ -103,14 +103,21 @@ export type ReserveResult =
   | { kind: "conflict"; storedDigest: string };
 
 export type ClaimResult =
-  | { kind: "claimed" }
+  /** A fresh claim. `attempts` (1) is the claim's token: `release` presents it. */
+  | { kind: "claimed"; attempts: number }
   | { kind: "completed"; chatwootMessageId: number | null }
   /**
    * Claimed by a previous attempt that never recorded an outcome. Whether the
    * write reached Chatwoot is UNKNOWN — the caller must reconcile, never
    * blindly resend.
+   *
+   * `owned` says whether THIS caller now holds the claim (Codex R4): true when the previous
+   * claim's lease had expired or been released and this call took it over (`attempts` was
+   * incremented and is the new token); false when another worker's lease is still live, in
+   * which case this caller holds nothing and must not release it. Concurrent execution of the
+   * action is NOT prevented either way (the exclusivity gap, Codex F2/F3, is open by design).
    */
-  | { kind: "ambiguous"; attempts: number };
+  | { kind: "ambiguous"; attempts: number; owned: boolean };
 
 /** A delivery whose lease expired before it finished. */
 export interface RecoverableDelivery {
@@ -216,8 +223,14 @@ export interface Ledger {
    * "claimed and never recorded" path: a message is reconciled against Chatwoot and sent
    * only if proven absent; an idempotent write is simply re-run. No schema change.
    * Only an `in_progress` row is touched: a completed or failed row is never reopened.
+   *
+   * HOLDER-FENCED (Codex R4): `attempts` is the token the caller's own `claimAction` returned,
+   * and the release applies only while the row still carries that token AND this process's
+   * lease owner. A stale worker whose claim was taken over (a later `claimAction` incremented
+   * `attempts`) cannot clear the new holder's lease. Returns true when it released, false when
+   * it did not (stale, terminal, or not this process's claim): a refusal is not an error.
    */
-  release(identity: LedgerIdentity, action: string): Promise<void>;
+  release(identity: LedgerIdentity, action: string, attempts: number): Promise<boolean>;
   /**
    * The ACTIONS (never the delivery row) of one delivery that are claimed and not settled:
    * `in_progress`, whether still leased, released or expired (Codex R4 G4-1). A delivery
@@ -527,7 +540,12 @@ export class PostgresLedger implements Ledger, SqlExecutor {
     const ref = deliveryRef(identity, action);
     const leaseSeconds = Math.max(1, Math.ceil(leaseMs / 1000));
 
-    const inserted = await this.query<{ inserted: boolean }>(
+    // Insert-or-ACQUIRE (Codex R4). A first claim inserts (attempts 1). A claim whose lease
+    // has EXPIRED or been RELEASED is taken over by this caller in the same statement:
+    // `attempts` is incremented, which is the claim's token (`release` presents it) and the
+    // count of how often the action was attempted. A claim another worker still holds under a
+    // live lease, and any completed or failed row, is not touched.
+    const inserted = await this.query<{ inserted: boolean; attempts: number }>(
       `
       INSERT INTO delivery_ledger (
         tenant_id, binding_id, chatwoot_account_id, chatwoot_inbox_id,
@@ -538,8 +556,15 @@ export class PostgresLedger implements Ledger, SqlExecutor {
         $5, $6, $7, $8, $9,
         'in_progress', $10, now() + make_interval(secs => $11::double precision), 1
       )
-      ON CONFLICT ON CONSTRAINT delivery_ledger_pkey DO NOTHING
-      RETURNING (xmax = 0) AS inserted
+      ON CONFLICT ON CONSTRAINT delivery_ledger_pkey DO UPDATE
+        SET lease_owner       = EXCLUDED.lease_owner,
+            lease_expires_at  = EXCLUDED.lease_expires_at,
+            attempts          = delivery_ledger.attempts + 1,
+            updated_at        = now()
+        WHERE delivery_ledger.delivery_state = 'in_progress'
+          AND (delivery_ledger.lease_expires_at IS NULL
+               OR delivery_ledger.lease_expires_at <= now())
+      RETURNING (xmax = 0) AS inserted, attempts
       `,
       [
         identity.tenantId,
@@ -556,7 +581,12 @@ export class PostgresLedger implements Ledger, SqlExecutor {
       ],
     );
 
-    if (inserted.rows[0] !== undefined) return { kind: "claimed" };
+    const took = inserted.rows[0];
+    if (took !== undefined) {
+      return took.inserted
+        ? { kind: "claimed", attempts: took.attempts }
+        : { kind: "ambiguous", attempts: took.attempts, owned: true };
+    }
 
     const existing = await this.query<{
       delivery_state: DeliveryState;
@@ -567,7 +597,7 @@ export class PostgresLedger implements Ledger, SqlExecutor {
       keyParams(identity, action),
     );
     const found = existing.rows[0];
-    if (found === undefined) return { kind: "claimed" };
+    if (found === undefined) return { kind: "claimed", attempts: 1 };
     if (found.delivery_state === "completed") {
       const id = found.chatwoot_message_id;
       return {
@@ -579,7 +609,8 @@ export class PostgresLedger implements Ledger, SqlExecutor {
       // A deliberate, recorded failure is not retried blind either.
       return { kind: "completed", chatwootMessageId: null };
     }
-    return { kind: "ambiguous", attempts: found.attempts };
+    // In progress under a lease another worker still holds: report it, do not take it.
+    return { kind: "ambiguous", attempts: found.attempts, owned: false };
   }
 
   async complete(
@@ -618,8 +649,10 @@ export class PostgresLedger implements Ledger, SqlExecutor {
     );
   }
 
-  async release(identity: LedgerIdentity, action: string): Promise<void> {
-    await this.query(
+  async release(identity: LedgerIdentity, action: string, attempts: number): Promise<boolean> {
+    // Holder-fenced: only the claim this process took (its lease owner, its attempts token)
+    // can be released. A stale worker, or a claim since taken over, matches no row.
+    const result = await this.query(
       `
       UPDATE delivery_ledger
          SET lease_owner      = NULL,
@@ -627,9 +660,12 @@ export class PostgresLedger implements Ledger, SqlExecutor {
              updated_at       = now()
        WHERE ${KEY_PREDICATE}
          AND delivery_state = 'in_progress'
+         AND attempts       = $7
+         AND lease_owner    = $8
       `,
-      keyParams(identity, action),
+      [...keyParams(identity, action), attempts, this.instanceId],
     );
+    return result.rowCount === 1;
   }
 
   async unsettledActions(identity: LedgerIdentity): Promise<string[]> {

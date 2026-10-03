@@ -675,6 +675,8 @@ interface FakeRow {
   mode: string | null;
   correlationId: string;
   chatwootMessageId: number | null;
+  /** The instance that holds the lease (an ACTION row claimed or taken over); null = released or unowned. */
+  owner?: string | null;
 }
 
 /**
@@ -692,13 +694,17 @@ export class FakeLedger implements Ledger {
   unavailable = false;
   migrated = 0;
 
-  constructor(rows: Map<string, FakeRow> = new Map()) {
+  /** Identifies this process in a claim's `owner` (the SQL ledger's `lease_owner`). */
+  readonly instanceId: string;
+
+  constructor(rows: Map<string, FakeRow> = new Map(), instanceId = "fake-instance-1") {
     this.rows = rows;
+    this.instanceId = instanceId;
   }
 
-  /** A new process against the same durable store. */
+  /** A new process against the same durable store (a different instance id, as a real restart has). */
   survivesRestart(): FakeLedger {
-    return new FakeLedger(this.rows);
+    return new FakeLedger(this.rows, `${this.instanceId}+`);
   }
 
   private key(identity: LedgerIdentity, action: string): string {
@@ -778,15 +784,24 @@ export class FakeLedger implements Ledger {
         mode: null,
         correlationId,
         chatwootMessageId: null,
+        owner: this.instanceId,
       });
-      return { kind: "claimed" };
+      return { kind: "claimed", attempts: 1 };
     }
     if (existing.state === "completed") {
       return { kind: "completed", chatwootMessageId: existing.chatwootMessageId };
     }
     if (existing.state === "failed") return { kind: "completed", chatwootMessageId: null };
-    existing.attempts += 1;
-    return { kind: "ambiguous", attempts: existing.attempts };
+    // The SQL ledger's insert-or-ACQUIRE: a claim whose lease has expired or been released is
+    // taken over (attempts + 1 is the new token); a live lease is reported, not taken.
+    const now = Date.now();
+    if (existing.leaseExpiresAt === null || existing.leaseExpiresAt <= now) {
+      existing.attempts += 1;
+      existing.owner = this.instanceId;
+      existing.leaseExpiresAt = now + leaseMs;
+      return { kind: "ambiguous", attempts: existing.attempts, owned: true };
+    }
+    return { kind: "ambiguous", attempts: existing.attempts, owned: false };
   }
 
   async complete(
@@ -810,11 +825,15 @@ export class FakeLedger implements Ledger {
     row.leaseExpiresAt = null;
   }
 
-  async release(identity: LedgerIdentity, action: string): Promise<void> {
+  async release(identity: LedgerIdentity, action: string, attempts: number): Promise<boolean> {
     this.guard();
     const row = this.rows.get(this.key(identity, action));
-    if (row === undefined || row.state !== "in_progress") return;
+    // Holder-fenced, as the SQL ledger: this process's claim, at the token it was given.
+    if (row === undefined || row.state !== "in_progress") return false;
+    if (row.attempts !== attempts || row.owner !== this.instanceId) return false;
     row.leaseExpiresAt = 0;
+    row.owner = null;
+    return true;
   }
 
   async unsettledActions(identity: LedgerIdentity): Promise<string[]> {
