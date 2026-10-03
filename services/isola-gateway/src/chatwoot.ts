@@ -194,10 +194,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * A Chatwoot message id: a POSITIVE SAFE INTEGER, and a number (the API gives numbers, so a
+ * digit string is unreadable too). `Number.isFinite` accepted -1, 0, 0.5 and -0.5, which let
+ * a malformed record read as "well formed, nothing of ours in it" and authorised a second
+ * copy of a committed reply (Codex R5 G5-3).
+ */
+function isMessageId(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
 function readMessageId(payload: unknown): number | null {
   if (!isRecord(payload)) return null;
   const id = payload["id"];
-  return typeof id === "number" && Number.isFinite(id) ? id : null;
+  return isMessageId(id) ? id : null;
 }
 
 export interface ScannedMessage {
@@ -301,7 +311,7 @@ export function readConversationHistory(record: unknown): ConversationHistory {
 function readScannedMessage(entry: unknown): ScannedMessage | null {
   if (!isRecord(entry)) return null;
   const id = entry["id"];
-  if (typeof id !== "number" || !Number.isFinite(id)) return null;
+  if (!isMessageId(id)) return null;
   const createdAt = entry["created_at"];
   const attributes = entry["content_attributes"];
   const ref = isRecord(attributes) ? attributes[DELIVERY_REF_ATTRIBUTE] : undefined;
@@ -345,7 +355,13 @@ export function readVisibleMessages(record: unknown): ScannedMessage[] {
  * Why a `conversations#show` body cannot be trusted to PROVE a message absent, or null when
  * it is well formed. Well formed means: an object whose `messages` is an array and which
  * carries the `last_non_activity_message` field (null is legitimate: a conversation with no
- * real message yet), and every message in either place has a finite numeric `id`.
+ * real message yet), every message in either place has a POSITIVE SAFE INTEGER `id`, and
+ * the visibility fields AGREE with each other (Codex R5 G5-3):
+ *   - `last_non_activity_message` is not an activity line;
+ *   - if the newest message in `messages` is a real (non-activity) one, `last_non_activity_message`
+ *     is that same message (it cannot be null, and it cannot be older);
+ *   - the newest message overall is never older than `last_non_activity_message`.
+ * Contradictory metadata is evidence of nothing, so it is unreadable, never "no real message".
  *
  * The presence of `last_non_activity_message` is UNVERIFIED against the installed 4.18
  * build (the 4.16.1 partial was read, and always emitted it). If 4.18 omits it, every
@@ -361,6 +377,22 @@ function unreadableConversationRecord(record: unknown): string | null {
   }
   const last = record["last_non_activity_message"];
   if (last !== null && readScannedMessage(last) === null) return "last_non_activity_message has no readable id";
+
+  const lastMessage = last === null ? null : readScannedMessage(last);
+  if (lastMessage !== null && lastMessage.isActivity) {
+    return "last_non_activity_message is an activity line";
+  }
+  const listed = messages.map((entry) => readScannedMessage(entry)).filter((m): m is ScannedMessage => m !== null);
+  if (listed.length > 0) {
+    const newest = listed.reduce((a, b) => (b.id > a.id ? b : a));
+    if (!newest.isActivity) {
+      if (lastMessage === null) return "the newest message is a real one but last_non_activity_message is null";
+      if (lastMessage.id < newest.id) return "last_non_activity_message is older than the newest message, which is a real one";
+    }
+    if (lastMessage !== null && newest.id < lastMessage.id) {
+      return "the newest message is older than last_non_activity_message";
+    }
+  }
   return null;
 }
 
