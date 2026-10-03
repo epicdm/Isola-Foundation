@@ -33,17 +33,17 @@ Already protecting customers: the time budget, a re-check that a human has not t
 - **What it does NOT fix (F3 residual):** a request already on the wire to Chatwoot cannot be recalled. Under "never resend" no duplicate comes from our code; under "resend automatically" a rare duplicate remains, and its window (how long Chatwoot can keep an aborted request pending) is **UNMEASURED**.
 
 ## 4. Rollback
-1. Switch the new flag (`GATEWAY_LEASE_FENCE`) off: the code ignores the ticket and behaves as today. 2. Then drop the two optional columns (`DROP COLUMN IF EXISTS`, safe once no running version reads them). The `attempts` meaning does not change, so nothing else breaks.
+1. Switch the new flag off (`GATEWAY_LEASE_FENCE` is a PROPOSED name; it does not exist in the code today): the code ignores the ticket and behaves as today. 2. Then drop the two optional columns (`DROP COLUMN IF EXISTS`, safe once no running version reads them). The `attempts` meaning does not change, so nothing else breaks.
 **Mixed-version caveat:** an old copy of the gateway does not check the ticket, so it can still close a row the new copy took over. Do not rely on the fence until **every** replica runs the new code.
 
 ## 5. Two stages, two sets of approvers
 | Stage | What happens | Who must authorise |
 |---|---|---|
-| A. Isolated build | Branch code + fake ledger tests (no database), then a real-PostgreSQL race test (two connections) on a **scratch Postgres**. No scratch resource is known to me; earlier scratch containers on deepseek were blocked by the safety hook. It needs a named, authorised throwaway database on UAT | Owner (scratch DB) / Lane A names the route |
+| A. Isolated build | Branch code + fake ledger tests (no database), then a real-PostgreSQL race test (two connections) on a **scratch Postgres**. It needs a named throwaway UAT database. The existing Lane A scratch Postgres containers on deepseek (`lane-a-scratch-pg-gate`, `-base`, `-h3`, `-m3`, created for PR #284 testing, not for the gateway) are one possible candidate; not authorised, and using one for a gateway race test is itself something the owner must name and authorise | Owner (names and authorises the scratch DB) / Lane A names the route |
 | B. Live gateway (image `overlay-5317cec`, not in this repo's history) | Read its real tables and code read-only first; add columns (additive) first; then flagged code; all replicas on new code | Owner **and** Overall PM / Promotion Process; Law 22 stop-and-ask; a read-only schema read needs its own approval |
 
 ## 6. At-most-once or at-least-once for a reply we cannot confirm
-When a send was cut off and the next worker cannot see the message, we either **never resend and hand the thread to a person (at-most-once)** or **resend automatically (at-least-once)**. At-most-once: the customer never gets the same answer twice, but now and then waits for a human to reply (no silence, since a person is asked). At-least-once: nobody is left without an answer, but a rare duplicate message appears, how rare unmeasured. **Recommendation, for your decision, not mine: at-most-once for customer-facing replies**, because a human follow-up is the fail-closed answer and current volume is low.
+When a send was cut off and the next worker cannot see the message, we either **never resend and hand the thread to a person (at-most-once)** or **resend automatically (at-least-once)**. At-most-once: the customer never gets the same answer twice, but now and then waits for a human to reply (no silence, since a person is asked). At-least-once: nobody is left without an answer, but a rare duplicate message appears, how rare unmeasured. **Recommendation, for your decision, not mine: at-most-once for customer-facing replies**, because a human follow-up is the fail-closed answer.
 
 Interim rule until you decide: the Paperclip path stays OFF; any sandbox test runs ONE gateway copy and ONE sweeper, test conversations only.
 
