@@ -117,7 +117,110 @@ const FORBIDDEN_AUTH_HEADER = "x-paperclip-run-id";
 
 /** Paperclip's documented ceiling for `idempotencyKey` (SOURCE: Lane A relay: 1-255). */
 const MAX_IDEMPOTENCY_KEY = 255;
+/**
+ * The customer message is cut to at most this many UTF-16 code units, and never in the
+ * middle of a surrogate pair (Codex R6: an emoji at the boundary left a lone surrogate).
+ */
 const MAX_MESSAGE_CHARS = 4000;
+
+/**
+ * Hard ceiling on ANY Paperclip response body the gateway will buffer (Codex R4: a
+ * 16 MiB body was accepted "ok" with a 1 ms timeout, and nothing capped the read). A
+ * declared Content-Length over it is refused before a byte is read; an undeclared or
+ * lying body is cut off the moment the running total passes it. 1 MiB is far above a
+ * create response or a 50-comment page and far below anything that could pressure
+ * the process.
+ */
+export const MAX_PAPERCLIP_RESPONSE_BYTES = 1024 * 1024;
+
+class ResponseTooLargeError extends Error {
+  constructor() {
+    super("paperclip: the response body exceeds the byte cap");
+    this.name = "ResponseTooLargeError";
+  }
+}
+
+/** At most `max` UTF-16 code units, never splitting a surrogate pair. */
+export function truncateKeepingPairs(text: string, max: number): string {
+  if (text.length <= max) return text;
+  let end = max;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1; // a high surrogate whose pair would be cut
+  return text.slice(0, end);
+}
+
+/**
+ * Resolves with the value, or "deadline" when the absolute turn deadline passes first.
+ * A rejection is returned as `false` for a boolean probe by the caller's choice via
+ * `onReject`: for the ownership read that means "could not find out" = not ours.
+ */
+function raceDeadline<T>(promise: Promise<T>, deadlineAt: number, onReject: T): Promise<T | "deadline"> {
+  const remaining = deadlineAt - Date.now();
+  if (remaining <= 0) return Promise.resolve("deadline");
+  return new Promise<T | "deadline">((resolve) => {
+    const timer = setTimeout(() => resolve("deadline"), remaining);
+    if (typeof timer.unref === "function") timer.unref();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(onReject);
+      },
+    );
+  });
+}
+
+/**
+ * Read the body as text, never past `cap` bytes and never past the abort signal, even
+ * when the body itself ignores the signal (a stalled stream is raced against it).
+ */
+async function readCappedText(response: Response, signal: AbortSignal, cap: number): Promise<string> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > cap) {
+    try {
+      void response.body?.cancel().catch(() => undefined);
+    } catch {
+      /* nothing to release */
+    }
+    throw new ResponseTooLargeError();
+  }
+  const stream = response.body;
+  if (stream === null) return "";
+  const reader = stream.getReader();
+  let onAbort: (() => void) | null = null;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(new Error("paperclip: aborted while reading the body"));
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+  aborted.catch(() => undefined);
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await Promise.race([reader.read(), aborted]);
+      if (done) break;
+      total += value.byteLength;
+      if (total > cap) throw new ResponseTooLargeError();
+      chunks.push(value);
+    }
+  } catch (err) {
+    void reader.cancel().catch(() => undefined);
+    throw err;
+  } finally {
+    if (onAbort !== null) signal.removeEventListener("abort", onAbort);
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(joined);
+}
 
 /**
  * The stable idempotency key: the ledger key `(tenant, binding, account, inbox,
@@ -226,7 +329,7 @@ function describeContext(request: AgentRuntimeRequest): { title: string; descrip
     scopeLines = `- customerId=${String(scope["customerId"])}\n- serviceIds=${serviceIds}`;
   } else scopeLines = `- ${String(scope["kind"])}`;
 
-  const text = typeof message["content"] === "string" ? message["content"].slice(0, MAX_MESSAGE_CHARS) : "";
+  const text = typeof message["content"] === "string" ? truncateKeepingPairs(message["content"], MAX_MESSAGE_CHARS) : "";
   return {
     title: `Chatwoot ${ids.replace(/ /g, " ")} (${request.runId})`,
     description: [
@@ -345,14 +448,17 @@ export class PaperclipAgentRuntime implements AgentRuntime {
     for (;;) {
       if (Date.now() >= deadline) return failure(request.runId, PAPERCLIP_OUTCOMES.timeout);
       if (request.isStillOwned !== undefined) {
-        let owned: boolean;
-        try {
-          owned = await request.isStillOwned();
-        } catch {
-          owned = false; // "I could not find out who holds this" is never "nobody does".
-        }
+        // The ownership read runs under the SAME absolute turn deadline (Codex R4): a
+        // pending read must not hold the turn open. A rejection is "I could not find
+        // out who holds this", which is never "nobody does".
+        const owned = await raceDeadline(
+          Promise.resolve().then(() => request.isStillOwned?.() ?? true),
+          deadline,
+          false,
+        );
+        if (owned === "deadline") return failure(request.runId, PAPERCLIP_OUTCOMES.timeout);
         if (!owned) {
-          await this.cancelRun(issueId);
+          await this.cancelRun(issueId, deadline);
           return failure(request.runId, PAPERCLIP_OUTCOMES.ownershipLost);
         }
       }
@@ -418,6 +524,9 @@ export class PaperclipAgentRuntime implements AgentRuntime {
       );
     } catch (err) {
       if (err instanceof EgressBlockedError) return { kind: "config_defect" };
+      // An oversized page is anomalous, not weather: re-reading the same page until the
+      // deadline would just repeat it (Codex R4). One request, then a config defect.
+      if (err instanceof ResponseTooLargeError) return { kind: "config_defect" };
       return { kind: "transient" };
     }
     // EVERY 4xx is a configuration defect (401/403 refused credential, 400/404/422
@@ -451,14 +560,16 @@ export class PaperclipAgentRuntime implements AgentRuntime {
    * changes the outcome: the takeover is already enforced by the ownership gate.
    * Whether Paperclip's cancel reaches Hermes mid-run is UNVERIFIED.
    */
-  private async cancelRun(issueId: string): Promise<void> {
+  private async cancelRun(issueId: string, deadlineAt: number): Promise<void> {
     const runId = this.runIds.get(issueId);
     if (runId === undefined) return;
     const auth = this.authHeaders();
     if (auth === null) return; // never send a run id header, not even to cancel
     try {
-      // Its own small budget: the turn deadline may be nearly spent when a takeover
-      // is noticed, and a cancel is best effort either way.
+      // The SAME absolute turn deadline (Codex R4: a fresh request-timeout budget let a
+      // 20 ms turn run ~98 ms). When the turn has no time left the cancel is skipped:
+      // takeover safety never rests on the cancel (the send fence and the post-run
+      // ownership recheck enforce it), and whether it reaches Hermes is UNVERIFIED.
       await this.exchange(
         `${this.base()}/api/heartbeat-runs/${encodeURIComponent(runId)}/cancel`,
         {
@@ -466,7 +577,7 @@ export class PaperclipAgentRuntime implements AgentRuntime {
           headers: { "content-type": "application/json", accept: "application/json", ...auth },
           body: "{}",
         },
-        Date.now() + this.options.requestTimeoutMs,
+        deadlineAt,
         false,
       );
     } catch {
@@ -529,7 +640,8 @@ export class PaperclipAgentRuntime implements AgentRuntime {
         }
         return { status: response.status, json: undefined };
       }
-      const text = await response.text(); // under the SAME signal and timer
+      // under the SAME signal and timer, and never past the byte cap (Codex R4)
+      const text = await readCappedText(response, controller.signal, MAX_PAPERCLIP_RESPONSE_BYTES);
       let json: unknown;
       try {
         json = JSON.parse(text);
