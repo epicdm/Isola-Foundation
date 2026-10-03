@@ -386,8 +386,10 @@ async function establishHumanHold(
     reason: string;
     actorRef: string;
     alertCode: string;
+    /** The episode this delivery started under (Codex R3 F5); null = unknown, no precondition. */
+    expectedEpisode?: number | null;
   },
-): Promise<{ state: string; episode: number }> {
+): Promise<{ state: string; episode: number; stale?: true }> {
   let transition;
   try {
     transition = await deps.ownership.requestHuman({
@@ -396,6 +398,7 @@ async function establishHumanHold(
       reason: args.reason,
       actorRef: args.actorRef,
       correlationId: job.correlationId,
+      expectedEpisode: args.expectedEpisode ?? null,
     });
   } catch (err) {
     deps.logger.error({
@@ -407,6 +410,23 @@ async function establishHumanHold(
       detail: err instanceof Error ? err.name : "unknown ownership failure",
     });
     throw new OwnershipHoldFailedError("store_unavailable");
+  }
+
+  // The conversation moved to a NEWER episode after this delivery read it (a person took
+  // it and handed it back). NOT a failure and NOT a hold of ours: report it so the caller
+  // stops, and never adopt whatever episode is there now (Codex R3 F5).
+  if (transition.status === "stale_episode") {
+    deps.logger.warn({
+      ...base,
+      event: "ownership",
+      outcome: "stale_episode",
+      ownershipState: transition.state,
+      episode: transition.episode,
+      expectedEpisode: args.expectedEpisode ?? null,
+      detail:
+        "the conversation moved to a newer ownership episode before this delivery could record its hold; no hold was opened and none will be adopted",
+    });
+    return { state: transition.state, episode: transition.episode, stale: true };
   }
 
   if (!suppressesAutomatedReply(transition.state)) {
@@ -676,7 +696,12 @@ export async function processDelivery(
   // After one denial the fence latches: this delivery writes nothing more.
   // A rejected read propagates (nothing written, the sweeper retries): "I could not
   // find out who holds this" is never "nobody does".
-  const authority: NonNullable<WriteContext["authority"]> = { heldEpisode: null, fenced: false, deadlineExceeded: false };
+  const authority: NonNullable<WriteContext["authority"]> = {
+    heldEpisode: null,
+    fenced: false,
+    deadlineExceeded: false,
+    episodeAtStart: ownership.episode,
+  };
   writes.authority = authority;
   writes.turnExpired = turnExpired;
   // The turn budget closes the fence for good: the one place every wire write passes
@@ -1351,7 +1376,14 @@ async function processHandoff(
     reason: classification.reason,
     actorRef: "gateway:handoff",
     alertCode: "ownership_transition_failed_on_handoff",
+    expectedEpisode: writes.authority?.episodeAtStart ?? null,
   });
+
+  // Same rule as `escalate` (Codex R3 F5): a newer episode is not ours to adopt.
+  if (hold.stale === true) {
+    stopForPerson(deps, writes, base, "handoff_hold_stale_episode", hold);
+    return suppressedResult(writes);
+  }
 
   // Same rule as `escalate`: the hold is ours only if the conversation was still the
   // AI's. A person who already has it gets none of the handoff writes.
@@ -1662,7 +1694,14 @@ async function escalate(
     reason: isReasonCode(outcome) ? outcome : "runtime_outcome_unrecognised",
     actorRef: "gateway:escalate",
     alertCode: "ownership_transition_failed_on_escalate",
+    expectedEpisode: writes.authority?.episodeAtStart ?? null,
   });
+
+  // The conversation moved to a newer episode while this delivery was working (Codex R3
+  // F5): there is no hold of ours to adopt, and none of the writes below are ours to make.
+  if (hold.stale === true) {
+    return stopForPerson(deps, writes, base, "escalate_hold_stale_episode", hold);
+  }
 
   // The hold can only be recorded as OUR hold if the conversation was still the AI's.
   // If a person took it between the decision to escalate and now, the store answers

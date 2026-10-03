@@ -111,6 +111,7 @@ export class InMemoryOwnershipGate implements OwnershipGate {
   async requestHuman(input: {
     conversation: ConversationRef;
     operationId: string;
+    expectedEpisode?: number | null;
   }): Promise<TransitionOutcome> {
     const key = this.key(input.conversation);
     const claimKey = `${key}|${input.operationId}`;
@@ -132,6 +133,17 @@ export class InMemoryOwnershipGate implements OwnershipGate {
         episode: row.episode,
         operationId: input.operationId,
         duplicateSource: "replay",
+      };
+    }
+    // Same order as the store: replay, then the episode precondition, then legality.
+    if (input.expectedEpisode !== undefined && input.expectedEpisode !== null && input.expectedEpisode !== row.episode) {
+      return {
+        ok: false,
+        status: "stale_episode",
+        state: row.state,
+        episode: row.episode,
+        operationId: input.operationId,
+        duplicateSource: null,
       };
     }
     if (row.state !== "AI_OWNED" && row.state !== "AI_RESUMED") {

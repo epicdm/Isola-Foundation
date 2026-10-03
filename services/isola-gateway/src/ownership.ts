@@ -367,13 +367,21 @@ export interface OwnershipGate {
    *  history is AI_OWNED, which is a fact and not an absence. */
   read(ref: ConversationRef): Promise<OwnershipView>;
 
-  /** Accepted escalation -> HUMAN_REQUESTED, opening a new episode. */
+  /**
+   * Accepted escalation -> HUMAN_REQUESTED, opening a new episode.
+   *
+   * `expectedEpisode` (Codex R3 F5): the episode the caller STARTED under. When set it is
+   * compared under the row lock and a mismatch is refused as `stale_episode`: a delivery
+   * that read the conversation in one episode must not open a hold in a NEWER one (a
+   * person took the conversation and handed it back meanwhile) and then act as its owner.
+   */
   requestHuman(input: {
     conversation: ConversationRef;
     operationId: string;
     reason: string;
     actorRef?: string | null;
     correlationId?: string | null;
+    expectedEpisode?: number | null;
   }): Promise<TransitionOutcome>;
 
   /**

@@ -719,6 +719,8 @@ export function requestHumanOwnership(
     reason: string;
     actorRef?: string | null;
     correlationId?: string | null;
+    /** The episode the caller started under; a mismatch is refused as `stale_episode` under the row lock. */
+    expectedEpisode?: number | null;
   },
 ): Promise<TransitionOutcome> {
   return applyOwnershipTransition(exec, {

@@ -51,6 +51,12 @@ export interface WriteAuthority {
   fenced: boolean;
   /** The fence was closed because the TURN BUDGET ran out (not because a person took the conversation). */
   deadlineExceeded: boolean;
+  /**
+   * The ownership episode this delivery STARTED under (Codex R3 F5). A hold is recorded
+   * only against it: if the conversation has moved to a newer episode the hold is refused
+   * rather than adopted.
+   */
+  episodeAtStart?: number | null;
 }
 
 /**
