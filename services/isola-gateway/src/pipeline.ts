@@ -225,7 +225,7 @@ export const FAILURE_EXPLANATIONS: Readonly<Record<string, string>> = Object.fre
   hermes_dispatch_unrecorded:
     "the gateway could not record that it was about to start an AI run, so it did not start one (a run that cannot be recorded could be repeated); nothing was sent to the customer",
   hermes_rate_limited:
-    "the AI runtime was at its concurrency limit and was still at it after one retry",
+    "the AI runtime answered 429 (its concurrency limit) and either was still limited after one retry, or the backoff did not fit inside the turn deadline so no retry was made; nothing was sent to the customer",
   hermes_busy:
     "no AI run slot became free inside the deadline (another turn for this conversation, or the runtime's cap); nothing was started",
   hermes_history_unavailable:
