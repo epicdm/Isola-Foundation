@@ -110,7 +110,8 @@ function poisonedBody(): Record<string, unknown> {
       id: CONVERSATION_DISPLAY_ID,
       status: "pending",
       meta: { assignee: null },
-      contact_inbox: { source_id: VERIFIED_PHONE },
+      // carries the comparison ids too: with scope on, an absent id cannot be cross-checked (Codex round 2)
+      contact_inbox: { id: 9, contact_id: 55, inbox_id: INBOX_ID, source_id: VERIFIED_PHONE },
       custom_attributes: {
         customer_id: CLAIMED_CUSTOMER,
         service_id: CLAIMED_SERVICE,
@@ -279,7 +280,7 @@ describe("the scope comes from the AUTHENTICATED sender, never from the event's 
         id: CONVERSATION_DISPLAY_ID,
         status: "pending",
         meta: { assignee: null },
-        contact_inbox: { source_id: CLAIMED_PHONE },
+        contact_inbox: { id: 10, contact_id: 56, inbox_id: INBOX_ID, source_id: CLAIMED_PHONE },
         custom_attributes: { customer_id: VERIFIED_CUSTOMER },
       },
     });

@@ -179,8 +179,13 @@ export function createFailClosedCustomerScopeResolver(): CustomerScopeResolver {
  * present) and its `inbox_id` is the inbox the binding routed (when present). A
  * `contact_inbox` that is not the sender's, or not this inbox's, is not a subject
  * channel-bound FOR THIS CONVERSATION, so the scope fails closed exactly as it does
- * for an absent one. STATED LIMIT: an id that is absent cannot be cross-checked and
- * is not treated as a mismatch; we refuse a MISMATCH, not an absence.
+ * for an absent one. Codex round 2: an id that is ABSENT cannot be cross-checked, and
+ * accepting it let a signed payload pair another sender with a known fixture
+ * `source_id` and simply omit the ids that would have exposed it. So when scope
+ * resolution is on, an absent comparison id is UNRESOLVED (fail closed), not a pass.
+ * If Chatwoot does not send these nodes, every sender escalates to a person: loud, not
+ * wrong. STILL not production identity evidence: HMAC proves the payload's origin and
+ * integrity, not the upstream provenance of each field.
  */
 export function coherentChannelSubject(args: {
   channelSubject: string | null;
@@ -191,15 +196,12 @@ export function coherentChannelSubject(args: {
   routedInboxId: number;
 }): string | null {
   if (args.channelSubject === null) return null;
-  if (
-    args.senderType === "contact" &&
-    args.senderId !== null &&
-    args.contactInboxContactId !== null &&
-    args.senderId !== args.contactInboxContactId
-  ) {
-    return null;
+  if (args.senderType === "contact") {
+    // Both must be PRESENT to be compared at all, and equal.
+    if (args.senderId === null || args.contactInboxContactId === null) return null;
+    if (args.senderId !== args.contactInboxContactId) return null;
   }
-  if (args.contactInboxInboxId !== null && args.contactInboxInboxId !== args.routedInboxId) return null;
+  if (args.contactInboxInboxId === null || args.contactInboxInboxId !== args.routedInboxId) return null;
   return args.channelSubject;
 }
 

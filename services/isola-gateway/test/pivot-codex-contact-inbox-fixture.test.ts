@@ -121,10 +121,11 @@ describe("contact_inbox cross-check, through the route (CONTROLLED FIXTURE)", ()
     expect(out.privateNotes).toBeGreaterThanOrEqual(1);
   });
 
-  it("STATED LIMIT (control): a contact_inbox that carries neither id cannot be cross-checked and is still used", async () => {
+  it("SUPERSEDED in round 2: a contact_inbox that carries neither id cannot be cross-checked and now FAILS CLOSED (it used to be 'still used')", async () => {
     const out = await run(body({ id: 9, source_id: FIXTURE_ID }));
-    expect(out.runtimeCalls).toBe(1);
-    expect(out.customerMessages).toBe(1);
+    expect(out.runtimeCalls).toBe(0);
+    expect(out.customerMessages).toBe(0);
+    expect(out.privateNotes).toBeGreaterThanOrEqual(1);
   });
 });
 
