@@ -387,15 +387,24 @@ async function lockConversation(
  *   1. Lock the conversation row.       Everything after this is serialised
  *                                       against every other transition on the
  *                                       same conversation.
- *   2. Replay pre-check.                A retry must NOT be judged against
- *                                       preconditions its own original
- *                                       application already changed. Without
- *                                       this, a retried escalation would read
- *                                       HUMAN_REQUESTED, fail `allowedFrom`,
- *                                       and report `illegal_transition` for an
- *                                       operation that in fact SUCCEEDED.
- *   3. `expectedEpisode`, then          Under the lock, so the value tested is
- *      `allowedFrom` + `canTransition`. the value written against.
+ *   2. `expectedEpisode`.               Under the lock, so the value tested is
+ *                                       the value written against, and BEFORE
+ *                                       the replay lookup (Codex R4 G4-2): a
+ *                                       replay used to answer `duplicate` with
+ *                                       the CURRENT episode, which let a
+ *                                       delivery that had been overtaken adopt
+ *                                       another delivery's hold. A caller that
+ *                                       states the episode it started under is
+ *                                       held to it, replay or not.
+ *   3. Replay pre-check.                A retry must NOT be judged against
+ *                                       `allowedFrom`/`canTransition`, which
+ *                                       its own original application already
+ *                                       changed. Without this, a retried
+ *                                       escalation would read HUMAN_REQUESTED,
+ *                                       fail `allowedFrom`, and report
+ *                                       `illegal_transition` for an operation
+ *                                       that in fact SUCCEEDED. Then
+ *                                       `allowedFrom` + `canTransition`.
  *   4. INSERT the transition.           The claim. If a writer got past step 2
  *                                       concurrently, THE CONSTRAINT rejects it
  *                                       here — application code does not, and
@@ -444,7 +453,19 @@ export async function applyOwnershipTransition(
   return exec.transaction(async (tx) => {
     const view = await lockConversation(tx, conversation, key);
 
-    // 2. Replay.
+    // 2. The caller's episode precondition, FIRST (Codex R4 G4-2). A replay used to be
+    //    answered before this was looked at, and the answer carried the CURRENT episode: a
+    //    delivery that had been overtaken (a person took the conversation, it was handed
+    //    back, another delivery opened its own hold) got `duplicate` with THAT hold's
+    //    episode, adopted it, and was then authorised against someone else's hold. "This
+    //    operation happened once" is not "this operation owns the hold that is current
+    //    now": a caller that states the episode it started under is held to it, replay or
+    //    not. A caller that states none keeps the old replay behaviour.
+    if (expectedEpisode !== null && expectedEpisode !== view.episode) {
+      return refused("stale_episode", view, operationId);
+    }
+
+    // 3. Replay.
     const existing = await tx.query<{ episode: number | string }>(
       `
       SELECT episode
@@ -464,11 +485,8 @@ export async function applyOwnershipTransition(
       };
     }
 
-    // 3. Preconditions, under the lock taken in step 1.
-    if (expectedEpisode !== null && expectedEpisode !== view.episode) {
-      return refused("stale_episode", view, operationId);
-    }
-
+    // 4. Legality, under the lock taken in step 1 (the episode precondition was step 2).
+    //
     // The target is resolved HERE, under the lock, never by the caller.
     let target: OwnershipState;
     let opensEpisode: boolean;

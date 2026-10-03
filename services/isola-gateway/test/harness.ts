@@ -125,17 +125,8 @@ export class InMemoryOwnershipGate implements OwnershipGate {
         escalationOperationId: null,
       };
 
-    if (this.claimed.has(claimKey)) {
-      return {
-        ok: true,
-        status: "duplicate",
-        state: row.state,
-        episode: row.episode,
-        operationId: input.operationId,
-        duplicateSource: "replay",
-      };
-    }
-    // Same order as the store: replay, then the episode precondition, then legality.
+    // Same order as the store (Codex R4 G4-2): the episode precondition FIRST, then the
+    // replay, then legality. A replay is held to the episode the caller says it started under.
     if (input.expectedEpisode !== undefined && input.expectedEpisode !== null && input.expectedEpisode !== row.episode) {
       return {
         ok: false,
@@ -144,6 +135,16 @@ export class InMemoryOwnershipGate implements OwnershipGate {
         episode: row.episode,
         operationId: input.operationId,
         duplicateSource: null,
+      };
+    }
+    if (this.claimed.has(claimKey)) {
+      return {
+        ok: true,
+        status: "duplicate",
+        state: row.state,
+        episode: row.episode,
+        operationId: input.operationId,
+        duplicateSource: "replay",
       };
     }
     if (row.state !== "AI_OWNED" && row.state !== "AI_RESUMED") {

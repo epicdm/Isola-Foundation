@@ -581,6 +581,60 @@ maybe("preconditions are evaluated under the row lock", () => {
     expect(retry.episode).toBe(1);
     expect(await transitionRows(ref)).toHaveLength(1);
   }, 30_000);
+
+  // Codex R4 G4-2. Needs a real database to run; the socket-free proof of the ORDER of
+  // checks is test/pivot-codex4-replay-episode.test.ts.
+  it("a replay by an OVERTAKEN delivery is stale_episode, never a duplicate carrying another delivery's episode", async () => {
+    const ref = freshConversation();
+    const a = await requestHumanOwnership(exec, {
+      conversation: ref,
+      operationId: "escalate:delivery-A",
+      reason: "explicit_human_request",
+      expectedEpisode: 0,
+    });
+    expect(a.status).toBe("applied");
+
+    // A person takes it and hands it back; ANOTHER delivery then opens its own hold.
+    const begin = await beginHandback(exec, {
+      conversation: ref,
+      operationId: "handback-1",
+      episode: a.episode,
+      actorRef: "human:test",
+    });
+    expect(begin.status).toBe("applied");
+    const done = await completeHandback(exec, {
+      conversation: ref,
+      operationId: "handback-1",
+      episode: begin.episode,
+      actorRef: "human:test",
+    });
+    expect(done.status).toBe("applied");
+    const b = await requestHumanOwnership(exec, {
+      conversation: ref,
+      operationId: "escalate:delivery-B",
+      reason: "explicit_human_request",
+      expectedEpisode: done.episode,
+    });
+    expect(b.status).toBe("applied");
+    expect(b.episode).toBeGreaterThan(a.episode);
+
+    const replay = await requestHumanOwnership(exec, {
+      conversation: ref,
+      operationId: "escalate:delivery-A",
+      reason: "explicit_human_request",
+      expectedEpisode: a.episode,
+    });
+    expect(replay.status).toBe("stale_episode");
+    expect(replay.ok).toBe(false);
+
+    // CONTROL (same test, same database): the same replay with no stated precondition is still a duplicate.
+    const unconditional = await requestHumanOwnership(exec, {
+      conversation: ref,
+      operationId: "escalate:delivery-A",
+      reason: "explicit_human_request",
+    });
+    expect(unconditional.status).toBe("duplicate");
+  }, 30_000);
 });
 
 // ---------------------------------------------------------------------------
