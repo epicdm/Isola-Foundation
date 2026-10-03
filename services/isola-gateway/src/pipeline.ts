@@ -355,6 +355,13 @@ export interface DeliveryJob {
 export interface PipelineDeps {
   /** Conversation memory. Absent = the gateway answers exactly as it did before. */
   turnStore?: SqlClient;
+  /**
+   * True when the transcript of this conversation is KNOWN to be missing a staff reply that could
+   * not be recorded (Step A+). The history is then treated as ABSENT, so the direct Hermes path
+   * answers nothing and escalates once instead of answering without what the person told the
+   * customer. Absent = no conversation is ever marked (the previous behaviour).
+   */
+  historyGap?: (accountId: number, conversationId: number) => boolean;
   config: GatewayConfig;
   chatwoot: ChatwootApi;
   runtime: AgentRuntime;
@@ -977,7 +984,16 @@ export async function processDelivery(
   // AgentBot token (both measured 2026-08-17). The gateway already sees every
   // turn, so it records them and reads them back here.
   let history: ConversationHistory | undefined;
-  if (deps.turnStore !== undefined) {
+  const knownHole = deps.historyGap?.(binding.chatwootAccountId, job.conversationId) === true;
+  if (knownHole) {
+    // A staff reply could not be recorded: the stored thread is NOT the thread the customer sees.
+    deps.logger.warn({
+      ...base,
+      event: "context",
+      outcome: "history_gap_unrecorded_staff_turn",
+    });
+  }
+  if (deps.turnStore !== undefined && !knownHole) {
     try {
       const h = await readTurnHistory(
         deps.turnStore,

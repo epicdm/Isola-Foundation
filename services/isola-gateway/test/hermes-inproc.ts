@@ -58,9 +58,21 @@ export async function callHandler(handler: Handler, signed: SignedRequest, path 
 
 export class FakeTurnSql implements SqlClient {
   readonly rows: Array<Record<string, unknown>> = [];
+  /** Test hook: the next N INSERTs throw (a transcript store that is down for a moment). */
+  failNextInserts = 0;
+  /** Every INSERT attempted, including the failed ones (so a test can prove the write was TRIED). */
+  insertAttempts = 0;
+  /** The SQL text of every INSERT attempted, so a test can pin the PRODUCTION statement (the model below is not proof of it). */
+  readonly insertStatements: string[] = [];
 
   async query<T = Record<string, unknown>>(sql: string, params: readonly unknown[] = []): Promise<QueryResult<T>> {
     if (/INSERT INTO conversation_turn/.test(sql)) {
+      this.insertAttempts += 1;
+      this.insertStatements.push(sql);
+      if (this.failNextInserts > 0) {
+        this.failNextInserts -= 1;
+        throw new Error("FakeTurnSql: simulated transcript store outage");
+      }
       const [tenant, account, conversation, message, role, author, content] = params as unknown as [string, number, number, number, string, string, string];
       const exists = this.rows.some((r) => r["account"] === account && r["message"] === message);
       if (!exists) this.rows.push({ tenant, account, conversation, message, role, author, content });

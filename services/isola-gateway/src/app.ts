@@ -48,7 +48,7 @@ import type { ConversationRef, OwnershipGate } from "./ownership.js";
 import { recordHumanReply } from "./ownership-store.js";
 import { constantTimeEquals } from "./signature.js";
 import { checkSender } from "./allowlist.js";
-import { classifyTurn, recordTurn } from "./turns.js";
+import { classifyTurn, HistoryGaps, recordTurn, STAFF_TURN_LABEL } from "./turns.js";
 import { createLogger, type Logger } from "./log.js";
 import { processDelivery, type DeliveryJob, type DeliveryMode } from "./pipeline.js";
 import {
@@ -292,6 +292,12 @@ export type DeliveryDecision =
       binding: Binding;
       conversationId: number;
       messageId: number;
+      /**
+       * The verified payload, carried so the staff reply can be RECORDED in the transcript the
+       * model reads (Step A+). Without it this branch recorded ownership and returned, and
+       * what the person told the customer never reached the history.
+       */
+      payload: WebhookPayload;
     };
 
 export interface DecideArgs {
@@ -459,6 +465,7 @@ export function decideDelivery(args: DecideArgs): DecideResult {
       binding: resolution.binding,
       conversationId: payload.conversationDisplayId,
       messageId: payload.messageId,
+      payload,
     });
   }
 
@@ -585,6 +592,9 @@ export function createGateway(deps: GatewayDeps): Gateway {
 
   const bindingStore =
     deps.bindingStore ?? new StaticBindingStore(configuredBindings(config));
+
+  // Conversations whose transcript is missing a staff reply that could not be recorded (Step A+).
+  const historyGaps = new HistoryGaps();
 
   const chatwoot =
     deps.chatwoot ??
@@ -821,6 +831,59 @@ export function createGateway(deps: GatewayDeps): Gateway {
               detail: err instanceof Error ? err.message : "unknown",
             });
           }
+        }
+      }
+    }
+
+    // STAFF REPLIES REACH THE HISTORY (Step A+). A signed human-agent reply takes the
+    // `human_reply` decision, which used to return BEFORE the block above, so what the person told
+    // the customer never reached the transcript the model reads (src/turns.ts says it is recorded).
+    //
+    //  - LABELLED (`STAFF_TURN_LABEL`): the store has one business voice; the label lets the model
+    //    tell a teammate from the bot. Only a real dashboard user's PUBLIC reply gets it.
+    //  - NEVER A PRIVATE NOTE: `classifyTurn` drops anything not explicitly `private=false`, so an
+    //    internal note takes the ownership path (it still counts as a person working) and no further.
+    //  - IDEMPOTENT: `recordTurn` is keyed on Chatwoot's message id; a redelivered webhook is a no-op.
+    //  - BEFORE the ownership branch below, so the early return for a missing executor cannot skip it.
+    //  - FAIL CLOSED: if the write fails, the takeover acknowledgement is unaffected, an ALERT is
+    //    logged, and the conversation is marked as having a hole; the next AI turn there treats its
+    //    history as absent (pipeline `historyGap`) instead of answering without what the person said.
+    if (decision.kind === "human_reply" && deps.turnStore !== undefined) {
+      const p = decision.payload;
+      const turn = classifyTurn({
+        event: p.event,
+        messageType: p.messageType,
+        private: p.private,
+        content: p.content,
+        messageId: p.messageId,
+        senderType: p.senderType,
+      });
+      if (turn !== null) {
+        try {
+          await recordTurn(deps.turnStore, {
+            tenantId: decision.binding.tenantId,
+            accountId: decision.binding.chatwootAccountId,
+            conversationId: decision.conversationId,
+            messageId: decision.messageId,
+            role: turn.role,
+            author: turn.author,
+            content: `${STAFF_TURN_LABEL}${turn.content}`,
+          });
+        } catch (err) {
+          historyGaps.mark(decision.binding.chatwootAccountId, decision.conversationId);
+          logger.error({
+            event: "turn",
+            correlationId,
+            alert: true,
+            alertCode: "human_reply_turn_not_recorded",
+            accountId: decision.binding.chatwootAccountId,
+            conversationId: decision.conversationId,
+            tenantId: decision.binding.tenantId,
+            outcome: "human_reply_turn_not_recorded",
+            detail:
+              (err instanceof Error ? err.message : "unknown") +
+              " -- the staff reply is missing from the transcript; the next AI turn in this conversation will not answer from a history with a hole",
+          });
         }
       }
     }
@@ -1202,6 +1265,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
           failpoint,
           now,
           turnStore: deps.turnStore,
+          historyGap: (accountId: number, conversationId: number): boolean => historyGaps.has(accountId, conversationId),
           ...(deps.customerScope === undefined ? {} : { customerScope: deps.customerScope }),
         },
         job,

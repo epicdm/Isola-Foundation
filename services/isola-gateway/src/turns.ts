@@ -61,6 +61,48 @@ export interface TurnHistory {
   truncated: boolean;
 }
 
+/**
+ * THE LABEL ON A STAFF TURN (Step A+, Lane A ruling). The store collapses the AI and a human
+ * agent into one `business` voice, so on the direct Hermes path a teammate's words would read
+ * as the bot's own. A signed human-agent reply is therefore STORED with this prefix inside
+ * the content (role stays `business`, which the history builder sends as `assistant`).
+ *
+ * SOURCE for the exact form: lane 59's Step B isolation script
+ * (`.checkpoint-out/public-hermes/step_b.sh`) used `[A teammate replied]: ` and the model
+ * used the line correctly (Step B (d): "human/teammate line ... usable by the model: True").
+ * Applied ONLY to a real dashboard user's public reply (`human_reply`), never to another
+ * bot's outgoing message and never to the AI's own echo.
+ */
+export const STAFF_TURN_LABEL = "[A teammate replied]: ";
+
+/**
+ * CONVERSATIONS WHOSE TRANSCRIPT HAS A KNOWN HOLE (Step A+). When a staff reply could not be
+ * recorded, the next AI turn must not answer from a history that is silently missing what
+ * the person told the customer. The pipeline asks this and, when the answer is yes, treats
+ * the history as ABSENT, which is the rule the direct Hermes path already enforces ("no
+ * history => answer nothing and escalate once").
+ *
+ * IN MEMORY, deliberately: a persistent marker would need a schema change, which is not
+ * authorised. The cost is stated, not hidden: the mark is lost on a process restart, after
+ * which the hole is invisible again; the alert logged when the mark is set is the durable
+ * record. Per conversation, so one failed write stops answering in ONE conversation only.
+ */
+export class HistoryGaps {
+  private readonly keys = new Set<string>();
+
+  private key(accountId: number, conversationId: number): string {
+    return `${accountId}:${conversationId}`;
+  }
+
+  mark(accountId: number, conversationId: number): void {
+    this.keys.add(this.key(accountId, conversationId));
+  }
+
+  has(accountId: number, conversationId: number): boolean {
+    return this.keys.has(this.key(accountId, conversationId));
+  }
+}
+
 /** The window, stated rather than discovered. Ruled 2026-08-16. */
 export const TURN_MAX = 20;
 export const TURN_MAX_CHARS = 8000;

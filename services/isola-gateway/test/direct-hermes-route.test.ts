@@ -200,15 +200,11 @@ describe("multi-turn: continuity is the gateway's own transcript, the SAME conve
     expect(r.fake.creates[1]!.body!["session_id"]).toBe(r.fake.creates[0]!.body!["session_id"]);
   });
 
-  // KNOWN GAP, reported to the coordinator and Lane A (not fixed here: it is in the reviewed webhook
-  // path). A signed HUMAN-AGENT reply takes the `human_reply` decision, which records the takeover in the
-  // ownership ledger and returns BEFORE the transcript-recording block (which handles only the accept and
-  // suppressed decisions). So what staff wrote is NOT in the transcript, although src/turns.ts says human
-  // replies are recorded: after a handback the model would not see what the person told the customer.
-  // THIS TEST PINS THE GAP SO IT STAYS VISIBLE; it does not endorse it (Law 28: a test around behaviour nobody
-  // chose preserves the accident). The day the webhook path records human replies it turns RED: flip the final
-  // expectation to include the staff line and delete this comment.
-  it("KNOWN GAP (pinned, to be flipped when fixed): a human agent's reply is NOT in the next turn's history today", async () => {
+  // FLIPPED in Step A+ (this used to pin the gap). A signed HUMAN-AGENT reply takes the `human_reply`
+  // decision; it is now RECORDED in the transcript (labelled `[A teammate replied]: `) before the ownership
+  // branch, so after a handback the model sees what the person told the customer. The full handback route,
+  // isolation and failure cases live in test/direct-hermes-staff-history.test.ts.
+  it("a human agent's reply IS in the next turn's history, labelled as a teammate (flipped from the pinned gap)", async () => {
     const r = rig();
     completeWith(r.fake, answer("First answer."));
     await r.post({ content: "Do you sell calling plans?" });
@@ -227,9 +223,12 @@ describe("multi-turn: continuity is the gateway's own transcript, the SAME conve
     await r.post({ content: "And does it work on WhatsApp?" });
     await r.gateway.drain();
     expect(r.fake.creates).toHaveLength(2);
-    // controls: the earlier customer turn IS there, so the transcript works; only the staff line is missing
-    expect(r.fake.creates[1]!.body!["conversation_history"]).toEqual([{ role: "user", content: "Do you sell calling plans?" }]);
-    expect(JSON.stringify(r.turns.rows)).not.toContain("yes, plans start at $10.");
+    // control: the earlier customer turn is still there, in order, and the staff line follows it with the label
+    expect(r.fake.creates[1]!.body!["conversation_history"]).toEqual([
+      { role: "user", content: "Do you sell calling plans?" },
+      { role: "assistant", content: "[A teammate replied]: Hi, this is Ann from EPIC: yes, plans start at $10." },
+    ]);
+    expect(JSON.stringify(r.turns.rows)).toContain("yes, plans start at $10.");
   });
 
   it("ISOLATION: another conversation, the same conversation id under another account, private notes and activity lines never reach the history", async () => {
