@@ -848,6 +848,77 @@ export function createGateway(deps: GatewayDeps): Gateway {
       }
     }
 
+    // THE TAKEOVER STARTS FIRST (Codex DH9, round 5). A signed human-agent reply is a takeover signal, and
+    // an AI answer that completes while it waits must not reach the customer. The transcript write below is
+    // BOUNDED but it is still a wait (up to STAFF_TURN_RECORD_TIMEOUT_MS): when `recordHumanReply()` began
+    // only AFTER that wait, Hermes could finish INSIDE it, the pipeline still read AI ownership, and one
+    // customer-facing AI reply went out over the person who had just taken the conversation. So the
+    // transition is STARTED (not awaited: `track()` keeps it for `drain()`) before the write is awaited.
+    // The write, its bound and the hole marker are unchanged.
+    if (decision.kind === "human_reply") {
+      // FAIL CLOSED ON MISSING WIRING, LOUDLY — same reasoning as the handback branch below. Silence here
+      // would recreate the very defect being fixed: a transition that exists, is correct, and is never
+      // called, with nothing in the logs to say so.
+      if (deps.ownershipExec === undefined) {
+        logger.error({
+          event: "ownership",
+          correlationId,
+          alert: true,
+          alertCode: "ownership_exec_not_configured",
+          accountId: decision.binding.chatwootAccountId,
+          conversationId: decision.conversationId,
+          tenantId: decision.binding.tenantId,
+          outcome: "human_reply_not_recorded",
+          detail:
+            "a signed human-agent reply arrived but GatewayDeps.ownershipExec is not " +
+            "configured; the takeover was acknowledged but the ledger was not advanced",
+        });
+      } else {
+        const conversation: ConversationRef = {
+          tenantId: decision.binding.tenantId,
+          chatwootAccountId: decision.binding.chatwootAccountId,
+          chatwootConversationId: decision.conversationId,
+          chatwootInboxId: decision.binding.chatwootInboxId,
+        };
+        track(
+          recordHumanReply(deps.ownershipExec, {
+            conversation,
+            // Chatwoot's own message id: one physical human message, one
+            // transition, however many times Chatwoot redelivers it.
+            operationId: `chatwoot:message:${decision.messageId}`,
+            reason: "human_agent_replied_in_chatwoot",
+            actorRef: "chatwoot:dashboard_user",
+          })
+            .then((outcome) => {
+              logger.info({
+                event: "ownership",
+                correlationId,
+                accountId: decision.binding.chatwootAccountId,
+                conversationId: decision.conversationId,
+                tenantId: decision.binding.tenantId,
+                outcome: "human_reply_recorded",
+                transition: outcome.status,
+                ownershipState: outcome.state ?? null,
+                ownershipEpisode: outcome.episode ?? null,
+              });
+            })
+            .catch((err: unknown) => {
+              logger.error({
+                event: "ownership",
+                correlationId,
+                alert: true,
+                alertCode: "human_reply_record_failed",
+                accountId: decision.binding.chatwootAccountId,
+                conversationId: decision.conversationId,
+                tenantId: decision.binding.tenantId,
+                outcome: "human_reply_not_recorded",
+                detail: err instanceof Error ? err.message : "unknown error",
+              });
+            }),
+        );
+      }
+    }
+
     // STAFF REPLIES REACH THE HISTORY (Step A+). A signed human-agent reply takes the
     // `human_reply` decision, which used to return BEFORE the block above, so what the person told
     // the customer never reached the transcript the model reads (src/turns.ts says it is recorded).
@@ -988,79 +1059,16 @@ export function createGateway(deps: GatewayDeps): Gateway {
         return;
 
       case "human_reply": {
-        // ACK first. Recording ownership is not worth risking Chatwoot's 5s
-        // deadline, and a human reply needs no response from us at all.
+        // The ACK follows the BOUNDED transcript write (at most STAFF_TURN_RECORD_TIMEOUT_MS, well inside
+        // Chatwoot's 5s deadline); the takeover was already started above, so it never waits for it. A human
+        // reply needs no response from us at all.
         finish(200, "human_reply", {
           accountId: decision.binding.chatwootAccountId,
           inboxId: decision.binding.chatwootInboxId,
           conversationId: decision.conversationId,
           tenantId: decision.binding.tenantId,
         });
-
-        // FAIL CLOSED ON MISSING WIRING, LOUDLY — same reasoning as the
-        // handback branch below. Silence here would recreate the very defect
-        // being fixed: a transition that exists, is correct, and is never
-        // called, with nothing in the logs to say so.
-        if (deps.ownershipExec === undefined) {
-          logger.error({
-            event: "ownership",
-            correlationId,
-            alert: true,
-            alertCode: "ownership_exec_not_configured",
-            accountId: decision.binding.chatwootAccountId,
-            conversationId: decision.conversationId,
-            tenantId: decision.binding.tenantId,
-            outcome: "human_reply_not_recorded",
-            detail:
-              "a signed human-agent reply arrived but GatewayDeps.ownershipExec is not " +
-              "configured; the takeover was acknowledged but the ledger was not advanced",
-          });
-          return;
-        }
-
-        const conversation: ConversationRef = {
-          tenantId: decision.binding.tenantId,
-          chatwootAccountId: decision.binding.chatwootAccountId,
-          chatwootConversationId: decision.conversationId,
-          chatwootInboxId: decision.binding.chatwootInboxId,
-        };
-
-        track(
-          recordHumanReply(deps.ownershipExec, {
-            conversation,
-            // Chatwoot's own message id: one physical human message, one
-            // transition, however many times Chatwoot redelivers it.
-            operationId: `chatwoot:message:${decision.messageId}`,
-            reason: "human_agent_replied_in_chatwoot",
-            actorRef: "chatwoot:dashboard_user",
-          })
-            .then((outcome) => {
-              logger.info({
-                event: "ownership",
-                correlationId,
-                accountId: decision.binding.chatwootAccountId,
-                conversationId: decision.conversationId,
-                tenantId: decision.binding.tenantId,
-                outcome: "human_reply_recorded",
-                transition: outcome.status,
-                ownershipState: outcome.state ?? null,
-                ownershipEpisode: outcome.episode ?? null,
-              });
-            })
-            .catch((err: unknown) => {
-              logger.error({
-                event: "ownership",
-                correlationId,
-                alert: true,
-                alertCode: "human_reply_record_failed",
-                accountId: decision.binding.chatwootAccountId,
-                conversationId: decision.conversationId,
-                tenantId: decision.binding.tenantId,
-                outcome: "human_reply_not_recorded",
-                detail: err instanceof Error ? err.message : "unknown error",
-              });
-            }),
-        );
+        // The takeover itself was STARTED above, before the transcript write was awaited (Codex DH9, round 5).
         return;
       }
 
