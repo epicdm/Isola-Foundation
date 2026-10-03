@@ -399,7 +399,7 @@ export class PaperclipAgentRuntime implements AgentRuntime {
     const url = `${this.base()}/api/companies/${encodeURIComponent(this.options.companyId)}/issues`;
     // A base URL with userinfo can never be fetched: it throws BEFORE a byte is sent,
     // so it is a configuration defect with nothing sent, not an uncertain create (Codex R5).
-    if (!this.baseIsSendable()) return { kind: "config_defect", detail: "the base url cannot be fetched (userinfo or unparseable)" };
+    if (!this.baseIsSendable()) return { kind: "config_defect", detail: "the base url cannot be used (userinfo, query, fragment or unparseable)" };
     const auth = this.authHeaders();
     if (auth === null) return { kind: "config_defect", detail: "the credential supplies a run id header" };
     let response: Exchange;
@@ -591,11 +591,16 @@ export class PaperclipAgentRuntime implements AgentRuntime {
     return this.options.baseUrl.replace(/\/+$/, "");
   }
 
-  /** False when a request to this base can never be built (unparseable, or carries userinfo). */
+  /**
+   * False when a request to this base can never be built correctly: unparseable, userinfo
+   * (fetch throws before sending), or a query/fragment (the route is appended to the
+   * string and would become query/fragment text, Codex R3 F7).
+   */
   private baseIsSendable(): boolean {
     try {
       const u = new URL(this.options.baseUrl);
-      return u.username === "" && u.password === "";
+      if (this.options.baseUrl.includes("?") || this.options.baseUrl.includes("#")) return false;
+      return u.username === "" && u.password === "" && u.search === "" && u.hash === "";
     } catch {
       return false;
     }

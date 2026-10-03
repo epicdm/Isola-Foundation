@@ -538,6 +538,13 @@ function paperclipBootErrors(config: GatewayConfig): string[] {
     } catch {
       /* hostOf already parsed it */
     }
+    // The API route is APPENDED to the base URL as a string. After a query or a fragment
+    // that is query/fragment TEXT, the pathname stays "/", and every request goes to the
+    // wrong route (Codex R3 F7). A base is an origin plus an optional path prefix, so even
+    // an empty "?" or "#" is refused.
+    if (p.baseUrl.includes("?") || p.baseUrl.includes("#")) {
+      errors.push("GATEWAY_PAPERCLIP_BASE_URL must not contain a query (?) or a fragment (#): the API route is appended to it, so it would become query or fragment text and every request would reach the wrong route.");
+    }
     if (!config.egressAllowlist.includes(paperclipHost)) {
       errors.push("The host of GATEWAY_PAPERCLIP_BASE_URL is not in the effective egress allowlist (EGRESS_ALLOWLIST): safeFetch would block every Paperclip request after boot.");
     }
