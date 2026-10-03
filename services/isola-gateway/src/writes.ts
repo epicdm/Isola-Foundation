@@ -39,7 +39,43 @@ export interface WriteDeps {
 
 export { DISARMED };
 
+/**
+ * Who may write to this conversation RIGHT NOW, shared by every guarded write of one
+ * delivery (Codex R3). `heldEpisode` is null while the AI has the conversation; once
+ * this delivery has itself recorded a human hold it is that hold's episode, and the
+ * fence then asks "is it STILL our unanswered hold" rather than "is the AI still
+ * authorised". `fenced` latches: after one denial this delivery writes nothing more.
+ */
+export interface WriteAuthority {
+  heldEpisode: number | null;
+  fenced: boolean;
+}
+
+/**
+ * Thrown by `runGuardedWrite` when the fence denies a non-message write. Nothing was
+ * sent. It is NOT a failed write: the conversation moved to a person and the rest of
+ * this delivery's writes must stop.
+ */
+export class WriteFencedError extends Error {
+  readonly action: string;
+  constructor(action: string) {
+    super(`write fenced: ownership moved before "${action}"`);
+    this.name = "WriteFencedError";
+    this.action = action;
+  }
+}
+
 export interface WriteContext {
+  /**
+   * Called IMMEDIATELY BEFORE each Chatwoot write, after the ledger claim and any
+   * reconciliation (Codex R3: a reply plus its annotations is up to five HTTP
+   * operations and an escalation up to seven, so ONE read before the first write goes
+   * stale). Resolves false when the conversation is no longer ours to write to. A
+   * rejection propagates, exactly as the pre-run gate's does: "I could not find out who
+   * holds this" is never "nobody does". Absent = no fence (legacy callers and tests).
+   */
+  fence?: (action: string) => Promise<boolean>;
+  authority?: WriteAuthority;
   identity: LedgerIdentity;
   /** The signed-body digest this delivery was reserved under. */
   digest: string;
@@ -61,6 +97,11 @@ export type SendOutcome =
   | { kind: "already_present"; messageId: number | null }
   /** The ledger already recorded this write as finished. Nothing was sent. */
   | { kind: "skipped" }
+  /**
+   * The fence denied the write: ownership moved to a person after the claim and before
+   * the send. NOTHING was sent, the claim is released, and the caller must stop.
+   */
+  | { kind: "fenced" }
   /** Proven NOT delivered. Safe for the caller to treat as a failed write. */
   | { kind: "failed"; detail: string }
   /**
@@ -165,6 +206,16 @@ export async function sendGuardedMessage(
   }
 
   // ---- 4. send -----------------------------------------------------------
+  // The last read before the wire: ownership is checked HERE, after the claim and any
+  // reconciliation, so no ledger or Chatwoot read can age the decision (Codex R3).
+  if (context.fence !== undefined && !(await context.fence(action))) {
+    try {
+      await deps.ledger.fail(context.identity, action, "fenced");
+    } catch {
+      // Releasing the claim is best effort; the delivery is closed as suppressed.
+    }
+    return { kind: "fenced" };
+  }
   let messageId: number | null;
   try {
     messageId = await deps.chatwoot.postMessage(target, content, isPrivate, ref);
@@ -277,13 +328,27 @@ export async function runGuardedWrite(
       outcome: "proceeding_unguarded",
       detail: detailOf(err),
     });
+    await fenceOrThrow(deps, context, action);
     await fn();
     return true;
   }
 
   if (claim.kind === "completed") return false;
 
+  await fenceOrThrow(deps, context, action);
   await fn();
   await settle(deps, context, action, null);
   return true;
+}
+
+/** The last read before the wire for a non-message write; throws `WriteFencedError` when denied. */
+async function fenceOrThrow(deps: WriteDeps, context: WriteContext, action: string): Promise<void> {
+  if (context.fence === undefined) return;
+  if (await context.fence(action)) return;
+  try {
+    await deps.ledger.fail(context.identity, action, "fenced");
+  } catch {
+    // Releasing the claim is best effort; the delivery is closed as suppressed.
+  }
+  throw new WriteFencedError(action);
 }

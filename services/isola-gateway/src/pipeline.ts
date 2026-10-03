@@ -58,6 +58,7 @@ import {
   type SendOutcome,
   type WriteContext,
   type WriteDeps,
+  WriteFencedError,
 } from "./writes.js";
 
 export type DeliveryOutcome =
@@ -99,6 +100,16 @@ export type DeliveryMode = "answer" | "handoff";
 
 /** The runtime outcome recorded on a path that deliberately never called it. */
 export const RUNTIME_NOT_INVOKED = "not_invoked";
+
+/** A delivery that stopped because a person took the conversation: nothing further was written. */
+const SUPPRESSED_RESULT: DeliveryResult = {
+  outcome: "suppressed_in_flight",
+  runtimeOutcome: RUNTIME_NOT_INVOKED,
+  customerMessageSent: false,
+  escalated: false,
+  handoffBlocked: false,
+  needsRetry: false,
+};
 
 /**
  * Write names for the per-delivery idempotency guard. One constant per write so
@@ -348,7 +359,7 @@ async function establishHumanHold(
     actorRef: string;
     alertCode: string;
   },
-): Promise<void> {
+): Promise<{ state: string; episode: number }> {
   let transition;
   try {
     transition = await deps.ownership.requestHuman({
@@ -393,6 +404,34 @@ async function establishHumanHold(
     episode: transition.episode,
     duplicateSource: transition.duplicateSource,
   });
+  return { state: transition.state, episode: transition.episode };
+}
+
+/**
+ * The conversation is held by a PERSON (it moved after this delivery decided to write):
+ * latch the fence so nothing further is written, say so once, and report the
+ * conversation as visibly with a human, which is what it is.
+ */
+function stopForPerson(
+  deps: PipelineDeps,
+  writes: WriteContext,
+  base: Record<string, unknown>,
+  stage: string,
+  held: { state: string; episode: number },
+): true {
+  if (writes.authority !== undefined) writes.authority.fenced = true;
+  deps.logger.warn({
+    ...base,
+    event: "ownership",
+    outcome: "suppressed_in_flight",
+    stage,
+    ownershipState: held.state,
+    episode: held.episode,
+    customerMessageSent: false,
+    detail:
+      "a person holds this conversation; the remaining writes of this delivery were not made",
+  });
+  return true;
 }
 
 export async function processDelivery(
@@ -556,6 +595,61 @@ export async function processDelivery(
     };
   }
 
+  // The ONE predicate for "the AI still has authority over this conversation",
+  // used by the rechecks (after the customer scope, before the runtime, after the
+  // model) AND handed to a long-running runtime so it can stop early on a takeover.
+  // Same state, same episode, same rule.
+  const ownershipStillMine = (read: Awaited<ReturnType<typeof deps.ownership.read>>): boolean =>
+    !read.diverged &&
+    read.episode === ownership.episode &&
+    (finishingOwnWork
+      ? read.state === ownership.state &&
+        read.escalationOperationId === ownership.escalationOperationId
+      : !suppressesAutomatedReply(read.state));
+
+  // THE WRITE FENCE (Codex R3). One ownership read is only as fresh as the last
+  // await: history, the model, a ledger claim, a reconciliation and every Chatwoot
+  // call each age it, and a reply plus its annotations is up to five HTTP operations
+  // (an escalation up to seven). So the fence is asked IMMEDIATELY BEFORE the runtime
+  // call and before EACH write (writes.ts calls it after the claim and any
+  // reconciliation, right before the wire).
+  //   - While the AI has the conversation the question is "is it still AI-authorised,
+  //     in the episode this delivery started under" (`ownershipStillMine`).
+  //   - Once THIS delivery has recorded a human hold (`authority.heldEpisode`) the
+  //     question is "is it still our unanswered hold": same episode and still
+  //     HUMAN_REQUESTED. A person who replied or took it moves it to HUMAN_OWNED, and
+  //     the remaining note / status / assignment / labels / attributes must not follow
+  //     them (an assignment would overwrite the person who just took it).
+  // After one denial the fence latches: this delivery writes nothing more.
+  // A rejected read propagates (nothing written, the sweeper retries): "I could not
+  // find out who holds this" is never "nobody does".
+  const authority: NonNullable<WriteContext["authority"]> = { heldEpisode: null, fenced: false };
+  writes.authority = authority;
+  writes.fence = async (stage: string): Promise<boolean> => {
+    if (authority.fenced) return false;
+    const read = await deps.ownership.read(conversationRefOf(job));
+    const mine =
+      authority.heldEpisode === null
+        ? ownershipStillMine(read)
+        : !read.diverged && read.episode === authority.heldEpisode && read.state === "HUMAN_REQUESTED";
+    if (mine) return true;
+    authority.fenced = true;
+    deps.logger.warn({
+      ...base,
+      event: "ownership",
+      outcome: "suppressed_in_flight",
+      stage,
+      ownershipState: read.state,
+      episode: read.episode,
+      episodeAtStart: ownership.episode,
+      heldEpisode: authority.heldEpisode,
+      customerMessageSent: false,
+      detail:
+        "ownership moved before this write; it and every later write of this delivery were not made",
+    });
+    return false;
+  };
+
   // No usable text: hand over to a human, and never call the model.
   if (job.mode === "handoff") {
     const handoff = await processHandoff(deps, job, target, writeDeps, writes, base);
@@ -587,17 +681,7 @@ export async function processDelivery(
     return handoff;
   }
 
-  // The ONE predicate for "the AI still has authority over this conversation",
-  // used by the rechecks below (after the customer scope, and after the model) AND
-  // handed to a long-running runtime so it can stop early on a takeover. Same
-  // state, same episode, same rule.
-  const ownershipStillMine = (read: Awaited<ReturnType<typeof deps.ownership.read>>): boolean =>
-    !read.diverged &&
-    read.episode === ownership.episode &&
-    (finishingOwnWork
-      ? read.state === ownership.state &&
-        read.escalationOperationId === ownership.escalationOperationId
-      : !suppressesAutomatedReply(read.state));
+  // (`ownershipStillMine` and the write fence are defined above the handoff branch.)
 
   // ---- THE CUSTOMER SCOPE ---------------------------------------------------
   //
@@ -741,6 +825,14 @@ export async function processDelivery(
     historyTruncated: history?.truncated ?? false,
   });
 
+  // The runtime call is itself a mutation when the runtime is Paperclip (it creates an
+  // issue and wakes an employee), and the history read above can have taken a while
+  // (Codex R3: a takeover during readTurnHistory() still reached the runtime).
+  if (!(await writes.fence?.("runtime_invoke") ?? true)) {
+    await finish("suppressed_in_flight");
+    return { ...SUPPRESSED_RESULT };
+  }
+
   const result = await deps.runtime.invoke({
     templateId: binding.templateId,
     // THE BINDING'S exposure, not a constant. A hardcoded "PUBLIC" here made
@@ -846,6 +938,13 @@ export async function processDelivery(
       answer,
       false,
     );
+
+    if (sent.kind === "fenced") {
+      // Ownership moved between the post-run recheck and the wire (the claim and any
+      // reconciliation sit in between). Nothing was sent and the fence has said so.
+      await finish("suppressed_in_flight");
+      return { ...SUPPRESSED_RESULT, runtimeOutcome: result.outcome };
+    }
 
     if (sent.kind === "failed") {
       deps.logger.error({
@@ -1160,12 +1259,20 @@ async function processHandoff(
   //
   // Keyed on this delivery's ledger identity, so Chatwoot's redeliveries of the
   // same webhook collapse to ONE episode rather than incrementing per retry.
-  await establishHumanHold(deps, job, context, {
+  const hold = await establishHumanHold(deps, job, context, {
     operationId: `handoff:${job.identity.eventId}`,
     reason: classification.reason,
     actorRef: "gateway:handoff",
     alertCode: "ownership_transition_failed_on_handoff",
   });
+
+  // Same rule as `escalate`: the hold is ours only if the conversation was still the
+  // AI's. A person who already has it gets none of the handoff writes.
+  if (hold.state !== "HUMAN_REQUESTED") {
+    stopForPerson(deps, writes, base, "handoff_hold", hold);
+    return { ...SUPPRESSED_RESULT };
+  }
+  if (writes.authority !== undefined) writes.authority.heldEpisode = hold.episode;
 
   // ---- 1. open -----------------------------------------------------------
   try {
@@ -1173,6 +1280,7 @@ async function processHandoff(
       deps.chatwoot.openConversation(target),
     );
   } catch (err) {
+    if (err instanceof WriteFencedError) return { ...SUPPRESSED_RESULT };
     return blockHandoff(deps, job, target, writeDeps, writes, context, classification, teamId, {
       failedStep: "toggle_status",
       detail: err instanceof Error ? err.message : "unknown chatwoot failure",
@@ -1186,6 +1294,7 @@ async function processHandoff(
         deps.chatwoot.assignTeam(target, teamId),
       );
     } catch (err) {
+      if (err instanceof WriteFencedError) return { ...SUPPRESSED_RESULT };
       // The conversation stays open — that half succeeded and undoing it would
       // only hide the problem from the human who has to pick this up.
       return blockHandoff(deps, job, target, writeDeps, writes, context, classification, teamId, {
@@ -1218,6 +1327,7 @@ async function processHandoff(
     note,
     true,
   );
+  if (notePosted.kind === "fenced") return { ...SUPPRESSED_RESULT }; // a person has it
   const noteRecorded = notePosted.kind !== "failed" && notePosted.kind !== "ambiguous";
   if (!noteRecorded) {
     // A missing note does not make the acknowledgement untrue — the
@@ -1286,6 +1396,7 @@ async function processHandoff(
     false,
   );
 
+  if (ack.kind === "fenced") return { ...SUPPRESSED_RESULT }; // a person has it; nothing was said
   if (ack.kind === "failed" || ack.kind === "ambiguous") {
     // Never re-sent blind: `sendGuardedMessage` has already reconciled, and
     // either proved the acknowledgement absent (failed) or could not resolve it
@@ -1442,7 +1553,7 @@ async function escalate(
   // The operation id is the delivery's own ledger identity, so a redelivery of
   // THIS webhook presents the same id and claims once — one escalation, one
   // note, one assignment, however many times Chatwoot retries.
-  await establishHumanHold(deps, job, base, {
+  const hold = await establishHumanHold(deps, job, base, {
     operationId: `escalate:${job.identity.eventId}`,
     // `outcome` can originate from the runtime's response body, which is an
     // EXTERNAL string this service does not control. The store refuses free
@@ -1458,6 +1569,15 @@ async function escalate(
     alertCode: "ownership_transition_failed_on_escalate",
   });
 
+  // The hold can only be recorded as OUR hold if the conversation was still the AI's.
+  // If a person took it between the decision to escalate and now, the store answers
+  // with their state (HUMAN_OWNED): they have it, and none of the writes below are ours
+  // to make (Codex R3: they used to be made regardless).
+  if (hold.state !== "HUMAN_REQUESTED") {
+    return stopForPerson(deps, writes, base, "escalate_hold", hold);
+  }
+  if (writes.authority !== undefined) writes.authority.heldEpisode = hold.episode;
+
   const note = renderFailureNote({
     outcome,
     correlationId: job.correlationId,
@@ -1472,6 +1592,7 @@ async function escalate(
     note,
     true,
   );
+  if (posted.kind === "fenced") return true; // a person has it; the fence has said so
   if (posted.kind === "failed" || posted.kind === "ambiguous") {
     deps.logger.error({
       ...base,
@@ -1488,6 +1609,7 @@ async function escalate(
     );
     opened = true;
   } catch (err) {
+    if (err instanceof WriteFencedError) return true; // a person has it
     deps.logger.error({
       ...base,
       event: "escalate",
@@ -1505,6 +1627,7 @@ async function escalate(
       );
       assigned = true;
     } catch (err) {
+      if (err instanceof WriteFencedError) return true; // a person has it
       deps.logger.error({
         ...base,
         event: "escalate",
@@ -1590,6 +1713,7 @@ async function annotate(
               deps.chatwoot.setLabels(target, merged),
             );
           } catch (err) {
+            if (err instanceof WriteFencedError) return; // a person has it
             deps.logger.warn({
               ...base,
               event: "labels",
@@ -1628,6 +1752,7 @@ async function annotate(
           deps.chatwoot.setCustomAttributes(target, merged),
         );
       } catch (err) {
+        if (err instanceof WriteFencedError) return; // a person has it
         deps.logger.warn({
           ...base,
           event: "custom_attributes",
