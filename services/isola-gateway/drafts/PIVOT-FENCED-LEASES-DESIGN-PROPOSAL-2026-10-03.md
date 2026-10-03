@@ -5,7 +5,7 @@ Labels: CODE-ONLY = read in the worktree at 1eb7ba3 (services/isola-gateway); SO
 
 ## 0. Answer first (question 4)
 
-**F3 (late commit of a pending upstream send) is NOT fully fixable without an upstream idempotency key or proof that the earlier request is dead.** Chatwoot's application API offers no client-supplied idempotency key on message create (SOURCE: Chatwoot swagger, Context7 `/openapi/raw_githubusercontent_chatwoot_chatwoot_develop_swagger_tag_groups_application_swagger_json`: request body has content, message_type, private, content_type, content_attributes, campaign_id, template_params; no echo_id/source_id/idempotency field). `source_id` is indexed but not unique (CODE-ONLY: writes.ts header, citing deployed v4.16.1 `db/schema.rb`; installed 4.18 not re-checked: UNVERIFIED). What CAN be done: (a) a database fence so a stale worker can never durably mutate or complete (fully fixable, F2); (b) a durable send-intent plus a wait bound plus an **at-most-once-after-ambiguity** policy, which turns F3 from "two customer messages" into "zero automatic resend; a person is asked". Residual duplicate window under (b) with strict at-most-once: **none from our code** (we never resend after an aborted/fenced send); the cost is some replies become human escalations. If the owner wants automatic resend instead (at-least-once), the residual window is the longest time an upstream request can stay pending after we abort it: unknown (a reverse proxy default of 60 s is typical but UNVERIFIED for this deployment), and not bounded by anything this service controls.
+**F3 (late commit of a pending upstream send) is NOT fully fixable without an upstream idempotency key or proof that the earlier request is dead.** Chatwoot's application API offers no client-supplied idempotency key on message create (SOURCE: Chatwoot swagger, Context7 `/openapi/raw_githubusercontent_chatwoot_chatwoot_develop_swagger_tag_groups_application_swagger_json`: request body has content, message_type, private, content_type, content_attributes, campaign_id, template_params; no echo_id/source_id/idempotency field). `source_id` is indexed but not unique (CODE-ONLY: writes.ts header, citing deployed v4.16.1 `db/schema.rb`; installed 4.18 not re-checked: UNVERIFIED). What CAN be done: (a) a database fence so a stale worker can never durably mutate or complete (fully fixable, F2); (b) a DURABLE, EXCLUSIVE send permission (see section 4: a wait alone proves nothing) plus an **at-most-once-after-ambiguity** policy, which turns F3 from "two customer messages" into "no automatic resend of an uncertain send; a person is asked". Under (b) with strict at-most-once, our code never RESENDS an uncertain send; that is per AUTOMATED action, not per conversation: a person's own reply can still overlap a late automated one, and the guarantee holds only if no worker can start a send without first winning the durable permission. The cost is that some replies become human escalations. If the owner wants automatic resend instead (at-least-once), the residual window is the longest time an upstream request can stay pending after we abort it: unknown (a reverse proxy default of 60 s is typical but UNVERIFIED for this deployment), and not bounded by anything this service controls.
 
 ## 1. Invariant
 
@@ -45,20 +45,20 @@ CORRECTIONS (Codex round 4):
 
 CODE-ONLY: the gateway already stamps a deterministic opaque `delivery_ref` into `content_attributes` and reconciles by reading `conversations#show` (AgentBot tokens cannot list messages; chatwoot.ts ~483-509). That detects an already-visible message. It cannot detect a request still pending upstream. No Chatwoot-side mechanism closes that (section 0). Not recommended: patching/forking Chatwoot to add a unique constraint (a fork of an upstream engine; out of scope and against the estate's reuse rule).
 
-Durable send-intent (new, small): when an action row is claimed, `updated_at` already records "claimed at" (CODE-ONLY: default `now()` on insert). Treat `claimed_at + T_wait` as the earliest instant a successor may conclude "absent". Add `claimed_fence` (section 5) so the successor knows which fence started the send.
+Durable send-intent (SKETCH ONLY, not designed): the successor needs to know that a send STARTED and by whom. `updated_at` cannot be that instant: it is mutable (claims, heartbeats and releases all touch it), so it is NOT a "send started" time and this proposal does not use it as one (Codex round 4/5). An immutable "possibly sent" marker, separate from "claimed" and from "definitely unsent", is a required part of the design and needs a column or a state this draft does not yet define. `claimed_fence` (section 5) records which generation claimed the action; it does not by itself say a send began.
 
-`T_wait` = our Chatwoot request timeout + the longest time an upstream request can remain pending after we abort. The second term is UNVERIFIED (reverse proxy `proxy_read_timeout`, Rails/Puma timeouts, queue depth); measure it before any number is committed. A placeholder of request timeout + 60 s is a starting assumption, not a finding.
+`T_wait` = our Chatwoot request timeout + the longest time an upstream request can remain pending after we abort. The second term is UNVERIFIED (reverse proxy `proxy_read_timeout`, Rails/Puma timeouts, queue depth); measure it before any number is committed. A placeholder of request timeout + 60 s is a starting assumption, not a finding. A wait on its own is not evidence that a send did not happen.
 
 ## 4. Policy for an ambiguous or fenced send
 
 1. Worker A claims the reply action (fenced), records intent, sends. If A is fenced out or its deadline passes mid-send, A abandons without `fail()`.
 2. Successor B resumes the delivery, claims the action, sees `ambiguous`.
-3. B waits until `claimed_at + T_wait` has elapsed (it can park the delivery with a short lease and let the sweeper pick it up again; no busy waiting).
+3. (UNDESIGNED PART) B must not conclude anything from elapsed time alone. It needs the durable, exclusive send-intent of section 3 to know whether A's send began; a wait bound is only an additional margin, never the proof.
 4. B reads `conversations#show`:
    - ref visible => adopt that message id, mark complete (no send).
    - ref absent => **strict at-most-once (recommended): do NOT resend; escalate to a person** through the existing escalation path, ledger outcome `send_unconfirmed`. A human sees the thread and answers once.
    - alternative at-least-once (owner option): resend. Residual duplicate window = A's request still pending after `T_wait` (unbounded in principle).
-5. Customer-facing preference: a duplicated sentence is mildly annoying; silence is worse; a human takeover on an unconfirmed send is the fail-closed answer (Law 12) and costs little at current volume. Recommend strict at-most-once for any binding with the Paperclip seam on, and the owner decides for others.
+5. Customer-facing preference: a duplicated sentence is mildly annoying; silence is worse; a human takeover on an unconfirmed send is the fail-closed answer (Law 12). Its cost depends on how often sends are interrupted, which is UNMEASURED. Recommend strict at-most-once for any binding with the Paperclip seam on, and the owner decides for others. Caution on wording: this is NOT "no silence" (a person can be slow) and NOT "a human answers once" (a person's reply can overlap a late automated one).
 
 Honest limit if the owner does not authorise the schema change: there is NO operational setting that removes the second worker. DELETED CLAIM (Codex round 4): an earlier version of this paragraph said running one gateway replica and one sweeper removes B except across a restart. That is false for this implementation. One gateway plus one sweeper still permits a live handler and a recovery handler to overlap after the lease expires: the sweeper's local `running` flag serialises sweeps, not webhook processing. The only protection that holds is to keep the Paperclip seam OFF and to run no production traffic through this branch.
 
@@ -78,7 +78,7 @@ ALTER TABLE delivery_ledger
 --   paperclip_issue_id text NULL, paperclip_run_id text NULL
 -- Rollback (NOT executed): ALTER TABLE delivery_ledger DROP COLUMN IF EXISTS claimed_fence, DROP COLUMN IF EXISTS fenced_out_at;
 ```
-Backfill: none. `claimed_fence IS NULL` means a legacy row: predicates treat `(claimed_fence IS NULL OR claimed_fence = $fence)` as allowed, so in-flight work at upgrade time is not stranded. No index needed (writes are by primary key).
+Backfill: none. `claimed_fence IS NULL` means a LEGACY row, and a legacy row is **NOT permission to send**: work whose claimant generation is unknown is treated as uncertain (reconcile, never blind resend; escalate if it cannot be proven absent). An earlier version of this paragraph allowed `(claimed_fence IS NULL OR claimed_fence = $fence)` so that in-flight work at upgrade time would not be stranded; that reading is withdrawn (Codex round 4/5), and the cost of stranding a legacy row is a person being asked, which is the intended fail-closed outcome. No index needed (writes are by primary key).
 
 ## 6. What changes in the deployed gateway
 
@@ -96,7 +96,7 @@ If separately authorised (this is a schema + code change to a service already de
 - A late-complete vs B: A in `finish()` awaiting `complete()`, lease expires, B reserves (attempts 2), A's `complete()` returns zero rows and writes nothing; B's reply is sent exactly once. Control: a live A completes normally; a reclaimed delivery completes via B.
 - Stale `claimAction`/`complete`/`fail`/`heartbeat` each rejected; control for each when fence matches.
 - `release` makes a fenced-but-unsent reply retryable: ZERO customer messages is impossible (this is the F4 regression test; it must fail on the current code).
-- A late-send vs B reconcile with a fake Chatwoot whose first POST commits late: B does not conclude "absent" before `claimed_at + T_wait`; after `T_wait` with ref absent B escalates (strict policy) and sends nothing; with A's late commit landing before B's check, B adopts the message and sends nothing. Positive control: no late commit and policy at-least-once => exactly one message.
+- A late-send vs B reconcile with a fake Chatwoot whose first POST commits late: B does not conclude "absent" from elapsed time alone; with ref absent and no durable evidence that the send did not begin, B escalates (strict policy) and sends nothing; with A's late commit landing before B's check, B adopts the message and sends nothing. Positive control: no late commit and policy at-least-once => exactly one message.
 - Stale worker's `requestHuman` with an old expected episode is refused (F5).
 - Sabotage: remove the predicate => the two-worker tests go red; remove the wait => the reconcile test goes red.
 
@@ -117,7 +117,11 @@ If separately authorised (this is a schema + code change to a service already de
 3. Adopt strict at-most-once-after-ambiguity for any binding where the Paperclip seam is on.
 4. **Interim operating rule until then (corrected after Codex round 4):** the Paperclip seam stays default OFF and there is NO production use of this branch. "One gateway replica and one sweeper" is NOT enforced by code and does NOT remove the second worker (see section 4); it is not a mitigation. The in-memory issue store also means no real runs across restarts.
 
-## 10. Status after Codex round 4 (103c353) and the follow-up code commits
+## 10. Status after Codex rounds 4 and 5
+
+ROUND 5 (reviewed e5dbea9): recovery no longer RESUMES a delivery at all. It escalates what it cannot prove complete, once and recorded (BRANCH-NOTES, "Codex round 5"). That narrowing is permanent for this slice; resumption is revisited only after fenced leases are authorised AND proven on a real PostgreSQL. The customer-visible cost is that a delivery interrupted by a crash or a lease expiry is not answered automatically; a person answers it (rate unmeasured). It does not remove the need for the fence: the live pipeline can still overlap a recovery handler after the lease expires, and a pending upstream send can still land late.
+
+### Earlier status (after Codex round 4, 103c353) and the follow-up code commits
 
 Codex found three further CODE defects, not part of F2/F3, now fixed on the branch with tests (see BRANCH-NOTES): G4-1 recovery completed a delivery while its released escalation was unpublished; G4-2 a replay adopted another delivery's ownership hold; G4-3 an unreadable Chatwoot response was treated as proof a message was absent and caused a second send. The ledger also gained a holder-fenced `release(identity, action, attempts)` and an insert-or-acquire `claimAction` (no schema change). None of that is exclusivity: F2 and F3 remain open, pending the owner's decision on this proposal.
 
