@@ -548,9 +548,11 @@ export async function processDelivery(
   const { binding, payload, correlationId } = job;
   // THE TURN BUDGET (Codex R2): this delivery performs no durable mutation that STARTS
   // after `turnDeadlineAt`, no request outlives it, and its row is not completed after
-  // it. The budget is sized at boot to end before the ledger lease does, and the
-  // recovery sweeper takes a delivery only once its lease has expired, so this worker
-  // is finished with the conversation before any other worker may begin.
+  // it. The budget is sized at boot to end before the ledger lease does. That is
+  // CONTAINMENT, NOT EXCLUSIVITY (Codex R3/R4, F2/F3, open by design): a durable write
+  // already in flight at the deadline can still commit, `ledger.complete()` carries no
+  // owner or lease predicate, and a live handler can overlap a recovery handler after the
+  // lease expires. Do not read this budget as proof that no other worker has begun.
   const turnDeadlineAt = job.startedAtMs + deps.config.turnBudgetMs;
   const turnExpired = (): boolean => deps.now() >= turnDeadlineAt;
   const target: ChatwootTarget = {
