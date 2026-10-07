@@ -49,4 +49,4 @@ Source: Port plan-isola-uplink-host03-production-and-prune-2026-10-06 v4.10 (las
 1. Launch Uplink (host03 production, https://uplink.epic.dm) with Personal Line first; native page and WhatsApp journey first, conversational agent only claimed live after model-backed acceptance.
 2. Lane A owns configuration, deployment and acceptance; Codex owns focused application source corrections. The US$3.00 model-test budget (owner authorization 2026-10-07) belongs to the Uplink acceptance run and is not for this agent's use.
 3. This agent (Internal Agent) is being made useful in daily use: plan-internal-agent-hermes-host03-canonical-2026-10-07.
-Use the skill epic-status-brief for the full structured status answer.
+Skills: epic-status-brief (project status), epic-runbook-finder (decisions, runbooks, prior work), epic-work-order (drafting and, only with a Paperclip run id, filing work orders), epic-brief-formats (owner brief, end-of-day, readiness vocabulary, investigation order, open loops, tenant gate, reconciliation rule). Load the matching skill before answering in that shape.
