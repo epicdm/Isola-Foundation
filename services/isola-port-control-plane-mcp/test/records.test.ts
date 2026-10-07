@@ -136,6 +136,25 @@ describe("list_records", () => {
     expect(e.limit).toBe(50);
   });
 
+  it("title_contains is case-insensitive and also matches the identifier (live Port `contains` is case-sensitive)", async () => {
+    // CONTROL: the raw Port-side rule with the wrong case finds nothing (this is what produced a silent zero live).
+    const raw: any = await ctx.client.searchEntities({
+      combinator: "and",
+      rules: [{ property: "$blueprint", operator: "=", value: "execution_plan" }, { property: "$title", operator: "contains", value: "internal" }]
+    });
+    expect(JSON.stringify(raw.data ?? raw)).not.toContain("plan-internal-agent");
+    // FIX: any case works; the identifier alone also matches.
+    for (const term of ["internal", "INTERNAL", "Internal", "iNtErNaL"]) {
+      const r: any = await listRecords(ctx, "execution_plan", { title_contains: term });
+      expect(r.items.map((i: any) => i.identifier)).toContain("plan-internal-agent");
+    }
+    const byId: any = await listRecords(ctx, "execution_plan", { title_contains: "plan-older" });
+    expect(byId.items.map((i: any) => i.identifier)).toEqual(["plan-older"]);
+    // NEGATIVE CONTROL: a term in neither title nor identifier still returns zero.
+    const none: any = await listRecords(ctx, "execution_plan", { title_contains: "zzz-no-such-term" });
+    expect(none.items).toEqual([]);
+  });
+
   it("refuses non-allowlisted blueprints and works for each new one", async () => {
     expect(((await listRecords(ctx, "customer")) as any).error).toContain("not in the allowlist");
     for (const bp of ["execution_plan", "execution_packet", "isola_launch_gate", "isola_component", "agent_contract"]) {

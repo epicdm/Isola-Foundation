@@ -42,7 +42,8 @@ function evalRule(rule: any, e: MockEntity): boolean {
   const s = String(val ?? "").toLowerCase();
   const want = String(rule.value ?? "").toLowerCase();
   if (rule.operator === "=") return s === want;
-  if (rule.operator === "contains") return s.includes(want);
+  // live Port `contains` is case-sensitive (measured 2026-10-07: 'uplink' matched no 'Uplink' title)
+  if (rule.operator === "contains") return String(val ?? "").includes(String(rule.value ?? ""));
   return false;
 }
 

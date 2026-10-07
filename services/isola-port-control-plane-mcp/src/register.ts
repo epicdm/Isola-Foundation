@@ -109,7 +109,7 @@ export function buildMcpServer(ctx: ToolContext, opts: BuildOptions = {}): McpSe
       inputSchema: {
         blueprint: z.string().describe("Blueprint identifier, must be in the allowlist"),
         status: z.string().optional().describe("Exact (case-insensitive) match on the status property"),
-        title_contains: z.string().optional().describe("Case-insensitive substring match on the title"),
+        title_contains: z.string().optional().describe("Case-insensitive substring match on the title or the identifier"),
         sort: z.enum(["updated_desc", "updated_asc", "title_asc"]).optional().describe("Default updated_desc"),
         limit: z.number().int().optional().describe("Default 25, hard cap 50"),
         offset: z.number().int().min(0).optional()

@@ -133,7 +133,19 @@ export async function listRecords(
 
     const rules: Record<string, unknown>[] = [{ property: "$blueprint", operator: "=", value: blueprint }];
     if (opts.status) rules.push({ property: "status", operator: "=", value: opts.status });
-    if (opts.title_contains) rules.push({ property: "$title", operator: "contains", value: opts.title_contains });
+    if (opts.title_contains) {
+      // Port's `contains` is CASE-SENSITIVE (measured live: 'uplink' matched 0 titles that say 'Uplink').
+      // Ask for common case variants of the term against title and identifier in one OR group,
+      // then re-filter case-insensitively below. Never report a silent zero for a case mismatch.
+      const t = opts.title_contains;
+      const variants = Array.from(new Set([t, t.toLowerCase(), t.toUpperCase(), t.charAt(0).toUpperCase() + t.slice(1).toLowerCase()]));
+      const orRules: Record<string, unknown>[] = [];
+      for (const v of variants) {
+        orRules.push({ property: "$title", operator: "contains", value: v });
+        orRules.push({ property: "$identifier", operator: "contains", value: v });
+      }
+      rules.push({ combinator: "or", rules: orRules });
+    }
 
     const result = await ctx.client.searchEntities({ combinator: "and", rules });
     if (isOutage(result)) return result;
@@ -151,7 +163,11 @@ export async function listRecords(
     all = all.filter((e) => {
       const props = (e.properties ?? {}) as Record<string, unknown>;
       if (wantStatus && String(props.status ?? "").toLowerCase() !== wantStatus) return false;
-      if (wantTitle && !String(e.title ?? e.$title ?? "").toLowerCase().includes(wantTitle)) return false;
+      if (
+        wantTitle &&
+        !String(e.title ?? e.$title ?? "").toLowerCase().includes(wantTitle) &&
+        !String(e.identifier ?? e.$identifier ?? "").toLowerCase().includes(wantTitle)
+      ) return false;
       return true;
     });
     const upd = (e: Record<string, unknown>) => String(e.updatedAt ?? e.$updatedAt ?? "");
