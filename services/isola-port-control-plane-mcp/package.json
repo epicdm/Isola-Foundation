@@ -1,0 +1,29 @@
+{
+  "name": "isola-port-control-plane-mcp",
+  "version": "1.0.0",
+  "description": "Private, read-only remote MCP server exposing Isola's Port.io control plane (release board, gates, blockers, decisions) for inspection by ChatGPT or other MCP clients. Read-only-ness is enforced in code at the HTTP client layer, not merely by Port credential scoping.",
+  "type": "module",
+  "private": true,
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "tsx src/server.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start:stdio": "node dist/stdio.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}
