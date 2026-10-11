@@ -2,7 +2,7 @@
 # host03 STAGING ONLY: dedicated rc16 web (plstg_zzrc16_web, alias web-rc16) - a clone of plstg_web's runtime (same image recipe, same
 # staging env secret, same staging DB, same data mount) PLUS the store-button proof scaffolding. plstg_web itself is left untouched.
 set -u
-D="sudo -n docker"; H=/home/epicadmin/zz-lanea-rc16-20261011/h; S=plstg_zzrc16_web; IMG=plsvc-staging-synthetic:rc16-9c5d8439
+D="sudo -n docker"; H=/home/epicadmin/zz-lanea-rc16-20261011/h; S=plstg_zzrc16_web; IMG=${IMG:-plsvc-staging-synthetic:rc16f-bb85db5c}
 # the metamock VIP measured at creation (10.77.0.16/24); refuse if it moved, the mapping below is literal
 [ "$($D service inspect plstg_zzrc16_metamock --format '{{range .Endpoint.VirtualIPs}}{{.Addr}}{{end}}')" = "10.77.0.16/24" ] || { echo "metamock VIP changed - stop"; exit 1; }
 $D service inspect $S >/dev/null 2>&1 && { echo "$S exists"; exit 1; }

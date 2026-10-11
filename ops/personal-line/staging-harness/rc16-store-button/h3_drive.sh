@@ -4,8 +4,8 @@ D="sudo -n docker"; H=/home/epicadmin/zz-lanea-rc16-20261011/h
 N=zzl_rc16_drive_$(date +%H%M%S)
 cp /tmp/zzrc16/flowdrive.mjs $H/flowdrive.mjs 2>/dev/null; chmod 0644 $H/flowdrive.mjs
 $D service create --detach --name $N --restart-condition none --network plstg_net \
-  --secret source=plstg_app_env_v3,target=plenv --env USE_WA=17675550159 --mount type=bind,src=$H,dst=/app/zzh,readonly \
-  --entrypoint node plsvc-staging-synthetic:rc16-8600c15c /app/zzh/flowdrive.mjs >/dev/null
+  --secret source=plstg_app_env_v3,target=plenv --env USE_WA=${USE_WA:-} --mount type=bind,src=$H,dst=/app/zzh,readonly \
+  --entrypoint node ${DRIVE_IMG:-plsvc-staging-synthetic:rc16f-bb85db5c} /app/zzh/flowdrive.mjs >/dev/null
 for i in $(seq 1 150); do st=$($D service ps $N --format '{{.CurrentState}}' | head -1); case "$st" in Complete*|Failed*|Rejected*|Shutdown*) break;; esac; sleep 2; done
 echo "task: $st"
 $D service logs $N --no-task-ids --raw 2>&1

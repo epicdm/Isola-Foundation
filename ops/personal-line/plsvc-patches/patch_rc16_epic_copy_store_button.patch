@@ -1,5 +1,5 @@
-﻿diff --git a/app/lib/pl-concierge/service.ts b/app/lib/pl-concierge/service.ts
-index 2382f973..25352535 100644
+diff --git a/app/lib/pl-concierge/service.ts b/app/lib/pl-concierge/service.ts
+index 2382f973..1eebffd7 100644
 --- a/app/lib/pl-concierge/service.ts
 +++ b/app/lib/pl-concierge/service.ts
 @@ -600,8 +600,8 @@ async function flowLaunch(ctx: Ctx): Promise<Outcome> {
@@ -9,11 +9,11 @@ index 2382f973..25352535 100644
 -    ? `Your Isola line ${didPretty(existing.did) ?? ''}. Open this to see your line, your connection and your balance - and to finish setting up the free Cloud Softphone app if it isn't done yet. Nothing new will be created.`
 -    : `Free trial: ${o.trial_days} days with ${o.trial_minutes} minutes of Dominica calls, EC$${o.trial_price_xcd}. ${PL_OVERAGE_TEXT} Calls are made and received in the free Cloud Softphone app. ${VOICE_ONLY_DISCLOSURE}`
 +    ? `Your EPIC line ${didPretty(existing.did) ?? ''}. Open this to see your line, your connection and your balance - and to finish setting up the free Cloud Softphone app if it isn't done yet. Nothing new will be created.`
-+    : `Free trial: ${o.trial_days} days with ${o.trial_minutes} minutes of Dominica calls, EC$${o.trial_price_xcd}. ${PL_OVERAGE_TEXT} You make calls from the free Cloud Softphone app; receiving calls on your number is not available yet. ${VOICE_ONLY_DISCLOSURE}`
++    : `Free trial: ${o.trial_days} days with ${o.trial_minutes} minutes of Dominica calls, EC$${o.trial_price_xcd}. ${PL_OVERAGE_TEXT} Make calls from the free Cloud Softphone app. This launch offer covers outgoing calling. ${VOICE_ONLY_DISCLOSURE}`
    let decision: any
    try { decision = await sendPlSignupFlow(ctx.a.wa_id, token, body, { senderPath: 'pl:flows/launch', userId: existing?.userId, sourceEventType: 'pl_verified_inbound', sourceEventId: ctx.a.mid }, existing ? { header: 'Manage your line', cta: 'Manage my line' } : undefined) } catch (e: any) { return { code: 'flow_unavailable', op: 'flows/launch', detail: String(e?.message ?? e).slice(0, 120) } }
    if (!String(decision?.code ?? '').startsWith('allow_') || decision?.dispatchFailed) return { code: 'flow_unavailable', op: 'flows/launch', detail: `${decision?.code ?? 'no_decision'}${decision?.dispatchFailed ? ':dispatch_failed' : ''}` }
-@@ -629,6 +629,49 @@ export async function nextStepForFlow(args: { waId: string; rid: string; mid: st
+@@ -629,6 +629,85 @@ export async function nextStepForFlow(args: { waId: string; rid: string; mid: st
    return o
  }
  
@@ -24,10 +24,18 @@ index 2382f973..25352535 100644
 +// (the same identity every Flow step uses); the gate's PL verified-inbound carve-out applies because the token is only minted by
 +// flows/launch in reply to a relay-verified inbound and lives 1 h, inside that inbound's 24 h service window. The send goes through
 +// dispatchToMeta (wa-send-gate: suppression/STOP, audit, idempotency key userId:...:flow:<n>:...:store-button:<os>).
-+export const STORE_BUTTON_WINDOW_S = 24 * 3600
-+export type StoreButtonCode = 'store_button_sent' | 'store_button_duplicate' | 'store_button_failed' | 'service_disabled' | 'invalid_body'
++export const STORE_BUTTON_WINDOW_S = 24 * 3600          // DE-DUPLICATION window only: one store button per sender per OS per 24 h
++export const STORE_BUTTON_TOKEN_MAX_AGE_S = 3600 + 60   // the signed flow_token's life (1 h) + clock skew: the proof must be this fresh
++export const SERVICE_WINDOW_S = 24 * 3600 - 300         // WhatsApp customer-service window (24 h from the customer's last inbound), 5 min margin
++// TWO INDEPENDENT CONDITIONS, BOTH REQUIRED (PM rule 2026-10-11): (1) ELIGIBILITY - proof fresh, line bound, customer's 24 h service window
++// open, no STOP; (2) DE-DUPLICATION - no claim in the last 24 h. Passing one never bypasses the other. Eligibility is checked BEFORE the
++// claim, so a refusal for window/STOP/proof never consumes the once-per-24h allowance; every refusal is audited under its own code
++// (store_button_window_closed / _window_unknown / _stopped / _proof_stale / _deduped / store_button_failed) so they are distinguishable.
++// NOT ENFORCED HERE: human ownership of the Chatwoot conversation and the adapter's own STOP preference - they live in the PL adapter,
++// which this service cannot read; see Port ev-lane-a-plsvc-rc16e-gate-review-and-staging-2026-10-11 (decision for the owner/PM).
++export type StoreButtonCode = 'store_button_sent' | 'store_button_deduped' | 'store_button_window_closed' | 'store_button_window_unknown' | 'store_button_stopped' | 'store_button_proof_stale' | 'store_button_failed' | 'service_disabled' | 'invalid_body'
 +export interface StoreButtonResult { code: StoreButtonCode; detail?: string }
-+export async function storeButtonForFlow(args: { waId: string; rid: string; flowNonce: string; os: 'ios' | 'android'; url: string }): Promise<StoreButtonResult> {
++export async function storeButtonForFlow(args: { waId: string; rid: string; flowNonce: string; iat: number; os: 'ios' | 'android'; url: string }): Promise<StoreButtonResult> {
 +  const t0 = Date.now()
 +  if (args.os !== 'ios' && args.os !== 'android') return { code: 'invalid_body' }
 +  const cfg = readConfig(process.env)
@@ -35,21 +43,49 @@ index 2382f973..25352535 100644
 +  if (cfg.misconfig.length > 0 || !hashKey) return { code: 'service_disabled' }
 +  const waIdHash = store.idHash(hashKey, args.waId)
 +  const mid = `flow:${args.flowNonce}`
++  const refuse = async (code: StoreButtonCode, detail: string): Promise<StoreButtonResult> => {
++    // a distinguishable audit row, in a code OUTSIDE the claim's countCodes (a refusal never counts as a send or a claim)
++    await store.writeAudit({ endpoint: 'flows/store-button', op: args.os, httpStatus: 200, code, detail: detail.slice(0, 200), kid: 'flow', pnid: null, rid: args.rid, mid, waIdHash, waLast4: args.waId.slice(-4), latencyMs: Date.now() - t0 })
++      .catch((e: any) => console.error(`[pl-concierge] store-button refusal audit failed: ${e?.message}`))
++    return { code, detail }
++  }
++  // (1a) proof: the server-signed flow_token was verified by the Flow endpoint (signature, purpose, expiry); re-assert its age here.
++  const nowS = Math.floor(Date.now() / 1000)
++  if (!Number.isFinite(args.iat) || args.iat <= 0 || nowS - args.iat > STORE_BUTTON_TOKEN_MAX_AGE_S || args.iat - nowS > 60) return await refuse('store_button_proof_stale', 'flow_token_age')
++  // (1b) the customer's WhatsApp service window, from THEIR last relay-verified inbound. A token minted in an earlier reply is NOT a substitute.
++  let lastIn: Date | null
++  try { lastIn = await store.lastVerifiedInboundAt(waIdHash) } catch (e: any) { return await refuse('store_button_window_unknown', `read_error:${String(e?.name ?? 'error').slice(0, 40)}`) }
++  if (!lastIn || !Number.isFinite(lastIn.getTime())) return await refuse('store_button_window_unknown', 'no_inbound_on_record')
++  if (Date.now() - lastIn.getTime() > SERVICE_WINDOW_S * 1000) return await refuse('store_button_window_closed', 'last_inbound_older_than_24h')
++  // (1c) the line binding and the estate STOP stores (the gate re-checks STOP at send time; checking here keeps the claim unspent).
++  let userId: string
++  try {
++    const b: any = await resolveExistingBinding(args.waId)
++    if (b?.kind !== 'existing' || !b.userId) return await refuse('store_button_failed', 'no_line_binding')
++    userId = b.userId
++    const phones = [args.waId, `+${args.waId}`]
++    const [dnc, revoked] = await Promise.all([
++      prisma.contact.findFirst({ where: { userId, phone: { in: phones }, doNotContact: true }, select: { id: true } }),
++      prisma.whatsappOptIn.findFirst({ where: { userId, phone: { in: phones }, status: 'revoked' }, select: { id: true } }),
++    ])
++    if (dnc || revoked) return await refuse('store_button_stopped', 'estate_suppressed')
++  } catch (e: any) {
++    return await refuse('store_button_failed', `eligibility_unreadable:${String(e?.name ?? 'error').slice(0, 40)}`)   // unreadable -> fail closed
++  }
++  // (2) de-duplication: atomic claim. Only reached when every eligibility condition holds.
 +  const claimId = await store.claimOncePerWindow({
 +    endpoint: 'flows/store-button', op: args.os, waIdHash, windowS: STORE_BUTTON_WINDOW_S,
 +    claimCode: 'store_button_claimed', countCodes: ['store_button_claimed', 'store_button_sent'], rid: args.rid, mid, waLast4: args.waId.slice(-4),
 +  })
-+  if (!claimId) return { code: 'store_button_duplicate', detail: 'already sent or in flight for this sender + os within 24 h' }
++  if (!claimId) return await refuse('store_button_deduped', 'already sent or in flight for this sender + os within 24 h')
 +  const fail = async (detail: string): Promise<StoreButtonResult> => {
 +    await store.finishClaim(claimId, 'store_button_failed', 'failed', detail.slice(0, 200), Date.now() - t0).catch((e: any) => console.error(`[pl-concierge] store-button finish failed: ${e?.message}`))
 +    return { code: 'store_button_failed', detail }
 +  }
 +  try {
-+    const b: any = await resolveExistingBinding(args.waId)
-+    if (b?.kind !== 'existing' || !b.userId) return await fail('no_line_binding')
 +    const { sendPlStoreButton } = await import('@/app/lib/whatsapp')
 +    const d: any = await sendPlStoreButton(args.waId, args.os, args.url, {
-+      userId: b.userId, senderPath: 'pl:flows/store-button', sourceEventType: 'pl_verified_inbound', sourceEventId: mid, sourceMessageId: `store-button:${args.os}`,
++      userId, senderPath: 'pl:flows/store-button', sourceEventType: 'pl_verified_inbound', sourceEventId: mid, sourceMessageId: `store-button:${args.os}`,
 +    })
 +    const code = String(d?.code ?? 'no_decision')
 +    if (!code.startsWith('allow_') || d?.duplicate || d?.dispatchFailed) return await fail(`${code}${d?.duplicate ? ':duplicate' : ''}${d?.dispatchFailed ? `:dispatch_failed:${d?.errorCode ?? ''}` : ''}`)
@@ -64,10 +100,10 @@ index 2382f973..25352535 100644
  // so repeated checks cannot spend the customer's activation-link budget (nextStepGuidance mints/reuses at stage link_ready).
  export async function lineStatusForFlow(args: { waId: string; rid: string; mid: string }): Promise<Outcome> {
 diff --git a/app/lib/pl-concierge/signup-flow.ts b/app/lib/pl-concierge/signup-flow.ts
-index 21e6c632..f3e7605f 100644
+index 21e6c632..a54fd6ae 100644
 --- a/app/lib/pl-concierge/signup-flow.ts
 +++ b/app/lib/pl-concierge/signup-flow.ts
-@@ -74,7 +74,7 @@ async function stepScreen(claims: FlowTokenClaims, event: 'status' | 'installed'
+@@ -74,15 +74,15 @@ async function stepScreen(claims: FlowTokenClaims, event: 'status' | 'installed'
    if (stage === 'connected' || stage === 'first_call_done') {
      const did = f.did_pretty ? ` ${f.did_pretty}` : ''
      const text = stage === 'first_call_done'
@@ -75,8 +111,9 @@ index 21e6c632..f3e7605f 100644
 +      ? 'Your first call went through - welcome to EPIC!'
        : f.inbound_enabled
          ? `Your line is live. Your number${did} rings in Cloud Softphone now. Try it - call any Dominica number from the app; you have free minutes to start.`
-         : `Cloud Softphone is connected. You can make calls now - try it: call any Dominica number from the app. Incoming calls to your number${did} are not available yet - we'll message you when they are.`
-@@ -82,7 +82,7 @@ async function stepScreen(claims: FlowTokenClaims, event: 'status' | 'installed'
+-        : `Cloud Softphone is connected. You can make calls now - try it: call any Dominica number from the app. Incoming calls to your number${did} are not available yet - we'll message you when they are.`
++        : `Cloud Softphone is connected. You can make calls now - try it: call any Dominica number from the app. This launch offer covers outgoing calling.`
+     return { screen: 'CONNECTED', data: { connected_text: text, ...(await balanceFacts(claims)) } }
    }
    if (stage === 'install') {
      if (from === 'install' && event === 'installed') return err('We could not record that just now. Please try again.')
@@ -102,7 +139,7 @@ index 21e6c632..f3e7605f 100644
 +    void Promise.resolve()
 +      .then(async () => {
 +        const { storeButtonForFlow } = await import('@/app/lib/pl-concierge/service')
-+        const r: any = await storeButtonForFlow({ waId: claims.wa, rid: claims.cw, flowNonce: claims.n, os, url })
++        const r: any = await storeButtonForFlow({ waId: claims.wa, rid: claims.cw, flowNonce: claims.n, iat: claims.iat, os, url })
 +        console.log(`${tag} store-button os=${os} -> ${r?.code ?? 'no_result'}${r?.detail ? ` (${r.detail})` : ''}`)
 +      })
 +      .catch((e: any) => console.error(`${tag} store-button os=${os} failed (Flow answer unaffected): ${String(e?.name ?? 'Error')}${e?.code ? ` ${e.code}` : ''}: ${String(e?.message || e?.cause?.message || e).replace(/\s+/g, ' ').trim().slice(0, 240)}`))
@@ -122,6 +159,15 @@ index 21e6c632..f3e7605f 100644
      }
      // The offer is rendered from the SAME catalogue read as the chat offer (buildOffer), never typed into the Flow JSON.
      const { buildOffer } = await import('@/app/lib/pl-concierge/service')
+@@ -156,7 +173,7 @@ export async function handleSignupFlow(args: { action: string; screen?: string;
+     const offer: any = await buildOffer()
+     const o = offer?.data ?? {}
+     if (offer?.code !== 'offer' || !o.trial_days || !o.trial_minutes || o.trial_price_xcd === undefined) return err('Signup is not available right now. Please try again shortly.')
+-    return { screen: 'WELCOME', data: { offer_text: `Free trial: ${o.trial_days} days with ${o.trial_minutes} minutes of Dominica calls, EC$${o.trial_price_xcd}.\n\n${PL_OVERAGE_TEXT}\n\nYou make calls from the free Cloud Softphone app. Incoming calls to your number are not available yet.\n\n${VOICE_ONLY_DISCLOSURE}` } }
++    return { screen: 'WELCOME', data: { offer_text: `Free trial: ${o.trial_days} days with ${o.trial_minutes} minutes of Dominica calls, EC$${o.trial_price_xcd}.\n\n${PL_OVERAGE_TEXT}\n\nMake calls from the free Cloud Softphone app. This launch offer covers outgoing calling.\n\n${VOICE_ONLY_DISCLOSURE}` } }
+   }
+ 
+   if (action === 'data_exchange' && screen === 'WELCOME') {
 @@ -164,7 +181,7 @@ export async function handleSignupFlow(args: { action: string; screen?: string;
      const name = cleanName(data?.first_name)
      const held = await existingLine(wa)
@@ -176,10 +222,10 @@ index 21e6c632..f3e7605f 100644
      return stepScreen(claims, 'installed', '', 'install')
    }
 diff --git a/app/lib/pl-concierge/store.ts b/app/lib/pl-concierge/store.ts
-index 35153911..c7f6c0ad 100644
+index 35153911..280f313e 100644
 --- a/app/lib/pl-concierge/store.ts
 +++ b/app/lib/pl-concierge/store.ts
-@@ -78,6 +78,40 @@ export async function provisionByMid(waIdHash: string, mid: string): Promise<{ c
+@@ -78,6 +78,54 @@ export async function provisionByMid(waIdHash: string, mid: string): Promise<{ c
    return rows[0] ? { code: rows[0].code, outcome: rows[0].outcome, detail: rows[0].detail, createdAt: new Date(rows[0].created_at) } : null
  }
  
@@ -209,6 +255,20 @@ index 35153911..c7f6c0ad 100644
 +  })
 +}
 +
++/**
++ * rc16e: the newest time a RELAY-VERIFIED customer message reached this service for this sender. Every request that passes
++ * verifyAssertion (120 s freshness) is made by the relay in response to a customer's inbound message, and a handled one is written
++ * with http_status 200 and the relay's kid; Flow-session rows (kid 'flow', incl. store-button claims/refusals) and refused assertions
++ * (non-200) are excluded. null = none on record (the caller treats that as unknown -> fail closed). A proxy for the customer's last
++ * inbound (the authoritative store is the adapter/Chatwoot, which this service cannot read).
++ */
++export async function lastVerifiedInboundAt(waIdHash: string): Promise<Date | null> {
++  const rows = await prisma.$queryRaw<Array<{ t: Date | null }>>`
++    SELECT max("created_at") AS t FROM "pl_concierge_audit"
++    WHERE "wa_id_hash" = ${waIdHash} AND "kid" IS NOT NULL AND "kid" <> 'flow' AND "http_status" = 200`
++  return rows[0]?.t ? new Date(rows[0].t) : null
++}
++
 +/** rc16: record how a claim ended (code + outcome + short detail). */
 +export async function finishClaim(id: string, code: string, outcome: 'done' | 'failed', detail?: string | null, latencyMs?: number | null): Promise<void> {
 +  await prisma.$executeRaw`
@@ -220,6 +280,32 @@ index 35153911..c7f6c0ad 100644
  /** Newest qualifying row (for "one per window" retry_after_s). */
  export async function newestRecentAt(waIdHash: string, endpoints: string[], windowS: number, codes?: string[]): Promise<Date | null> {
    const since = new Date(Date.now() - windowS * 1000)
+diff --git a/app/lib/wa-send-gate.ts b/app/lib/wa-send-gate.ts
+index a5d16897..60097e11 100644
+--- a/app/lib/wa-send-gate.ts
++++ b/app/lib/wa-send-gate.ts
+@@ -181,9 +181,20 @@ function normalizePhone(phone: string | null | undefined): string {
+  * suppression (STOP / doNotContact) still applies whenever a userId is supplied, and every decision is audited with this sourceEventType.
+  */
+ export function isPlVerifiedInboundReply(ctx: WaSendContext): boolean {
+-  return ctx.sourceEventType === 'pl_verified_inbound' && !!ctx.sourceEventId && String(ctx.senderPath ?? '').startsWith('pl:')
++  const base = ctx.sourceEventType === 'pl_verified_inbound' && !!ctx.sourceEventId && String(ctx.senderPath ?? '').startsWith('pl:')
+     && (ctx.kind === 'flow' || ctx.kind === 'interactive') && !PROACTIVE_PURPOSES.has(ctx.purpose)
++  if (!base) return false
++  // rc16e: the store-button path (the newest user of this carve-out) is fenced to EXACTLY the shape pl-concierge/service.ts
++  // storeButtonForFlow sends: a tenant-scoped interactive 'lite_onboarding' message whose provenance is a signed Flow session
++  // ('flow:<nonce>') and whose message ref is 'store-button:<os>'. Anything else on that senderPath is NOT exempt and falls to the
++  // ordinary proactive rules (blocked). Other 'pl:' paths are unchanged.
++  if (ctx.senderPath === PL_STORE_BUTTON_SENDER_PATH) {
++    return ctx.kind === 'interactive' && ctx.purpose === 'lite_onboarding' && !!ctx.userId
++      && /^flow:.+/.test(String(ctx.sourceEventId ?? '')) && /^store-button:(ios|android)$/.test(String(ctx.sourceMessageId ?? ''))
++  }
++  return true
+ }
++export const PL_STORE_BUTTON_SENDER_PATH = 'pl:flows/store-button'
+ 
+ export function deriveMessageClass(ctx: WaSendContext): MessageClass {
+   if (isPlVerifiedInboundReply(ctx)) return 'conversation_reply'
 diff --git a/app/lib/whatsapp.ts b/app/lib/whatsapp.ts
 index 04ea5c43..d0c14671 100644
 --- a/app/lib/whatsapp.ts
@@ -304,50 +390,65 @@ index 04ea5c43..d0c14671 100644
  // Sends an interactive Flow message that opens the "Isola Lite Top-Up" Flow
 diff --git a/test/pl-outbound-only-claims.test.ts b/test/pl-outbound-only-claims.test.ts
 new file mode 100644
-index 00000000..fa6e7cae
+index 00000000..1401c37c
 --- /dev/null
 +++ b/test/pl-outbound-only-claims.test.ts
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,52 @@
 +/**
-+ * rc16b: launch scope is OUTBOUND calling only. No customer-facing Personal Line copy may claim or imply that the customer can
-+ * RECEIVE calls on their number (readiness record pl-launch-readiness-for-sales-marketing-2026-10-10: "never claim or imply").
-+ * Found in production rc15: the new-customer flows/launch body said "Calls are made and received in the free Cloud Softphone app".
-+ * Line-based scan of the customer-copy sources (comment lines excluded); the same scan function runs on a positive control.
++ * rc16e: launch scope wording (PM 2026-10-11, reconciled with ev-owner-confirms-incoming-call-5099-2026-10-11).
++ * The offer covers OUTGOING calling. Customer-facing launch copy must (a) say exactly that, (b) never CLAIM that calls are
++ * received, and (c) never make the unsupported BLANKET assertion that incoming calls are unavailable (one incoming ring was owner-
++ * confirmed on a test line; incoming is simply not part of this offer and is not renewed-investigated here).
++ * Production rc15 said "Calls are made and received..." (over-claim) and, elsewhere, "Incoming calls ... are not available yet".
++ * Line-based scan of the launch-path copy sources (comment lines excluded); the same scan runs on positive controls.
 + */
 +import { describe, it, expect } from 'vitest'
 +import { readFileSync } from 'node:fs'
 +
 +const SOURCES = ['../app/lib/pl-concierge/service.ts', '../app/lib/pl-concierge/signup-flow.ts']
++const SENTENCE = 'Make calls from the free Cloud Softphone app. This launch offer covers outgoing calling.'
 +const RECEIVE_CLAIM = /(made and received|receive (your )?calls (in|on|from)|calls? (are|is) received)/i
-+// the only allowed mention: the inbound-enabled branch in signup-flow.ts, gated on f.inbound_enabled (false at launch)
++const BLANKET_UNAVAILABLE = /incoming calls[^.`'"]*(are )?not available|receiving calls[^.`'"]*not available/i
++// the only allowed mention: the inbound-enabled branch in signup-flow.ts, gated on f.inbound_enabled
 +const ALLOWED = /rings in Cloud Softphone now/
 +
 +const codeLines = (text: string) => text.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l))
-+const offenders = (text: string) => codeLines(text).filter(l => RECEIVE_CLAIM.test(l) && !ALLOWED.test(l))
++const offenders = (text: string, re: RegExp) => codeLines(text).filter(l => re.test(l) && !ALLOWED.test(l))
 +const read = (rel: string) => readFileSync(new URL(rel, import.meta.url), 'utf8')
 +
-+describe('outbound-only launch scope: no receive-calls claim in customer copy', () => {
-+  it('new-customer flows/launch body states outbound calling and that receiving is not available', () => {
-+    const line = codeLines(read(SOURCES[0])).find(l => l.includes('Free trial: ${o.trial_days}'))
++describe('launch-scope wording: outgoing calling offer, no receive claim, no blanket "incoming unavailable"', () => {
++  it('flows/launch body (new customer) and the Flow WELCOME offer use the approved sentence', () => {
++    const body = codeLines(read(SOURCES[0])).find(l => l.includes('Free trial: ${o.trial_days}'))
++    const welcome = codeLines(read(SOURCES[1])).find(l => l.includes("screen: 'WELCOME'") && l.includes('Free trial: ${o.trial_days}'))
++    expect(body).toContain(SENTENCE)
++    expect(welcome).toContain(SENTENCE)
++  })
++  it('no launch-path code line claims calls are received or asserts incoming is unavailable', () => {
++    for (const s of SOURCES) {
++      expect({ s, claims: offenders(read(s), RECEIVE_CLAIM) }).toEqual({ s, claims: [] })
++      expect({ s, blanket: offenders(read(s), BLANKET_UNAVAILABLE) }).toEqual({ s, blanket: [] })
++    }
++  })
++  it('CONNECTED copy (outbound, inbound flag off) says the offer covers outgoing calling', () => {
++    const line = codeLines(read(SOURCES[1])).find(l => l.includes('Cloud Softphone is connected. You can make calls now'))
 +    expect(line).toBeDefined()
-+    expect(line).toContain('You make calls from the free Cloud Softphone app')
-+    expect(line).toContain('receiving calls on your number is not available yet')
++    expect(line).toContain('This launch offer covers outgoing calling.')
 +  })
-+  it('no code line in the customer-copy sources claims calls are received', () => {
-+    for (const s of SOURCES) expect({ s, hits: offenders(read(s)) }).toEqual({ s, hits: [] })
-+  })
-+  it('CONTROL: the same scan fires on the old production line and not on the new one or on a comment', () => {
-+    const old = "    : `Free trial: ${o.trial_days} days. Calls are made and received in the free Cloud Softphone app. ${X}`"
-+    const fixed = "    : `Free trial: ${o.trial_days} days. You make calls from the free Cloud Softphone app; receiving calls on your number is not available yet.`"
-+    const comment = '  // Calls are made and received - old copy'
-+    expect(offenders(old)).toHaveLength(1)
-+    expect(offenders(fixed)).toHaveLength(0)
-+    expect(offenders(comment)).toHaveLength(0)
++  it('CONTROL: both scans fire on the old production lines and ignore comments / the new copy', () => {
++    const oldClaim = "    : `Free trial: ${o.trial_days} days. Calls are made and received in the free Cloud Softphone app. ${X}`"
++    const oldBlanket = "        : `Cloud Softphone is connected. Incoming calls to your number${did} are not available yet - we'll message you when they are.`"
++    const fixed = "    : `Free trial. Make calls from the free Cloud Softphone app. This launch offer covers outgoing calling. ${X}`"
++    const comment = '  // Incoming calls are not available yet - old copy'
++    expect(offenders(oldClaim, RECEIVE_CLAIM)).toHaveLength(1)
++    expect(offenders(oldBlanket, BLANKET_UNAVAILABLE)).toHaveLength(1)
++    expect(offenders(fixed, RECEIVE_CLAIM)).toHaveLength(0)
++    expect(offenders(fixed, BLANKET_UNAVAILABLE)).toHaveLength(0)
++    expect(offenders(comment, BLANKET_UNAVAILABLE)).toHaveLength(0)
 +  })
 +})
 diff --git a/test/pl-signup-flow-store-step.test.ts b/test/pl-signup-flow-store-step.test.ts
 new file mode 100644
-index 00000000..b8cde7df
+index 00000000..2f6e85df
 --- /dev/null
 +++ b/test/pl-signup-flow-store-step.test.ts
 @@ -0,0 +1,119 @@
@@ -393,7 +494,7 @@ index 00000000..b8cde7df
 +    S.storeLinks = { ios: 'https://apps.apple.com/dm/app/cloud-softphone/id567475545' }
 +    const r = await storeTap('ios'); await flush()
 +    expect(r.screen).toBe('INSTALL_STORE')
-+    expect(S.sends).toEqual([{ waId: '17675550101', rid: 'rid1', flowNonce: 'nonce1', os: 'ios', url: 'https://apps.apple.com/dm/app/cloud-softphone/id567475545' }])
++    expect(S.sends).toEqual([{ waId: '17675550101', rid: 'rid1', flowNonce: 'nonce1', iat: 0, os: 'ios', url: 'https://apps.apple.com/dm/app/cloud-softphone/id567475545' }])
 +    expect(r.data.store_url).toBe('https://apps.apple.com/dm/app/cloud-softphone/id567475545')
 +  })
 +  it('a completed line holder (stage connected) gets the screen but NO send', async () => {
@@ -548,10 +649,10 @@ index 00000000..219271f6
 +})
 diff --git a/test/pl-store-button-dedupe.test.ts b/test/pl-store-button-dedupe.test.ts
 new file mode 100644
-index 00000000..1fcb04d0
+index 00000000..6d4de9b6
 --- /dev/null
 +++ b/test/pl-store-button-dedupe.test.ts
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,190 @@
 +/**
 + * rc16: storeButtonForFlow - at most ONE store-button message per verified sender per OS per 24 h.
 + * The store's claim is faked here with the SAME semantics as store.claimOncePerWindow (rows keyed by endpoint + op + waIdHash,
@@ -560,15 +661,21 @@ index 00000000..1fcb04d0
 + */
 +import { describe, it, expect, vi, beforeEach } from 'vitest'
 +
-+const S = vi.hoisted(() => ({ rows: [] as any[], clock: Date.now(), sends: [] as any[], sendImpl: null as null | ((...a: any[]) => Promise<any>), bindings: {} as Record<string, string> }))
++const S = vi.hoisted(() => ({ rows: [] as any[], audits: [] as any[], clock: Date.now(), sends: [] as any[], sendImpl: null as null | ((...a: any[]) => Promise<any>), bindings: {} as Record<string, string>, lastIn: 'now' as 'now' | 'unknown' | 'throw' | Date, stopped: false as boolean, estateThrows: false as boolean }))
 +
 +vi.mock('@/app/lib/runtime-flags', () => ({ getRuntimeFlag: () => false, getRuntimeNumber: (_k: string, d: number) => d, getRuntimeList: (_k: string, d: string[]) => d }))
-+vi.mock('@/app/lib/prisma', () => ({ prisma: {} }))
++vi.mock('@/app/lib/prisma', () => ({
++  prisma: {
++    contact: { findFirst: vi.fn(async () => { if (S.estateThrows) throw new Error('db down'); return S.stopped ? { id: 'c' } : null }) },
++    whatsappOptIn: { findFirst: vi.fn(async () => null) },
++  },
++}))
 +vi.mock('@/app/lib/pl-concierge/store', async (orig) => {
 +  const real: any = await orig()
 +  return {
 +    idHash: real.idHash,
-+    writeAudit: vi.fn(async () => 'x'),
++    writeAudit: vi.fn(async (r: any) => { S.audits.push(r); return 'x' }),
++    lastVerifiedInboundAt: vi.fn(async () => { if (S.lastIn === 'throw') throw new Error('db down'); return S.lastIn === 'unknown' ? null : S.lastIn === 'now' ? new Date() : S.lastIn }),
 +    claimOncePerWindow: vi.fn(async (a: any) => {
 +      const since = S.clock - a.windowS * 1000
 +      const n = S.rows.filter(r => r.waIdHash === a.waIdHash && r.endpoint === a.endpoint && r.op === a.op && r.at >= since && a.countCodes.includes(r.code)).length
@@ -606,10 +713,10 @@ index 00000000..1fcb04d0
 +const A = '17675550101', B = '17675550102'
 +const IOS = 'https://apps.apple.com/us/app/cloud-softphone/id567475545'
 +const AND = 'https://play.google.com/store/apps/details?id=cz.acrobits.softphone.cloudphone'
-+const tap = (wa: string, os: 'ios' | 'android', n = 'n1') => storeButtonForFlow({ waId: wa, rid: 'rid1', flowNonce: n, os, url: os === 'ios' ? IOS : AND })
++const tap = (wa: string, os: 'ios' | 'android', n = 'n1', iat = Math.floor(Date.now() / 1000)) => storeButtonForFlow({ waId: wa, rid: 'rid1', flowNonce: n, iat, os, url: os === 'ios' ? IOS : AND })
 +
 +beforeEach(() => {
-+  S.rows = []; S.sends = []; S.sendImpl = null; S.clock = Date.now()
++  S.rows = []; S.audits = []; S.sends = []; S.sendImpl = null; S.clock = Date.now(); S.lastIn = 'now'; S.stopped = false; S.estateThrows = false
 +  S.bindings = { [A]: 'userA', [B]: 'userB' }
 +  process.env.PL_ASSERTION_KID = 'k1'
 +  process.env.PL_ASSERTION_HMAC_KEY = 'k'.repeat(48)   // test-only fixture; length is all readConfig checks
@@ -628,11 +735,11 @@ index 00000000..1fcb04d0
 +  })
 +  it('a second tap (same Flow session) within the window sends nothing', async () => {
 +    await tap(A, 'ios'); const r = await tap(A, 'ios')
-+    expect(r.code).toBe('store_button_duplicate'); expect(S.sends).toHaveLength(1)
++    expect(r.code).toBe('store_button_deduped'); expect(S.sends).toHaveLength(1)
 +  })
 +  it('a NEW Flow session within the window also sends nothing (dedupe is per sender, not per token)', async () => {
 +    await tap(A, 'ios', 'n1'); S.clock += 23 * 3600 * 1000; const r = await tap(A, 'ios', 'n2')
-+    expect(r.code).toBe('store_button_duplicate'); expect(S.sends).toHaveLength(1)
++    expect(r.code).toBe('store_button_deduped'); expect(S.sends).toHaveLength(1)
 +  })
 +  it('CONTROL: a different OS within the window DOES send', async () => {
 +    await tap(A, 'ios'); const r = await tap(A, 'android')
@@ -672,11 +779,188 @@ index 00000000..1fcb04d0
 +  })
 +  it('no line binding -> nothing sent', async () => {
 +    S.bindings = {}
-+    const r = await tap(A, 'ios'); expect(r.code).toBe('store_button_failed'); expect(S.sends).toHaveLength(0)
++    const r = await tap(A, 'ios'); expect(r.code).toBe('store_button_failed'); expect(r.detail).toBe('no_line_binding'); expect(S.sends).toHaveLength(0); expect(S.rows).toHaveLength(0)
 +  })
 +  it('service misconfigured -> service_disabled, nothing claimed or sent', async () => {
 +    delete process.env.PL_ASSERTION_HMAC_KEY
 +    const r = await tap(A, 'ios'); expect(r.code).toBe('service_disabled'); expect(S.rows).toHaveLength(0); expect(S.sends).toHaveLength(0)
++  })
++})
++
++/**
++ * rc16e PM rule: DE-DUPLICATION expiry and CUSTOMER-SERVICE-WINDOW eligibility are independent; the send needs BOTH (plus proof, binding,
++ * no STOP). Each negative below has a positive twin in the same harness; a refusal never spends the once-per-24h allowance and is
++ * distinguishable in the audit rows.
++ */
++const WINDOW_OK = () => { S.lastIn = new Date(Date.now() - 3600 * 1000) }
++const WINDOW_CLOSED = () => { S.lastIn = new Date(Date.now() - 25 * 3600 * 1000) }
++describe('eligibility (window / STOP / proof) and de-duplication are independent, both required', () => {
++  it('(c) both satisfied: window open (last inbound 1 h ago) + no claim + not stopped + fresh proof -> exactly one send', async () => {
++    WINDOW_OK(); const r = await tap(A, 'ios')
++    expect(r.code).toBe('store_button_sent'); expect(S.sends).toHaveLength(1)
++  })
++  it('(a) dedup EXPIRED (claim 25 h old) but window CLOSED -> no send, and the expired claim path is not a bypass', async () => {
++    WINDOW_OK(); await tap(A, 'ios'); S.clock += STORE_BUTTON_WINDOW_S * 1000 + 1000
++    WINDOW_CLOSED(); const r = await tap(A, 'ios', 'n2')
++    expect(r.code).toBe('store_button_window_closed'); expect(S.sends).toHaveLength(1)
++    WINDOW_OK(); const r2 = await tap(A, 'ios', 'n3')                 // TWIN: same expired claim, window now open -> sends
++    expect(r2.code).toBe('store_button_sent'); expect(S.sends).toHaveLength(2)
++  })
++  it('(b) window OPEN but dedup claim still active -> no send, reason is store_button_deduped (not a window reason)', async () => {
++    WINDOW_OK(); await tap(A, 'ios'); const r = await tap(A, 'ios', 'n2')
++    expect(r.code).toBe('store_button_deduped'); expect(S.sends).toHaveLength(1)
++    expect(S.audits.at(-1)).toMatchObject({ endpoint: 'flows/store-button', code: 'store_button_deduped' })
++  })
++  it('(d) window unreadable (store throws) -> fail closed; no inbound on record -> fail closed; TWIN: readable + open sends', async () => {
++    S.lastIn = 'throw'; expect((await tap(A, 'ios')).code).toBe('store_button_window_unknown')
++    S.lastIn = 'unknown'; expect((await tap(A, 'ios', 'n2')).code).toBe('store_button_window_unknown')
++    expect(S.sends).toHaveLength(0); expect(S.rows).toHaveLength(0)
++    WINDOW_OK(); expect((await tap(A, 'ios', 'n3')).code).toBe('store_button_sent')
++  })
++  it('a refusal for window / STOP / stale proof does NOT burn the once-per-24h allowance (no claim row), and the next eligible tap sends', async () => {
++    WINDOW_CLOSED(); expect((await tap(A, 'ios')).code).toBe('store_button_window_closed')
++    WINDOW_OK(); S.stopped = true; expect((await tap(A, 'ios', 'n2')).code).toBe('store_button_stopped')
++    S.stopped = false; expect((await tap(A, 'ios', 'n3', Math.floor(Date.now() / 1000) - 7200)).code).toBe('store_button_proof_stale')
++    expect(S.rows).toHaveLength(0); expect(S.sends).toHaveLength(0)
++    expect((await tap(A, 'ios', 'n4')).code).toBe('store_button_sent'); expect(S.sends).toHaveLength(1)
++  })
++  it('each refusal leaves its OWN distinguishable audit row (never counted as a claim or a send)', async () => {
++    WINDOW_CLOSED(); await tap(A, 'ios', 'a'); S.lastIn = 'unknown'; await tap(A, 'ios', 'b'); WINDOW_OK(); S.stopped = true; await tap(A, 'ios', 'c')
++    S.stopped = false; await tap(A, 'ios', 'd', 1); await tap(A, 'ios', 'e'); await tap(A, 'ios', 'f')
++    expect(S.audits.map(x => x.code)).toEqual(['store_button_window_closed', 'store_button_window_unknown', 'store_button_stopped', 'store_button_proof_stale', 'store_button_deduped'])
++    expect(S.audits.every(x => x.kid === 'flow' && x.httpStatus === 200)).toBe(true)   // kid 'flow' => never read back as an inbound proof
++    expect(S.rows.map(x => x.code)).toEqual(['store_button_sent'])
++  })
++  it('STOP (estate) -> no send; STOP store unreadable -> fail closed; TWIN: not stopped sends', async () => {
++    S.stopped = true; expect((await tap(A, 'ios')).code).toBe('store_button_stopped')
++    S.stopped = false; S.estateThrows = true; expect((await tap(A, 'ios', 'n2')).code).toBe('store_button_failed')
++    expect(S.sends).toHaveLength(0)
++    S.estateThrows = false; expect((await tap(A, 'ios', 'n3')).code).toBe('store_button_sent')
++  })
++  it('proof: a future-dated / missing iat is refused; TWIN: a 59-minute-old proof is accepted', async () => {
++    expect((await tap(A, 'ios', 'n1', Math.floor(Date.now() / 1000) + 600)).code).toBe('store_button_proof_stale')
++    expect((await tap(A, 'ios', 'n2', 0)).code).toBe('store_button_proof_stale')
++    expect((await tap(A, 'ios', 'n3', Math.floor(Date.now() / 1000) - 59 * 60)).code).toBe('store_button_sent')
++  })
++})
+diff --git a/test/pl-store-button-gate-exemption.test.ts b/test/pl-store-button-gate-exemption.test.ts
+new file mode 100644
+index 00000000..3b92a1ce
+--- /dev/null
++++ b/test/pl-store-button-gate-exemption.test.ts
+@@ -0,0 +1,114 @@
++/**
++ * rc16e gate review: what the 'pl_verified_inbound' carve-out in wa-send-gate.ts lets through for the store-button path, tested
++ * against the REAL evaluateWaSend (only prisma is mocked). Every refusal has its positive twin in the same harness (CLAUDE.md 2.19).
++ *
++ * Also the proof side: a forged / expired / wrong-purpose flow_token is refused by verifyFlowToken (the Flow endpoint calls it before
++ * anything else), and the recipient of the store button is the token's own wa, never a request field.
++ */
++import { describe, it, expect, vi, beforeEach } from 'vitest'
++
++const S = vi.hoisted(() => ({ rows: [] as any[], stopped: false }))
++vi.mock('@/app/lib/runtime-flags', () => ({ getRuntimeFlag: () => false, getRuntimeNumber: (_k: string, d: number) => d, getRuntimeList: (_k: string, d: string[]) => d }))
++vi.mock('@/app/lib/prisma', () => ({
++  prisma: {
++    waSendAudit: {
++      create: vi.fn(async ({ data }: any) => { const row = { id: `a${S.rows.length + 1}`, ...data }; S.rows.push(row); return row }),
++      findUnique: vi.fn(async ({ where }: any) => S.rows.find(r => r.idempotencyKey === where.idempotencyKey) ?? null),
++      update: vi.fn(async () => ({})), count: vi.fn(async () => 0),
++    },
++    liteAccount: { findUnique: vi.fn(async () => ({ ownerPhone: null })) },
++    contact: { findFirst: vi.fn(async () => (S.stopped ? { id: 'c1' } : null)) },
++    whatsappOptIn: { findFirst: vi.fn(async () => null) },
++    waTemplateRecord: { findFirst: vi.fn(async () => null), findUnique: vi.fn(async () => null) },
++  },
++}))
++
++import { evaluateWaSend, isPlVerifiedInboundReply } from '@/app/lib/wa-send-gate'
++import { mintFlowToken, verifyFlowToken } from '@/app/lib/pl-concierge/flow-token'
++
++const good = (over: Record<string, unknown> = {}) => ({
++  purpose: 'lite_onboarding', senderPath: 'pl:flows/store-button', kind: 'interactive', recipientPhone: '17675550101', userId: 'u1',
++  sourceEventType: 'pl_verified_inbound', sourceEventId: 'flow:n1', sourceMessageId: 'store-button:ios', fromPhoneId: '111111111111111', ...over,
++}) as any
++
++beforeEach(() => { S.rows = []; S.stopped = false })
++
++describe('gate: the exact store-button shape is exempt; nothing else on that path is', () => {
++  it('TWIN: the exact shape (tenant, interactive, lite_onboarding, flow:<n>, store-button:<os>) is allowed and audited', async () => {
++    const d = await evaluateWaSend(good())
++    expect(d.code).toBe('allow_service_message')
++    expect(S.rows.at(-1)).toMatchObject({ decision: 'allow_service_message', senderPath: 'pl:flows/store-button', sourceEventType: 'pl_verified_inbound' })
++    expect(isPlVerifiedInboundReply(good())).toBe(true)
++  })
++  it.each([
++    ['arbitrary message ref', { sourceMessageId: 'anything' }],
++    ['missing message ref', { sourceMessageId: undefined }],
++    ['unknown os in the ref', { sourceMessageId: 'store-button:windows' }],
++    ['event id not a Flow session', { sourceEventId: 'wamid.HBg' }],
++    ['no tenant', { userId: undefined }],
++    ['freeform text instead of the interactive button', { kind: 'freeform' }],
++    ['a template send', { kind: 'template', templateName: 't' }],
++    ['a Flow send', { kind: 'flow' }],
++    ['another purpose', { purpose: 'support_reply' }],
++    ['a proactive purpose', { purpose: 'campaign' }],
++  ])('refused (not exempt): %s', async (_n, over) => {
++    expect(isPlVerifiedInboundReply(good(over))).toBe(false)
++    const d = await evaluateWaSend(good(over))
++    expect(d.code.startsWith('allow_')).toBe(false)
++  })
++  it('a different senderPath / sourceEventType cannot reach the exemption with this payload shape', async () => {
++    for (const over of [{ senderPath: 'app:other' }, { senderPath: 'whatsapp:x' }, { sourceEventType: 'wa_inbound_fake' }, { sourceEventType: 'pl_verified' }, { sourceEventType: undefined }]) {
++      expect(isPlVerifiedInboundReply(good(over))).toBe(false)
++      expect((await evaluateWaSend(good(over))).code.startsWith('allow_')).toBe(false)
++    }
++  })
++  it('CONTROL: other pl: paths are exactly as before (launch Flow send still exempt) - the gate is unchanged for them', async () => {
++    expect(isPlVerifiedInboundReply(good({ senderPath: 'pl:flows/launch', kind: 'flow', sourceEventId: 'wamid.X', sourceMessageId: undefined }))).toBe(true)
++    expect((await evaluateWaSend(good({ senderPath: 'pl:flows/launch', kind: 'flow', sourceEventId: 'wamid.X', sourceMessageId: undefined }))).code).toBe('allow_service_message')
++  })
++  it('STOP outranks the exemption: doNotContact -> suppress; TWIN: not stopped -> allowed', async () => {
++    S.stopped = true
++    expect((await evaluateWaSend(good())).code).toBe('suppress')
++    S.stopped = false; S.rows = []
++    expect((await evaluateWaSend(good())).code).toBe('allow_service_message')
++  })
++  it('replay: the same Flow session + os is deduped by the gate idempotency key (second evaluation is duplicate, same decision, no new row)', async () => {
++    const first = await evaluateWaSend(good())
++    const again = await evaluateWaSend(good())
++    expect(first.duplicate).toBeUndefined(); expect(again.duplicate).toBe(true); expect(S.rows).toHaveLength(1)
++    const other = await evaluateWaSend(good({ sourceEventId: 'flow:n2' }))     // TWIN: a different session is a fresh evaluation
++    expect(other.duplicate).toBeUndefined(); expect(S.rows).toHaveLength(2)
++  })
++})
++
++describe('proof: the signed flow_token', () => {
++  const KEY = 'k'.repeat(48)
++  beforeEach(() => { process.env.PL_ASSERTION_HMAC_KEY = KEY })
++  it('TWIN: a freshly minted signup token verifies and carries the wa it was minted for', () => {
++    const t = mintFlowToken({ purpose: 'signup', waId: '17675550101', rid: 'r1' })
++    const v = verifyFlowToken(t, 'signup'); expect(v.ok).toBe(true)
++    if (v.ok) expect(v.claims.wa).toBe('17675550101')
++  })
++  it('FORGED (signed with another key) -> bad_signature', () => {
++    const t = mintFlowToken({ purpose: 'signup', waId: '17675550101', rid: 'r1' })
++    process.env.PL_ASSERTION_HMAC_KEY = 'z'.repeat(48)
++    expect(verifyFlowToken(t, 'signup')).toMatchObject({ ok: false, why: 'bad_signature' })
++  })
++  it('TAMPERED payload (wa swapped to another number, signature kept) -> bad_signature', () => {
++    const t = mintFlowToken({ purpose: 'signup', waId: '17675550101', rid: 'r1' })
++    const [pre, P, S2] = t.split('.')
++    const claims = JSON.parse(Buffer.from(P, 'base64url').toString()); claims.wa = '17675550199'
++    const forged = `${pre}.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.${S2}`
++    expect(verifyFlowToken(forged, 'signup')).toMatchObject({ ok: false, why: 'bad_signature' })
++  })
++  it('EXPIRED (minted 2 h ago, ttl 1 h) -> expired; TWIN: minted 30 min ago verifies', () => {
++    const now = Date.now()
++    expect(verifyFlowToken(mintFlowToken({ purpose: 'signup', waId: '17675550101', rid: 'r1', now: now - 2 * 3600 * 1000 }), 'signup', now)).toMatchObject({ ok: false, why: 'expired' })
++    expect(verifyFlowToken(mintFlowToken({ purpose: 'signup', waId: '17675550101', rid: 'r1', now: now - 1800 * 1000 }), 'signup', now).ok).toBe(true)
++  })
++  it('WRONG PURPOSE (a topup token) -> wrong_purpose; malformed / bare phone -> refused', () => {
++    expect(verifyFlowToken(mintFlowToken({ purpose: 'topup', waId: '17675550101', rid: 'r1' }), 'signup')).toMatchObject({ ok: false, why: 'wrong_purpose' })
++    expect(verifyFlowToken('+17675550101', 'signup').ok).toBe(false)
++    expect(verifyFlowToken('pls1.abc', 'signup').ok).toBe(false)
 +  })
 +})
 diff --git a/test/pl-store-button-payload.test.ts b/test/pl-store-button-payload.test.ts

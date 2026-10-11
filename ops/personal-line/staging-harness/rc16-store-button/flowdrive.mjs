@@ -1,3 +1,5 @@
+// rc16f: adds copy assertions, forged/expired/wrong-purpose token refusals, and the window-vs-dedup matrix (the customer's last relay-verified
+// inbound is seeded in the STAGING DB as a synthetic audit row, because staging has no relay). Original header follows.
 // host03 STAGING ONLY one-shot harness: drives the REAL signup-Flow endpoint of plstg_web (http://web:3005/api/whatsapp/flows) the way
 // Meta does - encrypted data_exchange requests with a SERVER-signed flow_token - for a SYNTHETIC sender, and reads the store-button
 // sends that reached the graph.facebook.com stand-in (metamock). Secrets are read in-process from the mounted staging env and never printed.
@@ -16,10 +18,10 @@ const WEB = 'http://web-rc16:3005/api/whatsapp/flows'
 const MOCK = 'http://metamock:9001'
 const mask = (p) => `***${String(p).slice(-4)}`
 
-function mint(wa, rid = 'stg-rc16') {
-  const key = crypto.createHmac('sha256', Buffer.from(env.PL_ASSERTION_HMAC_KEY, 'utf8')).update('isola-pl-flow-token-v1').digest()
-  const iat = Math.floor(Date.now() / 1000)
-  const P = Buffer.from(JSON.stringify({ v: 1, p: 'signup', wa, cw: rid, iat, exp: iat + 3600, n: crypto.randomBytes(12).toString('base64url') })).toString('base64url')
+function mint(wa, rid = 'stg-rc16', o = {}) {
+  const key = crypto.createHmac('sha256', Buffer.from(o.hmacKey ?? env.PL_ASSERTION_HMAC_KEY, 'utf8')).update('isola-pl-flow-token-v1').digest()
+  const iat = o.iat ?? Math.floor(Date.now() / 1000)
+  const P = Buffer.from(JSON.stringify({ v: 1, p: o.purpose ?? 'signup', wa, cw: rid, iat, exp: o.exp ?? iat + 3600, n: crypto.randomBytes(12).toString('base64url') })).toString('base64url')
   return `pls1.${P}.${crypto.createHmac('sha256', key).update('pls1.' + P).digest().toString('base64url')}`
 }
 async function flow(token, action, screen, data) {
@@ -67,18 +69,40 @@ const T1 = mint(wa)
 const steps = []
 const log = (k, r) => { steps.push([k, short(r)]); console.log(`${k}: ${short(r)}`) }
 let r = await flow(T1, 'INIT', undefined, undefined); log('INIT', r)
-if (r.data?.offer_text) console.log('  offer_text first line:', String(r.data.offer_text).split('\n')[0].replace(/\d{3}\) \d{3}-\d{4}/, 'NNN) NNN-NNNN'))
+const APPROVED = 'Make calls from the free Cloud Softphone app. This launch offer covers outgoing calling.'
+const copyChecks = []
+const chk = (k, ok) => { copyChecks.push([k, !!ok]); console.log(`COPY ${ok ? 'PASS' : 'FAIL'}: ${k}`) }
+if (r.data?.offer_text) {
+  console.log('  offer_text first line:', String(r.data.offer_text).split('\n')[0].replace(/\d{3}\) \d{3}-\d{4}/, 'NNN) NNN-NNNN'))
+  const ot = String(r.data.offer_text)
+  const holder = /^Your EPIC line/.test(ot)   // an existing line holder gets the line/status text, not the trial offer
+  if (holder) chk('WELCOME (existing holder) says EPIC and never Isola; the offer sentence applies to the new-customer path only', /EPIC/.test(ot) && !/isola/i.test(ot))
+  else chk('WELCOME offer_text contains the approved outgoing-calling sentence', ot.includes(APPROVED))
+  chk('WELCOME offer_text has no "Incoming calls to your number" / "made and received" / Isola', !/Incoming calls to your number|made and received|isola/i.test(ot))
+}
 r = await flow(T1, 'data_exchange', 'WELCOME', { first_name: 'Stg' }); log('WELCOME', r)
-if (r.data?.confirm_text) console.log('  confirm_text:', String(r.data.confirm_text).replace(/\d{3}\) \d{3}-\d{4}/, 'NNN) NNN-NNNN'))
+if (r.data?.confirm_text) { console.log('  confirm_text:', String(r.data.confirm_text).replace(/\d{3}\) \d{3}-\d{4}/, 'NNN) NNN-NNNN')); chk('CONFIRM text never says Isola (new customer: says EPIC)', !/isola/i.test(r.data.confirm_text) && (/continue with your line/.test(r.data.confirm_text) || /EPIC/.test(r.data.confirm_text))) }
 r = await flow(T1, 'data_exchange', 'CONFIRM', { confirm: 'yes' }); log('CONFIRM', r)
 for (let i = 0; i < 10 && r.screen === 'PROVISIONING'; i++) { await sleep(3000); r = await flow(T1, 'data_exchange', 'PROVISIONING', {}); log(`PROVISIONING#${i + 1}`, r) }
-if (r.screen === 'LINE_READY') console.log('  line_text:', r.data?.line_text)
+if (r.screen === 'LINE_READY') { console.log('  line_text:', r.data?.line_text); chk('LINE_READY text says EPIC, never Isola', /EPIC/.test(r.data?.line_text) && !/isola/i.test(r.data?.line_text)) }
 if (r.screen === 'ERROR') console.log('  error_text:', r.data?.error_text)
 r = await flow(T1, 'data_exchange', 'LINE_READY', {}); log('LINE_READY->', r)
 if (r.screen !== 'INSTALL') { console.log('NOT AT INSTALL - stopping (no store taps made)'); await db.end(); process.exit(3) }
 
-// rc16 run 2 measured a first send landing 4.1 s after its tap - after a fixed 2.5 s wait - so per-tap attribution moved one row.
-// The instrument now waits for the claim to finish (no 'store_button_claimed' row in flight for this sender) before counting.
+// ---- window proof: staging has no relay, so the customer's last relay-verified inbound is a SYNTHETIC audit row in the STAGING DB
+const idHash = (v) => crypto.createHmac('sha256', Buffer.from(env.PL_ASSERTION_HMAC_KEY, 'utf8')).update(`pl-audit\0${v}`, 'utf8').digest('hex').slice(0, 32)
+const waHash = idHash(wa)
+const SEED_KID = 'rc16f-seed'
+async function inboundAt(hoursAgo) {   // null = no inbound on record
+  await db.query(`delete from pl_concierge_audit where kid = $1 and wa_id_hash = $2`, [SEED_KID, waHash])
+  if (hoursAgo === null) return
+  await db.query(`insert into pl_concierge_audit (id, endpoint, op, http_status, code, kid, wa_id_hash, wa_last4, created_at) values ($1,'account/journey',null,200,'journey',$2,$3,$4, now() - ($5 || ' hours')::interval)`,
+    [crypto.randomUUID(), SEED_KID, waHash, wa.slice(-4), String(hoursAgo)])
+}
+// does this sender hold any claim/sent store-button row in the last 24h (i.e. is the once-per-24h allowance spent)?
+const claims = async (os) => (await db.query(`select count(*)::int n from pl_concierge_audit where endpoint='flows/store-button' and wa_last4=$1 and op=$2 and code in ('store_button_claimed','store_button_sent') and created_at > now() - interval '24 hours'`, [wa.slice(-4), os])).rows[0].n
+const lastRefusal = async () => (await db.query(`select code from pl_concierge_audit where endpoint='flows/store-button' and wa_last4=$1 and code not in ('store_button_claimed','store_button_sent','store_button_failed') order by created_at desc limit 1`, [wa.slice(-4)])).rows[0]?.code ?? null
+
 async function settle() {
   await sleep(1500)
   for (let i = 0; i < 40; i++) {
@@ -88,38 +112,61 @@ async function settle() {
   }
   await sleep(1000)
 }
-// start from a clean window for this synthetic sender: age any earlier store-button rows past 24 h (staging DB, synthetic rows only)
 const pre = await db.query(`update pl_concierge_audit set created_at = now() - interval '25 hours' where endpoint = 'flows/store-button' and wa_last4 = $1 and created_at > now() - interval '24 hours' returning op`, [wa.slice(-4)])
 console.log(`pre-run: aged ${pre.rowCount} earlier store-button row(s) of ${mask(wa)} out of the window`)
 const runStart = new Date()
 const results = []
-async function tap(label, token, os, expectSends) {
+async function tap(label, token, os, expectSends, expect = {}) {
   const before = (await sentTo(wa)).length
   const t = await flow(token, 'data_exchange', 'INSTALL', { step: 'store', os })
-  await settle()                                      // the send is fire-and-forget; wait until no claim is in flight, then 1 s
-  const after = (await sentTo(wa)).length
-  const row = { label, os, screen: t.screen, http: t.http, flow_ms: t.ms, store_url: t.data?.store_url, new_sends: after - before, expected: expectSends, ok: t.screen === 'INSTALL_STORE' && after - before === expectSends }
-  results.push(row); console.log(JSON.stringify(row))
-}
-await tap('T1 first iPhone tap', T1, 'ios', 1)
-await tap('T2 same iPhone tap again (same Flow session)', T1, 'ios', 0)
-const T2 = mint(wa)
-await tap('T3 iPhone tap from a NEW Flow session (new token)', T2, 'ios', 0)
-await tap('T4 CONTROL first Android tap', T2, 'android', 1)
-// Meta endpoint retries / double taps arriving together
-{
-  const T3 = mint(wa)
-  const before = (await sentTo(wa)).length
-  const rs = await Promise.all([1, 2, 3].map(() => flow(T3, 'data_exchange', 'INSTALL', { step: 'store', os: 'android' })))
   await settle()
   const after = (await sentTo(wa)).length
-  const row = { label: 'T5 three concurrent Android taps', os: 'android', screens: rs.map((x) => x.screen), flow_ms: rs.map((x) => x.ms), new_sends: after - before, expected: 0, ok: rs.every((x) => x.screen === 'INSTALL_STORE') && after === before }
+  const row = { label, os, screen: t.screen, http: t.http, flow_ms: t.ms, store_url: t.data?.store_url, new_sends: after - before, expected: expectSends }
+  row.refusal = expect.refusal !== undefined ? await lastRefusal() : undefined
+  row.ok = (expect.screen ?? 'INSTALL_STORE') === t.screen && after - before === expectSends && (expect.refusal === undefined || row.refusal === expect.refusal)
   results.push(row); console.log(JSON.stringify(row))
 }
-// window control: age THIS synthetic sender's iPhone claim rows past 24 h (staging DB, synthetic rows only), then tap again
-const upd = await db.query(`update pl_concierge_audit set created_at = now() - interval '25 hours' where endpoint = 'flows/store-button' and op = 'ios' and wa_last4 = $1 and created_at > now() - interval '1 hour' returning id`, [wa.slice(-4)])
-console.log(`aged ${upd.rowCount} iPhone claim row(s) of ${mask(wa)} past the window`)
-await tap('T6 CONTROL iPhone tap after the 24 h window', mint(wa), 'ios', 1)
+const nowS = () => Math.floor(Date.now() / 1000)
+
+console.log('=== A. proof refusals (no inbound seeded yet; window is not what is under test) ===')
+await inboundAt(1)
+await tap('A1 FORGED token (signed with another key)', mint(wa, 'stg-rc16', { hmacKey: 'z'.repeat(48) }), 'ios', 0, { screen: 'ERROR' })
+await tap('A2 EXPIRED token (minted 2 h ago, 1 h ttl)', mint(wa, 'stg-rc16', { iat: nowS() - 7200 }), 'ios', 0, { screen: 'ERROR' })
+await tap('A3 WRONG-PURPOSE token (topup)', mint(wa, 'stg-rc16', { purpose: 'topup' }), 'ios', 0, { screen: 'ERROR' })
+await tap('A4 token for a DIFFERENT sender cannot send to this one (token wa = other synthetic number)', mint('17675550198'), 'ios', 0, { screen: 'INSTALL_STORE' })
+results.at(-1).note = 'recipient is the token wa; this sender received nothing. (The other number holds no line, so no send was attempted for it either.)'
+
+console.log('=== B. window / dedup matrix ===')
+await inboundAt(null)
+await tap('B1 window UNKNOWN (no inbound on record), no claim -> no send', mint(wa), 'ios', 0, { refusal: 'store_button_window_unknown' })
+await inboundAt(25)
+await tap('B2 window CLOSED (last inbound 25 h ago), no claim -> no send', mint(wa), 'ios', 0, { refusal: 'store_button_window_closed' })
+console.log(`claims spent by refusals so far (ios): ${await claims('ios')} (must be 0)`)
+await inboundAt(1)
+const S1 = mint(wa)
+await tap('B3 window OPEN + no claim -> exactly 1 (iPhone)', S1, 'ios', 1)
+await tap('B4 same iPhone tap again (same Flow session) -> 0 (deduped)', S1, 'ios', 0, { refusal: 'store_button_deduped' })
+const S2 = mint(wa)
+await tap('B5 iPhone from a NEW Flow session, window open, claim active -> 0 (deduped)', S2, 'ios', 0, { refusal: 'store_button_deduped' })
+await tap('B6 CONTROL first Android tap -> 1', S2, 'android', 1)
+{
+  const S3 = mint(wa)
+  const before = (await sentTo(wa)).length
+  const rs = await Promise.all([1, 2, 3].map(() => flow(S3, 'data_exchange', 'INSTALL', { step: 'store', os: 'android' })))
+  await settle()
+  const after = (await sentTo(wa)).length
+  const row = { label: 'B7 three concurrent Android taps (claim active) -> 0 extra', os: 'android', screens: rs.map((x) => x.screen), flow_ms: rs.map((x) => x.ms), new_sends: after - before, expected: 0, ok: rs.every((x) => x.screen === 'INSTALL_STORE') && after === before }
+  results.push(row); console.log(JSON.stringify(row))
+}
+// age THIS sender's iPhone claim rows past 24 h (dedup EXPIRED)
+const upd = await db.query(`update pl_concierge_audit set created_at = now() - interval '25 hours' where endpoint = 'flows/store-button' and op = 'ios' and wa_last4 = $1 and created_at > now() - interval '1 hour' and code in ('store_button_claimed','store_button_sent') returning id`, [wa.slice(-4)])
+console.log(`aged ${upd.rowCount} iPhone claim row(s) of ${mask(wa)} past the dedup window`)
+await inboundAt(25)
+await tap('B8 dedup EXPIRED but window CLOSED -> 0 (expiry is not eligibility)', mint(wa), 'ios', 0, { refusal: 'store_button_window_closed' })
+console.log(`iPhone claims after that refusal: ${await claims('ios')} (must be 0 - the refusal did not burn the allowance)`)
+await inboundAt(1)
+await tap('B9 dedup expired AND window open -> 1', mint(wa), 'ios', 1)
+await inboundAt(null)
 
 const mine = (await sentTo(wa)).filter((s) => new Date(s.t) >= runStart)
 console.log('--- sends that reached the graph.facebook.com stand-in for this sender:')
@@ -131,5 +178,6 @@ const audit = await db.query(`select op, code, outcome, detail, latency_ms, crea
 console.log('--- pl_concierge_audit flows/store-button rows (this sender):'); for (const a of audit.rows) console.log(JSON.stringify(a))
 const ws = await db.query(`select decision, "dispatchStatus", "senderPath", purpose, "sourceEventType", "metaMessageId" is not null as has_wamid, left("errorSummary", 120) as err, "createdAt" from wa_send_audit where "senderPath" = 'pl:flows/store-button' and phone = $1 and "createdAt" >= $2 order by "createdAt"`, [wa, runStart])
 console.log('--- wa_send_audit rows (gate decisions) for this sender:'); for (const a of ws.rows) console.log(JSON.stringify(a))
-console.log(`SUMMARY: ${results.filter((x) => x.ok).length}/${results.length} taps as expected; sends to this sender = ${mine.length} (expected 3: iPhone, Android, iPhone-after-window)`)
+console.log(`COPY CHECKS: ${copyChecks.filter(([, ok]) => ok).length}/${copyChecks.length}`)
+console.log(`SUMMARY: ${results.filter((x) => x.ok).length}/${results.length} taps as expected; sends to this sender = ${mine.length} (expected 3: B3 iPhone, B6 Android, B9 iPhone)`)
 await db.end()
