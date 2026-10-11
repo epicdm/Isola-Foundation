@@ -1,0 +1,12 @@
+{
+  "name": "sf-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chatwoot AgentBot to Uplink native Personal Line agent relay (prepared for account 2 inbox 11). No dependencies.",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  }
+}
