@@ -1,7 +1,7 @@
 #!/bin/bash
 # host03 STAGING ONLY (plstg_* / uplinkstg_*; never a production service). Expert-concierge conversation suite setup.
 #   base   : plfix fixture PL service, mock Chatwoot keeps buttons, adapter -> plfix + account tools, Uplink staging -> REAL model,
-#            relay staging -> adapter actions; staging dollar envelope 35 cents (gate row = app env).
+#            relay staging -> adapter actions; staging dollar envelope 60 cents to 2026-10-19T05:25Z (gate row = app env).
 #   before : adapter rc12 + relay rc9 + agent v8 config (the production state before this work)
 #   after  : adapter rc13 + relay rc10 + agent v9 config
 # Inputs staged in /tmp/zzx/ by the caller. Nothing secret is printed.
@@ -26,7 +26,9 @@ if [ "$PH" = base ]; then
   cp -p $W/mock/mock-ext.mjs $W/mock/mock-ext.mjs.pre-rc13 2>/dev/null; cp $X/mock-ext-rc13.mjs $W/mock/mock-ext.mjs
   $D service update --detach --force plstg_mock-ext >/dev/null; wait_svc plstg_mock-ext
   $D service update --detach --env-add PL_BASE_URL=http://plfix:3005 --env-add PL_ACCOUNT_TOOLS=1 --env-rm STAGING_DIRECT_OFFER plstg_adapter >/dev/null; wait_svc plstg_adapter
-  $D service update --detach --host-rm "api.deepseek.com:10.77.0.123" --env-add PUBLIC_PILOT_BUDGET_CENTS=35 uplinkstg_uplink-app >/dev/null; wait_svc uplinkstg_uplink-app
+  # Envelope per dec-owner-staging-pilot-budget-60c-window-plus-7d-2026-10-11 (was 35 cents / 2026-10-12T05:25Z). The gate row
+  # (budget_micro_usd = cents*10000, expires_at) must match these EXACTLY or every public turn is refused - see gate_set.mjs.
+  $D service update --detach --host-rm "api.deepseek.com:10.77.0.123" --env-add PUBLIC_PILOT_BUDGET_CENTS=60 --env-add PUBLIC_PILOT_EXPIRES_AT=2026-10-19T05:25:00.000Z uplinkstg_uplink-app >/dev/null; wait_svc uplinkstg_uplink-app
   $D service update --detach --secret-add source=plstg_adapter_bearer_v1,target=adapter_bearer --secret-add source=plstg_tls_ca_v2,target=tls_ca \
     --env-add PL_ADAPTER_URL=https://adapter:9100 --env-add PL_ADAPTER_BEARER_FILE=/run/secrets/adapter_bearer --env-add NODE_EXTRA_CA_CERTS=/run/secrets/tls_ca uplinkstg_relay >/dev/null
   $D service inspect uplinkstg_uplink-app --format 'app hosts now: {{json .Spec.TaskTemplate.ContainerSpec.Hosts}}'
