@@ -39,16 +39,18 @@ function fakeDb() {
     if (s === RELEASE_SQL) { const i = g.findIndex((x) => x.id === p[0]); if (i >= 0) g.splice(i, 1); return { rows: [], rowCount: i >= 0 ? 1 : 0 } }
     if (s.startsWith('SELECT stage FROM pl_adapter_guidance')) { const r = g.find((x) => x.c === p[0] && x.h === p[1] && x.m === p[2] && x.e === p[3]); return { rows: r ? [{ stage: r.stage }] : [], rowCount: r ? 1 : 0 } }
     if (s.startsWith('SELECT 1 FROM pl_adapter_guidance') && s.includes("stage='proactive_first_call'")) { const r = g.find((x) => x.c === p[0] && x.h === p[1] && x.m === p[2] && x.stage === 'proactive_first_call'); return { rows: r ? [{}] : [], rowCount: r ? 1 : 0 } }
+    if (s.startsWith('SELECT count(*)::int AS n FROM pl_adapter_guidance') && s.includes("event='act:my_account'")) { return { rows: [{ n: g.filter((r) => r.h === p[0] && r.e === 'act:my_account' && r.stage === 'my_account_link').length }], rowCount: 1 } }
     if (s.startsWith('INSERT INTO pl_adapter_preference')) { pref.set(p[0], p[1]); return { rows: [], rowCount: 1 } }
     if (s.startsWith('SELECT proactive_stopped')) { return { rows: pref.has(p[0]) ? [{ proactive_stopped: pref.get(p[0]) }] : [], rowCount: pref.has(p[0]) ? 1 : 0 } }
     throw new Error('unexpected SQL: ' + s.slice(0, 80))
   } }
 }
 const WA = '17670000001'
-function world({ j = J.active, status = 'pending', messages = [], lastInboundAgoS = 60, contactSearch = null } = {}) {
+const LINK_URL = 'https://uplink.example.test/customer/pl-ws/wa-link?token=' + 'T'.repeat(43)
+function world({ j = J.active, status = 'pending', messages = [], lastInboundAgoS = 60, contactSearch = null, portal = null } = {}) {
   const posts = [], calls = [], nowS = Math.floor(Date.now() / 1000)
   const conv = { id: 77, inbox_id: 11, status, meta: { sender: { id: 5 } } }
-  const st = { j, status }
+  const st = { j, status, portal: portal ?? { code: 'portal_link', status: 'ok', data: { url: LINK_URL, expires_at: new Date(Date.now() + 600000).toISOString(), single_use: true } } }
   const f = async (url, init) => {
     const u = String(url)
     const ok = (body) => ({ ok: true, status: 200, json: async () => body })
@@ -59,6 +61,7 @@ function world({ j = J.active, status = 'pending', messages = [], lastInboundAgo
       if (ep === 'account/balance') return ok(st.j.has_line ? { code: 'balance', data: { known: true, kind: 'included', minutes_included: 60, minutes_remaining: st.j.facts.minutes_remaining, low: st.j.facts.low, expires_date_pretty: 'October 17, 2026', wallet_xcd: '0.00' } } : { code: 'no_account' })
       if (ep === 'account/recent-calls') return ok({ code: 'recent_calls', data: { known: true, calls: [{ dir: 'out', number_masked: '***2300', duration_s: 65, started_at: '2026-10-10T14:00:56Z' }] } })
       if (ep === 'flows/launch') return ok({ code: 'flow_sent', data: { existing_line: st.j.has_line } })
+      if (ep === 'account/portal-link') return ok(st.portal)
       return ok({ code: 'bad_response' })
     }
     if (u.startsWith('http://cw/')) {
@@ -304,4 +307,38 @@ const failing = (re) => (f) => async (url, init) => { if (re.test(String(url))) 
   const again = await post(a.body, a.sig); check('elig http: the SAME signed request replayed -> 409, no answer', again.status === 409)
   const bearerOnly = await fetch(`http://127.0.0.1:${port}/v1/eligibility`, { method: 'POST', headers: { authorization: 'Bearer b' }, body: a.body }); check('elig http: the bearer alone does not authenticate it -> 401', bearerOnly.status === 401)
   server.close() }
+// 11. rc13i (R1 slice S-c): the 'My account' menu button -> a one-time portal sign-in link, posted ONLY into the verified sender's own conversation.
+// Every refusal has a positive twin in the same run. The feature is dark unless cfg.myAccountLink is on (PL_MY_ACCOUNT_LINK=1).
+const on = (w) => { w.cfg.myAccountLink = true; return w }
+const urlPosts = (w) => w.posts.filter((p) => String(p.content).includes(LINK_URL))
+{ const w = world({ j: J.active }); const r = await w.h._runAction(who('menu-off'), 'menu'); check('rc13i OFF (default): line-holder menu is exactly rc13h - Manage my line / How it works / Talk to a person', same(postTitles(lastPost(w)), ['Manage my line', 'How it works', 'Talk to a person']), postTitles(lastPost(w)).join('/')) }
+{ const w = on(world({ j: J.active })); await w.h._runAction(who('menu-on'), 'menu'); check('rc13i ON: line-holder menu offers My account in place of How it works, still exactly 3 reply buttons', same(postTitles(lastPost(w)), ['Manage my line', 'My account', 'Talk to a person']), postTitles(lastPost(w)).join('/')) }
+{ const w = on(world({ j: J.no_line })); await w.h._runAction(who('menu-nl2'), 'menu'); check('rc13i ON: a customer with NO line never sees My account', same(postTitles(lastPost(w)), ['Get my number', 'How it works', 'Talk to a person'])) }
+check('rc13i: My account title <= 20 chars, value unique, tap resolves to my_account by readback', A.MENU_BTN.account.title.length <= 20 && A.MENU_VALUES.has('menu_account') && A.resolveTap([offered(80, [A.MENU_BTN.manage, A.MENU_BTN.account, A.BTN.human])], 81, 'My account')?.action === 'my_account')
+{ const w = world({ j: J.active }); const r = await w.h._runAction(who('acct-off'), 'my_account'); check('rc13i OFF: the action is refused (feature_disabled), nothing minted, nothing posted', !r.ok && r.result.code === 'feature_disabled' && w.posts.length === 0 && !w.calls.includes('account/portal-link')) }
+{ const w = on(world({ j: J.active })); const r = await w.h._runAction(who('acct-ok'), 'my_account')
+  check('rc13i: eligible verified sender -> exactly ONE message in conversation 77 carrying the link + My account / person buttons', r.ok && r.result.code === 'message_sent' && w.posts.length === 1 && urlPosts(w).length === 1 && same(postTitles(lastPost(w)), ['My account', 'Talk to a person']), JSON.stringify(r.result))
+  check('rc13i: the PL service was asked once, with NO body (identity is the assertion only: no typed phone/email/account id)', w.calls.filter((c) => c === 'account/portal-link').length === 1)
+  check('rc13i: the reply tells the truth about the link (once, ~10 minutes, do not forward) and names no number', /works once/.test(lastPost(w).content) && /10 minutes/.test(lastPost(w).content) && !/\+1 767|17670000001/.test(lastPost(w).content))
+  const again = await w.h._runAction(who('acct-ok'), 'my_account'); check('rc13i: the SAME customer message replayed -> not re-sent, not re-minted', again.ok && again.result.already === true && w.posts.length === 1 && w.calls.filter((c) => c === 'account/portal-link').length === 1)
+  const next = await w.h._runAction(who('acct-ok-2'), 'my_account'); check('rc13i: a later tap (new message) sends a fresh link (positive twin of the replay refusal)', next.ok && w.posts.length === 2) }
+{ const w = on(world({ j: J.active })); for (let i = 0; i < 3; i++) await w.h._runAction(who(`acct-r${i}`), 'my_account')
+  const r = await w.h._runAction(who('acct-r3'), 'my_account'); check('rc13i: more than 3 links in 10 minutes -> honest rate-limit message, no 4th mint', r.ok && w.calls.filter((c) => c === 'account/portal-link').length === 3 && /moment ago/.test(lastPost(w).content) && urlPosts(w).length === 3) }
+{ const w = on(world({ j: J.active, status: 'open' })); const r = await w.h._runAction(who('acct-human'), 'my_account'); check('rc13i: a person owns the conversation (open) -> nothing minted, nothing posted', !r.ok && r.result.code === 'not_eligible' && r.result.reason === 'human_owned' && w.posts.length === 0 && !w.calls.includes('account/portal-link')) }
+{ const w = on(world({ j: J.active })); await w.h._setPreference(who('acct-stop-pref'), true); const before = w.posts.length; const r = await w.h._runAction(who('acct-stop'), 'my_account'); check('rc13i: customer sent STOP -> nothing minted, nothing posted (twin: START re-enables)', !r.ok && r.result.reason === 'stopped' && w.posts.length === before && !w.calls.includes('account/portal-link'))
+  await w.h._setPreference(who('acct-start-pref'), false); const r2 = await w.h._runAction(who('acct-start'), 'my_account'); check('rc13i: after START the same action sends the link', r2.ok && urlPosts(w).length === 1) }
+{ const w = on(world({ j: { ...J.active, consent: { estate_suppressed: true, known: true } } })); const r = await w.h._runAction(who('acct-estate'), 'my_account'); check('rc13i: estate STOP (Meta STOP / doNotContact) -> nothing minted', !r.ok && r.result.reason === 'stopped' && !w.calls.includes('account/portal-link') && w.posts.length === 0) }
+{ const w = on(world({ j: { ...J.active, consent: { estate_suppressed: false, known: false } } })); const r = await w.h._runAction(who('acct-consent'), 'my_account'); check('rc13i: consent unreadable -> fail closed, nothing minted', !r.ok && r.result.reason === 'consent_unknown' && !w.calls.includes('account/portal-link')) }
+{ const w = on(world({ j: J.active, lastInboundAgoS: 25 * 3600 })); const r = await w.h._runAction(who('acct-window'), 'my_account'); check('rc13i: 24 h window closed -> nothing minted, nothing posted', !r.ok && r.result.reason === 'window_closed' && !w.calls.includes('account/portal-link') && w.posts.length === 0) }
+{ const w = on(world({ j: J.active })); const bad = (f) => async (url, init) => { if (/\/conversations\/77\/messages$/.test(String(url)) && !init?.method) throw new Error('down'); return f(url, init) }
+  w.h = A.makeHandlers(w.cfg, w.db, {}, bad(w.f)); const r = await w.h._runAction(who('acct-cwdown'), 'my_account'); check('rc13i: Chatwoot messages unreadable -> window_unknown, nothing minted (fail closed)', !r.ok && !w.calls.includes('account/portal-link')) }
+{ const w = on(world({ j: J.no_line })); const r = await w.h._runAction(who('acct-noline'), 'my_account'); check('rc13i: no line -> the no-line menu, never an account link or error', r.ok && !w.calls.includes('account/portal-link') && same(postTitles(lastPost(w)), EXPECT.no_line)) }
+{ for (const [label, portal] of [['portal_link_unavailable', { code: 'portal_link_unavailable', status: 'error', data: {} }], ['rate_limited by the PL service', { code: 'rate_limited', status: 'rate_limited', data: { retry_after_s: 600 } }], ['bad_response', { code: 'bad_response' }], ['malformed url (http, not https)', { code: 'portal_link', data: { url: 'http://uplink.example.test/customer/pl-ws/wa-link?token=x', expires_at: new Date(Date.now() + 600000).toISOString() } }], ['missing url', { code: 'portal_link', data: {} }]]) {
+    const w = on(world({ j: J.active, portal })); const r = await w.h._runAction(who('acct-' + label.replace(/\W/g, '')), 'my_account')
+    check(`rc13i fail closed: PL service ${label} -> one honest message, no link, no "on its way"`, r.ok && w.posts.length === 1 && !/https?:\/\//.test(lastPost(w).content) && !/on its way|coming|shortly sent/i.test(lastPost(w).content) && /(can't open your account page|moment ago)/.test(lastPost(w).content)) } }
+{ const w = on(world({ j: J.active })); const bad = (f) => async (url, init) => { if (/\/conversations\/77\/messages$/.test(String(url)) && init?.method === 'POST') return { ok: false, status: 500, json: async () => ({}) }; return f(url, init) }
+  w.h = A.makeHandlers(w.cfg, w.db, {}, bad(w.f)); const r = await w.h._runAction(who('acct-sendfail'), 'my_account'); check('rc13i: Chatwoot send fails after the mint -> refusal, claim released (the tap can be retried), nothing recorded as sent', !r.ok && w.db.g.length === 0) }
+{ // over the real HTTP server: the tap is deterministic (menu values are always deterministic, even with PL_DETERMINISTIC_TAPS=0)
+  const w = on(world({ j: J.active, messages: [{ id: 100, message_type: 0, private: false, sender_type: 'Contact', source_id: 'wamid.ABCDEFGHIJKL', content: 'My account', created_at: Math.floor(Date.now() / 1000) - 30 }, offered(90, [A.MENU_BTN.manage, A.MENU_BTN.account, A.BTN.human])] }))
+  check('rc13i: the tap resolves by readback of what WE offered (a customer typing "My account" with no offered button is not a tap)', A.resolveTap(w.cfg && [offered(90, [A.MENU_BTN.manage, A.MENU_BTN.account, A.BTN.human])], 91, 'My account')?.action === 'my_account' && A.resolveTap([], 91, 'My account') === null) }
 console.log(`${n - fails}/${n} ` + (fails ? 'FAILED' : 'ALL PASSED')); setTimeout(() => process.exit(fails ? 1 : 0), 50)

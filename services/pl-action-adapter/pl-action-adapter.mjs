@@ -41,6 +41,9 @@ export function loadConfig(env = process.env) {
     // rc13d (owner 2026-10-11: 'give the agent the facts and let it loose'): PL_DETERMINISTIC_TAPS=0 sends button taps to the AGENT as
     // ordinary messages (it answers with full context); only STOP/START stay deterministic. Default 1 keeps the rc12 behaviour.
     deterministicTaps: env.PL_DETERMINISTIC_TAPS !== '0',
+    // rc13i (R1 slice S-c): the 'My account' menu button posts a one-time portal sign-in link. Default OFF: with PL_MY_ACCOUNT_LINK unset the menu and
+    // every action are byte-for-byte rc13h behaviour. The PL service has its own switch (PL_SF_PORTAL_LINK_ENABLED); both must be on.
+    myAccountLink: env.PL_MY_ACCOUNT_LINK === '1',
     offerTtlS: Number(env.OFFER_TTL_S || 900), provisionPollMs: Number(env.PROVISION_POLL_MS || 13000), provisionAckMs: Number(env.PROVISION_ACK_MS || 2500), ctxSkewS: Number(env.CTX_SKEW_S || 60), timeoutMs: Number(env.UPSTREAM_TIMEOUT_MS || 15000),
     dbUrl: readSecret(need('DB_URL_FILE')),
     tlsKey: env.TLS_KEY_FILE ? fs.readFileSync(env.TLS_KEY_FILE) : null, tlsCert: env.TLS_CERT_FILE ? fs.readFileSync(env.TLS_CERT_FILE) : null,
@@ -185,18 +188,19 @@ export const MENU_BTN = {
   signup: { title: 'Get my number', value: 'menu_signup' },
   manage: { title: 'Manage my line', value: 'menu_manage' },
   how: { title: 'How it works', value: 'menu_how' },
+  account: { title: 'My account', value: 'menu_account' },   // rc13i: only ever OFFERED when cfg.myAccountLink is on
 }
 export const MENU_VALUES = new Set(Object.values(MENU_BTN).map((b) => b.value))
 export const MENU_RE = /^\s*(menu|main menu|options)\s*[.!?]?\s*$/i
 /** The menu for the customer's CURRENT state: one Flow entry (signup or manage), how it works, and a person - always 3 reply buttons. */
-export function composeMenu(j) {
+export function composeMenu(j, opts = {}) {
   const hasLine = j?.has_line === true
   return {
     stage: hasLine ? 'menu_line_holder' : 'menu_no_line',
     text: hasLine
       ? `Here's what I can do for you. Tap *Manage my line* to see your line, check your setup or continue where you left off.`
       : `Here's what I can do for you. Tap *Get my number* to start your free trial in a short form here in WhatsApp.`,
-    choices: [hasLine ? MENU_BTN.manage : MENU_BTN.signup, MENU_BTN.how, BTN.human],
+    choices: [hasLine ? MENU_BTN.manage : MENU_BTN.signup, hasLine && opts.myAccount === true ? MENU_BTN.account : MENU_BTN.how, BTN.human],
   }
 }
 export function composeGuidance(code, data) {
@@ -297,6 +301,11 @@ export function composeBalance(d, choices = [BTN.human]) {
   return { stage: known ? (d.low ? 'balance_low' : 'balance') : 'balance_unknown',
     text: `Your balance:\n• Included minutes: ${minutes}\n• Plan: ${plan}\n• Wallet credit: ${wallet}${low}`, choices: ch }
 }
+// rc13i: the account-link message. The URL is single use and short lived (the fork enforces both); the wording says only what is true of it.
+export function composeAccountLink(url, expiresAt) {
+  const mins = Math.max(1, Math.round((Date.parse(expiresAt) - Date.now()) / 60000))
+  return { stage: 'my_account_link', text: `\u{1F510} *Your account* - tap the link below to see your line, minutes, plan and wallet credit. It works once, for about ${Number.isFinite(mins) ? Math.min(mins, 10) : 10} minutes. Please don't forward it.\n\n${url}\n\nNeed a new one? Tap *My account* again.`, choices: [MENU_BTN.account, BTN.human] }
+}
 // Recent calls (new customer surface over the existing Magnus CDR read). Numbers arrive already masked; times are shown in Dominica time.
 export function composeCalls(d, choices = [BTN.human]) {
   if (!d || d.known !== true) return { stage: 'calls_unknown', text: `I can't read your call history right now. Please try again in a little while, or tap *Talk to a person* and someone will check it for you.`, choices: [BTN.human] }
@@ -337,7 +346,7 @@ export const VALUE_TO_ACTION = {
   ...Object.fromEntries(Object.entries(ACT).filter(([k]) => k !== 'human').map(([k, v]) => [v.value, k])),
   check_balance: 'balance', recent_calls: 'recent_calls', check_connection: 'check_connection', greet_start: 'get_number',
   installed_softphone: 'continue_setup', resend_link: 'continue_setup', greet_how: 'how_it_works',
-  menu_signup: 'menu_flow', menu_manage: 'menu_flow', menu_how: 'how_it_works',
+  menu_signup: 'menu_flow', menu_manage: 'menu_flow', menu_how: 'how_it_works', menu_account: 'my_account',
 }
 /** Buttons for a state: its actions minus the one just performed, a person always reachable, at most 3 (reply buttons, no list needed). */
 export function choicesFor(actions, done = null) {
@@ -551,7 +560,7 @@ export function makeHandlers(cfg, db, stats, f = fetch) {
     const o = await pl(cfg, stats, 'offer', who, {}, {}, f)
     return o.code === 'offer' ? o.data : null
   }
-  const NEEDS_LINE = new Set(['balance', 'recent_calls', 'check_connection', 'troubleshoot', 'how_to_call', 'calling_help', 'call_dominica', 'call_uscan', 'call_failed'])
+  const NEEDS_LINE = new Set(['my_account', 'balance', 'recent_calls', 'check_connection', 'troubleshoot', 'how_to_call', 'calling_help', 'call_dominica', 'call_uscan', 'call_failed'])
   const SETUP_DONE = new Set(['registered_no_call', 'active', 'attention'])
   /** One deterministic action for the verified sender, chosen and worded from the CURRENT journey. Never a model turn. */
   async function runAction(who, action) {
@@ -613,7 +622,28 @@ export function makeHandlers(cfg, db, stats, f = fetch) {
         return say(composeCalls(r.data, choicesFor(j.actions, 'recent_calls')))
       }
       case 'flow_done': return deliverOwn(who, 'flow_done', async () => { const g = composeFlowDone(j); return g ? { g, extra: { state: j.state } } : { refusal: refuse('nothing_to_say') } })
-      case 'menu': return say(composeMenu(j))
+      case 'menu': return say(composeMenu(j, { myAccount: cfg.myAccountLink === true }))
+      case 'my_account': {
+        // rc13i (R1 S-c). The link goes ONLY to the verified sender's own WhatsApp conversation, through the same gates as /v1/eligibility
+        // (Chatwoot ownership, STOP, the 23.5 h window, estate consent) checked BEFORE anything is minted; any unreadable source = nothing is
+        // asked of the PL service and the customer is told, honestly, that it is not available. One link per tap (the guidance claim is unique per
+        // customer message), at most 3 per 10 minutes here (the PL service and the fork each enforce their own limits too).
+        if (cfg.myAccountLink !== true) return refuse('feature_disabled')
+        const h = waHash(cfg, who.waId)
+        const recent = await db.query(`SELECT count(*)::int AS n FROM pl_adapter_guidance WHERE wa_hash=$1 AND event='act:my_account' AND stage='my_account_link' AND created_at > now() - interval '10 minutes'`, [h]).then((r) => Number(r.rows[0]?.n ?? 0)).catch(() => null)
+        if (recent === null) return refuse('service_unavailable')
+        if (recent >= 3) return say({ stage: 'my_account_rate_limited', text: `I sent you your account link a moment ago - please use the most recent one in this chat. If it doesn't open, wait a few minutes and tap *My account* again, or tap *Talk to a person*.`, choices: [BTN.human] })
+        const el = await handleEligibility(cfg, db, stats, { wa_id: who.waId, nonce: crypto.randomBytes(16).toString('base64url'), ref: 'myacct' }, f).catch(() => ({ eligible: false, reason: 'unavailable' }))
+        if (el.eligible !== true || String(el.conversation_id) !== String(who.conversationId)) return refuse('not_eligible', { reason: el.reason ?? 'unavailable' })
+        return deliverOwn(who, 'act:my_account', async () => {
+          const r = await pl(cfg, stats, 'account/portal-link', who, {}, {}, f)
+          if (r.code === 'portal_link' && typeof r.data?.url === 'string' && /^https:\/\/[^\s]+$/.test(r.data.url) && typeof r.data.expires_at === 'string') return { g: composeAccountLink(r.data.url, r.data.expires_at), extra: { link_sent: true } }
+          if (r.code === 'no_account') return { g: composeJourney(j) }
+          if (r.code === 'rate_limited') return { g: { stage: 'my_account_rate_limited', text: `I sent you your account link a moment ago - please use the most recent one in this chat. If it doesn't open, wait a few minutes and tap *My account* again, or tap *Talk to a person*.`, choices: [BTN.human] } }
+          // Fail closed and say so: never a guessed link, never silence, never "it's on its way".
+          return { g: { stage: 'my_account_unavailable', text: `I can't open your account page right now. Please try again in a little while, or tap *Talk to a person* and someone will help.`, choices: [MENU_BTN.account, BTN.human] } }
+        })
+      }
       case 'menu_flow': {
         // rc13f: the menu's Flow entry always sends the existing published Flow (signup for a new customer; the same Flow opens as
         // "Manage your line" with the customer's own line and live status for a line holder - it creates nothing). A tap sends the Flow
