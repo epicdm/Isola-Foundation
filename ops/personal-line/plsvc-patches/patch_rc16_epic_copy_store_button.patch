@@ -1,8 +1,74 @@
+diff --git a/app/lib/pl-concierge/eligibility.ts b/app/lib/pl-concierge/eligibility.ts
+new file mode 100644
+index 00000000..4f8d34f3
+--- /dev/null
++++ b/app/lib/pl-concierge/eligibility.ts
+@@ -0,0 +1,52 @@
++/**
++ * pl-concierge/eligibility.ts - ask the PL action adapter whether a customer-facing WhatsApp message may be put in front of a
++ * verified wa_id RIGHT NOW (rc16g; owner decision 2026-10-11 "route via adapter first").
++ *
++ * Why the adapter: it sits next to Chatwoot and owns the three facts this service cannot read - whether a person holds the
++ * conversation (status pending vs open), the adapter's own STOP preference, and the customer's real last inbound message (the 24 h
++ * service window). It answers {eligible, reason} and sends NOTHING. Same signing pattern as proactive.ts: the PL concierge key both
++ * services already hold, an HMAC under its OWN purpose label ('pl-eligibility-v1'), iat +-120 s and a single-use nonce - no new
++ * credential. The conversation is NOT supplied by us: the adapter finds it from the exact numeric wa_id (never trusting a caller's
++ * conversation id); `ref` (the Flow token's `cw` rid) is correlation only.
++ *
++ * FAIL CLOSED: not configured, timeout, transport error, non-200, malformed answer, an unknown reason - all are `eligible:false`.
++ * There is NO retry (a retry would be a new request with a new nonce, and the caller's Flow answer must not wait on it). Never throws.
++ */
++import { createHmac, randomBytes } from 'crypto'
++import { readConfig } from '@/app/lib/pl-concierge/config'
++
++export const ELIGIBILITY_PURPOSE = 'pl-eligibility-v1'
++export const ELIGIBILITY_TIMEOUT_MS = 1500
++export type EligibilityReason = 'ok' | 'human_owned' | 'stopped' | 'window_closed' | 'window_unknown' | 'consent_unknown' | 'no_conversation' | 'unavailable' | 'not_configured' | 'adapter_error'
++export interface EligibilityResult { eligible: boolean; reason: EligibilityReason; detail?: string; conversationId?: string }
++
++const KNOWN: EligibilityReason[] = ['ok', 'human_owned', 'stopped', 'window_closed', 'window_unknown', 'consent_unknown', 'no_conversation', 'unavailable']
++
++export function signEligibility(key: string, body: string): string {
++  return createHmac('sha256', Buffer.from(key, 'utf8')).update(`${ELIGIBILITY_PURPOSE}.${body}`, 'utf8').digest('base64url')
++}
++
++export async function askAdapterEligibility(args: { waId: string; ref?: string }, env: NodeJS.ProcessEnv = process.env, f: typeof fetch = fetch, timeoutMs = ELIGIBILITY_TIMEOUT_MS): Promise<EligibilityResult> {
++  const base = (env.PL_ADAPTER_URL ?? '').replace(/\/+$/, '')
++  const cfg = readConfig(env)
++  const kid = cfg.currentKid
++  if (!base || !kid || !cfg.keys[kid]) return { eligible: false, reason: 'not_configured', detail: !base ? 'PL_ADAPTER_URL' : 'pl_key' }
++  const waId = String(args.waId).replace(/\D/g, '')
++  if (!/^[1-9][0-9]{6,15}$/.test(waId)) return { eligible: false, reason: 'adapter_error', detail: 'bad_wa_id' }
++  const ref = typeof args.ref === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(args.ref) ? args.ref : undefined
++  const body = JSON.stringify({ kid, wa_id: waId, ...(ref ? { ref } : {}), iat: Math.floor(Date.now() / 1000), nonce: randomBytes(16).toString('base64url') })
++  try {
++    const r = await f(`${base}/v1/eligibility`, {
++      method: 'POST', headers: { 'content-type': 'application/json', 'x-pl-eligibility-signature': signEligibility(cfg.keys[kid], body) },
++      body, signal: AbortSignal.timeout(timeoutMs),
++    })
++    const j: any = await r.json().catch(() => null)
++    if (!r.ok || typeof j?.eligible !== 'boolean' || typeof j?.reason !== 'string') return { eligible: false, reason: 'adapter_error', detail: `http_${r.status}` }
++    const reason = (KNOWN as string[]).includes(j.reason) ? (j.reason as EligibilityReason) : 'adapter_error'
++    // eligible only when the adapter says so AND says it plainly: {eligible:true} with any other reason is not trusted.
++    const eligible = j.eligible === true && reason === 'ok'
++    return { eligible, reason: eligible ? 'ok' : reason === 'ok' ? 'adapter_error' : reason, detail: typeof j.detail === 'string' ? j.detail.slice(0, 80) : undefined, conversationId: typeof j.conversation_id === 'string' ? j.conversation_id.slice(0, 20) : undefined }
++  } catch (e: any) {
++    return { eligible: false, reason: 'unavailable', detail: `transport:${String(e?.name ?? 'error').slice(0, 40)}` }
++  }
++}
 diff --git a/app/lib/pl-concierge/service.ts b/app/lib/pl-concierge/service.ts
-index 2382f973..1eebffd7 100644
+index 2382f973..b900e8da 100644
 --- a/app/lib/pl-concierge/service.ts
 +++ b/app/lib/pl-concierge/service.ts
-@@ -600,8 +600,8 @@ async function flowLaunch(ctx: Ctx): Promise<Outcome> {
+@@ -36,6 +36,7 @@ import { RATIFIED_LADDER, LADDER_KEYS } from '@/app/lib/pl-concierge/ladder'
+ import { verifyAssertion, CONFIRM_SIGNUP_ACT, type AssertionPayload, type AssertionFailure } from '@/app/lib/pl-concierge/assertion'
+ import { envelope, type PlCode } from '@/app/lib/pl-concierge/http-map'
+ import { decideSource } from '@/app/lib/pl-concierge/source-gate'
++import { askAdapterEligibility } from '@/app/lib/pl-concierge/eligibility'
+ import { readConfig, auditHashKey, serviceEnabled, provisionEnabled, provisionLockEnabled, refuseNumberedAct, limit } from '@/app/lib/pl-concierge/config'
+ import * as store from '@/app/lib/pl-concierge/store'
+ 
+@@ -600,8 +601,8 @@ async function flowLaunch(ctx: Ctx): Promise<Outcome> {
    const token = mintFlowToken({ purpose: 'signup', waId: ctx.a.wa_id, rid: ctx.a.rid })
    // rc12: a line holder gets 'Manage your line' (never signup copy); the Flow opens on their CURRENT step.
    const body = existing
@@ -13,7 +79,7 @@ index 2382f973..1eebffd7 100644
    let decision: any
    try { decision = await sendPlSignupFlow(ctx.a.wa_id, token, body, { senderPath: 'pl:flows/launch', userId: existing?.userId, sourceEventType: 'pl_verified_inbound', sourceEventId: ctx.a.mid }, existing ? { header: 'Manage your line', cta: 'Manage my line' } : undefined) } catch (e: any) { return { code: 'flow_unavailable', op: 'flows/launch', detail: String(e?.message ?? e).slice(0, 120) } }
    if (!String(decision?.code ?? '').startsWith('allow_') || decision?.dispatchFailed) return { code: 'flow_unavailable', op: 'flows/launch', detail: `${decision?.code ?? 'no_decision'}${decision?.dispatchFailed ? ':dispatch_failed' : ''}` }
-@@ -629,6 +629,85 @@ export async function nextStepForFlow(args: { waId: string; rid: string; mid: st
+@@ -629,6 +630,98 @@ export async function nextStepForFlow(args: { waId: string; rid: string; mid: st
    return o
  }
  
@@ -31,9 +97,13 @@ index 2382f973..1eebffd7 100644
 +// open, no STOP; (2) DE-DUPLICATION - no claim in the last 24 h. Passing one never bypasses the other. Eligibility is checked BEFORE the
 +// claim, so a refusal for window/STOP/proof never consumes the once-per-24h allowance; every refusal is audited under its own code
 +// (store_button_window_closed / _window_unknown / _stopped / _proof_stale / _deduped / store_button_failed) so they are distinguishable.
-+// NOT ENFORCED HERE: human ownership of the Chatwoot conversation and the adapter's own STOP preference - they live in the PL adapter,
-+// which this service cannot read; see Port ev-lane-a-plsvc-rc16e-gate-review-and-staging-2026-10-11 (decision for the owner/PM).
-+export type StoreButtonCode = 'store_button_sent' | 'store_button_deduped' | 'store_button_window_closed' | 'store_button_window_unknown' | 'store_button_stopped' | 'store_button_proof_stale' | 'store_button_failed' | 'service_disabled' | 'invalid_body'
++// rc16g (owner decision 2026-10-11, "route via adapter first"): human ownership of the Chatwoot conversation, the adapter's own STOP
++// preference, consent and the REAL 24 h window (Chatwoot's last incoming message) live in the PL adapter, which sits next to Chatwoot.
++// After the local checks above and BEFORE the claim, this service asks the adapter (eligibility.ts, POST /v1/eligibility, signed) and
++// sends only on eligible=true. Any other answer - human_owned / stopped / window_closed, or anything that cannot be established
++// (window_unknown, consent_unknown, no_conversation, unavailable, timeout, not configured) - refuses under its own audit code and does
++// NOT spend the claim. The local checks stay as defence in depth; the adapter answer can only remove eligibility, never add it.
++export type StoreButtonCode = 'store_button_sent' | 'store_button_deduped' | 'store_button_window_closed' | 'store_button_window_unknown' | 'store_button_stopped' | 'store_button_human_owned' | 'store_button_eligibility_unavailable' | 'store_button_proof_stale' | 'store_button_failed' | 'service_disabled' | 'invalid_body'
 +export interface StoreButtonResult { code: StoreButtonCode; detail?: string }
 +export async function storeButtonForFlow(args: { waId: string; rid: string; flowNonce: string; iat: number; os: 'ios' | 'android'; url: string }): Promise<StoreButtonResult> {
 +  const t0 = Date.now()
@@ -71,6 +141,15 @@ index 2382f973..1eebffd7 100644
 +    if (dnc || revoked) return await refuse('store_button_stopped', 'estate_suppressed')
 +  } catch (e: any) {
 +    return await refuse('store_button_failed', `eligibility_unreadable:${String(e?.name ?? 'error').slice(0, 40)}`)   // unreadable -> fail closed
++  }
++  // (1d) the authoritative adapter consult (ownership, adapter STOP, real window, consent), fail closed, short timeout, no retry.
++  const el = await askAdapterEligibility({ waId: args.waId, ref: args.rid })
++  if (!el.eligible) {
++    const detail = `adapter:${el.reason}${el.detail ? `:${el.detail}` : ''}`
++    if (el.reason === 'human_owned') return await refuse('store_button_human_owned', detail)
++    if (el.reason === 'stopped') return await refuse('store_button_stopped', detail)
++    if (el.reason === 'window_closed') return await refuse('store_button_window_closed', detail)
++    return await refuse('store_button_eligibility_unavailable', detail)   // window_unknown / consent_unknown / no_conversation / unavailable / not_configured / adapter_error
 +  }
 +  // (2) de-duplication: atomic claim. Only reached when every eligibility condition holds.
 +  const claimId = await store.claimOncePerWindow({
@@ -222,10 +301,10 @@ index 21e6c632..a54fd6ae 100644
      return stepScreen(claims, 'installed', '', 'install')
    }
 diff --git a/app/lib/pl-concierge/store.ts b/app/lib/pl-concierge/store.ts
-index 35153911..280f313e 100644
+index 35153911..2d9d1bb2 100644
 --- a/app/lib/pl-concierge/store.ts
 +++ b/app/lib/pl-concierge/store.ts
-@@ -78,6 +78,54 @@ export async function provisionByMid(waIdHash: string, mid: string): Promise<{ c
+@@ -78,6 +78,56 @@ export async function provisionByMid(waIdHash: string, mid: string): Promise<{ c
    return rows[0] ? { code: rows[0].code, outcome: rows[0].outcome, detail: rows[0].detail, createdAt: new Date(rows[0].created_at) } : null
  }
  
@@ -259,13 +338,15 @@ index 35153911..280f313e 100644
 + * rc16e: the newest time a RELAY-VERIFIED customer message reached this service for this sender. Every request that passes
 + * verifyAssertion (120 s freshness) is made by the relay in response to a customer's inbound message, and a handled one is written
 + * with http_status 200 and the relay's kid; Flow-session rows (kid 'flow', incl. store-button claims/refusals) and refused assertions
-+ * (non-200) are excluded. null = none on record (the caller treats that as unknown -> fail closed). A proxy for the customer's last
++ * (non-200) are excluded, and so are the adapter's own send-eligibility reads (rid 'elig-<conv>', rc16g): the adapter consulting this service
++ * to answer /v1/eligibility is NOT a customer message and must not refresh this proxy. null = none on record (the caller treats that as unknown -> fail closed). A proxy for the customer's last
 + * inbound (the authoritative store is the adapter/Chatwoot, which this service cannot read).
 + */
 +export async function lastVerifiedInboundAt(waIdHash: string): Promise<Date | null> {
 +  const rows = await prisma.$queryRaw<Array<{ t: Date | null }>>`
 +    SELECT max("created_at") AS t FROM "pl_concierge_audit"
-+    WHERE "wa_id_hash" = ${waIdHash} AND "kid" IS NOT NULL AND "kid" <> 'flow' AND "http_status" = 200`
++    WHERE "wa_id_hash" = ${waIdHash} AND "kid" IS NOT NULL AND "kid" <> 'flow' AND "http_status" = 200
++      AND ("rid" IS NULL OR "rid" NOT LIKE 'elig-%')`
 +  return rows[0]?.t ? new Date(rows[0].t) : null
 +}
 +
@@ -573,10 +654,10 @@ index 00000000..2f6e85df
 +})
 diff --git a/test/pl-store-button-claim.realpg.test.ts b/test/pl-store-button-claim.realpg.test.ts
 new file mode 100644
-index 00000000..219271f6
+index 00000000..4cf34f00
 --- /dev/null
 +++ b/test/pl-store-button-claim.realpg.test.ts
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,83 @@
 +/**
 + * rc16: store.claimOncePerWindow against a REAL Postgres through the REAL Prisma client (+ @prisma/adapter-pg): the advisory lock,
 + * the count and the insert happen in one interactive transaction, so concurrent claimers (Flow re-taps, Meta endpoint retries) get
@@ -600,7 +681,7 @@ index 00000000..219271f6
 +vi.unmock('@/app/lib/prisma')
 +
 +import { prisma } from '../app/lib/prisma'
-+import { claimOncePerWindow, finishClaim } from '../app/lib/pl-concierge/store'
++import { claimOncePerWindow, finishClaim, writeAudit, lastVerifiedInboundAt } from '../app/lib/pl-concierge/store'
 +
 +const run = Date.now().toString(36)
 +const base = { endpoint: 'flows/store-button', windowS: 86400, claimCode: 'store_button_claimed', countCodes: ['store_button_claimed', 'store_button_sent'] }
@@ -646,13 +727,26 @@ index 00000000..219271f6
 +    await prisma.$executeRawUnsafe(`UPDATE "pl_concierge_audit" SET "created_at" = NOW() - INTERVAL '25 hours' WHERE "id" = $1`, id)
 +    expect(await claimOncePerWindow({ ...base, op: 'ios', waIdHash: h })).toBeTruthy()
 +  })
++  it('rc16g: lastVerifiedInboundAt ignores the adapter send-eligibility reads (rid elig-*) and Flow rows; a relay row (rid cw-*) counts', async () => {
++    const h = `h_inb_${run}`
++    const row = (rid: string, kid: string) => writeAudit({ endpoint: 'account/journey', httpStatus: 200, code: 'journey', kid, rid, waIdHash: h, waLast4: '0000' })
++    const age = (id: string, hours: number) => prisma.$executeRawUnsafe(`UPDATE "pl_concierge_audit" SET "created_at" = NOW() - ($2 || ' hours')::interval WHERE "id" = $1`, id, String(hours))
++    expect(await lastVerifiedInboundAt(h)).toBeNull()
++    await row('elig-77', 'k1'); await row('cw-flow', 'flow')
++    expect(await lastVerifiedInboundAt(h)).toBeNull()                                  // only eligibility reads + a Flow row on record -> unknown
++    const relay = await row('cw-77', 'k1'); await age(relay, 30)
++    const t = await lastVerifiedInboundAt(h)                                           // the fresh elig row does NOT mask the old real inbound
++    expect(t).not.toBeNull(); expect(Date.now() - t!.getTime()).toBeGreaterThan(29 * 3600 * 1000)
++    await row('cw-78', 'k1')                                                           // CONTROL: a fresh relay row is seen
++    expect(Date.now() - (await lastVerifiedInboundAt(h))!.getTime()).toBeLessThan(60_000)
++  })
 +})
 diff --git a/test/pl-store-button-dedupe.test.ts b/test/pl-store-button-dedupe.test.ts
 new file mode 100644
-index 00000000..6d4de9b6
+index 00000000..4f1f6237
 --- /dev/null
 +++ b/test/pl-store-button-dedupe.test.ts
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,304 @@
 +/**
 + * rc16: storeButtonForFlow - at most ONE store-button message per verified sender per OS per 24 h.
 + * The store's claim is faked here with the SAME semantics as store.claimOncePerWindow (rows keyed by endpoint + op + waIdHash,
@@ -661,7 +755,7 @@ index 00000000..6d4de9b6
 + */
 +import { describe, it, expect, vi, beforeEach } from 'vitest'
 +
-+const S = vi.hoisted(() => ({ rows: [] as any[], audits: [] as any[], clock: Date.now(), sends: [] as any[], sendImpl: null as null | ((...a: any[]) => Promise<any>), bindings: {} as Record<string, string>, lastIn: 'now' as 'now' | 'unknown' | 'throw' | Date, stopped: false as boolean, estateThrows: false as boolean }))
++const S = vi.hoisted(() => ({ adapter: { status: 200, body: { eligible: true, reason: 'ok' } } as any, adapterCalls: [] as any[],  rows: [] as any[], audits: [] as any[], clock: Date.now(), sends: [] as any[], sendImpl: null as null | ((...a: any[]) => Promise<any>), bindings: {} as Record<string, string>, lastIn: 'now' as 'now' | 'unknown' | 'throw' | Date, stopped: false as boolean, estateThrows: false as boolean }))
 +
 +vi.mock('@/app/lib/runtime-flags', () => ({ getRuntimeFlag: () => false, getRuntimeNumber: (_k: string, d: number) => d, getRuntimeList: (_k: string, d: string[]) => d }))
 +vi.mock('@/app/lib/prisma', () => ({
@@ -716,6 +810,15 @@ index 00000000..6d4de9b6
 +const tap = (wa: string, os: 'ios' | 'android', n = 'n1', iat = Math.floor(Date.now() / 1000)) => storeButtonForFlow({ waId: wa, rid: 'rid1', flowNonce: n, iat, os, url: os === 'ios' ? IOS : AND })
 +
 +beforeEach(() => {
++  S.adapter = { status: 200, body: { eligible: true, reason: 'ok' } }; S.adapterCalls = []
++  process.env.PL_ADAPTER_URL = 'http://adapter.test'
++  vi.stubGlobal('fetch', async (url: any, init: any) => {
++    S.adapterCalls.push({ url: String(url), init })
++    if (S.adapter === 'throw') throw new Error('ECONNREFUSED')
++    if (S.adapter === 'hang') return new Promise((_res, rej) => init.signal.addEventListener('abort', () => rej(Object.assign(new Error('timed out'), { name: 'TimeoutError' }))))
++    const a = S.adapter
++    return { ok: a.status >= 200 && a.status < 300, status: a.status, json: async () => { if (a.body === null) throw new Error('not json'); return a.body } }
++  })
 +  S.rows = []; S.audits = []; S.sends = []; S.sendImpl = null; S.clock = Date.now(); S.lastIn = 'now'; S.stopped = false; S.estateThrows = false
 +  S.bindings = { [A]: 'userA', [B]: 'userB' }
 +  process.env.PL_ASSERTION_KID = 'k1'
@@ -841,6 +944,111 @@ index 00000000..6d4de9b6
 +    expect((await tap(A, 'ios', 'n1', Math.floor(Date.now() / 1000) + 600)).code).toBe('store_button_proof_stale')
 +    expect((await tap(A, 'ios', 'n2', 0)).code).toBe('store_button_proof_stale')
 +    expect((await tap(A, 'ios', 'n3', Math.floor(Date.now() / 1000) - 59 * 60)).code).toBe('store_button_sent')
++  })
++})
++
++/**
++ * rc16g: the PL ADAPTER is the authority for human ownership, adapter STOP and the real 24 h window (owner decision 2026-10-11).
++ * The adapter is a fake behind a stubbed global fetch (the REAL eligibility.ts client runs: signing, timeout, fail-closed mapping).
++ * Every refusal has a positive twin in the same harness; a refusal never spends the claim; each has its own audit code.
++ */
++import { createHmac } from 'crypto'
++const adapterSays = (eligible: boolean, reason: string, extra: any = {}) => { S.adapter = { status: 200, body: { eligible, reason, ...extra } } }
++describe('rc16g adapter eligibility is consulted before the claim and fails closed', () => {
++  it('eligible=true -> exactly one send; the request is signed under its own purpose with a single-use nonce and names only the wa_id (+ correlation ref)', async () => {
++    WINDOW_OK(); const r = await tap(A, 'ios')
++    expect(r.code).toBe('store_button_sent'); expect(S.sends).toHaveLength(1); expect(S.adapterCalls).toHaveLength(1)
++    const c = S.adapterCalls[0]
++    expect(c.url).toBe('http://adapter.test/v1/eligibility')
++    const body = c.init.body as string, sig = c.init.headers['x-pl-eligibility-signature']
++    const expected = createHmac('sha256', Buffer.from('k'.repeat(48), 'utf8')).update(`pl-eligibility-v1.${body}`, 'utf8').digest('base64url')
++    expect(sig).toBe(expected)                                                                    // independent re-computation of the signature
++    expect(createHmac('sha256', Buffer.from('k'.repeat(48), 'utf8')).update(`pl-proactive-v1.${body}`, 'utf8').digest('base64url')).not.toBe(sig)   // distinct purpose label
++    const j = JSON.parse(body)
++    expect(Object.keys(j).sort()).toEqual(['iat', 'kid', 'nonce', 'ref', 'wa_id'])
++    expect(j).toMatchObject({ kid: 'k1', wa_id: A, ref: 'rid1' }); expect(j.nonce).toMatch(/^[A-Za-z0-9_-]{16,64}$/)
++    expect(Math.abs(j.iat - Math.floor(Date.now() / 1000))).toBeLessThan(5)
++    await tap(A, 'android'); expect(JSON.parse(S.adapterCalls[1].init.body).nonce).not.toBe(j.nonce)   // fresh nonce per request
++  })
++  it('human-owned conversation -> NOT sent, own audit code, claim NOT consumed; TWIN: after the person hands back, the next tap sends', async () => {
++    WINDOW_OK(); adapterSays(false, 'human_owned', { detail: 'status_open' })
++    const r = await tap(A, 'ios'); expect(r.code).toBe('store_button_human_owned'); expect(r.detail).toContain('adapter:human_owned')
++    expect(S.sends).toHaveLength(0); expect(S.rows).toHaveLength(0)
++    expect(S.audits.at(-1)).toMatchObject({ endpoint: 'flows/store-button', code: 'store_button_human_owned', kid: 'flow', httpStatus: 200 })
++    adapterSays(true, 'ok'); expect((await tap(A, 'ios', 'n2')).code).toBe('store_button_sent'); expect(S.sends).toHaveLength(1)
++  })
++  it('adapter STOP -> NOT sent as store_button_stopped, claim unspent (TWIN: START -> sends)', async () => {
++    WINDOW_OK(); adapterSays(false, 'stopped', { detail: 'adapter_stop' })
++    expect((await tap(A, 'ios')).code).toBe('store_button_stopped'); expect(S.sends).toHaveLength(0); expect(S.rows).toHaveLength(0)
++    adapterSays(true, 'ok'); expect((await tap(A, 'ios', 'n2')).code).toBe('store_button_sent')
++  })
++  it('the adapter\'s REAL window closed although the local proxy says open -> NOT sent as store_button_window_closed (the adapter outranks the proxy)', async () => {
++    WINDOW_OK(); adapterSays(false, 'window_closed')
++    expect((await tap(A, 'ios')).code).toBe('store_button_window_closed'); expect(S.sends).toHaveLength(0); expect(S.rows).toHaveLength(0)
++    adapterSays(true, 'ok'); expect((await tap(A, 'ios', 'n2')).code).toBe('store_button_sent')
++  })
++  it('anything the adapter cannot establish -> store_button_eligibility_unavailable, nothing sent, claim unspent', async () => {
++    WINDOW_OK()
++    for (const reason of ['window_unknown', 'consent_unknown', 'no_conversation', 'unavailable']) {
++      adapterSays(false, reason); const r = await tap(A, 'ios', `n-${reason}`)
++      expect(r.code).toBe('store_button_eligibility_unavailable'); expect(r.detail).toContain(`adapter:${reason}`)
++    }
++    expect(S.sends).toHaveLength(0); expect(S.rows).toHaveLength(0)
++    adapterSays(true, 'ok'); expect((await tap(A, 'ios', 'nz')).code).toBe('store_button_sent')   // TWIN
++  })
++  it('adapter unreachable / HTTP error / unauthorised / malformed / contradictory answers -> NOT sent (fail closed); TWIN sends', async () => {
++    WINDOW_OK()
++    const bad: Array<[string, () => void]> = [
++      ['throw', () => { S.adapter = 'throw' }],
++      ['500', () => { S.adapter = { status: 500, body: {} } }],
++      ['401', () => { S.adapter = { status: 401, body: { error: 'unauthorized' } } }],
++      ['409 replay', () => { S.adapter = { status: 409, body: { error: 'replayed' } } }],
++      ['not json', () => { S.adapter = { status: 200, body: null } }],
++      ['eligible without a reason', () => { S.adapter = { status: 200, body: { eligible: true } } }],
++      ['ok reason but eligible=false', () => { adapterSays(false, 'ok') }],
++      ['unknown reason', () => { adapterSays(true, 'sure_go_ahead') }],
++      ['truthy string', () => { S.adapter = { status: 200, body: { eligible: 'true', reason: 'ok' } } }],
++    ]
++    for (const [name, set] of bad) { set(); const r = await tap(A, 'ios', `n-${name}`); expect(r.code, name).toBe('store_button_eligibility_unavailable') }
++    adapterSays(true, 'human_owned'); expect((await tap(A, 'ios', 'n-contradiction')).code).toBe('store_button_human_owned')   // eligible=true with a refusal reason is a refusal, never a pass
++    expect(S.sends).toHaveLength(0); expect(S.rows).toHaveLength(0)
++    adapterSays(true, 'ok'); expect((await tap(A, 'ios', 'nz')).code).toBe('store_button_sent'); expect(S.sends).toHaveLength(1)
++  })
++  it('adapter hangs past the 1.5 s timeout -> NOT sent, returns promptly, no retry (exactly one request)', async () => {
++    WINDOW_OK(); S.adapter = 'hang'; const t0 = Date.now()
++    const r = await tap(A, 'ios'); const dt = Date.now() - t0
++    expect(r.code).toBe('store_button_eligibility_unavailable'); expect(r.detail).toContain('transport'); expect(dt).toBeGreaterThanOrEqual(1400); expect(dt).toBeLessThan(3500)
++    expect(S.adapterCalls).toHaveLength(1); expect(S.sends).toHaveLength(0); expect(S.rows).toHaveLength(0)
++  })
++  it('adapter not configured (no PL_ADAPTER_URL) -> NOT sent, fail closed; TWIN: configured sends', async () => {
++    WINDOW_OK(); delete process.env.PL_ADAPTER_URL
++    const r = await tap(A, 'ios'); expect(r.code).toBe('store_button_eligibility_unavailable'); expect(r.detail).toContain('not_configured'); expect(S.adapterCalls).toHaveLength(0)
++    process.env.PL_ADAPTER_URL = 'http://adapter.test'; expect((await tap(A, 'ios', 'n2')).code).toBe('store_button_sent')
++  })
++  it('local checks still run first (defence in depth): stale proof / closed proxy window / local STOP never reach the adapter; TWIN reaches it', async () => {
++    WINDOW_CLOSED(); expect((await tap(A, 'ios')).code).toBe('store_button_window_closed')
++    WINDOW_OK(); S.stopped = true; expect((await tap(A, 'ios', 'n2')).code).toBe('store_button_stopped'); S.stopped = false
++    expect((await tap(A, 'ios', 'n3', 1)).code).toBe('store_button_proof_stale')
++    expect(S.adapterCalls).toHaveLength(0)
++    expect((await tap(A, 'ios', 'n4')).code).toBe('store_button_sent'); expect(S.adapterCalls).toHaveLength(1)
++  })
++  it('the adapter saying yes cannot override the local refusals or the dedup (it can only remove eligibility)', async () => {
++    WINDOW_OK(); adapterSays(true, 'ok'); await tap(A, 'ios')
++    expect((await tap(A, 'ios', 'n2')).code).toBe('store_button_deduped')                       // window-open + adapter ok + claim active -> no send
++    WINDOW_CLOSED(); expect((await tap(A, 'android', 'n3')).code).toBe('store_button_window_closed')   // adapter ok but local proxy closed -> no send
++    expect(S.sends).toHaveLength(1)
++  })
++  it('dedup EXPIRED but the adapter\'s window is closed -> no send; TWIN: adapter window open -> send', async () => {
++    WINDOW_OK(); await tap(A, 'ios'); S.clock += STORE_BUTTON_WINDOW_S * 1000 + 1000
++    adapterSays(false, 'window_closed'); expect((await tap(A, 'ios', 'n2')).code).toBe('store_button_window_closed'); expect(S.sends).toHaveLength(1)
++    adapterSays(true, 'ok'); expect((await tap(A, 'ios', 'n3')).code).toBe('store_button_sent'); expect(S.sends).toHaveLength(2)
++  })
++  it('every adapter refusal leaves its own distinguishable audit row, never a claim or a send', async () => {
++    WINDOW_OK()
++    adapterSays(false, 'human_owned'); await tap(A, 'ios', 'a'); adapterSays(false, 'stopped'); await tap(A, 'ios', 'b'); adapterSays(false, 'window_closed'); await tap(A, 'ios', 'c')
++    S.adapter = 'throw'; await tap(A, 'ios', 'd')
++    expect(S.audits.map(x => x.code)).toEqual(['store_button_human_owned', 'store_button_stopped', 'store_button_window_closed', 'store_button_eligibility_unavailable'])
++    expect(S.audits.every(x => x.kid === 'flow' && x.httpStatus === 200)).toBe(true); expect(S.rows).toHaveLength(0)
 +  })
 +})
 diff --git a/test/pl-store-button-gate-exemption.test.ts b/test/pl-store-button-gate-exemption.test.ts

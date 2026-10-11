@@ -258,4 +258,50 @@ check('every action title <= 20 chars and unique', Object.values(A.ACT).every((c
   check('/v1/proactive unsigned -> 401', pro.status === 401)
   server.close()
 }
+// 10. rc13h send-eligibility (/v1/eligibility): ownership + STOP + the real 24 h window + consent, answering only. Positive twin for each negative.
+const esign = (cfg, body) => crypto.createHmac('sha256', Buffer.from(cfg.plKey, 'utf8')).update(`${A.ELIGIBILITY_PURPOSE}.${body}`, 'utf8').digest('base64url')
+const ereq = (cfg, over = {}) => { const body = JSON.stringify({ kid: cfg.plKid, wa_id: WA, ref: 'cw-77', iat: Math.floor(Date.now() / 1000), nonce: crypto.randomBytes(16).toString('base64url'), ...over }); return { body, sig: esign(cfg, body) } }
+async function elig(w, over = {}, wrap = null) { const { body, sig } = ereq(w.cfg, over); const v = A.verifyEligibility(body, sig, w.cfg); if (!v.ok) return { eligible: false, reason: 'unauthorized:' + v.why }; return A.handleEligibility(w.cfg, w.db, {}, v.b, wrap ? wrap(w.f) : w.f) }
+const failing = (re) => (f) => async (url, init) => { if (re.test(String(url))) return { ok: false, status: 500, json: async () => ({}) }; return f(url, init) }
+{ const w = world({ j: J.active }); const r = await elig(w); check('elig: pending + window open + consent known + no STOP -> eligible/ok (conversation echoed)', r.eligible === true && r.reason === 'ok' && r.conversation_id === '77', JSON.stringify(r)); check('elig: answers only - nothing posted, no guidance/claim row written', w.posts.length === 0 && w.db.g.length === 0) }
+{ const w = world({ j: J.active }); const hdrs = []; const spy = (f) => async (url, init) => { if (String(url).startsWith('http://pl/')) hdrs.push({ a: init.headers['x-isola-assertion'], c: init.headers['x-conversation-id'] }); return f(url, init) }
+  await elig(w, {}, spy); const pj = hdrs.length ? JSON.parse(Buffer.from(hdrs[0].a.split('.')[1], 'base64url').toString('utf8')) : null
+  check('elig: the consent read it makes carries rid elig-77 (== X-Conversation-Id), NOT cw-77, so it cannot refresh the PL service inbound-window proxy', hdrs.length === 1 && pj.rid === 'elig-77' && hdrs[0].c === 'elig-77', JSON.stringify(pj)) }
+{ const w = world({ j: J.active, status: 'open' }); const r = await elig(w); check('elig: human-owned (open) -> not eligible, human_owned', r.eligible === false && r.reason === 'human_owned' && r.detail === 'status_open', JSON.stringify(r)) }
+{ const w = world({ j: J.active, status: 'resolved' }); const r = await elig(w); check('elig: resolved conversation is not AI-owned -> human_owned (same rule as /v1/proactive)', r.eligible === false && r.reason === 'human_owned') }
+{ const w = world({ j: J.active }); await w.h._setPreference({ ...who('stop-e') }, true); const r = await elig(w); check('elig: adapter STOP -> stopped', r.eligible === false && r.reason === 'stopped' && r.detail === 'adapter_stop')
+  await w.h._setPreference({ ...who('start-e') }, false); const r2 = await elig(w); check('elig: CONTROL after START -> eligible again', r2.eligible === true) }
+{ const w = world({ j: { ...J.active, consent: { estate_suppressed: true, known: true } } }); const r = await elig(w); check('elig: estate STOP (doNotContact / revoked opt-in) -> stopped/estate_suppressed', r.eligible === false && r.reason === 'stopped' && r.detail === 'estate_suppressed') }
+{ const w = world({ j: { ...J.active, consent: { estate_suppressed: false, known: false } } }); const r = await elig(w); check('elig: consent unreadable -> consent_unknown (fail closed)', r.eligible === false && r.reason === 'consent_unknown') }
+{ const w = world({ j: J.active, lastInboundAgoS: 25 * 3600 }); const r = await elig(w); check('elig: last inbound 25 h ago -> window_closed', r.eligible === false && r.reason === 'window_closed') }
+{ const w = world({ j: J.active, lastInboundAgoS: 23 * 3600 }); const r = await elig(w); check('elig: CONTROL last inbound 23 h ago -> eligible', r.eligible === true) }
+{ const w = world({ j: J.active, messages: [{ id: 1, message_type: 1, private: false, sender_type: 'User', content: 'agent reply', created_at: Math.floor(Date.now() / 1000) - 10 }] }); const r = await elig(w); check('elig: only OUTGOING messages on record (no customer inbound) -> window_unknown, not eligible', r.eligible === false && r.reason === 'window_unknown') }
+{ const w = world({ j: J.active }); const r = await elig(w, {}, failing(/\/conversations\/77\/messages$/)); check('elig: Chatwoot messages unreadable -> window_unknown (fail closed)', r.eligible === false && r.reason === 'window_unknown' && r.detail === 'messages_unreadable') }
+{ const w = world({ j: J.active }); const r = await elig(w, {}, failing(/\/conversations\/77$/)); check('elig: Chatwoot conversation unreadable -> unavailable (fail closed)', r.eligible === false && r.reason === 'unavailable') }
+{ const w = world({ j: J.active }); const r = await elig(w, {}, failing(/\/contacts\/search/)); check('elig: Chatwoot unreachable at lookup -> unavailable', r.eligible === false && r.reason === 'unavailable') }
+{ const w = world({ j: J.active, contactSearch: [] }); const r = await elig(w); check('elig: no Chatwoot contact -> no_conversation', r.eligible === false && r.reason === 'no_conversation') }
+{ const w = world({ j: J.active }); const r = await elig(w, {}, failing(/^http:\/\/pl\//)); check('elig: PL service (consent source) down -> unavailable (fail closed)', r.eligible === false && r.reason === 'unavailable') }
+{ const w = world({ j: J.active }); let n = 0; const flip = (f) => async (url, init) => { const u = String(url); if (/\/conversations\/77$/.test(u) && ++n === 2) return { ok: true, status: 200, json: async () => ({ id: 77, inbox_id: 11, status: 'open', meta: { sender: { id: 5 } } }) }; return f(url, init) }
+  const r = await elig(w, {}, flip); check('elig: person takes the conversation between the checks (final re-read) -> human_owned', r.eligible === false && r.reason === 'human_owned') }
+{ const w = world({ j: J.active }); const a = ereq(w.cfg, { ref: 'cw-77' })
+  check('elig auth: valid signed request verifies', A.verifyEligibility(a.body, a.sig, w.cfg).ok)
+  check('elig auth: forged signature refused', A.verifyEligibility(a.body, 'x'.repeat(43), w.cfg).why === 'bad_signature')
+  check('elig auth: tampered body (other wa_id) refused', A.verifyEligibility(a.body.replace(WA, '17670000002'), a.sig, w.cfg).why === 'bad_signature')
+  const old = ereq(w.cfg, { iat: Math.floor(Date.now() / 1000) - 600 }); check('elig auth: expired (iat 10 min old) refused', A.verifyEligibility(old.body, old.sig, w.cfg).why === 'stale_or_wrong_key')
+  const fut = ereq(w.cfg, { iat: Math.floor(Date.now() / 1000) + 600 }); check('elig auth: future iat refused', !A.verifyEligibility(fut.body, fut.sig, w.cfg).ok)
+  const wk = ereq(w.cfg, { kid: 'other' }); check('elig auth: wrong key id refused', !A.verifyEligibility(wk.body, wk.sig, w.cfg).ok)
+  const nn = ereq(w.cfg, { nonce: 'short' }); check('elig auth: missing/short nonce refused', A.verifyEligibility(nn.body, nn.sig, w.cfg).why === 'bad_fields')
+  const bw = ereq(w.cfg, { wa_id: '12ab' }); check('elig auth: bad wa_id refused', A.verifyEligibility(bw.body, bw.sig, w.cfg).why === 'bad_fields')
+  const pro = req(w.cfg, 'first_call'); check('elig auth: a /v1/proactive signature (other purpose) cannot be replayed as an eligibility request', !A.verifyEligibility(pro.body, pro.sig, w.cfg).ok)
+  const nc = A.makeNonceCache(); check('elig nonce: first use accepted, replay refused, another nonce accepted', nc.claim('a'.repeat(22), 1000) === true && nc.claim('a'.repeat(22), 2000) === false && nc.claim('b'.repeat(22), 2000) === true)
+  check('elig nonce: expired entries are forgotten (cache cannot grow without bound)', nc.claim('a'.repeat(22), 1000 + 300000) === true) }
+{ // over HTTP, through the real server: own signature (no bearer), unsigned 401, replay 409, bearer alone 401, positive twin 200
+  const w = world({ j: J.active }); const { server } = A.makeServer(w.cfg, w.db, w.f)
+  await new Promise((res) => server.listen(0, '127.0.0.1', res)); const port = server.address().port
+  const post = (body, sig) => fetch(`http://127.0.0.1:${port}/v1/eligibility`, { method: 'POST', headers: sig ? { 'x-pl-eligibility-signature': sig } : {}, body })
+  const un = await post('{}'); check('elig http: unsigned -> 401', un.status === 401)
+  const a = ereq(w.cfg); const ok1 = await post(a.body, a.sig); const j1 = await ok1.json(); check('elig http: CONTROL signed -> 200 eligible', ok1.status === 200 && j1.eligible === true && j1.reason === 'ok', JSON.stringify(j1))
+  const again = await post(a.body, a.sig); check('elig http: the SAME signed request replayed -> 409, no answer', again.status === 409)
+  const bearerOnly = await fetch(`http://127.0.0.1:${port}/v1/eligibility`, { method: 'POST', headers: { authorization: 'Bearer b' }, body: a.body }); check('elig http: the bearer alone does not authenticate it -> 401', bearerOnly.status === 401)
+  server.close() }
 console.log(`${n - fails}/${n} ` + (fails ? 'FAILED' : 'ALL PASSED')); setTimeout(() => process.exit(fails ? 1 : 0), 50)

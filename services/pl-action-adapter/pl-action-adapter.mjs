@@ -949,6 +949,62 @@ export async function handleProactive(cfg, db, stats, b, f = fetch, nowMs = Date
   return { code: 'sent', covered: g.covered ?? [b.key], stage: g.stage }
 }
 
+// ── rc13h: send-eligibility (plsvc store button -> /v1/eligibility) ─────────────────────────────────────────────────────────────────────
+// ANSWERS ONE QUESTION - "may the PL service put a customer-facing WhatsApp message in front of this verified wa_id right now?" - and
+// sends nothing, writes nothing (no claim row, no Chatwoot post). The authoritative sources are the same ones /v1/proactive uses:
+// Chatwoot conversation ownership (pending only), the adapter STOP preference, the customer's last Chatwoot incoming message (23.5 h),
+// and the estate consent/STOP read (journey.consent). Any source that cannot be read is NOT eligible (fail closed): the answer is
+// {eligible:false, reason:'unavailable'|'window_unknown'|'consent_unknown'|...}, never a guess. Signed by plsvc with the PL concierge
+// key under its OWN purpose label (domain separation from pl-proactive-v1), iat +-120 s, and single-use nonce (replay refused).
+export const ELIGIBILITY_PURPOSE = 'pl-eligibility-v1'
+const ELIG_NONCE = /^[A-Za-z0-9_-]{16,64}$/
+export function verifyEligibility(raw, sig, cfg, nowMs = Date.now()) {
+  if (typeof sig !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(sig)) return { ok: false, why: 'no_signature' }
+  const mac = crypto.createHmac('sha256', Buffer.from(cfg.plKey, 'utf8')).update(`${ELIGIBILITY_PURPOSE}.${raw}`, 'utf8').digest('base64url')
+  if (!eq(mac, sig)) return { ok: false, why: 'bad_signature' }
+  let b; try { b = JSON.parse(raw) } catch { return { ok: false, why: 'bad_json' } }
+  if (!b || b.kid !== cfg.plKid || !Number.isSafeInteger(b.iat) || Math.abs(Math.floor(nowMs / 1000) - b.iat) > 120) return { ok: false, why: 'stale_or_wrong_key' }
+  if (!WA_ID.test(String(b.wa_id)) || typeof b.nonce !== 'string' || !ELIG_NONCE.test(b.nonce) || (b.ref !== undefined && (typeof b.ref !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(b.ref)))) return { ok: false, why: 'bad_fields' }
+  return { ok: true, b }
+}
+/** Single-use nonces for the +-120 s validity window (in-memory: the adapter is one replica; a restart re-opens at most the remaining <=120 s, bounded by iat). */
+export function makeNonceCache(ttlMs = 250_000) {
+  const seen = new Map()
+  return { claim(nonce, nowMs = Date.now()) {
+    for (const [k, t] of seen) if (nowMs - t > ttlMs) seen.delete(k)
+    if (seen.has(nonce)) return false
+    seen.set(nonce, nowMs); return true
+  } }
+}
+const NONCES = makeNonceCache()
+export async function handleEligibility(cfg, db, stats, b, f = fetch, nowMs = Date.now()) {
+  const no = (reason, detail, extra = {}) => ({ eligible: false, reason, ...(detail ? { detail } : {}), ...extra })
+  const fc = await conversationFor(cfg, String(b.wa_id), f).catch(() => ({ ok: false, why: 'chatwoot_unreachable' }))
+  if (!fc.ok) return fc.why === 'chatwoot_unreachable' ? no('unavailable', fc.why) : no('no_conversation', fc.why)
+  const conversationId = fc.conversationId
+  const conv = await cw(cfg, `/conversations/${conversationId}`, f).catch(() => null)
+  if (!conv || typeof conv.status !== 'string') return no('unavailable', 'conversation_unreadable')
+  if (conv.status !== 'pending') return no('human_owned', `status_${conv.status}`, { conversation_id: conversationId })
+  const h = waHash(cfg, String(b.wa_id))
+  let pref; try { pref = (await db.query(`SELECT proactive_stopped FROM pl_adapter_preference WHERE wa_hash=$1`, [h])).rows[0] } catch { return no('unavailable', 'preference_unreadable') }
+  if (pref?.proactive_stopped === true) return no('stopped', 'adapter_stop', { conversation_id: conversationId })
+  const msgs = await cw(cfg, `/conversations/${conversationId}/messages`, f).catch(() => null)
+  if (!Array.isArray(msgs?.payload)) return no('window_unknown', 'messages_unreadable')
+  const lastIn = msgs.payload.filter(isIncomingContactMsg).sort((x, y) => Number(y.created_at) - Number(x.created_at))[0]
+  if (!lastIn || !Number.isFinite(Number(lastIn.created_at))) return no('window_unknown', 'no_incoming_message_on_page')
+  if (Math.floor(nowMs / 1000) - Number(lastIn.created_at) > WINDOW_S) return no('window_closed', 'last_inbound_older_than_window', { conversation_id: conversationId })
+  const who = { waId: String(b.wa_id), conversationId, wamid: /^wamid\.[A-Za-z0-9+/=_-]{8,120}$/.test(String(lastIn.source_id ?? '')) ? String(lastIn.source_id) : `eligibility.${String(b.ref ?? 'x')}`, messageId: `eligibility:${b.nonce}` }
+  // rid 'elig-<conv>' (not 'cw-<conv>'): the PL service treats a 'cw-' assertion as proof of a customer message; this read is NOT one, so it must not refresh that window proxy.
+  const r = await pl(cfg, stats, 'account/journey', who, {}, { rid: `elig-${conversationId}` }, f).catch(() => null)
+  if (r?.code !== 'journey') return no('unavailable', `journey_${r?.code ?? 'unreachable'}`)
+  const consent = r.data?.consent
+  if (consent?.known === true && consent.estate_suppressed === true) return no('stopped', 'estate_suppressed', { conversation_id: conversationId })
+  if (consent?.known !== true) return no('consent_unknown', null, { conversation_id: conversationId })
+  const again = await cw(cfg, `/conversations/${conversationId}`, f).catch(() => null)   // ownership re-read last, closest to the caller's send
+  if (again?.status !== 'pending') return no(again ? 'human_owned' : 'unavailable', `status_${again?.status ?? 'unreadable'}`, { conversation_id: conversationId })
+  return { eligible: true, reason: 'ok', conversation_id: conversationId }
+}
+
 // ── MCP (Streamable HTTP, JSON-RPC 2.0) ─────────────────────────────────────────────────────────────────────────────────────────────────────
 const ACCOUNT_TOOLS = new Set(['pl_explain', 'pl_balance', 'pl_recent_calls', 'pl_journey', 'pl_guide'])
 const NEVER_EXPOSED = new Set(['pl_explain'])   // its 'Get my number' button would depend on a model turn; onboarding starts from the Flow
@@ -1015,6 +1071,15 @@ export function makeServer(cfg, db, f = fetch) {
       if (!v.ok) return send(401, { error: 'unauthorized', detail: v.why })
       try { return send(200, await handleProactive(cfg, db, stats, v.b, f)) }
       catch (e) { console.error('[adapter] proactive error', String(e?.message || e).slice(0, 120)); return send(200, { code: 'failed', detail: 'internal' }) }
+    }
+    // rc13h: send-eligibility for the PL service's store button: same key, own purpose label, single-use nonce, answers only (sends nothing).
+    if (rq.method === 'POST' && rq.url === '/v1/eligibility') {
+      const raw = await readRaw(rq); if (raw === null) return send(413, { error: 'too_large' })
+      const v = verifyEligibility(raw, rq.headers['x-pl-eligibility-signature'], cfg)
+      if (!v.ok) return send(401, { error: 'unauthorized', detail: v.why })
+      if (!NONCES.claim(v.b.nonce)) return send(409, { error: 'replayed' })
+      try { return send(200, await handleEligibility(cfg, db, stats, v.b, f)) }
+      catch (e) { console.error('[adapter] eligibility error', String(e?.message || e).slice(0, 120)); return send(200, { eligible: false, reason: 'unavailable', detail: 'internal' }) }
     }
     if (!eq(rq.headers.authorization || '', `Bearer ${cfg.bearer}`)) return send(401, { error: 'unauthorized' })
     if (cfg.debug && rq.url === '/__stats') return send(200, stats)
