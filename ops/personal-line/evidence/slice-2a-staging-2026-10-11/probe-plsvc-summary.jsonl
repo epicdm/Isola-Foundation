@@ -1,0 +1,8 @@
+{"n":1,"label":"plsvc summary UNSIGNED","expect":401,"http":401,"pass":true,"code":"bad_signature"}
+{"n":2,"label":"plsvc summary signed A (positive)","expect":200,"http":200,"pass":true,"code":"account_summary","account_is":"cmv20v05r003a01lll3hxhgap","did":"+1 767 818 5046","plan":"trial","plan_end":"2026-10-17T06:37:21.589Z","minutes_left":null,"minutes_included":null,"wallet":null,"setup_state":"unknown"}
+{"n":3,"label":"plsvc summary signed B (distinct subject)","expect":200,"http":200,"pass":true,"code":"account_summary","account_is":"cmv20njxw003201lltojtuxh9","did":"+1 767 818 5045","plan":"trial","plan_end":"2026-10-17T06:31:34.074Z","minutes_left":null,"minutes_included":null,"wallet":null,"setup_state":"unknown"}
+{"n":4,"label":"signature for A re-aimed at B (WRONG ACCOUNT)","expect":401,"http":401,"pass":true,"code":"bad_signature"}
+{"n":5,"label":"wrong key","expect":401,"http":401,"pass":true,"code":"bad_signature"}
+{"n":6,"label":"expired ts -301 s","expect":401,"http":401,"pass":true,"code":"bad_signature"}
+{"n":7,"label":"via public proxy (X-Real-IP)","expect":403,"http":403,"pass":true,"code":"source_not_allowed"}
+{"n":8,"label":"signed, unknown account","expect":404,"http":404,"pass":true,"code":"summary_not_found"}
