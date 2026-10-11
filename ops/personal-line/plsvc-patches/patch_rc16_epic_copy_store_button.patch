@@ -1,71 +1,18 @@
-From 9c5d8439e1ffb354461c502c204b318c47d5f943 Mon Sep 17 00:00:00 2001
-From: EPICDM <it@epic.dm>
-Date: Sun, 11 Oct 2026 13:15:58 -0400
-Subject: [PATCH 1/3] feat(personal-line): rc16 - EPIC copy in the signup Flow
- endpoint + real store button (cta_url)
-
-1. EPIC branding (wording only - no protocol, field, identifier, token, env, log tag, confirmation/duplicate
-   logic or screen routing changed):
-   - signup-flow.ts: "welcome to Isola!" -> "welcome to EPIC!"; "your Isola number rings in" -> "your EPIC
-     number rings in"; "Your Isola line <did>" (holder WELCOME) -> "Your EPIC line <did>"; "set up your free
-     Isola line" -> "set up your free EPIC line"; "You already have this Isola line" -> "...this EPIC line";
-     "Your Isola line has been created" (CONFIRM + PROVISIONING) -> "Your EPIC line has been created".
-   - storeScreen().install_md step 3 no longer names a footer label (true for Flow v7.1 "I've installed it"
-     and v8 "Continue setup"): "Come back to WhatsApp and continue your setup"; closing line "Please install
-     the app first - your setup link only works once the app is on your phone."
-   - whatsapp.ts sendPlSignupFlow footer 'Isola Personal Line' -> 'EPIC Personal Line'.
-   - service.ts flows/launch holder body "Your Isola line <did>." -> "Your EPIC line <did>."
-
-2. Real store button: when a customer picks a phone type on the Flow INSTALL screen
-   (data_exchange {step:'store', os}) and the next-step engine READ stage 'install', plsvc also sends ONE
-   documented interactive cta_url message (header "Install Cloud Softphone (free)", body with return
-   guidance, display_text "Open App Store"/"Open Google Play", url = the same store_links/fallback the
-   screen shows; non-https/foreign-host URLs fall back to the official listing) to the verified sender
-   (flow_token wa) FROM PL_FLOW_SENDER_PHONE_ID only (no fallback), through dispatchToMeta/wa-send-gate
-   (senderPath pl:flows/store-button, kind interactive, purpose lite_onboarding, userId of the line,
-   sourceEventType pl_verified_inbound, sourceEventId flow:<token nonce>, sourceMessageId store-button:<os>).
-   - Schema: developers.facebook.com/documentation/business-messaging/whatsapp/messages/interactive-cta-url-messages
-   - De-duplication: store.claimOncePerWindow - atomic claim row in the existing pl_concierge_audit table
-     (endpoint 'flows/store-button', op = os) under a per-(sender, os) advisory lock in one transaction; at
-     most one per sender per OS per 24 h; a refused/failed send is re-coded store_button_failed and does not
-     count. No schema change, no migration.
-   - Fire-and-forget (fireStoreButton): the Flow answer never awaits or fails because of the send.
-   - Not sent when the stage is not install or was not read (completed line holders, engine errors).
-
-Tests: pl-store-button-payload (schema, sender, gate, footer), pl-store-button-dedupe (once per sender/os/
-24 h with controls; failures), pl-signup-flow-store-step (screen unchanged on failure/hang, stage gating,
-EPIC copy, install_md), pl-store-button-claim.realpg (real Postgres: concurrency, window, failed claims).
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_0199pUMmWEgBuXq5GN1ZVorW
----
- app/lib/pl-concierge/service.ts           |  45 +++++++-
- app/lib/pl-concierge/signup-flow.ts       |  43 ++++++--
- app/lib/pl-concierge/store.ts             |  33 ++++++
- app/lib/whatsapp.ts                       |  64 ++++++++++-
- test/pl-signup-flow-store-step.test.ts    | 119 ++++++++++++++++++++
- test/pl-store-button-claim.realpg.test.ts |  70 ++++++++++++
- test/pl-store-button-dedupe.test.ts       | 127 ++++++++++++++++++++++
- test/pl-store-button-payload.test.ts      | 119 ++++++++++++++++++++
- 8 files changed, 608 insertions(+), 12 deletions(-)
- create mode 100644 test/pl-signup-flow-store-step.test.ts
- create mode 100644 test/pl-store-button-claim.realpg.test.ts
- create mode 100644 test/pl-store-button-dedupe.test.ts
- create mode 100644 test/pl-store-button-payload.test.ts
-
-diff --git a/app/lib/pl-concierge/service.ts b/app/lib/pl-concierge/service.ts
-index 2382f973..725b86d7 100644
+﻿diff --git a/app/lib/pl-concierge/service.ts b/app/lib/pl-concierge/service.ts
+index 2382f973..25352535 100644
 --- a/app/lib/pl-concierge/service.ts
 +++ b/app/lib/pl-concierge/service.ts
-@@ -600,7 +600,7 @@ async function flowLaunch(ctx: Ctx): Promise<Outcome> {
+@@ -600,8 +600,8 @@ async function flowLaunch(ctx: Ctx): Promise<Outcome> {
    const token = mintFlowToken({ purpose: 'signup', waId: ctx.a.wa_id, rid: ctx.a.rid })
    // rc12: a line holder gets 'Manage your line' (never signup copy); the Flow opens on their CURRENT step.
    const body = existing
 -    ? `Your Isola line ${didPretty(existing.did) ?? ''}. Open this to see your line, your connection and your balance - and to finish setting up the free Cloud Softphone app if it isn't done yet. Nothing new will be created.`
+-    : `Free trial: ${o.trial_days} days with ${o.trial_minutes} minutes of Dominica calls, EC$${o.trial_price_xcd}. ${PL_OVERAGE_TEXT} Calls are made and received in the free Cloud Softphone app. ${VOICE_ONLY_DISCLOSURE}`
 +    ? `Your EPIC line ${didPretty(existing.did) ?? ''}. Open this to see your line, your connection and your balance - and to finish setting up the free Cloud Softphone app if it isn't done yet. Nothing new will be created.`
-     : `Free trial: ${o.trial_days} days with ${o.trial_minutes} minutes of Dominica calls, EC$${o.trial_price_xcd}. ${PL_OVERAGE_TEXT} Calls are made and received in the free Cloud Softphone app. ${VOICE_ONLY_DISCLOSURE}`
++    : `Free trial: ${o.trial_days} days with ${o.trial_minutes} minutes of Dominica calls, EC$${o.trial_price_xcd}. ${PL_OVERAGE_TEXT} You make calls from the free Cloud Softphone app; receiving calls on your number is not available yet. ${VOICE_ONLY_DISCLOSURE}`
    let decision: any
    try { decision = await sendPlSignupFlow(ctx.a.wa_id, token, body, { senderPath: 'pl:flows/launch', userId: existing?.userId, sourceEventType: 'pl_verified_inbound', sourceEventId: ctx.a.mid }, existing ? { header: 'Manage your line', cta: 'Manage my line' } : undefined) } catch (e: any) { return { code: 'flow_unavailable', op: 'flows/launch', detail: String(e?.message ?? e).slice(0, 120) } }
+   if (!String(decision?.code ?? '').startsWith('allow_') || decision?.dispatchFailed) return { code: 'flow_unavailable', op: 'flows/launch', detail: `${decision?.code ?? 'no_decision'}${decision?.dispatchFailed ? ':dispatch_failed' : ''}` }
 @@ -629,6 +629,49 @@ export async function nextStepForFlow(args: { waId: string; rid: string; mid: st
    return o
  }
@@ -109,7 +56,7 @@ index 2382f973..725b86d7 100644
 +    await store.finishClaim(claimId, 'store_button_sent', 'done', code, Date.now() - t0)
 +    return { code: 'store_button_sent', detail: code }
 +  } catch (e: any) {
-+    return await fail(`error:${String(e?.message ?? e).slice(0, 160)}`)
++    return await fail(`error:${String(e?.message ?? e).replace(/\s+/g, ' ').trim().slice(0, 160)}`)
 +  }
 +}
 +
@@ -117,7 +64,7 @@ index 2382f973..725b86d7 100644
  // so repeated checks cannot spend the customer's activation-link budget (nextStepGuidance mints/reuses at stage link_ready).
  export async function lineStatusForFlow(args: { waId: string; rid: string; mid: string }): Promise<Outcome> {
 diff --git a/app/lib/pl-concierge/signup-flow.ts b/app/lib/pl-concierge/signup-flow.ts
-index 21e6c632..19f34d0b 100644
+index 21e6c632..f3e7605f 100644
 --- a/app/lib/pl-concierge/signup-flow.ts
 +++ b/app/lib/pl-concierge/signup-flow.ts
 @@ -74,7 +74,7 @@ async function stepScreen(claims: FlowTokenClaims, event: 'status' | 'installed'
@@ -158,7 +105,7 @@ index 21e6c632..19f34d0b 100644
 +        const r: any = await storeButtonForFlow({ waId: claims.wa, rid: claims.cw, flowNonce: claims.n, os, url })
 +        console.log(`${tag} store-button os=${os} -> ${r?.code ?? 'no_result'}${r?.detail ? ` (${r.detail})` : ''}`)
 +      })
-+      .catch((e: any) => console.error(`${tag} store-button os=${os} failed (Flow answer unaffected): ${String(e?.message ?? e).slice(0, 200)}`))
++      .catch((e: any) => console.error(`${tag} store-button os=${os} failed (Flow answer unaffected): ${String(e?.name ?? 'Error')}${e?.code ? ` ${e.code}` : ''}: ${String(e?.message || e?.cause?.message || e).replace(/\s+/g, ' ').trim().slice(0, 240)}`))
 +  } catch (e: any) {
 +    console.error(`${tag} store-button os=${os} could not start (Flow answer unaffected): ${String(e?.message ?? e).slice(0, 200)}`)
 +  }
@@ -229,10 +176,10 @@ index 21e6c632..19f34d0b 100644
      return stepScreen(claims, 'installed', '', 'install')
    }
 diff --git a/app/lib/pl-concierge/store.ts b/app/lib/pl-concierge/store.ts
-index 35153911..f18c1149 100644
+index 35153911..c7f6c0ad 100644
 --- a/app/lib/pl-concierge/store.ts
 +++ b/app/lib/pl-concierge/store.ts
-@@ -78,6 +78,39 @@ export async function provisionByMid(waIdHash: string, mid: string): Promise<{ c
+@@ -78,6 +78,40 @@ export async function provisionByMid(waIdHash: string, mid: string): Promise<{ c
    return rows[0] ? { code: rows[0].code, outcome: rows[0].outcome, detail: rows[0].detail, createdAt: new Date(rows[0].created_at) } : null
  }
  
@@ -244,7 +191,8 @@ index 35153911..f18c1149 100644
 + * `countCodes`, so a failed send does not block a later one.
 + */
 +export async function claimOncePerWindow(args: { endpoint: string; op: string; waIdHash: string; windowS: number; claimCode: string; countCodes: string[]; rid?: string | null; mid?: string | null; waLast4?: string | null }): Promise<string | null> {
-+  const lockKey = `pl-claim\0${args.endpoint}\0${args.waIdHash}\0${args.op}`
++  // ':' separators - a NUL byte cannot travel in a Postgres text parameter (measured on staging: the claim threw before this fix)
++  const lockKey = `pl-claim:${args.endpoint}:${args.waIdHash}:${args.op}`
 +  const since = new Date(Date.now() - args.windowS * 1000)
 +  return prisma.$transaction(async (tx) => {
 +    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`
@@ -354,9 +302,52 @@ index 04ea5c43..d0c14671 100644
  // ── WhatsApp Flows: Lite Top-Up ───────────────────────────────────────────────
  //
  // Sends an interactive Flow message that opens the "Isola Lite Top-Up" Flow
+diff --git a/test/pl-outbound-only-claims.test.ts b/test/pl-outbound-only-claims.test.ts
+new file mode 100644
+index 00000000..fa6e7cae
+--- /dev/null
++++ b/test/pl-outbound-only-claims.test.ts
+@@ -0,0 +1,37 @@
++/**
++ * rc16b: launch scope is OUTBOUND calling only. No customer-facing Personal Line copy may claim or imply that the customer can
++ * RECEIVE calls on their number (readiness record pl-launch-readiness-for-sales-marketing-2026-10-10: "never claim or imply").
++ * Found in production rc15: the new-customer flows/launch body said "Calls are made and received in the free Cloud Softphone app".
++ * Line-based scan of the customer-copy sources (comment lines excluded); the same scan function runs on a positive control.
++ */
++import { describe, it, expect } from 'vitest'
++import { readFileSync } from 'node:fs'
++
++const SOURCES = ['../app/lib/pl-concierge/service.ts', '../app/lib/pl-concierge/signup-flow.ts']
++const RECEIVE_CLAIM = /(made and received|receive (your )?calls (in|on|from)|calls? (are|is) received)/i
++// the only allowed mention: the inbound-enabled branch in signup-flow.ts, gated on f.inbound_enabled (false at launch)
++const ALLOWED = /rings in Cloud Softphone now/
++
++const codeLines = (text: string) => text.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l))
++const offenders = (text: string) => codeLines(text).filter(l => RECEIVE_CLAIM.test(l) && !ALLOWED.test(l))
++const read = (rel: string) => readFileSync(new URL(rel, import.meta.url), 'utf8')
++
++describe('outbound-only launch scope: no receive-calls claim in customer copy', () => {
++  it('new-customer flows/launch body states outbound calling and that receiving is not available', () => {
++    const line = codeLines(read(SOURCES[0])).find(l => l.includes('Free trial: ${o.trial_days}'))
++    expect(line).toBeDefined()
++    expect(line).toContain('You make calls from the free Cloud Softphone app')
++    expect(line).toContain('receiving calls on your number is not available yet')
++  })
++  it('no code line in the customer-copy sources claims calls are received', () => {
++    for (const s of SOURCES) expect({ s, hits: offenders(read(s)) }).toEqual({ s, hits: [] })
++  })
++  it('CONTROL: the same scan fires on the old production line and not on the new one or on a comment', () => {
++    const old = "    : `Free trial: ${o.trial_days} days. Calls are made and received in the free Cloud Softphone app. ${X}`"
++    const fixed = "    : `Free trial: ${o.trial_days} days. You make calls from the free Cloud Softphone app; receiving calls on your number is not available yet.`"
++    const comment = '  // Calls are made and received - old copy'
++    expect(offenders(old)).toHaveLength(1)
++    expect(offenders(fixed)).toHaveLength(0)
++    expect(offenders(comment)).toHaveLength(0)
++  })
++})
 diff --git a/test/pl-signup-flow-store-step.test.ts b/test/pl-signup-flow-store-step.test.ts
 new file mode 100644
-index 00000000..6b6f8ae4
+index 00000000..b8cde7df
 --- /dev/null
 +++ b/test/pl-signup-flow-store-step.test.ts
 @@ -0,0 +1,119 @@
@@ -473,7 +464,7 @@ index 00000000..6b6f8ae4
 +    const src = readFileSync(new URL('../app/lib/pl-concierge/signup-flow.ts', import.meta.url), 'utf8')
 +    // strip comments, then look only inside string/template literals
 +    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
-+    const literals = code.match(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g) ?? []
++    const literals: string[] = code.match(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g) ?? []
 +    const offenders = literals.filter(l => /isola/i.test(l) && !l.startsWith("'@/") && !/^['"`]\[/.test(l))
 +    expect(offenders).toEqual([])
 +    expect(['"welcome to Isola"'].filter(l => /isola/i.test(l))).toHaveLength(1)   // the filter itself fires on a known positive
@@ -813,102 +804,3 @@ index 00000000..0b5b219d
 +    expect(JSON.stringify(G.bodies[0])).not.toMatch(/isola/i)
 +  })
 +})
--- 
-2.53.0.windows.2
-
-
-From 8600c15cd7e7d3ee8d08bd60318d6d907d5b842d Mon Sep 17 00:00:00 2001
-From: EPICDM <it@epic.dm>
-Date: Sun, 11 Oct 2026 14:38:07 -0400
-Subject: [PATCH 2/3] fix(personal-line): rc16 store-button claim - no NUL byte
- in the advisory-lock key
-
-Measured twice before this fix: on host03 staging every store-button claim failed (the Flow answer was unaffected, by design),
-and the real-Postgres test pl-store-button-claim.realpg failed 4/4 with
-  Raw query failed. Code: 22021. invalid byte sequence for encoding "UTF8": 0x00
-A NUL cannot travel in a Postgres text parameter; the lock key now uses ':' separators. Also: the fire-and-forget error log and
-the claim's failure detail collapse whitespace (Prisma messages start with a newline, which made the staging log line look empty).
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_0199pUMmWEgBuXq5GN1ZVorW
----
- app/lib/pl-concierge/service.ts     | 2 +-
- app/lib/pl-concierge/signup-flow.ts | 2 +-
- app/lib/pl-concierge/store.ts       | 3 ++-
- 3 files changed, 4 insertions(+), 3 deletions(-)
-
-diff --git a/app/lib/pl-concierge/service.ts b/app/lib/pl-concierge/service.ts
-index 725b86d7..7968c0c9 100644
---- a/app/lib/pl-concierge/service.ts
-+++ b/app/lib/pl-concierge/service.ts
-@@ -668,7 +668,7 @@ export async function storeButtonForFlow(args: { waId: string; rid: string; flow
-     await store.finishClaim(claimId, 'store_button_sent', 'done', code, Date.now() - t0)
-     return { code: 'store_button_sent', detail: code }
-   } catch (e: any) {
--    return await fail(`error:${String(e?.message ?? e).slice(0, 160)}`)
-+    return await fail(`error:${String(e?.message ?? e).replace(/\s+/g, ' ').trim().slice(0, 160)}`)
-   }
- }
- 
-diff --git a/app/lib/pl-concierge/signup-flow.ts b/app/lib/pl-concierge/signup-flow.ts
-index 19f34d0b..f3e7605f 100644
---- a/app/lib/pl-concierge/signup-flow.ts
-+++ b/app/lib/pl-concierge/signup-flow.ts
-@@ -126,7 +126,7 @@ export function fireStoreButton(claims: FlowTokenClaims, os: 'ios' | 'android',
-         const r: any = await storeButtonForFlow({ waId: claims.wa, rid: claims.cw, flowNonce: claims.n, os, url })
-         console.log(`${tag} store-button os=${os} -> ${r?.code ?? 'no_result'}${r?.detail ? ` (${r.detail})` : ''}`)
-       })
--      .catch((e: any) => console.error(`${tag} store-button os=${os} failed (Flow answer unaffected): ${String(e?.message ?? e).slice(0, 200)}`))
-+      .catch((e: any) => console.error(`${tag} store-button os=${os} failed (Flow answer unaffected): ${String(e?.name ?? 'Error')}${e?.code ? ` ${e.code}` : ''}: ${String(e?.message || e?.cause?.message || e).replace(/\s+/g, ' ').trim().slice(0, 240)}`))
-   } catch (e: any) {
-     console.error(`${tag} store-button os=${os} could not start (Flow answer unaffected): ${String(e?.message ?? e).slice(0, 200)}`)
-   }
-diff --git a/app/lib/pl-concierge/store.ts b/app/lib/pl-concierge/store.ts
-index f18c1149..c7f6c0ad 100644
---- a/app/lib/pl-concierge/store.ts
-+++ b/app/lib/pl-concierge/store.ts
-@@ -86,7 +86,8 @@ export async function provisionByMid(waIdHash: string, mid: string): Promise<{ c
-  * `countCodes`, so a failed send does not block a later one.
-  */
- export async function claimOncePerWindow(args: { endpoint: string; op: string; waIdHash: string; windowS: number; claimCode: string; countCodes: string[]; rid?: string | null; mid?: string | null; waLast4?: string | null }): Promise<string | null> {
--  const lockKey = `pl-claim\0${args.endpoint}\0${args.waIdHash}\0${args.op}`
-+  // ':' separators - a NUL byte cannot travel in a Postgres text parameter (measured on staging: the claim threw before this fix)
-+  const lockKey = `pl-claim:${args.endpoint}:${args.waIdHash}:${args.op}`
-   const since = new Date(Date.now() - args.windowS * 1000)
-   return prisma.$transaction(async (tx) => {
-     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`
--- 
-2.53.0.windows.2
-
-
-From d80fe7245ce9e33a45b60f9bfe668f26ad728216 Mon Sep 17 00:00:00 2001
-From: EPICDM <it@epic.dm>
-Date: Sun, 11 Oct 2026 14:46:50 -0400
-Subject: [PATCH 3/3] test(personal-line): rc16 - type the literal list in the
- EPIC copy scan (tsc: startsWith on never)
-
-The only typecheck error rc16 added over its rc15 base (406 vs 405, normalised diff = 1 line). Test-only; the runtime image is
-unchanged by this commit.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_0199pUMmWEgBuXq5GN1ZVorW
----
- test/pl-signup-flow-store-step.test.ts | 2 +-
- 1 file changed, 1 insertion(+), 1 deletion(-)
-
-diff --git a/test/pl-signup-flow-store-step.test.ts b/test/pl-signup-flow-store-step.test.ts
-index 6b6f8ae4..b8cde7df 100644
---- a/test/pl-signup-flow-store-step.test.ts
-+++ b/test/pl-signup-flow-store-step.test.ts
-@@ -111,7 +111,7 @@ describe('endpoint-generated copy is EPIC-branded', () => {
-     const src = readFileSync(new URL('../app/lib/pl-concierge/signup-flow.ts', import.meta.url), 'utf8')
-     // strip comments, then look only inside string/template literals
-     const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
--    const literals = code.match(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g) ?? []
-+    const literals: string[] = code.match(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g) ?? []
-     const offenders = literals.filter(l => /isola/i.test(l) && !l.startsWith("'@/") && !/^['"`]\[/.test(l))
-     expect(offenders).toEqual([])
-     expect(['"welcome to Isola"'].filter(l => /isola/i.test(l))).toHaveLength(1)   // the filter itself fires on a known positive
--- 
-2.53.0.windows.2
-
