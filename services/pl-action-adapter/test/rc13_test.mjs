@@ -204,6 +204,21 @@ async function proactive(w, key, ref = 'row1', over = {}) { const { body, sig } 
   const old = req(w.cfg, 'first_call', 'r', { iat: Math.floor(Date.now() / 1000) - 600 }); check('stale request (iat 10 min old) -> refused', !A.verifyProactive(old.body, old.sig, w.cfg).ok)
   const fresh = req(w.cfg, 'first_call'); check('CONTROL fresh signed request verifies', A.verifyProactive(fresh.body, fresh.sig, w.cfg).ok) }
 
+// 9a. rc13g launch scope wording (PM 2026-10-11): outgoing-calling offer; no blanket "incoming unavailable"; EPIC brand
+{ const SENT = 'This launch offer covers outgoing calling.'
+  const off = A.composeGuidance('next_step', { stage: 'connected', facts: { inbound_enabled: false, did_pretty: '+1 767 818 5099' } })
+  check('connected (inbound flag off): says the launch offer covers outgoing calling', off && off.text.includes(SENT) && off.text.includes('make calls now'), off?.text)
+  check('connected (inbound flag off): NO blanket "incoming ... not available" assertion and no promise of rings', off && !/not available|rings in|receive/i.test(off.text))
+  const on = A.composeGuidance('next_step', { stage: 'connected', facts: { inbound_enabled: true, did_pretty: '+1 767 818 5099' } })
+  check('CONTROL: the flag-on branch is still the other text (the test can tell the branches apart)', on && /rings in Cloud Softphone now/.test(on.text) && !on.text.includes(SENT))
+  const af = JSON.stringify(A.APP_FACTS)
+  check('APP_FACTS (handed to the agent): approved sentence present, no "NOT available" assertion', af.includes('Make calls from the free Cloud Softphone app. This launch offer covers outgoing calling.') && !/NOT available/i.test(af) && /never promise or advertise/.test(af))
+  check('APP_FACTS keeps the guard against promising receiving calls (positive twin of the removed assertion)', /never state that incoming calls are unavailable/.test(af) && /never promise or advertise that the number rings/.test(af))
+  const fc = A.composeGuidance('next_step', { stage: 'first_call_done', facts: {} })
+  check('first call: EPIC brand, no "Isola"', fc && /welcome to EPIC/.test(fc.text) && !/isola/i.test(fc.text))
+  const ins = A.composeGuidance('next_step', { stage: 'install', facts: { inbound_enabled: true }, store_links: { ios: 'https://i', android: 'https://a' } })
+  check('install (flag on) branch: EPIC not Isola', ins && /EPIC number rings in/.test(ins.text) && !/isola/i.test(ins.text)) }
+
 // 9. rc13f contextual menu (PM 2026-10-11): menu taps carry their own values, recovered by readback; Flow entries send the existing Flow
 check('MENU keyword: menu / Menu! / options recognised; a sentence containing "menu" is not', A.MENU_RE.test('menu') && A.MENU_RE.test('Menu!') && A.MENU_RE.test(' options ') && !A.MENU_RE.test('show me the menu of plans'))
 check('menu titles <= 20 chars (WhatsApp reply-button limit) and values unique', Object.values(A.MENU_BTN).every((b) => b.title.length <= 20) && A.MENU_VALUES.size === Object.keys(A.MENU_BTN).length)

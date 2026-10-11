@@ -210,7 +210,7 @@ export function composeGuidance(code, data) {
     const disc = data?.disclosure ? `\n\n${data.disclosure}` : ''
     if (data?.activation_available === false) return { stage, text: `App setup is paused for a short while — we're improving how calling credentials are delivered. If your app is already set up it keeps working. Tap *Talk to a person* and someone will set your device up with you.${disc}`, choices: [BTN.human] }
     return { stage, text: [
-      f.inbound_enabled ? `📲 *One more step — install Cloud Softphone.* It's the free calling app your Isola number rings in.` : `📲 *One more step — install Cloud Softphone.* It's the free calling app you make calls from.`,
+      f.inbound_enabled ? `📲 *One more step — install Cloud Softphone.* It's the free calling app your EPIC number rings in.` : `📲 *One more step — install Cloud Softphone.* It's the free calling app you make calls from.`,
       ``, `• iPhone: ${links.ios}`, `• Android: ${links.android}`, ``,
       `When it's on your phone (or if you already have it), come back here and tap *I've installed it*. Please don't tap it before — the setup link only does its job once the app is installed.`,
     ].join('\n') + disc, choices: [BTN.installed, BTN.human] }
@@ -233,10 +233,10 @@ export function composeGuidance(code, data) {
   if (stage === 'connected') {
     const text = f.inbound_enabled
       ? `✅ *Your line is live.* Your number${did} rings in Cloud Softphone now. Try it — call any Dominica number from the app; you have free minutes to start.${f.missed_call_alerts_enabled ? ' Missed calls come back here on WhatsApp.' : ''}`
-      : `✅ *Cloud Softphone is connected.* You can make calls now — try it: call any Dominica number from the app. Incoming calls to your number${did} are not available yet — we'll message you here when they are.`
+      : `✅ *Cloud Softphone is connected.* You can make calls now — try it: call any Dominica number from the app. This launch offer covers outgoing calling.`
     return { stage, text, choices: [BTN.balance, BTN.calls, BTN.human] }
   }
-  if (stage === 'first_call_done') return { stage, text: `🎉 Your first call went through — welcome to Isola!`, choices: [BTN.balance, BTN.calls, BTN.human] }
+  if (stage === 'first_call_done') return { stage, text: `🎉 Your first call went through — welcome to EPIC!`, choices: [BTN.balance, BTN.calls, BTN.human] }
   return null
 }
 
@@ -458,7 +458,7 @@ export const GUIDE_TOPICS = ['how_it_works', 'plans', 'calling', 'call_failed', 
 // (wallet credit) and the 3-decimal Dominica rate are handed over WITHOUT a `$`; catalogue prices keep EC$ (they are in pricingFacts).
 export const FACTS_NOTE = 'Verified facts for THIS customer. Write ONE short, natural reply in your own words from them - answer what they asked, recommend when useful, ask at most one question. Never invent or round a number. Write catalogue prices exactly as given (EC$...); write wallet credit and the Dominica rate exactly as given (no $ sign). The buttons in `choices` are attached to your reply automatically - you may point to them, never list them as text.'
 // rc13d: the calling app, so the agent can always tell a customer where their line lives and how to get it.
-export const APP_FACTS = { name: 'Cloud Softphone', maker: 'Acrobits', where_the_line_lives: 'calls are made from this app on the customer phone (incoming calls to the number are NOT available yet - never say the number rings or that they can receive calls); the setup form puts the line into it with a one-tap link',
+export const APP_FACTS = { name: 'Cloud Softphone', maker: 'Acrobits', where_the_line_lives: 'calls are made from this app on the customer phone (this launch offer covers outgoing calling: say "Make calls from the free Cloud Softphone app. This launch offer covers outgoing calling." - never promise or advertise that the number rings or that they can receive calls, and never state that incoming calls are unavailable); the setup form puts the line into it with a one-tap link',
   ios_app_store: IOS_URL, android_google_play: ANDROID_URL }
 export const titlesOf = (choices) => (choices ?? []).map((c) => ({ title: c.title, value: c.value }))
 const ecWords = (xcd) => (typeof xcd === 'string' && xcd !== '' ? `${xcd} EC dollars` : null)
