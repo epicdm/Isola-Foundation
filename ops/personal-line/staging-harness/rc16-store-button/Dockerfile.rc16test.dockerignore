@@ -1,0 +1,12 @@
+# rc16 TEST image only: keep the tests and the vitest config (the runtime .dockerignore drops them); never secrets or build output.
+.env
+.env.*
+**/.env
+**/.env.*
+*.pem
+*.key
+secrets/
+.next/
+node_modules/
+**/node_modules/
+.git/

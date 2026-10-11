@@ -1,0 +1,914 @@
+From 9c5d8439e1ffb354461c502c204b318c47d5f943 Mon Sep 17 00:00:00 2001
+From: EPICDM <it@epic.dm>
+Date: Sun, 11 Oct 2026 13:15:58 -0400
+Subject: [PATCH 1/3] feat(personal-line): rc16 - EPIC copy in the signup Flow
+ endpoint + real store button (cta_url)
+
+1. EPIC branding (wording only - no protocol, field, identifier, token, env, log tag, confirmation/duplicate
+   logic or screen routing changed):
+   - signup-flow.ts: "welcome to Isola!" -> "welcome to EPIC!"; "your Isola number rings in" -> "your EPIC
+     number rings in"; "Your Isola line <did>" (holder WELCOME) -> "Your EPIC line <did>"; "set up your free
+     Isola line" -> "set up your free EPIC line"; "You already have this Isola line" -> "...this EPIC line";
+     "Your Isola line has been created" (CONFIRM + PROVISIONING) -> "Your EPIC line has been created".
+   - storeScreen().install_md step 3 no longer names a footer label (true for Flow v7.1 "I've installed it"
+     and v8 "Continue setup"): "Come back to WhatsApp and continue your setup"; closing line "Please install
+     the app first - your setup link only works once the app is on your phone."
+   - whatsapp.ts sendPlSignupFlow footer 'Isola Personal Line' -> 'EPIC Personal Line'.
+   - service.ts flows/launch holder body "Your Isola line <did>." -> "Your EPIC line <did>."
+
+2. Real store button: when a customer picks a phone type on the Flow INSTALL screen
+   (data_exchange {step:'store', os}) and the next-step engine READ stage 'install', plsvc also sends ONE
+   documented interactive cta_url message (header "Install Cloud Softphone (free)", body with return
+   guidance, display_text "Open App Store"/"Open Google Play", url = the same store_links/fallback the
+   screen shows; non-https/foreign-host URLs fall back to the official listing) to the verified sender
+   (flow_token wa) FROM PL_FLOW_SENDER_PHONE_ID only (no fallback), through dispatchToMeta/wa-send-gate
+   (senderPath pl:flows/store-button, kind interactive, purpose lite_onboarding, userId of the line,
+   sourceEventType pl_verified_inbound, sourceEventId flow:<token nonce>, sourceMessageId store-button:<os>).
+   - Schema: developers.facebook.com/documentation/business-messaging/whatsapp/messages/interactive-cta-url-messages
+   - De-duplication: store.claimOncePerWindow - atomic claim row in the existing pl_concierge_audit table
+     (endpoint 'flows/store-button', op = os) under a per-(sender, os) advisory lock in one transaction; at
+     most one per sender per OS per 24 h; a refused/failed send is re-coded store_button_failed and does not
+     count. No schema change, no migration.
+   - Fire-and-forget (fireStoreButton): the Flow answer never awaits or fails because of the send.
+   - Not sent when the stage is not install or was not read (completed line holders, engine errors).
+
+Tests: pl-store-button-payload (schema, sender, gate, footer), pl-store-button-dedupe (once per sender/os/
+24 h with controls; failures), pl-signup-flow-store-step (screen unchanged on failure/hang, stage gating,
+EPIC copy, install_md), pl-store-button-claim.realpg (real Postgres: concurrency, window, failed claims).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0199pUMmWEgBuXq5GN1ZVorW
+---
+ app/lib/pl-concierge/service.ts           |  45 +++++++-
+ app/lib/pl-concierge/signup-flow.ts       |  43 ++++++--
+ app/lib/pl-concierge/store.ts             |  33 ++++++
+ app/lib/whatsapp.ts                       |  64 ++++++++++-
+ test/pl-signup-flow-store-step.test.ts    | 119 ++++++++++++++++++++
+ test/pl-store-button-claim.realpg.test.ts |  70 ++++++++++++
+ test/pl-store-button-dedupe.test.ts       | 127 ++++++++++++++++++++++
+ test/pl-store-button-payload.test.ts      | 119 ++++++++++++++++++++
+ 8 files changed, 608 insertions(+), 12 deletions(-)
+ create mode 100644 test/pl-signup-flow-store-step.test.ts
+ create mode 100644 test/pl-store-button-claim.realpg.test.ts
+ create mode 100644 test/pl-store-button-dedupe.test.ts
+ create mode 100644 test/pl-store-button-payload.test.ts
+
+diff --git a/app/lib/pl-concierge/service.ts b/app/lib/pl-concierge/service.ts
+index 2382f973..725b86d7 100644
+--- a/app/lib/pl-concierge/service.ts
++++ b/app/lib/pl-concierge/service.ts
+@@ -600,7 +600,7 @@ async function flowLaunch(ctx: Ctx): Promise<Outcome> {
+   const token = mintFlowToken({ purpose: 'signup', waId: ctx.a.wa_id, rid: ctx.a.rid })
+   // rc12: a line holder gets 'Manage your line' (never signup copy); the Flow opens on their CURRENT step.
+   const body = existing
+-    ? `Your Isola line ${didPretty(existing.did) ?? ''}. Open this to see your line, your connection and your balance - and to finish setting up the free Cloud Softphone app if it isn't done yet. Nothing new will be created.`
++    ? `Your EPIC line ${didPretty(existing.did) ?? ''}. Open this to see your line, your connection and your balance - and to finish setting up the free Cloud Softphone app if it isn't done yet. Nothing new will be created.`
+     : `Free trial: ${o.trial_days} days with ${o.trial_minutes} minutes of Dominica calls, EC$${o.trial_price_xcd}. ${PL_OVERAGE_TEXT} Calls are made and received in the free Cloud Softphone app. ${VOICE_ONLY_DISCLOSURE}`
+   let decision: any
+   try { decision = await sendPlSignupFlow(ctx.a.wa_id, token, body, { senderPath: 'pl:flows/launch', userId: existing?.userId, sourceEventType: 'pl_verified_inbound', sourceEventId: ctx.a.mid }, existing ? { header: 'Manage your line', cta: 'Manage my line' } : undefined) } catch (e: any) { return { code: 'flow_unavailable', op: 'flows/launch', detail: String(e?.message ?? e).slice(0, 120) } }
+@@ -629,6 +629,49 @@ export async function nextStepForFlow(args: { waId: string; rid: string; mid: st
+   return o
+ }
+ 
++// rc16: the real Cloud Softphone store button for a Flow session at the INSTALL -> store step (signup-flow.ts fireStoreButton).
++// At most ONE per verified sender per OS per 24 h: an atomic claim row in pl_concierge_audit (endpoint 'flows/store-button', op = os)
++// decides, so Flow re-taps, Meta endpoint retries and new Flow sessions inside the window send nothing. A send that is refused or fails
++// is re-coded store_button_failed (not counted), so a later tap can try again. Identity = the wa_id inside the SERVER-signed flow_token
++// (the same identity every Flow step uses); the gate's PL verified-inbound carve-out applies because the token is only minted by
++// flows/launch in reply to a relay-verified inbound and lives 1 h, inside that inbound's 24 h service window. The send goes through
++// dispatchToMeta (wa-send-gate: suppression/STOP, audit, idempotency key userId:...:flow:<n>:...:store-button:<os>).
++export const STORE_BUTTON_WINDOW_S = 24 * 3600
++export type StoreButtonCode = 'store_button_sent' | 'store_button_duplicate' | 'store_button_failed' | 'service_disabled' | 'invalid_body'
++export interface StoreButtonResult { code: StoreButtonCode; detail?: string }
++export async function storeButtonForFlow(args: { waId: string; rid: string; flowNonce: string; os: 'ios' | 'android'; url: string }): Promise<StoreButtonResult> {
++  const t0 = Date.now()
++  if (args.os !== 'ios' && args.os !== 'android') return { code: 'invalid_body' }
++  const cfg = readConfig(process.env)
++  const hashKey = auditHashKey(cfg)
++  if (cfg.misconfig.length > 0 || !hashKey) return { code: 'service_disabled' }
++  const waIdHash = store.idHash(hashKey, args.waId)
++  const mid = `flow:${args.flowNonce}`
++  const claimId = await store.claimOncePerWindow({
++    endpoint: 'flows/store-button', op: args.os, waIdHash, windowS: STORE_BUTTON_WINDOW_S,
++    claimCode: 'store_button_claimed', countCodes: ['store_button_claimed', 'store_button_sent'], rid: args.rid, mid, waLast4: args.waId.slice(-4),
++  })
++  if (!claimId) return { code: 'store_button_duplicate', detail: 'already sent or in flight for this sender + os within 24 h' }
++  const fail = async (detail: string): Promise<StoreButtonResult> => {
++    await store.finishClaim(claimId, 'store_button_failed', 'failed', detail.slice(0, 200), Date.now() - t0).catch((e: any) => console.error(`[pl-concierge] store-button finish failed: ${e?.message}`))
++    return { code: 'store_button_failed', detail }
++  }
++  try {
++    const b: any = await resolveExistingBinding(args.waId)
++    if (b?.kind !== 'existing' || !b.userId) return await fail('no_line_binding')
++    const { sendPlStoreButton } = await import('@/app/lib/whatsapp')
++    const d: any = await sendPlStoreButton(args.waId, args.os, args.url, {
++      userId: b.userId, senderPath: 'pl:flows/store-button', sourceEventType: 'pl_verified_inbound', sourceEventId: mid, sourceMessageId: `store-button:${args.os}`,
++    })
++    const code = String(d?.code ?? 'no_decision')
++    if (!code.startsWith('allow_') || d?.duplicate || d?.dispatchFailed) return await fail(`${code}${d?.duplicate ? ':duplicate' : ''}${d?.dispatchFailed ? `:dispatch_failed:${d?.errorCode ?? ''}` : ''}`)
++    await store.finishClaim(claimId, 'store_button_sent', 'done', code, Date.now() - t0)
++    return { code: 'store_button_sent', detail: code }
++  } catch (e: any) {
++    return await fail(`error:${String(e?.message ?? e).slice(0, 160)}`)
++  }
++}
++
+ // Read-only registration/status for a Flow session (the ACTIVATE screen's "Check my connection"): lineStatus never mints a link,
+ // so repeated checks cannot spend the customer's activation-link budget (nextStepGuidance mints/reuses at stage link_ready).
+ export async function lineStatusForFlow(args: { waId: string; rid: string; mid: string }): Promise<Outcome> {
+diff --git a/app/lib/pl-concierge/signup-flow.ts b/app/lib/pl-concierge/signup-flow.ts
+index 21e6c632..19f34d0b 100644
+--- a/app/lib/pl-concierge/signup-flow.ts
++++ b/app/lib/pl-concierge/signup-flow.ts
+@@ -74,7 +74,7 @@ async function stepScreen(claims: FlowTokenClaims, event: 'status' | 'installed'
+   if (stage === 'connected' || stage === 'first_call_done') {
+     const did = f.did_pretty ? ` ${f.did_pretty}` : ''
+     const text = stage === 'first_call_done'
+-      ? 'Your first call went through - welcome to Isola!'
++      ? 'Your first call went through - welcome to EPIC!'
+       : f.inbound_enabled
+         ? `Your line is live. Your number${did} rings in Cloud Softphone now. Try it - call any Dominica number from the app; you have free minutes to start.`
+         : `Cloud Softphone is connected. You can make calls now - try it: call any Dominica number from the app. Incoming calls to your number${did} are not available yet - we'll message you when they are.`
+@@ -82,7 +82,7 @@ async function stepScreen(claims: FlowTokenClaims, event: 'status' | 'installed'
+   }
+   if (stage === 'install') {
+     if (from === 'install' && event === 'installed') return err('We could not record that just now. Please try again.')
+-    const lead = f.inbound_enabled ? "One more step - install Cloud Softphone. It's the free calling app your Isola number rings in." : "One more step - install Cloud Softphone. It's the free calling app you make calls from."
++    const lead = f.inbound_enabled ? "One more step - install Cloud Softphone. It's the free calling app your EPIC number rings in." : "One more step - install Cloud Softphone. It's the free calling app you make calls from."
+     void lead // rc14: the INSTALL screen is a phone-type chooser; the copy moved to INSTALL_STORE (storeScreen)
+     return { screen: 'INSTALL', data: {} }
+   }
+@@ -111,9 +111,26 @@ export function storeScreen(os: 'ios' | 'android', links: { ios?: string; androi
+     badge_img: ios ? STORE_BADGE_IOS_B64 : STORE_BADGE_ANDROID_B64,
+     store_url: url,
+     store_label: label,
+-    install_md: `**1.** Tap **${label.replace('👉 ', '')}** below\n\n**2.** Install **Cloud Softphone** - it's free\n\n**3.** Come back to WhatsApp and tap **I've installed it**\n\nPlease don't tap it before the app is installed - your setup link only works once the app is on your phone.`,
++    install_md: `**1.** Tap **${label.replace('👉 ', '')}** below\n\n**2.** Install **Cloud Softphone** - it's free\n\n**3.** Come back to WhatsApp and continue your setup\n\nPlease install the app first - your setup link only works once the app is on your phone.`,
+   } }
+ }
++/**
++ * rc16: start the store-button send WITHOUT awaiting it. Never throws, never rejects into the caller: every failure (import, DB, gate,
++ * Meta) is logged and swallowed, so the Flow screen answer is identical whether the send succeeds, is de-duplicated or fails.
++ */
++export function fireStoreButton(claims: FlowTokenClaims, os: 'ios' | 'android', url: string, tag = '[flows/signup]'): void {
++  try {
++    void Promise.resolve()
++      .then(async () => {
++        const { storeButtonForFlow } = await import('@/app/lib/pl-concierge/service')
++        const r: any = await storeButtonForFlow({ waId: claims.wa, rid: claims.cw, flowNonce: claims.n, os, url })
++        console.log(`${tag} store-button os=${os} -> ${r?.code ?? 'no_result'}${r?.detail ? ` (${r.detail})` : ''}`)
++      })
++      .catch((e: any) => console.error(`${tag} store-button os=${os} failed (Flow answer unaffected): ${String(e?.message ?? e).slice(0, 200)}`))
++  } catch (e: any) {
++    console.error(`${tag} store-button os=${os} could not start (Flow answer unaffected): ${String(e?.message ?? e).slice(0, 200)}`)
++  }
++}
+ function activateScreen(url: string, text: string) {
+   return { screen: 'ACTIVATE', data: { activate_text: text, activation_url: url || 'https://go.uplink.epic.dm/go', has_link: !!url } }
+ }
+@@ -148,7 +165,7 @@ export async function handleSignupFlow(args: { action: string; screen?: string;
+           : 'Next step: set your line up in the free Cloud Softphone app - tap Continue.'
+       } catch { /* the line and balance below still stand */ }
+       const b = await balanceFacts(claims)
+-      return { screen: 'WELCOME', data: { offer_text: `Your Isola line ${formatDidDisplay(held)}\n\n${status}\n\n${b.minutes_text}\n${b.expiry_text}\n${b.wallet_text}\n\nNothing new will be created.` } }
++      return { screen: 'WELCOME', data: { offer_text: `Your EPIC line ${formatDidDisplay(held)}\n\n${status}\n\n${b.minutes_text}\n${b.expiry_text}\n${b.wallet_text}\n\nNothing new will be created.` } }
+     }
+     // The offer is rendered from the SAME catalogue read as the chat offer (buildOffer), never typed into the Flow JSON.
+     const { buildOffer } = await import('@/app/lib/pl-concierge/service')
+@@ -164,7 +181,7 @@ export async function handleSignupFlow(args: { action: string; screen?: string;
+     const name = cleanName(data?.first_name)
+     const held = await existingLine(wa)
+     if (held) return { screen: 'CONFIRM', data: { first_name: name || 'there', confirm_text: `${name ? name + ', tap' : 'Tap'} below to continue with your line ${formatDidDisplay(held)}.` } }
+-    return { screen: 'CONFIRM', data: { first_name: name || 'there', confirm_text: `${name ? name + ', tap' : 'Tap'} below to set up your free Isola line on this WhatsApp number. The trial costs nothing.` } }
++    return { screen: 'CONFIRM', data: { first_name: name || 'there', confirm_text: `${name ? name + ', tap' : 'Tap'} below to set up your free EPIC line on this WhatsApp number. The trial costs nothing.` } }
+   }
+ 
+   if (action === 'data_exchange' && screen === 'CONFIRM') {
+@@ -179,7 +196,7 @@ export async function handleSignupFlow(args: { action: string; screen?: string;
+     const existing = await prisma.liteAccount.findUnique({ where: { userId: identity.userId }, select: { did: true } })
+     if (existing?.did) {
+       console.log(`${tag} CONFIRM -> existing line, no provisioning started`)
+-      return { screen: 'LINE_READY', data: { did_display: formatDidDisplay(existing.did), line_text: 'You already have this Isola line - nothing new was set up. Tap Continue to finish setting up the app.' } }
++      return { screen: 'LINE_READY', data: { did_display: formatDidDisplay(existing.did), line_text: 'You already have this EPIC line - nothing new was set up. Tap Continue to finish setting up the app.' } }
+     }
+     console.log(`${tag} CONFIRM -> provisioning (single attempt, idempotent per user)`)
+     const running = provisionLine(identity.userId, wa, 'flow', undefined, false, undefined, { trialGrant: 'background' })
+@@ -198,7 +215,7 @@ export async function handleSignupFlow(args: { action: string; screen?: string;
+     }
+     if (result?.status === 200 && result?.did) {
+       console.log(`${tag} provisioning OK did=***${String(result.did).slice(-4)}`)
+-      return { screen: 'LINE_READY', data: { did_display: formatDidDisplay(String(result.did)), line_text: 'Your Isola line has been created. Next you install the free Cloud Softphone app and set your line up in it - tap Continue.' } }
++      return { screen: 'LINE_READY', data: { did_display: formatDidDisplay(String(result.did)), line_text: 'Your EPIC line has been created. Next you install the free Cloud Softphone app and set your line up in it - tap Continue.' } }
+     }
+     console.error(`${tag} provisioning FAILED status=${result?.status} error=${result?.body?.error ?? '-'}`)
+     return err(String(result?.body?.message ?? 'We could not set up your line right now. Please try again shortly.'))
+@@ -209,7 +226,7 @@ export async function handleSignupFlow(args: { action: string; screen?: string;
+   if (action === 'data_exchange' && screen === 'PROVISIONING') {
+     // READ-ONLY: never starts a line. The line exists -> show it; the single attempt is still running -> wait; it failed -> say so.
+     const did = await existingLine(wa)
+-    if (did) return { screen: 'LINE_READY', data: { did_display: formatDidDisplay(did), line_text: 'Your Isola line has been created. Next you install the free Cloud Softphone app and set your line up in it - tap Continue.' } }
++    if (did) return { screen: 'LINE_READY', data: { did_display: formatDidDisplay(did), line_text: 'Your EPIC line has been created. Next you install the free Cloud Softphone app and set your line up in it - tap Continue.' } }
+     const run = provisioningRuns.get(wa)
+     if (run?.state === 'running' && Date.now() - run.at < 120_000) return { screen: 'PROVISIONING', data: { provisioning_text: 'Almost there - your number is still being set up. Tap Continue again in a few seconds.' } }
+     if (run?.state === 'failed' && run.message === 'pending') return err('We are still confirming your line. Please do not start again - reply in the chat and we will update you.')
+@@ -219,8 +236,14 @@ export async function handleSignupFlow(args: { action: string; screen?: string;
+     if (data?.step === 'store' && (data?.os === 'ios' || data?.os === 'android')) {
+       const { nextStepForFlow } = await import('@/app/lib/pl-concierge/service')
+       let links: any = {}
+-      try { const o: any = await nextStepForFlow({ waId: claims.wa, rid: claims.cw, mid: `flow:${claims.n}`, event: 'status' }); links = o?.data?.store_links ?? {} } catch { /* fallback store URLs */ }
+-      return storeScreen(data.os, links)
++      let stage: unknown = null
++      try { const o: any = await nextStepForFlow({ waId: claims.wa, rid: claims.cw, mid: `flow:${claims.n}`, event: 'status' }); links = o?.data?.store_links ?? {}; stage = o?.code === 'next_step' ? o?.data?.stage : null } catch { /* fallback store URLs */ }
++      const screenOut = storeScreen(data.os, links)
++      // rc16: ALSO send one real store button (a documented cta_url message) to this verified sender - only when the engine READ the
++      // install stage (never to a completed line holder; an unread stage sends nothing). Fire-and-forget: the Flow answer never waits on
++      // it or fails because of it (Meta's endpoint window); de-duplicated per sender per OS per 24 h in storeButtonForFlow.
++      if (stage === 'install') fireStoreButton(claims, data.os, screenOut.data.store_url, tag)
++      return screenOut
+     }
+     return stepScreen(claims, 'installed', '', 'install')
+   }
+diff --git a/app/lib/pl-concierge/store.ts b/app/lib/pl-concierge/store.ts
+index 35153911..f18c1149 100644
+--- a/app/lib/pl-concierge/store.ts
++++ b/app/lib/pl-concierge/store.ts
+@@ -78,6 +78,39 @@ export async function provisionByMid(waIdHash: string, mid: string): Promise<{ c
+   return rows[0] ? { code: rows[0].code, outcome: rows[0].outcome, detail: rows[0].detail, createdAt: new Date(rows[0].created_at) } : null
+ }
+ 
++/**
++ * rc16: ATOMIC "at most once per window" claim, recorded as an audit row (endpoint + op), in the existing audit table - no new table.
++ * Inside one transaction a per-(endpoint, waIdHash, op) advisory lock serialises concurrent claimers (Flow re-taps, Meta endpoint
++ * retries), then a row with one of `countCodes` inside the window means "already claimed" (returns null); otherwise the claim row is
++ * written with `claimCode` and its id returned. A claim whose work then fails is re-coded by the caller (finishClaim) to a code outside
++ * `countCodes`, so a failed send does not block a later one.
++ */
++export async function claimOncePerWindow(args: { endpoint: string; op: string; waIdHash: string; windowS: number; claimCode: string; countCodes: string[]; rid?: string | null; mid?: string | null; waLast4?: string | null }): Promise<string | null> {
++  const lockKey = `pl-claim\0${args.endpoint}\0${args.waIdHash}\0${args.op}`
++  const since = new Date(Date.now() - args.windowS * 1000)
++  return prisma.$transaction(async (tx) => {
++    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`
++    const rows = await tx.$queryRaw<Array<{ n: number }>>`
++      SELECT count(*)::int AS n FROM "pl_concierge_audit"
++      WHERE "wa_id_hash" = ${args.waIdHash} AND "endpoint" = ${args.endpoint} AND "op" = ${args.op}
++        AND "created_at" >= ${since} AND "code" = ANY(${args.countCodes}::text[])`
++    if (Number(rows[0]?.n ?? 0) > 0) return null
++    const id = randomUUID()
++    await tx.$executeRaw`
++      INSERT INTO "pl_concierge_audit" ("id", "endpoint", "op", "http_status", "code", "kid", "rid", "mid", "wa_id_hash", "wa_last4", "outcome")
++      VALUES (${id}, ${args.endpoint}, ${args.op}, 200, ${args.claimCode}, 'flow', ${args.rid ?? null}, ${args.mid ?? null}, ${args.waIdHash}, ${args.waLast4 ?? null}, 'started')`
++    return id
++  })
++}
++
++/** rc16: record how a claim ended (code + outcome + short detail). */
++export async function finishClaim(id: string, code: string, outcome: 'done' | 'failed', detail?: string | null, latencyMs?: number | null): Promise<void> {
++  await prisma.$executeRaw`
++    UPDATE "pl_concierge_audit" SET "code" = ${code}, "outcome" = ${outcome}, "detail" = ${detail ?? null},
++      "latency_ms" = ${latencyMs ?? null}, "updated_at" = NOW()
++    WHERE "id" = ${id}`
++}
++
+ /** Newest qualifying row (for "one per window" retry_after_s). */
+ export async function newestRecentAt(waIdHash: string, endpoints: string[], windowS: number, codes?: string[]): Promise<Date | null> {
+   const since = new Date(Date.now() - windowS * 1000)
+diff --git a/app/lib/whatsapp.ts b/app/lib/whatsapp.ts
+index 04ea5c43..d0c14671 100644
+--- a/app/lib/whatsapp.ts
++++ b/app/lib/whatsapp.ts
+@@ -1050,7 +1050,7 @@ export async function sendPlSignupFlow(toPhone: string, flowToken: string, bodyT
+       type: 'flow',
+       header: { type: 'text', text: (ui?.header || 'Get your free number').slice(0, 60) },
+       body: { text: bodyText.slice(0, 1024) },
+-      footer: { text: 'Isola Personal Line' },
++      footer: { text: 'EPIC Personal Line' },
+       action: { name: 'flow', parameters: { flow_message_version: '3', flow_id: flowId, flow_cta: (ui?.cta || 'Start signup').slice(0, 20), flow_token: flowToken, mode: 'published', flow_action: 'data_exchange' } },
+     },
+   }
+@@ -1061,6 +1061,68 @@ export async function sendPlSignupFlow(toPhone: string, flowToken: string, bodyT
+   return decision
+ }
+ 
++// ── Personal Line: Cloud Softphone store button (rc16) ────────────────────────
++// A documented interactive Call-to-Action URL button message ("Interactive Call-to-Action URL Button Messages",
++// developers.facebook.com/documentation/business-messaging/whatsapp/messages/interactive-cta-url-messages):
++//   interactive.type 'cta_url'; header optional (text <= 60 chars); body.text required (<= 1024); footer.text optional (<= 60);
++//   action.name 'cta_url'; action.parameters.display_text required (<= 20 chars); action.parameters.url required.
++// A Flow cannot open a URL from a button, so the real store button is this separate message, sent beside the INSTALL_STORE screen.
++export const PL_STORE_FALLBACK_URLS = {
++  ios: 'https://apps.apple.com/us/app/cloud-softphone/id567475545',
++  android: 'https://play.google.com/store/apps/details?id=cz.acrobits.softphone.cloudphone',
++} as const
++/** Only an https URL on the official store host is put behind the button; anything else falls back to the official listing. */
++export function plStoreUrl(os: 'ios' | 'android', candidate?: unknown): string {
++  const host = os === 'ios' ? 'apps.apple.com' : 'play.google.com'
++  if (typeof candidate === 'string') {
++    try { const u = new URL(candidate); if (u.protocol === 'https:' && u.hostname === host) return u.toString() } catch { /* fall back */ }
++  }
++  return PL_STORE_FALLBACK_URLS[os]
++}
++export function buildPlStoreButtonPayload(toPhone: string, os: 'ios' | 'android', url?: unknown): Record<string, any> {
++  const ios = os === 'ios'
++  const store = ios ? 'the App Store' : 'Google Play'
++  const back = 'After installing, come back to this chat and tap the setup form above to continue - on iPhone tap ◀ WhatsApp at the top left, on Android press Back.'
++  return {
++    messaging_product: 'whatsapp',
++    recipient_type: 'individual',
++    to: toPhone,
++    type: 'interactive',
++    interactive: {
++      type: 'cta_url',
++      header: { type: 'text', text: 'Install Cloud Softphone (free)'.slice(0, 60) },
++      body: { text: `Tap the button below to open ${store} and install Cloud Softphone - the free app you make calls from with your EPIC line.\n\n${back}`.slice(0, 1024) },
++      footer: { text: 'EPIC Personal Line'.slice(0, 60) },
++      action: { name: 'cta_url', parameters: { display_text: (ios ? 'Open App Store' : 'Open Google Play').slice(0, 20), url: plStoreUrl(os, url) } },
++    },
++  }
++}
++/**
++ * Same gate/dispatch as sendPlSignupFlow, same sender rule: PL_FLOW_SENDER_PHONE_ID with NO fallback (never 3742). The caller supplies
++ * the provenance (userId + the signed Flow session) and does the per-sender/per-OS/24 h de-duplication (storeButtonForFlow).
++ */
++export async function sendPlStoreButton(toPhone: string, os: 'ios' | 'android', url: unknown, ctx: Partial<WaSendContext>): Promise<GateDecision> {
++  const phoneId = process.env.PL_FLOW_SENDER_PHONE_ID || ''
++  if (!phoneId) throw new Error('PL_FLOW_SENDER_PHONE_ID not configured')
++  const sendCtx: WaSendContext = {
++    purpose: ctx.purpose ?? 'lite_onboarding',
++    senderPath: ctx.senderPath ?? 'pl:flows/store-button',
++    kind: 'interactive',
++    recipientPhone: toPhone,
++    userId: ctx.userId,
++    agentId: ctx.agentId,
++    sourceEventType: ctx.sourceEventType,
++    sourceEventId: ctx.sourceEventId,
++    sourceMessageId: ctx.sourceMessageId,
++  }
++  const decision = await dispatchToMeta(buildPlStoreButtonPayload(toPhone, os, url), phoneId, sendCtx)
++  if (!decision.code.startsWith('allow_')) console.warn(`[whatsapp][gate] ${decision.code} - sendPlStoreButton suppressed: ${decision.reason}`)
++  else if (decision.duplicate) console.log('[whatsapp] PL store button: duplicate (idempotency key) - not re-sent')
++  else if (decision.dispatchFailed) console.error('[whatsapp] sendPlStoreButton dispatch failed')
++  else console.log('[whatsapp] PL store button sent via', phoneId)
++  return decision
++}
++
+ // ── WhatsApp Flows: Lite Top-Up ───────────────────────────────────────────────
+ //
+ // Sends an interactive Flow message that opens the "Isola Lite Top-Up" Flow
+diff --git a/test/pl-signup-flow-store-step.test.ts b/test/pl-signup-flow-store-step.test.ts
+new file mode 100644
+index 00000000..6b6f8ae4
+--- /dev/null
++++ b/test/pl-signup-flow-store-step.test.ts
+@@ -0,0 +1,119 @@
++/**
++ * rc16: the signup Flow endpoint's INSTALL -> store step, through the real handleSignupFlow.
++ *  - the Flow answer (INSTALL_STORE) is unchanged by the store-button send: identical on success, failure, rejection or a hung send;
++ *  - the send is started only when the engine READ the install stage (never for a completed line holder or an unread stage);
++ *  - endpoint-generated copy says EPIC, never "Isola"; install_md no longer names a footer label (true for Flow v7.1 and v8).
++ * Every negative has a positive twin in this file.
++ */
++import { describe, it, expect, vi, beforeEach } from 'vitest'
++
++const S = vi.hoisted(() => ({
++  stage: 'install' as string | null, nextCode: 'next_step', sendImpl: null as null | (() => Promise<any>), sends: [] as any[],
++  storeLinks: {} as Record<string, string>, did: '17678185001' as string | null,
++}))
++vi.mock('@/app/lib/prisma', () => ({ prisma: { liteAccount: { findUnique: vi.fn(async () => (S.did ? { did: S.did } : null)) } } }))
++vi.mock('@/app/lib/lite-signup-identity', () => ({
++  resolveExistingBinding: vi.fn(async () => (S.did ? { kind: 'existing', userId: 'userA' } : { kind: 'none' })),
++  resolveSignupIdentity: vi.fn(async () => ({ kind: 'existing', userId: 'userA' })),
++  notifyAmbiguousRefusal: vi.fn(async () => true),
++}))
++vi.mock('@/app/lib/lite-provision', () => ({ provisionLine: vi.fn(async () => ({ status: 200, did: '17678185001' })) }))
++vi.mock('@/app/lib/lite-offer-text', () => ({ PL_OVERAGE_TEXT: 'Overage text.', VOICE_ONLY_DISCLOSURE: 'Voice only.' }))
++vi.mock('@/app/lib/pl-concierge/service', () => ({
++  nextStepForFlow: vi.fn(async () => (S.nextCode === 'throw' ? Promise.reject(new Error('engine down')) : { code: S.nextCode, data: { stage: S.stage, store_links: S.storeLinks, facts: { did_pretty: '+1 (767) 818-5001' } } })),
++  storeButtonForFlow: vi.fn(async (a: any) => { S.sends.push(a); return S.sendImpl ? S.sendImpl() : { code: 'store_button_sent' } }),
++  lineStatusForFlow: vi.fn(async () => ({ code: 'line_status', data: { registration: 'unknown', softphone_activated: false } })),
++  balanceForFlow: vi.fn(async () => ({ code: 'balance', data: { known: true, kind: 'included', minutes_remaining: 50, minutes_included: 60, expires_date_pretty: 'Oct 20', plan_name: 'Trial', wallet_xcd: '0.00' } })),
++  buildOffer: vi.fn(async () => ({ code: 'offer', data: { trial_days: 7, trial_minutes: 60, trial_price_xcd: '0' } })),
++}))
++
++import { handleSignupFlow, storeScreen } from '@/app/lib/pl-concierge/signup-flow'
++
++const claims = { v: 1, p: 'signup', wa: '17675550101', cw: 'rid1', iat: 0, exp: 9e9, n: 'nonce1' } as any
++const storeTap = (os: 'ios' | 'android') => handleSignupFlow({ action: 'data_exchange', screen: 'INSTALL', data: { step: 'store', os }, claims })
++const flush = () => new Promise(r => setTimeout(r, 20))
++
++beforeEach(() => { S.stage = 'install'; S.nextCode = 'next_step'; S.sendImpl = null; S.sends = []; S.storeLinks = {}; S.did = '17678185001' })
++
++describe('INSTALL -> store: the Flow answer is the store screen, the send is a side effect', () => {
++  it('install stage: answers INSTALL_STORE and starts exactly one store-button send with the screen\'s own store URL', async () => {
++    S.storeLinks = { ios: 'https://apps.apple.com/dm/app/cloud-softphone/id567475545' }
++    const r = await storeTap('ios'); await flush()
++    expect(r.screen).toBe('INSTALL_STORE')
++    expect(S.sends).toEqual([{ waId: '17675550101', rid: 'rid1', flowNonce: 'nonce1', os: 'ios', url: 'https://apps.apple.com/dm/app/cloud-softphone/id567475545' }])
++    expect(r.data.store_url).toBe('https://apps.apple.com/dm/app/cloud-softphone/id567475545')
++  })
++  it('a completed line holder (stage connected) gets the screen but NO send', async () => {
++    S.stage = 'connected'
++    const r = await storeTap('android'); await flush()
++    expect(r.screen).toBe('INSTALL_STORE'); expect(S.sends).toHaveLength(0)
++  })
++  it('an unread stage (engine error / not next_step) sends nothing - fail closed', async () => {
++    S.nextCode = 'throw'; let r = await storeTap('ios'); await flush()
++    expect(r.screen).toBe('INSTALL_STORE'); expect(S.sends).toHaveLength(0)
++    S.nextCode = 'rate_limited'; r = await storeTap('ios'); await flush()
++    expect(S.sends).toHaveLength(0)
++  })
++  it('send failure / rejection does not change the Flow screen response (byte-identical to the success case)', async () => {
++    const ok = await storeTap('android'); await flush()
++    S.sendImpl = async () => ({ code: 'store_button_failed', detail: 'dispatch_failed' })
++    const failed = await storeTap('android'); await flush()
++    S.sendImpl = async () => { throw new Error('boom') }
++    const rejected = await storeTap('android'); await flush()
++    expect(JSON.stringify(failed)).toBe(JSON.stringify(ok))
++    expect(JSON.stringify(rejected)).toBe(JSON.stringify(ok))
++    expect(S.sends).toHaveLength(3)   // CONTROL: the send really was attempted each time
++  })
++  it('a send that never finishes does not hold the Flow answer (answers in well under 1 s)', async () => {
++    S.sendImpl = () => new Promise(() => { /* never settles */ })
++    const t0 = Date.now(); const r = await storeTap('ios'); const ms = Date.now() - t0
++    expect(r.screen).toBe('INSTALL_STORE'); expect(ms).toBeLessThan(1000); await flush(); expect(S.sends).toHaveLength(1)
++  })
++  it('CONTROL: other INSTALL actions (already have it) never start a send', async () => {
++    await handleSignupFlow({ action: 'data_exchange', screen: 'INSTALL', data: { step: 'installed' }, claims }); await flush()
++    expect(S.sends).toHaveLength(0)
++  })
++})
++
++describe('install_md is true for Flow v7.1 ("I\'ve installed it") and v8 ("Continue setup")', () => {
++  it('names no footer label, keeps the three steps', () => {
++    for (const os of ['ios', 'android'] as const) {
++      const md = storeScreen(os).data.install_md
++      expect(md).not.toMatch(/I've installed it|Continue setup/)
++      expect(md).toContain('**3.** Come back to WhatsApp and continue your setup')
++      expect(md).toContain('Install **Cloud Softphone**')
++    }
++  })
++})
++
++describe('endpoint-generated copy is EPIC-branded', () => {
++  const texts = (o: any) => JSON.stringify(o?.data ?? {})
++  it('holder WELCOME, CONFIRM, LINE_READY (existing + created), PROVISIONING, CONNECTED: no "Isola", says EPIC', async () => {
++    const out: any[] = []
++    out.push(await handleSignupFlow({ action: 'INIT', claims }))
++    out.push(await handleSignupFlow({ action: 'data_exchange', screen: 'WELCOME', data: { first_name: 'Ann' }, claims }))
++    out.push(await handleSignupFlow({ action: 'data_exchange', screen: 'CONFIRM', data: { confirm: 'yes' }, claims }))
++    out.push(await handleSignupFlow({ action: 'data_exchange', screen: 'PROVISIONING', data: {}, claims }))
++    S.stage = 'first_call_done'; out.push(await handleSignupFlow({ action: 'data_exchange', screen: 'LINE_READY', data: {}, claims }))
++    S.did = null
++    out.push(await handleSignupFlow({ action: 'data_exchange', screen: 'WELCOME', data: { first_name: 'Ann' }, claims }))
++    const all = out.map(texts).join('\n')
++    expect(out.map(o => o.screen)).toEqual(['WELCOME', 'CONFIRM', 'LINE_READY', 'LINE_READY', 'CONNECTED', 'CONFIRM'])
++    expect(all).not.toMatch(/isola/i)
++    expect(all).toContain('Your EPIC line +1 (767) 818-5001')
++    expect(all).toContain('You already have this EPIC line')
++    expect(all).toContain('Your EPIC line has been created')
++    expect(all).toContain('welcome to EPIC!')
++    expect(all).toContain('set up your free EPIC line')
++  })
++  it('CONTROL: the scan would catch the old brand (signup-flow source no longer carries a customer-facing "Isola" string)', async () => {
++    const { readFileSync } = await import('node:fs')
++    const src = readFileSync(new URL('../app/lib/pl-concierge/signup-flow.ts', import.meta.url), 'utf8')
++    // strip comments, then look only inside string/template literals
++    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
++    const literals = code.match(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g) ?? []
++    const offenders = literals.filter(l => /isola/i.test(l) && !l.startsWith("'@/") && !/^['"`]\[/.test(l))
++    expect(offenders).toEqual([])
++    expect(['"welcome to Isola"'].filter(l => /isola/i.test(l))).toHaveLength(1)   // the filter itself fires on a known positive
++  })
++})
+diff --git a/test/pl-store-button-claim.realpg.test.ts b/test/pl-store-button-claim.realpg.test.ts
+new file mode 100644
+index 00000000..219271f6
+--- /dev/null
++++ b/test/pl-store-button-claim.realpg.test.ts
+@@ -0,0 +1,70 @@
++/**
++ * rc16: store.claimOncePerWindow against a REAL Postgres through the REAL Prisma client (+ @prisma/adapter-pg): the advisory lock,
++ * the count and the insert happen in one interactive transaction, so concurrent claimers (Flow re-taps, Meta endpoint retries) get
++ * exactly one claim. Positive twins in the same run: a different op, another sender, a failed claim and an expired window each DO claim.
++ *
++ * Runs only when LOCK_TEST_PG_URL points at a THROWAWAY local database (127.0.0.1/localhost, db name lockvoid*); anything else is
++ * refused (same guard as pl-concierge.realpg.test.ts). The table comes from the REVIEWED migration file itself.
++ */
++import { describe, it, expect, vi, beforeAll } from 'vitest'
++import { readFileSync } from 'node:fs'
++import path from 'node:path'
++
++const URL_ = vi.hoisted(() => {
++  const u = process.env.LOCK_TEST_PG_URL || ''
++  let ok = false
++  try { const x = new URL(u); ok = /^(127\.0\.0\.1|localhost)$/.test(x.hostname) && /^\/lockvoid/.test(x.pathname) } catch { ok = false }
++  if (u && !ok) throw new Error('LOCK_TEST_PG_URL must be a THROWAWAY local database (127.0.0.1/localhost, db name lockvoid*) - refusing')
++  if (ok) { process.env.DATABASE_URL = u; process.env.POSTGRES_PRISMA_URL = u }
++  return ok ? u : ''
++})
++vi.unmock('@/app/lib/prisma')
++
++import { prisma } from '../app/lib/prisma'
++import { claimOncePerWindow, finishClaim } from '../app/lib/pl-concierge/store'
++
++const run = Date.now().toString(36)
++const base = { endpoint: 'flows/store-button', windowS: 86400, claimCode: 'store_button_claimed', countCodes: ['store_button_claimed', 'store_button_sent'] }
++
++describe.skipIf(!URL_)('REAL Postgres: store-button claim (one per sender per OS per window)', () => {
++  beforeAll(async () => {
++    const db = ((await prisma.$queryRawUnsafe('SELECT current_database() AS d')) as any[])[0].d
++    if (!/^lockvoid/.test(db)) throw new Error(`refusing: connected to ${db}`)
++    const exists = ((await prisma.$queryRawUnsafe(`SELECT to_regclass('public.pl_concierge_audit')::text AS t`)) as any[])[0].t
++    if (!exists) {
++      const sql = readFileSync(path.join(__dirname, '..', 'prisma', 'migrations', '20261001020000_add_pl_concierge_service_tables', 'migration.sql'), 'utf8')
++      for (const stmt of sql.split(/;\s*\n/).map(s => s.replace(/--.*$/gm, '').trim()).filter(Boolean)) await prisma.$executeRawUnsafe(stmt)
++    }
++  })
++
++  it('20 concurrent claims for one sender + os -> exactly one claim row', async () => {
++    const h = `h_conc_${run}`
++    const ids = await Promise.all(Array.from({ length: 20 }, () => claimOncePerWindow({ ...base, op: 'ios', waIdHash: h })))
++    expect(ids.filter(Boolean)).toHaveLength(1)
++    const n = ((await prisma.$queryRawUnsafe(`SELECT count(*)::int AS n FROM "pl_concierge_audit" WHERE "wa_id_hash" = $1`, h)) as any[])[0].n
++    expect(n).toBe(1)
++  })
++  it('a second claim inside the window is refused; CONTROL: other os / other sender claim', async () => {
++    const h = `h_seq_${run}`
++    expect(await claimOncePerWindow({ ...base, op: 'android', waIdHash: h })).toBeTruthy()
++    expect(await claimOncePerWindow({ ...base, op: 'android', waIdHash: h })).toBeNull()
++    expect(await claimOncePerWindow({ ...base, op: 'ios', waIdHash: h })).toBeTruthy()
++    expect(await claimOncePerWindow({ ...base, op: 'android', waIdHash: `${h}_other` })).toBeTruthy()
++  })
++  it('a claim finished as sent still blocks; one finished as failed does not', async () => {
++    const h = `h_fin_${run}`
++    const id1 = await claimOncePerWindow({ ...base, op: 'ios', waIdHash: h })
++    await finishClaim(id1!, 'store_button_sent', 'done', 'allow_service_message', 5)
++    expect(await claimOncePerWindow({ ...base, op: 'ios', waIdHash: h })).toBeNull()
++    const h2 = `h_fail_${run}`
++    const id2 = await claimOncePerWindow({ ...base, op: 'ios', waIdHash: h2 })
++    await finishClaim(id2!, 'store_button_failed', 'failed', 'dispatch_failed', 5)
++    expect(await claimOncePerWindow({ ...base, op: 'ios', waIdHash: h2 })).toBeTruthy()
++  })
++  it('after the window the same sender + os claims again', async () => {
++    const h = `h_win_${run}`
++    const id = await claimOncePerWindow({ ...base, op: 'ios', waIdHash: h })
++    await prisma.$executeRawUnsafe(`UPDATE "pl_concierge_audit" SET "created_at" = NOW() - INTERVAL '25 hours' WHERE "id" = $1`, id)
++    expect(await claimOncePerWindow({ ...base, op: 'ios', waIdHash: h })).toBeTruthy()
++  })
++})
+diff --git a/test/pl-store-button-dedupe.test.ts b/test/pl-store-button-dedupe.test.ts
+new file mode 100644
+index 00000000..1fcb04d0
+--- /dev/null
++++ b/test/pl-store-button-dedupe.test.ts
+@@ -0,0 +1,127 @@
++/**
++ * rc16: storeButtonForFlow - at most ONE store-button message per verified sender per OS per 24 h.
++ * The store's claim is faked here with the SAME semantics as store.claimOncePerWindow (rows keyed by endpoint + op + waIdHash,
++ * counted codes, window); the SQL itself (advisory lock + count + insert) is proven against a real Postgres in
++ * pl-store-button-claim.realpg.test.ts. Every "nothing was sent" assertion has a positive twin that DOES send in this harness.
++ */
++import { describe, it, expect, vi, beforeEach } from 'vitest'
++
++const S = vi.hoisted(() => ({ rows: [] as any[], clock: Date.now(), sends: [] as any[], sendImpl: null as null | ((...a: any[]) => Promise<any>), bindings: {} as Record<string, string> }))
++
++vi.mock('@/app/lib/runtime-flags', () => ({ getRuntimeFlag: () => false, getRuntimeNumber: (_k: string, d: number) => d, getRuntimeList: (_k: string, d: string[]) => d }))
++vi.mock('@/app/lib/prisma', () => ({ prisma: {} }))
++vi.mock('@/app/lib/pl-concierge/store', async (orig) => {
++  const real: any = await orig()
++  return {
++    idHash: real.idHash,
++    writeAudit: vi.fn(async () => 'x'),
++    claimOncePerWindow: vi.fn(async (a: any) => {
++      const since = S.clock - a.windowS * 1000
++      const n = S.rows.filter(r => r.waIdHash === a.waIdHash && r.endpoint === a.endpoint && r.op === a.op && r.at >= since && a.countCodes.includes(r.code)).length
++      if (n > 0) return null
++      const id = `c${S.rows.length + 1}`
++      S.rows.push({ id, endpoint: a.endpoint, op: a.op, waIdHash: a.waIdHash, code: a.claimCode, at: S.clock, mid: a.mid })
++      return id
++    }),
++    finishClaim: vi.fn(async (id: string, code: string, outcome: string, detail?: string) => { const r = S.rows.find(x => x.id === id); if (r) Object.assign(r, { code, outcome, detail }) }),
++  }
++})
++vi.mock('@/app/lib/lite-signup-identity', () => ({
++  resolveExistingBinding: vi.fn(async (wa: string) => (S.bindings[wa] ? { kind: 'existing', userId: S.bindings[wa], accountId: 'acc', reason: 'sole_holder' } : { kind: 'none' })),
++  resolveSignupIdentity: vi.fn(), notifyAmbiguousRefusal: vi.fn(),
++}))
++vi.mock('@/app/lib/whatsapp', () => ({
++  sendPlStoreButton: vi.fn(async (...a: any[]) => { S.sends.push(a); return S.sendImpl ? S.sendImpl(...a) : { code: 'allow_service_message', auditId: 'w1' } }),
++  sendPlSignupFlow: vi.fn(),
++}))
++vi.mock('@/app/lib/lite-provision-identity', () => ({ provisionUserIdFor: vi.fn() }))
++vi.mock('@/app/lib/lite-provision', () => ({ provisionLine: vi.fn() }))
++vi.mock('@/app/lib/lite-line-balance', () => ({ getLineMinutesBalance: vi.fn(), isKnownLow: vi.fn(), formatBalanceDate: vi.fn() }))
++vi.mock('@/app/lib/lite-registration-watch', () => ({ REGISTERED: new Set(['registered']), readPeerRegistration: vi.fn() }))
++vi.mock('@/app/lib/lite-post-provision', () => ({ activationStatusForUser: vi.fn() }))
++vi.mock('@/app/lib/lite-first-call-status', () => ({ getFirstCallStatus: vi.fn(), recordInstallSelfReport: vi.fn() }))
++vi.mock('@/app/lib/lite-offer-copy', () => ({ inboundReachable: () => false, missedCallAlertsLive: () => false }))
++vi.mock('@/app/lib/lite-softphone-activation', () => ({ mintSoftphoneActivation: vi.fn(), IOS_URL: 'https://apps.apple.com/x', ANDROID_URL: 'https://play.google.com/x' }))
++vi.mock('@/app/lib/lite-activation', () => ({ activationEnabledFor: vi.fn() }))
++vi.mock('@/app/lib/lite-reply-guard', () => ({ appLinkGateEnabled: () => true, onboardingGates: () => ({}) }))
++vi.mock('@/app/lib/wa-signin-token', () => ({ buildAppSigninLinkCapped: vi.fn() }))
++vi.mock('@/app/lib/magnus', () => ({ getMagnusUserById: vi.fn(), getMagnusUserCallsStrict: vi.fn(), getMagnusOfferIncludedMinutes: vi.fn(), requirePlPlusPlanId: () => '19' }))
++
++import { storeButtonForFlow, STORE_BUTTON_WINDOW_S } from '@/app/lib/pl-concierge/service'
++
++const A = '17675550101', B = '17675550102'
++const IOS = 'https://apps.apple.com/us/app/cloud-softphone/id567475545'
++const AND = 'https://play.google.com/store/apps/details?id=cz.acrobits.softphone.cloudphone'
++const tap = (wa: string, os: 'ios' | 'android', n = 'n1') => storeButtonForFlow({ waId: wa, rid: 'rid1', flowNonce: n, os, url: os === 'ios' ? IOS : AND })
++
++beforeEach(() => {
++  S.rows = []; S.sends = []; S.sendImpl = null; S.clock = Date.now()
++  S.bindings = { [A]: 'userA', [B]: 'userB' }
++  process.env.PL_ASSERTION_KID = 'k1'
++  process.env.PL_ASSERTION_HMAC_KEY = 'k'.repeat(48)   // test-only fixture; length is all readConfig checks
++  process.env.PL_CONCIERGE_PNID_ALLOWLIST = '100000000000001'
++})
++
++describe('one store button per sender per OS per 24 h', () => {
++  it('first store tap sends exactly one message, with the documented provenance', async () => {
++    const r = await tap(A, 'ios')
++    expect(r.code).toBe('store_button_sent')
++    expect(S.sends).toHaveLength(1)
++    const [to, os, url, ctx] = S.sends[0]
++    expect([to, os, url]).toEqual([A, 'ios', IOS])
++    expect(ctx).toMatchObject({ userId: 'userA', senderPath: 'pl:flows/store-button', sourceEventType: 'pl_verified_inbound', sourceEventId: 'flow:n1', sourceMessageId: 'store-button:ios' })
++    expect(S.rows.map(x => x.code)).toEqual(['store_button_sent'])
++  })
++  it('a second tap (same Flow session) within the window sends nothing', async () => {
++    await tap(A, 'ios'); const r = await tap(A, 'ios')
++    expect(r.code).toBe('store_button_duplicate'); expect(S.sends).toHaveLength(1)
++  })
++  it('a NEW Flow session within the window also sends nothing (dedupe is per sender, not per token)', async () => {
++    await tap(A, 'ios', 'n1'); S.clock += 23 * 3600 * 1000; const r = await tap(A, 'ios', 'n2')
++    expect(r.code).toBe('store_button_duplicate'); expect(S.sends).toHaveLength(1)
++  })
++  it('CONTROL: a different OS within the window DOES send', async () => {
++    await tap(A, 'ios'); const r = await tap(A, 'android')
++    expect(r.code).toBe('store_button_sent'); expect(S.sends).toHaveLength(2); expect(S.sends[1][1]).toBe('android')
++  })
++  it('CONTROL: the same OS after the 24 h window DOES send', async () => {
++    await tap(A, 'ios'); S.clock += STORE_BUTTON_WINDOW_S * 1000 + 1000; const r = await tap(A, 'ios', 'n9')
++    expect(r.code).toBe('store_button_sent'); expect(S.sends).toHaveLength(2)
++  })
++  it('CONTROL: another sender is independent', async () => {
++    await tap(A, 'ios'); const r = await tap(B, 'ios')
++    expect(r.code).toBe('store_button_sent'); expect(S.sends).toHaveLength(2); expect(S.sends[1][0]).toBe(B)
++  })
++  it('concurrent retries of the same tap (Meta endpoint retry) send once', async () => {
++    const rs = await Promise.all([tap(A, 'android'), tap(A, 'android'), tap(A, 'android')])
++    expect(rs.filter(r => r.code === 'store_button_sent')).toHaveLength(1)
++    expect(S.sends).toHaveLength(1)
++  })
++})
++
++describe('failures never count as a send, and never throw', () => {
++  it('a Meta dispatch failure is recorded as failed (not counted) and returns, no throw', async () => {
++    S.sendImpl = async () => ({ code: 'allow_service_message', dispatchFailed: true, errorCode: '400', auditId: 'w' })
++    const r = await tap(A, 'ios')
++    expect(r.code).toBe('store_button_failed'); expect(S.rows[0].code).toBe('store_button_failed')
++    S.sendImpl = null
++    const r2 = await tap(A, 'ios', 'n2')                      // CONTROL: the failed attempt does not block a later one
++    expect(r2.code).toBe('store_button_sent'); expect(S.sends).toHaveLength(2)
++  })
++  it('a gate refusal (e.g. STOP on file) is failed, not sent', async () => {
++    S.sendImpl = async () => ({ code: 'suppress', auditId: 'w' })
++    const r = await tap(A, 'ios'); expect(r.code).toBe('store_button_failed'); expect(r.detail).toContain('suppress')
++  })
++  it('a thrown sender error is caught and recorded', async () => {
++    S.sendImpl = async () => { throw new Error('PL_FLOW_SENDER_PHONE_ID not configured') }
++    const r = await tap(A, 'ios'); expect(r.code).toBe('store_button_failed'); expect(r.detail).toMatch(/PL_FLOW_SENDER_PHONE_ID/)
++  })
++  it('no line binding -> nothing sent', async () => {
++    S.bindings = {}
++    const r = await tap(A, 'ios'); expect(r.code).toBe('store_button_failed'); expect(S.sends).toHaveLength(0)
++  })
++  it('service misconfigured -> service_disabled, nothing claimed or sent', async () => {
++    delete process.env.PL_ASSERTION_HMAC_KEY
++    const r = await tap(A, 'ios'); expect(r.code).toBe('service_disabled'); expect(S.rows).toHaveLength(0); expect(S.sends).toHaveLength(0)
++  })
++})
+diff --git a/test/pl-store-button-payload.test.ts b/test/pl-store-button-payload.test.ts
+new file mode 100644
+index 00000000..0b5b219d
+--- /dev/null
++++ b/test/pl-store-button-payload.test.ts
+@@ -0,0 +1,119 @@
++/**
++ * rc16: the Personal Line store button is a DOCUMENTED interactive Call-to-Action URL button message.
++ * Source of the schema (read 2026-10-11, page "Updated: Nov 3, 2025"):
++ *   https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/interactive-cta-url-messages
++ *   interactive.type 'cta_url'; header (text) <= 60; body.text required <= 1024; footer.text <= 60;
++ *   action.name 'cta_url'; action.parameters.display_text required <= 20; action.parameters.url required.
++ * The send goes through the gate (gateAndDispatch) FROM PL_FLOW_SENDER_PHONE_ID only - never the default/3742 fallback.
++ * Every refusal has a positive twin in the same file.
++ */
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
++
++const G = vi.hoisted(() => {
++  // whatsapp.ts reads its bearer at module load; a dummy so the stubbed fetch is reached (never a real credential, fetch is stubbed).
++  if (!process.env.WHATSAPP_TOKEN && !process.env.META_WA_TOKEN) process.env.WHATSAPP_TOKEN = `dummy-${Math.random().toString(36).slice(2)}`
++  return { ctxs: [] as any[], bodies: [] as any[], urls: [] as string[], decision: 'allow_service_message' as string }
++})
++vi.mock('@/app/lib/prisma', () => ({ prisma: {} }))
++vi.mock('@/app/lib/paperclip', () => ({ paperclipMirrorOutbound: vi.fn() }))
++vi.mock('@/app/lib/wa-send-gate', () => ({
++  evaluateWaSend: vi.fn(),
++  gateAndDispatch: vi.fn(async (ctx: any, send: () => Promise<Response>) => {
++    G.ctxs.push(ctx)
++    if (!G.decision.startsWith('allow_')) return { code: G.decision, reason: 'test', auditId: 'a0' }
++    await send()
++    return { code: G.decision, reason: 'test', auditId: 'a1' }
++  }),
++}))
++
++import { buildPlStoreButtonPayload, plStoreUrl, sendPlStoreButton, sendPlSignupFlow, PL_STORE_FALLBACK_URLS } from '@/app/lib/whatsapp'
++
++const realFetch = globalThis.fetch
++beforeEach(() => {
++  G.ctxs = []; G.bodies = []; G.urls = []; G.decision = 'allow_service_message'
++  globalThis.fetch = vi.fn(async (url: any, init: any) => { G.urls.push(String(url)); G.bodies.push(JSON.parse(String(init?.body ?? '{}'))); return new Response('{"messages":[{"id":"wamid.X"}]}', { status: 200 }) }) as any
++  process.env.PL_FLOW_SENDER_PHONE_ID = '111111111111111'
++  process.env.PL_SIGNUP_FLOW_ID = '222222222222222'
++})
++afterEach(() => { globalThis.fetch = realFetch })
++
++function assertDocumentedCtaUrl(p: any) {
++  expect(p.messaging_product).toBe('whatsapp')
++  expect(p.type).toBe('interactive')
++  expect(p.interactive.type).toBe('cta_url')
++  expect(p.interactive.action.name).toBe('cta_url')
++  const prm = p.interactive.action.parameters
++  expect(Object.keys(prm).sort()).toEqual(['display_text', 'url'])
++  expect(typeof prm.display_text).toBe('string')
++  expect(prm.display_text.length).toBeGreaterThan(0)
++  expect(prm.display_text.length).toBeLessThanOrEqual(20)
++  expect(new URL(prm.url).protocol).toBe('https:')
++  expect(p.interactive.body.text.length).toBeGreaterThan(0)
++  expect(p.interactive.body.text.length).toBeLessThanOrEqual(1024)
++  expect(p.interactive.header).toMatchObject({ type: 'text' })
++  expect(p.interactive.header.text.length).toBeLessThanOrEqual(60)
++  expect(p.interactive.footer.text.length).toBeLessThanOrEqual(60)
++  // only documented top-level interactive keys
++  expect(Object.keys(p.interactive).sort()).toEqual(['action', 'body', 'footer', 'header', 'type'])
++}
++
++describe('payload matches the documented cta_url schema', () => {
++  it('iPhone: App Store button, documented shape, honest return guidance, no "Isola"', () => {
++    const p = buildPlStoreButtonPayload('17675550101', 'ios', 'https://apps.apple.com/us/app/cloud-softphone/id567475545')
++    assertDocumentedCtaUrl(p)
++    expect(p.to).toBe('17675550101')
++    expect(p.interactive.action.parameters).toEqual({ display_text: 'Open App Store', url: 'https://apps.apple.com/us/app/cloud-softphone/id567475545' })
++    expect(p.interactive.header.text).toBe('Install Cloud Softphone (free)')
++    expect(p.interactive.body.text).toContain('After installing, come back to this chat and tap the setup form above to continue - on iPhone tap ◀ WhatsApp at the top left, on Android press Back.')
++    expect(JSON.stringify(p)).not.toMatch(/isola/i)
++    expect(JSON.stringify(p)).toContain('EPIC')
++  })
++  it('Android: Google Play button, documented shape, no "Isola"', () => {
++    const p = buildPlStoreButtonPayload('17675550101', 'android', 'https://play.google.com/store/apps/details?id=cz.acrobits.softphone.cloudphone')
++    assertDocumentedCtaUrl(p)
++    expect(p.interactive.action.parameters.display_text).toBe('Open Google Play')
++    expect(p.interactive.action.parameters.url).toBe('https://play.google.com/store/apps/details?id=cz.acrobits.softphone.cloudphone')
++    expect(JSON.stringify(p)).not.toMatch(/isola/i)
++  })
++  it('a non-https or foreign-host URL never goes behind the button (falls back to the official listing)', () => {
++    expect(plStoreUrl('ios', 'http://apps.apple.com/x')).toBe(PL_STORE_FALLBACK_URLS.ios)
++    expect(plStoreUrl('ios', 'https://evil.example/apps.apple.com')).toBe(PL_STORE_FALLBACK_URLS.ios)
++    expect(plStoreUrl('android', 'https://apps.apple.com/us/app/x')).toBe(PL_STORE_FALLBACK_URLS.android)
++    expect(plStoreUrl('android', undefined)).toBe(PL_STORE_FALLBACK_URLS.android)
++    expect(plStoreUrl('ios', 'not a url')).toBe(PL_STORE_FALLBACK_URLS.ios)
++  })
++  it('CONTROL: an https URL on the right store host is kept as given', () => {
++    expect(plStoreUrl('ios', 'https://apps.apple.com/dm/app/cloud-softphone/id567475545')).toBe('https://apps.apple.com/dm/app/cloud-softphone/id567475545')
++    expect(plStoreUrl('android', 'https://play.google.com/store/apps/details?id=cz.acrobits.softphone.cloudphone&hl=en')).toBe('https://play.google.com/store/apps/details?id=cz.acrobits.softphone.cloudphone&hl=en')
++  })
++})
++
++describe('sendPlStoreButton goes through the gate from the PL sender only', () => {
++  it('dispatches via gateAndDispatch from PL_FLOW_SENDER_PHONE_ID with a pl: interactive context', async () => {
++    const d = await sendPlStoreButton('17675550101', 'ios', 'https://apps.apple.com/us/app/cloud-softphone/id567475545', { userId: 'u1', sourceEventType: 'pl_verified_inbound', sourceEventId: 'flow:n1', sourceMessageId: 'store-button:ios' })
++    expect(d.code).toBe('allow_service_message')
++    expect(G.ctxs).toHaveLength(1)
++    expect(G.ctxs[0]).toMatchObject({ kind: 'interactive', purpose: 'lite_onboarding', senderPath: 'pl:flows/store-button', recipientPhone: '17675550101', userId: 'u1', fromPhoneId: '111111111111111', sourceEventType: 'pl_verified_inbound', sourceEventId: 'flow:n1', sourceMessageId: 'store-button:ios' })
++    expect(G.urls).toEqual(['https://graph.facebook.com/v25.0/111111111111111/messages'])
++    assertDocumentedCtaUrl(G.bodies[0])
++  })
++  it('no PL_FLOW_SENDER_PHONE_ID -> throws, nothing reaches the gate or Meta (never the 3742/default fallback)', async () => {
++    delete process.env.PL_FLOW_SENDER_PHONE_ID
++    await expect(sendPlStoreButton('17675550101', 'ios', '', { userId: 'u1' })).rejects.toThrow(/PL_FLOW_SENDER_PHONE_ID/)
++    expect(G.ctxs).toHaveLength(0); expect(G.urls).toHaveLength(0)
++  })
++  it('a gate refusal sends nothing to Meta', async () => {
++    G.decision = 'suppress'
++    const d = await sendPlStoreButton('17675550101', 'android', '', { userId: 'u1' })
++    expect(d.code).toBe('suppress'); expect(G.ctxs).toHaveLength(1); expect(G.urls).toHaveLength(0)
++  })
++})
++
++describe('EPIC branding on the PL signup Flow message footer', () => {
++  it('footer reads "EPIC Personal Line" (no "Isola" in the sent payload)', async () => {
++    await sendPlSignupFlow('17675550101', 'pls1.x.y', 'body', { userId: 'u1' })
++    expect(G.bodies).toHaveLength(1)
++    expect(G.bodies[0].interactive.footer).toEqual({ text: 'EPIC Personal Line' })
++    expect(JSON.stringify(G.bodies[0])).not.toMatch(/isola/i)
++  })
++})
+-- 
+2.53.0.windows.2
+
+
+From 8600c15cd7e7d3ee8d08bd60318d6d907d5b842d Mon Sep 17 00:00:00 2001
+From: EPICDM <it@epic.dm>
+Date: Sun, 11 Oct 2026 14:38:07 -0400
+Subject: [PATCH 2/3] fix(personal-line): rc16 store-button claim - no NUL byte
+ in the advisory-lock key
+
+Measured twice before this fix: on host03 staging every store-button claim failed (the Flow answer was unaffected, by design),
+and the real-Postgres test pl-store-button-claim.realpg failed 4/4 with
+  Raw query failed. Code: 22021. invalid byte sequence for encoding "UTF8": 0x00
+A NUL cannot travel in a Postgres text parameter; the lock key now uses ':' separators. Also: the fire-and-forget error log and
+the claim's failure detail collapse whitespace (Prisma messages start with a newline, which made the staging log line look empty).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0199pUMmWEgBuXq5GN1ZVorW
+---
+ app/lib/pl-concierge/service.ts     | 2 +-
+ app/lib/pl-concierge/signup-flow.ts | 2 +-
+ app/lib/pl-concierge/store.ts       | 3 ++-
+ 3 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/app/lib/pl-concierge/service.ts b/app/lib/pl-concierge/service.ts
+index 725b86d7..7968c0c9 100644
+--- a/app/lib/pl-concierge/service.ts
++++ b/app/lib/pl-concierge/service.ts
+@@ -668,7 +668,7 @@ export async function storeButtonForFlow(args: { waId: string; rid: string; flow
+     await store.finishClaim(claimId, 'store_button_sent', 'done', code, Date.now() - t0)
+     return { code: 'store_button_sent', detail: code }
+   } catch (e: any) {
+-    return await fail(`error:${String(e?.message ?? e).slice(0, 160)}`)
++    return await fail(`error:${String(e?.message ?? e).replace(/\s+/g, ' ').trim().slice(0, 160)}`)
+   }
+ }
+ 
+diff --git a/app/lib/pl-concierge/signup-flow.ts b/app/lib/pl-concierge/signup-flow.ts
+index 19f34d0b..f3e7605f 100644
+--- a/app/lib/pl-concierge/signup-flow.ts
++++ b/app/lib/pl-concierge/signup-flow.ts
+@@ -126,7 +126,7 @@ export function fireStoreButton(claims: FlowTokenClaims, os: 'ios' | 'android',
+         const r: any = await storeButtonForFlow({ waId: claims.wa, rid: claims.cw, flowNonce: claims.n, os, url })
+         console.log(`${tag} store-button os=${os} -> ${r?.code ?? 'no_result'}${r?.detail ? ` (${r.detail})` : ''}`)
+       })
+-      .catch((e: any) => console.error(`${tag} store-button os=${os} failed (Flow answer unaffected): ${String(e?.message ?? e).slice(0, 200)}`))
++      .catch((e: any) => console.error(`${tag} store-button os=${os} failed (Flow answer unaffected): ${String(e?.name ?? 'Error')}${e?.code ? ` ${e.code}` : ''}: ${String(e?.message || e?.cause?.message || e).replace(/\s+/g, ' ').trim().slice(0, 240)}`))
+   } catch (e: any) {
+     console.error(`${tag} store-button os=${os} could not start (Flow answer unaffected): ${String(e?.message ?? e).slice(0, 200)}`)
+   }
+diff --git a/app/lib/pl-concierge/store.ts b/app/lib/pl-concierge/store.ts
+index f18c1149..c7f6c0ad 100644
+--- a/app/lib/pl-concierge/store.ts
++++ b/app/lib/pl-concierge/store.ts
+@@ -86,7 +86,8 @@ export async function provisionByMid(waIdHash: string, mid: string): Promise<{ c
+  * `countCodes`, so a failed send does not block a later one.
+  */
+ export async function claimOncePerWindow(args: { endpoint: string; op: string; waIdHash: string; windowS: number; claimCode: string; countCodes: string[]; rid?: string | null; mid?: string | null; waLast4?: string | null }): Promise<string | null> {
+-  const lockKey = `pl-claim\0${args.endpoint}\0${args.waIdHash}\0${args.op}`
++  // ':' separators - a NUL byte cannot travel in a Postgres text parameter (measured on staging: the claim threw before this fix)
++  const lockKey = `pl-claim:${args.endpoint}:${args.waIdHash}:${args.op}`
+   const since = new Date(Date.now() - args.windowS * 1000)
+   return prisma.$transaction(async (tx) => {
+     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`
+-- 
+2.53.0.windows.2
+
+
+From d80fe7245ce9e33a45b60f9bfe668f26ad728216 Mon Sep 17 00:00:00 2001
+From: EPICDM <it@epic.dm>
+Date: Sun, 11 Oct 2026 14:46:50 -0400
+Subject: [PATCH 3/3] test(personal-line): rc16 - type the literal list in the
+ EPIC copy scan (tsc: startsWith on never)
+
+The only typecheck error rc16 added over its rc15 base (406 vs 405, normalised diff = 1 line). Test-only; the runtime image is
+unchanged by this commit.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0199pUMmWEgBuXq5GN1ZVorW
+---
+ test/pl-signup-flow-store-step.test.ts | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/test/pl-signup-flow-store-step.test.ts b/test/pl-signup-flow-store-step.test.ts
+index 6b6f8ae4..b8cde7df 100644
+--- a/test/pl-signup-flow-store-step.test.ts
++++ b/test/pl-signup-flow-store-step.test.ts
+@@ -111,7 +111,7 @@ describe('endpoint-generated copy is EPIC-branded', () => {
+     const src = readFileSync(new URL('../app/lib/pl-concierge/signup-flow.ts', import.meta.url), 'utf8')
+     // strip comments, then look only inside string/template literals
+     const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
+-    const literals = code.match(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g) ?? []
++    const literals: string[] = code.match(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g) ?? []
+     const offenders = literals.filter(l => /isola/i.test(l) && !l.startsWith("'@/") && !/^['"`]\[/.test(l))
+     expect(offenders).toEqual([])
+     expect(['"welcome to Isola"'].filter(l => /isola/i.test(l))).toHaveLength(1)   // the filter itself fires on a known positive
+-- 
+2.53.0.windows.2
+

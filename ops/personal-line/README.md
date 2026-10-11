@@ -8,8 +8,8 @@ open in the same dispatch.**
 |---|---|---|
 | `agent-config/` | Uplink agent configs v10–v15 for agent `28a55c69` + `uplink_agent_apply.ts` (Uplink's own updateAgentBlueprint, dry/apply, readback) + `apply-prod.sh` | v15 config live as agent version 14 |
 | `flows/` | WhatsApp Flow JSON v6, v7 (do not use: INSTALL NavigationList description > 20 chars), **v7.1 (live, Flow id 1028745810223586)** + flag/badge PNG sources | plsvc `PL_SIGNUP_FLOW_ID` = v7.1 |
-| `plsvc-patches/` | Patch series applied to the Personal Line service (isolav2 base `cbf1d10c`) rc9 → rc15, in order | plsvc image `prod3-go-rc15-cbf1d10c`; the patched source tree is committed to isolav2 separately (see Port) |
-| `staging-harness/` | host03 staging suite (synthetic identities, real model under the staging dollar gate) | — |
+| `plsvc-patches/` | Patch series applied to the Personal Line service (isolav2 base `cbf1d10c`) rc9 → rc15, in order; `patch_rc16_epic_copy_store_button.patch` = git format-patch of isolav2 PR #289 (on rc15 `16cefa3c`) | plsvc image `prod3-go-rc15-cbf1d10c`; rc16 is **staging only** (`plsvc-staging-synthetic:rc16-8600c15c`), not in production |
+| `staging-harness/` | host03 staging suite (synthetic identities, real model under the staging dollar gate); `rc16-store-button/` = the signed+encrypted Flow driver, the graph.facebook.com recorder and the deepseek test-image scripts used for rc16 | — |
 | `journey-monitor/` | Exception monitor (cron `*/5` on host03 `~/pl-monitor`) + fixture tests | live |
 | `specs/` | SeldonFrame runtime-linked agent (Class 2) spec v1 | Planned |
 
