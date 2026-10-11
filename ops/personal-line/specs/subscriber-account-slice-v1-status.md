@@ -53,7 +53,12 @@ plsvc 108/108 (5 pl-concierge suites incl. new). Fork: slice spec 17/17, public-
    EPIC Personal Line workspace's integration on settings/integrations (keys pasted once; never env).
 3. The PL production workspace needs the card to be visible only after (1)+(2); until then no card renders anywhere.
 
-## Next iteration
+## R1 release-candidate source (2026-10-11, deepseek runner) - see Port `ev-lane-a-r1-account-release-candidate-source-2026-10-11`
+- S-a fork `d0c76582` (three more event types accepted) · S-c fork `57db5107` (portal-link mint + wa-link redemption, no migration) ·
+  real-Postgres harness `e85c8aa5` · plsvc isolav2#291 `ops/plsvc-portal-link-2026-10-11` (`6fbe4407`, `d887aa0e`) on #290 on #288 on rc15 ·
+  adapter rc13i (`PL_MY_ACCOUNT_LINK=1`, dark by default).
+
+## Next iteration (as of the original slice; items done in R1 are listed above)
 plsvc outbox (`sf_event_outbox`, same transaction) + emitter + backfill replay (links existing lines); WhatsApp
 `portal-link` magic link (contacts have no email — session needs an email-less form); "Send me a fresh setup link";
 forward-only deal stage projection (not probability); trial events; settings card browser walk with an operator login.
