@@ -1,0 +1,98 @@
+{
+ "A": {
+  "engine_line_status": {
+   "http": 200,
+   "code": "line_status",
+   "registration": "reachable",
+   "listener_connected": true,
+   "plan": "trial",
+   "plan_expires_at": "2026-10-17T06:37:21.589Z",
+   "did_pretty": "+1 767 818 5046"
+  },
+  "engine_balance": {
+   "http": 200,
+   "code": "balance",
+   "known": true,
+   "kind": "included",
+   "plan": "trial",
+   "minutes_included": 60,
+   "minutes_remaining": 52,
+   "wallet_xcd": "12.50",
+   "expires_at": "2026-10-17T06:37:21.589Z"
+  },
+  "engine_journey": {
+   "http": 200,
+   "state": "setup_not_activated",
+   "registration": "reachable",
+   "minutes_remaining": 52,
+   "wallet_xcd": "12.50"
+  },
+  "signed_summary": {
+   "http": 200,
+   "code": "account_summary",
+   "data": {
+    "account": "cmv20v05r003a01lll3hxhgap",
+    "did": "+1 767 818 5046",
+    "plan": "trial",
+    "plan_name": "Free Trial",
+    "plan_end": "2026-10-17T06:37:21.589Z",
+    "minutes_left": 52,
+    "minutes_included": 60,
+    "balance_known": true,
+    "wallet": {
+     "currency": "XCD",
+     "amount": "12.50"
+    },
+    "setup_state": "registered"
+   }
+  }
+ },
+ "B": {
+  "engine_line_status": {
+   "http": 200,
+   "code": "line_status",
+   "registration": "unregistered",
+   "listener_connected": true,
+   "plan": "trial",
+   "plan_expires_at": "2026-10-17T06:31:34.074Z",
+   "did_pretty": "+1 767 818 5045"
+  },
+  "engine_balance": {
+   "http": 200,
+   "code": "balance",
+   "known": true,
+   "kind": "included",
+   "plan": "trial",
+   "minutes_included": 60,
+   "minutes_remaining": 35,
+   "wallet_xcd": "3.25",
+   "expires_at": "2026-10-17T06:31:34.074Z"
+  },
+  "engine_journey": {
+   "http": 200,
+   "state": "setup_not_activated",
+   "registration": "unregistered",
+   "minutes_remaining": 35,
+   "wallet_xcd": "3.25"
+  },
+  "signed_summary": {
+   "http": 200,
+   "code": "account_summary",
+   "data": {
+    "account": "cmv20njxw003201lltojtuxh9",
+    "did": "+1 767 818 5045",
+    "plan": "trial",
+    "plan_name": "Free Trial",
+    "plan_end": "2026-10-17T06:31:34.074Z",
+    "minutes_left": 35,
+    "minutes_included": 60,
+    "balance_known": true,
+    "wallet": {
+     "currency": "XCD",
+     "amount": "3.25"
+    },
+    "setup_state": "not_registered"
+   }
+  }
+ }
+}

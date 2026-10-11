@@ -1,0 +1,178 @@
+﻿{
+    "captured_at":  "2026-10-11T22:49:03Z",
+    "phase":  "Baseline",
+    "webMode":  "public",
+    "target":  "66.118.37.29",
+    "target6":  "2602:fc3a:1:0:250:56ff:fea4:b47d",
+    "localEgress":  "66.118.37.10",
+    "http3000":  "200",
+    "http80":  "301",
+    "https443":  "200",
+    "panelServedOnBareIp443":  true,
+    "tailscale22":  "OPEN",
+    "tailscale3000":  "OPEN",
+    "rows":  [
+                 {
+                     "Vantage":  "local(66.118.37.10)",
+                     "Role":  "admin",
+                     "Family":  "v4",
+                     "Port":  22,
+                     "Name":  "ssh",
+                     "Result":  "OPEN",
+                     "Verdict":  "RECORD"
+                 },
+                 {
+                     "Vantage":  "local(66.118.37.10)",
+                     "Role":  "admin",
+                     "Family":  "v4",
+                     "Port":  3000,
+                     "Name":  "easypanel-console",
+                     "Result":  "OPEN",
+                     "Verdict":  "RECORD"
+                 },
+                 {
+                     "Vantage":  "local(66.118.37.10)",
+                     "Role":  "admin",
+                     "Family":  "v4",
+                     "Port":  2377,
+                     "Name":  "swarm-manager",
+                     "Result":  "OPEN",
+                     "Verdict":  "RECORD"
+                 },
+                 {
+                     "Vantage":  "local(66.118.37.10)",
+                     "Role":  "admin",
+                     "Family":  "v4",
+                     "Port":  7946,
+                     "Name":  "swarm-gossip",
+                     "Result":  "OPEN",
+                     "Verdict":  "RECORD"
+                 },
+                 {
+                     "Vantage":  "local(66.118.37.10)",
+                     "Role":  "admin",
+                     "Family":  "v4",
+                     "Port":  80,
+                     "Name":  "traefik-http",
+                     "Result":  "OPEN",
+                     "Verdict":  "RECORD"
+                 },
+                 {
+                     "Vantage":  "local(66.118.37.10)",
+                     "Role":  "admin",
+                     "Family":  "v4",
+                     "Port":  443,
+                     "Name":  "traefik-https",
+                     "Result":  "OPEN",
+                     "Verdict":  "RECORD"
+                 },
+                 {
+                     "Vantage":  "ssh:deepseek(66.118.37.12)",
+                     "Role":  "non-admin",
+                     "Family":  "v4",
+                     "Port":  22,
+                     "Name":  "ssh",
+                     "Result":  "OPEN",
+                     "Verdict":  "RECORD"
+                 },
+                 {
+                     "Vantage":  "ssh:deepseek(66.118.37.12)",
+                     "Role":  "non-admin",
+                     "Family":  "v4",
+                     "Port":  3000,
+                     "Name":  "easypanel-console",
+                     "Result":  "OPEN",
+                     "Verdict":  "RECORD"
+                 },
+                 {
+                     "Vantage":  "ssh:deepseek(66.118.37.12)",
+                     "Role":  "non-admin",
+                     "Family":  "v4",
+                     "Port":  2377,
+                     "Name":  "swarm-manager",
+                     "Result":  "OPEN",
+                     "Verdict":  "RECORD"
+                 },
+                 {
+                     "Vantage":  "ssh:deepseek(66.118.37.12)",
+                     "Role":  "non-admin",
+                     "Family":  "v4",
+                     "Port":  7946,
+                     "Name":  "swarm-gossip",
+                     "Result":  "OPEN",
+                     "Verdict":  "RECORD"
+                 },
+                 {
+                     "Vantage":  "ssh:deepseek(66.118.37.12)",
+                     "Role":  "non-admin",
+                     "Family":  "v4",
+                     "Port":  80,
+                     "Name":  "traefik-http",
+                     "Result":  "OPEN",
+                     "Verdict":  "RECORD"
+                 },
+                 {
+                     "Vantage":  "ssh:deepseek(66.118.37.12)",
+                     "Role":  "non-admin",
+                     "Family":  "v4",
+                     "Port":  443,
+                     "Name":  "traefik-https",
+                     "Result":  "OPEN",
+                     "Verdict":  "RECORD"
+                 },
+                 {
+                     "Vantage":  "ssh:deepseek(66.118.37.12)",
+                     "Role":  "non-admin",
+                     "Family":  "v6",
+                     "Port":  22,
+                     "Name":  "ssh",
+                     "Result":  "OPEN",
+                     "Verdict":  "RECORD"
+                 },
+                 {
+                     "Vantage":  "ssh:deepseek(66.118.37.12)",
+                     "Role":  "non-admin",
+                     "Family":  "v6",
+                     "Port":  3000,
+                     "Name":  "easypanel-console",
+                     "Result":  "OPEN",
+                     "Verdict":  "RECORD"
+                 },
+                 {
+                     "Vantage":  "ssh:deepseek(66.118.37.12)",
+                     "Role":  "non-admin",
+                     "Family":  "v6",
+                     "Port":  2377,
+                     "Name":  "swarm-manager",
+                     "Result":  "OPEN",
+                     "Verdict":  "RECORD"
+                 },
+                 {
+                     "Vantage":  "ssh:deepseek(66.118.37.12)",
+                     "Role":  "non-admin",
+                     "Family":  "v6",
+                     "Port":  7946,
+                     "Name":  "swarm-gossip",
+                     "Result":  "OPEN",
+                     "Verdict":  "RECORD"
+                 },
+                 {
+                     "Vantage":  "ssh:deepseek(66.118.37.12)",
+                     "Role":  "non-admin",
+                     "Family":  "v6",
+                     "Port":  80,
+                     "Name":  "traefik-http",
+                     "Result":  "OPEN",
+                     "Verdict":  "RECORD"
+                 },
+                 {
+                     "Vantage":  "ssh:deepseek(66.118.37.12)",
+                     "Role":  "non-admin",
+                     "Family":  "v6",
+                     "Port":  443,
+                     "Name":  "traefik-https",
+                     "Result":  "OPEN",
+                     "Verdict":  "RECORD"
+                 }
+             ]
+}

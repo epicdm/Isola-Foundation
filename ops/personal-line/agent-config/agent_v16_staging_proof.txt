@@ -1,0 +1,80 @@
+STAGING proof, agent v16 (config sha256 4c8b62e43bff...), 2026-10-11 ~19:55Z. Staging only; production Uplink untouched.
+Staging agent 'default' v11 -> v12 (updateAgentBlueprint ok; stored skill/faq/greeting/pricing equal to v16 file; READBACK 'faq MISMATCH' was key order only, verified by q/a compare).
+Gate before: spent_micro_usd 278228 / budget 600000; after 3 real-model turns: 288197 (delta 9969 micro-USD).
+
+=== turn a ===
+﻿task: Complete less than a second ago
+{
+ "conv": 9261,
+ "customer": "Can I receive calls on my number?",
+ "webhook": 200,
+ "ms": 12016,
+ "replies": [
+  {
+   "private": false,
+   "text": "Make calls from the free Cloud Softphone app. This launch offer covers outgoing calling.\n\nWould you like to get your own +1 767 number to start calling?",
+   "buttons": [
+    "Get my number",
+    "How it works",
+    "Plans & prices"
+   ]
+  }
+ ],
+ "other": [],
+ "pl_calls": [
+  "account/journey"
+ ],
+ "conversation_status": null
+}
+
+=== turn b ===
+﻿task: Complete 1 second ago
+{
+ "conv": 9271,
+ "customer": "Is it only for making calls?",
+ "webhook": 200,
+ "ms": 10523,
+ "replies": [
+  {
+   "private": false,
+   "text": "Yes — it's a calling service. You make calls from the free Cloud Softphone app, so you're calling out to Dominica, the US or Canada over Wi-Fi or mobile data 📞\n\nThis launch offer covers outgoing calling.\n\nWant me to get you your own +1 767 number? Tap *Get my number* and we'll start you on the free trial.",
+   "buttons": [
+    "Get my number",
+    "How it works",
+    "Plans & prices"
+   ]
+  }
+ ],
+ "other": [],
+ "pl_calls": [
+  "account/journey"
+ ],
+ "conversation_status": null
+}
+
+=== turn c ===
+﻿task: Complete less than a second ago
+{
+ "conv": 9281,
+ "customer": "What is Personal Line and what app do I need?",
+ "webhook": 200,
+ "ms": 12495,
+ "replies": [
+  {
+   "private": false,
+   "text": "Hi there 👋\n\nPersonal Line gives you your own +1 767 number for making voice calls — it all happens in the *Cloud Softphone* app by Acrobits, free on the App Store and Google Play. Your line lives in that app, and setup is a one-tap link sent right here in WhatsApp, so there's nothing to type.\n\nIt's voice calling only, no SMS or emergency calls.\n\nWant me to get you your number?",
+   "buttons": [
+    "Get my number",
+    "Plans & prices",
+    "Talk to a person"
+   ]
+  }
+ ],
+ "other": [],
+ "pl_calls": [
+  "account/journey",
+  "account/journey",
+  "offer"
+ ],
+ "conversation_status": null
+}
