@@ -204,6 +204,29 @@ async function proactive(w, key, ref = 'row1', over = {}) { const { body, sig } 
   const old = req(w.cfg, 'first_call', 'r', { iat: Math.floor(Date.now() / 1000) - 600 }); check('stale request (iat 10 min old) -> refused', !A.verifyProactive(old.body, old.sig, w.cfg).ok)
   const fresh = req(w.cfg, 'first_call'); check('CONTROL fresh signed request verifies', A.verifyProactive(fresh.body, fresh.sig, w.cfg).ok) }
 
+// 9. rc13f contextual menu (PM 2026-10-11): menu taps carry their own values, recovered by readback; Flow entries send the existing Flow
+check('MENU keyword: menu / Menu! / options recognised; a sentence containing "menu" is not', A.MENU_RE.test('menu') && A.MENU_RE.test('Menu!') && A.MENU_RE.test(' options ') && !A.MENU_RE.test('show me the menu of plans'))
+check('menu titles <= 20 chars (WhatsApp reply-button limit) and values unique', Object.values(A.MENU_BTN).every((b) => b.title.length <= 20) && A.MENU_VALUES.size === Object.keys(A.MENU_BTN).length)
+{ const w = world({ j: J.no_line }); const r = await w.h._runAction(who('menu-nl'), 'menu'); const p = lastPost(w)
+  check('menu @ no_line: Get my number / How it works / Talk to a person (one message)', r.ok && w.posts.length === 1 && same(postTitles(p), ['Get my number', 'How it works', 'Talk to a person']), postTitles(p).join('/')) }
+{ const w = world({ j: J.active }); const r = await w.h._runAction(who('menu-ac'), 'menu'); const p = lastPost(w)
+  check('menu @ active line: Manage my line / How it works / Talk to a person', r.ok && same(postTitles(p), ['Manage my line', 'How it works', 'Talk to a person']), postTitles(p).join('/')) }
+{
+  const msgs = [offered(50, [A.MENU_BTN.signup, A.MENU_BTN.how, A.BTN.human]), cust(51, 'Get my number')]
+  check('menu tap "Get my number" maps by its MENU value -> menu_flow', A.resolveTap(msgs, 51, 'Get my number')?.action === 'menu_flow' && A.resolveTap(msgs, 51, 'Get my number')?.value === 'menu_signup')
+  check('menu tap "How it works" -> how_it_works (static facts, deterministic)', A.resolveTap([offered(60, [A.MENU_BTN.manage, A.MENU_BTN.how, A.BTN.human])], 61, 'How it works')?.value === 'menu_how')
+  check('menu "Talk to a person" stays the relay\'s direct handoff (not an adapter action)', A.resolveTap([offered(70, [A.MENU_BTN.manage, A.MENU_BTN.how, A.BTN.human])], 71, 'Talk to a person') === null)
+  check('CONTROL the journey\'s own "Get my number" keeps its non-menu value (agent path unchanged)', A.resolveTap([offered(80, A.choicesFor(J.no_line.actions))], 81, 'Get my number')?.value !== 'menu_signup')
+}
+{ const w = world({ j: J.no_line }); const r = await w.h._runAction(who('mf-nl'), 'menu_flow')
+  check('menu_flow @ no_line: sends the signup Flow launch message, posts nothing else', r.ok && r.result.code === 'menu_flow_sent' && w.calls.includes('flows/launch') && w.posts.length === 0) }
+{ const w = world({ j: J.active }); const r = await w.h._runAction(who('mf-ac'), 'menu_flow')
+  check('menu_flow @ active line: sends the SAME Flow (opens as "Manage your line")', r.ok && r.result.code === 'menu_flow_sent' && r.result.existing_line === true && w.calls.includes('flows/launch')) }
+{ const w = world({ j: J.active }); await w.h._runAction(who('gn-ac'), 'get_number')
+  check('CONTROL get_number @ active does NOT relaunch setup (unchanged)', !w.calls.includes('flows/launch')) }
+{ const w = world({ j: J.active, status: 'open' }); const r = await w.h._runAction(who('menu-open'), 'menu')
+  check('menu while a person holds the conversation -> refused, nothing posted', !r.ok && w.posts.length === 0) }
+
 // 8. controls + MCP exposure + routes
 check('every action title <= 20 chars and unique', Object.values(A.ACT).every((c) => c.title.length <= 20) && new Set(Object.values(A.ACT).map((c) => c.title)).size === Object.keys(A.ACT).length)
 {

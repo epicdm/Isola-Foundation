@@ -179,6 +179,26 @@ export const BTN = {
   check: { title: 'Check my connection', value: 'check_connection' },
   human: { title: 'Talk to a person', value: 'esc_human' },
 }
+// rc13f (PM 2026-10-11): contextual WhatsApp menu. Menu items carry their OWN values so a menu tap is always deterministic (even while
+// ordinary taps go to the agent); Chatwoot 4.18 forwards only the tapped TITLE, so the value is recovered by readback of what we offered.
+export const MENU_BTN = {
+  signup: { title: 'Get my number', value: 'menu_signup' },
+  manage: { title: 'Manage my line', value: 'menu_manage' },
+  how: { title: 'How it works', value: 'menu_how' },
+}
+export const MENU_VALUES = new Set(Object.values(MENU_BTN).map((b) => b.value))
+export const MENU_RE = /^\s*(menu|main menu|options)\s*[.!?]?\s*$/i
+/** The menu for the customer's CURRENT state: one Flow entry (signup or manage), how it works, and a person - always 3 reply buttons. */
+export function composeMenu(j) {
+  const hasLine = j?.has_line === true
+  return {
+    stage: hasLine ? 'menu_line_holder' : 'menu_no_line',
+    text: hasLine
+      ? `Here's what I can do for you. Tap *Manage my line* to see your line, check your setup or continue where you left off.`
+      : `Here's what I can do for you. Tap *Get my number* to start your free trial in a short form here in WhatsApp.`,
+    choices: [hasLine ? MENU_BTN.manage : MENU_BTN.signup, MENU_BTN.how, BTN.human],
+  }
+}
 export function composeGuidance(code, data) {
   const f = data?.facts ?? {}, links = data?.store_links ?? {}
   const did = f.did_pretty ? ` ${f.did_pretty}` : ''
@@ -317,6 +337,7 @@ export const VALUE_TO_ACTION = {
   ...Object.fromEntries(Object.entries(ACT).filter(([k]) => k !== 'human').map(([k, v]) => [v.value, k])),
   check_balance: 'balance', recent_calls: 'recent_calls', check_connection: 'check_connection', greet_start: 'get_number',
   installed_softphone: 'continue_setup', resend_link: 'continue_setup', greet_how: 'how_it_works',
+  menu_signup: 'menu_flow', menu_manage: 'menu_flow', menu_how: 'how_it_works',
 }
 /** Buttons for a state: its actions minus the one just performed, a person always reachable, at most 3 (reply buttons, no list needed). */
 export function choicesFor(actions, done = null) {
@@ -592,6 +613,16 @@ export function makeHandlers(cfg, db, stats, f = fetch) {
         return say(composeCalls(r.data, choicesFor(j.actions, 'recent_calls')))
       }
       case 'flow_done': return deliverOwn(who, 'flow_done', async () => { const g = composeFlowDone(j); return g ? { g, extra: { state: j.state } } : { refusal: refuse('nothing_to_say') } })
+      case 'menu': return say(composeMenu(j))
+      case 'menu_flow': {
+        // rc13f: the menu's Flow entry always sends the existing published Flow (signup for a new customer; the same Flow opens as
+        // "Manage your line" with the customer's own line and live status for a line holder - it creates nothing). A tap sends the Flow
+        // launch MESSAGE; the customer opens it. Rate limits answer honestly instead of sending a second form.
+        const fl = await pl(cfg, stats, 'flows/launch', who, { flow: 'signup' }, {}, f).catch(() => null)
+        if (fl?.code === 'flow_sent') return done({ code: 'menu_flow_sent', state: j.state, existing_line: j.has_line === true })
+        if (fl?.code === 'rate_limited') return say({ stage: 'flow_recently_sent', text: `I sent you the form a little while ago - open the most recent one in this chat (${j.has_line ? '"Manage your line"' : '"Get your free number"'}) and tap its button.`, choices: [BTN.human] })
+        return refuse(fl?.code && fl.code !== 'bad_response' ? fl.code : 'service_unavailable')
+      }
       default: return refuse('unknown_action')
     }
   }
@@ -964,8 +995,11 @@ export function makeServer(cfg, db, f = fetch) {
     if (body.action !== 'auto') return { code: 'invalid_action' }
     if (STOP_RE.test(who.content)) return run('stop', () => handlers._setPreference(who, true))
     if (START_RE.test(who.content)) return run('start', () => handlers._setPreference(who, false))
-    if (cfg.deterministicTaps === false) return { code: 'not_handled' }   // the agent answers taps (rc13d)
+    if (MENU_RE.test(who.content)) return run('menu', () => handlers._runAction(who, 'menu'))
     const tap = resolveTap(who.messages, who.messageId, who.content)
+    // rc13f: menu taps (their own values, verified by readback) are always deterministic; every other tap follows PL_DETERMINISTIC_TAPS.
+    if (tap && MENU_VALUES.has(tap.value)) return run(tap.action, () => handlers._runAction(who, tap.action))
+    if (cfg.deterministicTaps === false) return { code: 'not_handled' }   // the agent answers taps (rc13d)
     if (!tap) return { code: 'not_handled' }
     return run(tap.action, () => handlers._runAction(who, tap.action))
   }
