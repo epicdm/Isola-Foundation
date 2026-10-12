@@ -545,3 +545,109 @@ test("rc10j: rotated turn with carry-over - the relay context binds the message 
   assert.equal(old.ok, false);
   assert.equal(old.reason, "binding_mismatch:messageSha256");
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// rc10k (2026-10-12): a rotation keeps the PREVIOUS binding until Uplink ACCEPTS the rotated request. Live evidence: a refused rotated turn (403) overwrote the binding with
+// a null conversation, orphaning the old Uplink conversation and silently dropping carry-over on the next message. States: ready -> (503) rotating{messageId, sessionId}
+// with the previous conversation id/capability preserved -> ready(new) on acceptance | ready(previous) on a definitive refusal | rotating kept on an ambiguous timeout.
+import { openConversationBinding, CONVERSATION_BINDING_ATTRIBUTE } from "../src/conversation-binding.js";
+const STATE_KEY = "synthetic-state-key-material-long-enough-32";
+const LIMIT503 = { ok: false, reason: "http_503", error: "PUBLIC_CHAT_CONVERSATION_LIMIT", conversationId: null };
+const ACCEPTED = (n) => ({ ok: true, text: `rotated reply ${n}`, conversationId: `sf-conv-${n}`, conversationCapability: `cap-${n}` });
+const storedBinding = async (f) => openConversationBinding((await f.chatwoot.getConversation(41)).custom_attributes[CONVERSATION_BINDING_ATTRIBUTE], STATE_KEY);
+const messageFor = (f, id, content) => ({ ...f.event, id, content });
+function restart(f) {   // a NEW relay process over the same Chatwoot state (all in-memory dedup and caches are lost)
+  return createRelay({
+    scope: SCOPE, ownerUserId: 16, escalationTeamId: 8, chatwoot: f.chatwoot, seldon: f.seldon, requireCapability: true, conversationStateKey: STATE_KEY,
+    plConcierge: { key: KEY, kid: "uat1", bridgeKey: BRIDGE_KEY, bridgeKid: "ctx1", phoneNumberId: "1023804347491554", resolveConfirmation: undefined }, now: () => NOW,
+  });
+}
+async function primed() {   // one ordinary turn first, so the binding holds an OLD Uplink conversation (sf-conv / visitor-bound-capability)
+  const seq = [];
+  const f = fixture({ turnSeq: seq });
+  f.chatwoot.listMessages = async () => ({ payload: [{ id: 6990, message_type: 0, private: false, content: "I am planning to call my sister tomorrow." }, { id: 6991, message_type: 1, private: false, content: "Lovely, enjoy." }] });
+  await run(f);
+  assert.equal((await storedBinding(f)).conversationId, "sf-conv");
+  return { f, seq };
+}
+const publicReplies = (f) => f.posted.filter((m) => !m.private).map((m) => m.content);
+
+test("rc10k accepted rotation (positive control): bound to the NEW conversation only after Uplink accepts; one reply; marker cleared", async () => {
+  const { f, seq } = await primed();
+  seq.push(LIMIT503, ACCEPTED(2));
+  await run(f, messageFor(f, 7002, "What was I planning to do tomorrow?"));
+  const b = await storedBinding(f);
+  assert.equal(b.conversationId, "sf-conv-2"); assert.equal(b.conversationCapability, "cap-2"); assert.equal(b.phase, "ready"); assert.equal(b.rotation, undefined);
+  assert.equal(f.seldon.turnInputs[1].conversationId, "sf-conv");        // the old conversation was tried first
+  assert.equal(f.seldon.turnInputs[2].conversationId, null);
+  assert.match(f.seldon.turnInputs[2].message, /Earlier in this same WhatsApp chat/);
+  assert.ok(publicReplies(f).includes("rotated reply 2"));
+  assert.equal(handedOff(f), false);
+});
+
+test("rc10k definitive refusal: the OLD binding is kept exactly, handoff only; control: the next message rotates from that preserved binding and succeeds", async () => {
+  const { f, seq } = await primed();
+  seq.push(LIMIT503, { ok: false, reason: "http_403", error: "invalid_channel_context", conversationId: null });
+  await run(f, messageFor(f, 7002, "What was I planning to do tomorrow?"));
+  const kept = await storedBinding(f);
+  assert.equal(kept.conversationId, "sf-conv"); assert.equal(kept.conversationCapability, "visitor-bound-capability"); assert.equal(kept.phase, "ready"); assert.equal(kept.rotation, undefined);
+  assert.equal(handedOff(f), true);
+  assert.equal(publicReplies(f).some((t) => /rotated reply/.test(t)), false);
+  // positive control in the same harness: the preserved binding is usable
+  seq.push(LIMIT503, ACCEPTED(3));
+  const before = f.seldon.turnInputs.length;
+  await run(f, messageFor(f, 7003, "Hello again"));
+  assert.equal(f.seldon.turnInputs[before].conversationId, "sf-conv");   // went to the PRESERVED old conversation (it is at the limit, so it rotated again)
+  assert.equal((await storedBinding(f)).conversationId, "sf-conv-3");
+});
+
+test("rc10k timeout after possible acceptance: marker kept, previous binding preserved, nothing retried; the SAME message after a restart is a duplicate (no second turn); control: another message proceeds", async () => {
+  const { f, seq } = await primed();
+  seq.push(LIMIT503, { ok: false, reason: "timeout", conversationId: null });
+  await run(f, messageFor(f, 7002, "What was I planning to do tomorrow?"));
+  const marker = await storedBinding(f);
+  assert.equal(marker.phase, "rotating"); assert.equal(marker.rotation.messageId, 7002);
+  assert.equal(marker.conversationId, "sf-conv"); assert.equal(marker.conversationCapability, "visitor-bound-capability");
+  assert.equal(handedOff(f), true);
+  const turnsAfterAmbiguous = f.seldon.turnInputs.length;                       // 3: first turn, old-conversation attempt, the rotated attempt
+  // restart (memory lost) and the SAME message is delivered again: never blindly retried
+  const r2 = restart(f); await r2.accept(messageFor(f, 7002, "What was I planning to do tomorrow?")).done;
+  assert.equal(f.seldon.turnInputs.length, turnsAfterAmbiguous);
+  assert.equal((await storedBinding(f)).conversationId, "sf-conv");           // not replaced
+  // positive control: a DIFFERENT message continues from the preserved binding and rotates successfully
+  seq.push(LIMIT503, ACCEPTED(4));
+  await r2.accept(messageFor(f, 7004, "Are you there?")).done;
+  assert.equal(f.seldon.turnInputs[turnsAfterAmbiguous].conversationId, "sf-conv");
+  assert.equal((await storedBinding(f)).conversationId, "sf-conv-4");
+});
+
+test("rc10k restart after an ACCEPTED rotation: the duplicate of the completed message is ignored (no extra turn); the next message continues on the NEW conversation (control)", async () => {
+  const { f, seq } = await primed();
+  seq.push(LIMIT503, ACCEPTED(5));
+  await run(f, messageFor(f, 7005, "What was I planning to do tomorrow?"));
+  const turns = f.seldon.turnInputs.length;
+  const r2 = restart(f); await r2.accept(messageFor(f, 7005, "What was I planning to do tomorrow?")).done;
+  assert.equal(f.seldon.turnInputs.length, turns);
+  assert.equal(publicReplies(f).filter((t) => t === "rotated reply 5").length, 1);
+  await r2.accept(messageFor(f, 7006, "thanks")).done;
+  assert.equal(f.seldon.turnInputs[turns].conversationId, "sf-conv-5");
+});
+
+test("rc10k duplicate delivery of the same webhook during one process: exactly one rotated turn and one reply", async () => {
+  const { f, seq } = await primed();
+  seq.push(LIMIT503, ACCEPTED(6));
+  const ev = messageFor(f, 7007, "What was I planning to do tomorrow?");
+  const a = f.relay.accept(ev), b = f.relay.accept(ev);
+  await Promise.all([a.done, b.done]);
+  assert.equal(f.seldon.turnInputs.filter((t) => t.conversationId === null && /Earlier in this same WhatsApp chat/.test(t.message)).length, 1);
+  assert.equal(publicReplies(f).filter((t) => t === "rotated reply 6").length, 1);
+});
+
+test("rc10k an accepted turn whose reply is unusable (empty text) still binds the new conversation (it exists in Uplink and holds the spend)", async () => {
+  const { f, seq } = await primed();
+  seq.push(LIMIT503, { ok: false, reason: "empty_reply", conversationId: "sf-conv-7", conversationCapability: "cap-7" });
+  await run(f, messageFor(f, 7008, "What was I planning to do tomorrow?"));
+  const b = await storedBinding(f);
+  assert.equal(b.conversationId, "sf-conv-7"); assert.equal(b.phase, "ready");
+  assert.equal(handedOff(f), true);
+});

@@ -562,6 +562,17 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
       }
       if (r && r.code !== "not_handled") log({ event: "action_unavailable", code: r.code, detail: r.detail ?? null, ...ctx });
     }
+    if (binding.phase === "rotating") {
+      // rc10k: an earlier rotation attempt ended AMBIGUOUSLY (timeout or restart) with the previous binding preserved. The same message again is a duplicate
+      // (Uplink may already have accepted it): never retried blindly. Any other message continues from the preserved previous binding (it will rotate again if it is still at the limit).
+      if (binding.rotation?.messageId === ev.messageId) {
+        log({ event: "rotation_duplicate_after_ambiguous_attempt", ...ctx });
+        await handoff(ev, "duplicate delivery after an ambiguous rotation attempt", { tellCustomer: true });
+        return;
+      }
+      const { rotation: _staleRotation, ...preservedBinding } = binding;
+      binding = { ...preservedBinding, phase: "ready", pendingMessageId: null };
+    }
     if (binding.phase === "processing") {
       if (binding.pendingMessageId === ev.messageId) {
         await handoff(ev, "duplicate delivery after an ambiguous relay attempt", { tellCustomer: true });
@@ -623,9 +634,13 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
     // conversation (new session, re-minted signed context) and retry once; the agent re-reads verified state with pl_journey.
     if (!turn.ok && turn.error === "PUBLIC_CHAT_CONVERSATION_LIMIT") {
       log({ event: "uplink_conversation_rotated", reason: "conversation_turn_limit", ...ctx });
-      binding = { ...binding, sessionId: `cw-chatwoot-${scope.accountId}-${ev.conversationId}-r${ev.messageId}`, conversationId: null, conversationCapability: null, phase: "processing", pendingMessageId: ev.messageId };
-      if (!await persistConversationBinding(ev, binding)) {
-        await handoff(ev, "rotated binding could not be durably recorded", { tellCustomer: true });
+      // rc10k: the PREVIOUS binding (old Uplink conversation id and capability) is kept until the rotated request is ACCEPTED. Only a marker is stored while the
+      // rotated request is in flight; the new conversation is bound only when Uplink answers with a new conversation id and capability.
+      const previousBinding = { ...binding, phase: "ready", pendingMessageId: null };
+      const rotatedSessionId = `cw-chatwoot-${scope.accountId}-${ev.conversationId}-r${ev.messageId}`;
+      const rotatingMarker = { ...previousBinding, phase: "rotating", pendingMessageId: ev.messageId, rotation: { sessionId: rotatedSessionId, messageId: ev.messageId } };
+      if (!await persistConversationBinding(ev, rotatingMarker)) {
+        await handoff(ev, "rotation marker could not be durably recorded", { tellCustomer: true });
         return;
       }
       // rc10i: carry the recent same-conversation context into the fresh Uplink conversation (best effort: any failure falls back to the bare message).
@@ -637,17 +652,30 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
         turnMessage = ev.content;
         log({ event: "uplink_conversation_context_carry_failed", reason: err instanceof Error ? err.name : "failed", ...ctx });
       }
-      // rc10j: the signed relay context binds sha256(message). Mint it for the message actually SENT (the carried one), after it is built;
-      // signing ev.content made Uplink refuse the rotated turn (403 invalid_channel_context, measured live 2026-10-12).
+      // rc10j: the signed relay context binds sha256(message): mint it for the message actually SENT (the carried one).
       let rotatedContext = null;
-      try { rotatedContext = makeRelayContext(ev, binding, plAssertion, turnMessage); } catch { rotatedContext = null; }
+      try { rotatedContext = makeRelayContext(ev, { ...binding, sessionId: rotatedSessionId, conversationId: null }, plAssertion, turnMessage); } catch { rotatedContext = null; }
       turn = await seldon.turn({
         message: turnMessage,
         conversationId: null,
-        sessionId: binding.sessionId,
+        sessionId: rotatedSessionId,
         channelMeta: { source: "chatwoot", account_id: scope.accountId, inbox_id: scope.inboxId, conversation_id: ev.conversationId },
         relayContext: rotatedContext,
       });
+      const accepted = Boolean(turn.conversationId && turn.conversationCapability);
+      const ambiguous = !accepted && !turn.ok && (turn.reason === "timeout" || turn.reason === "unreachable");
+      if (accepted) {
+        binding = { ...previousBinding, sessionId: rotatedSessionId, conversationId: null, conversationCapability: null, phase: "processing", pendingMessageId: ev.messageId };
+      } else if (ambiguous) {
+        // Uplink may have accepted the turn although the response was lost: the marker stays (previous binding preserved), nothing is replaced and nothing is retried.
+        log({ event: "rotation_ambiguous", reason: turn.reason, state: "rotating_marker_kept", ...ctx });
+        binding = rotatingMarker;
+      } else {
+        // Definitive refusal: restore the previous binding exactly (old conversation id and capability).
+        const restored = await persistConversationBinding(ev, previousBinding);
+        log({ event: "rotation_refused_previous_binding_kept", reason: turn.reason, restored, ...ctx });
+        binding = previousBinding;
+      }
     }
 
     if (turn.conversationId && turn.conversationCapability) {
