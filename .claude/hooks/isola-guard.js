@@ -424,7 +424,9 @@ function evaluate(inp) {
   }
 
   // 1. Secrets must not be printed.
-  if (T.SECRET_DUMP_RE.test(scanTarget)) {
+  // Operation-bound exemption (2026-10-12): the EasyPanel createMount that binds a /etc/pl-secrets FILE at /app/.env prints
+  // nothing; its JSON key "type" was read as the `type` pager. T.isPlSecretsBindMountOnly accepts that exact operation only.
+  if (T.SECRET_DUMP_RE.test(scanTarget) && !T.isPlSecretsBindMountOnly(scanTarget)) {
     deny(
       'secret-dump',
       'This command would print secret values into the transcript.',

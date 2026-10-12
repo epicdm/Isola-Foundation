@@ -58,6 +58,13 @@ const GRAPH = 'https://graph.facebook.com/v23.0/';
  */
 const FAKE_TOKEN = t('EA', 'A', 'b3xY7qLm2Nv9Kd4Rt6Wz8Ps1Hj5Gf0Cx', 'Qa7Ue2Ir');
 
+/** The one permitted EasyPanel createMount operation (fixture text assembled so this file does not itself look like the operation). */
+function MOUNT_OP(over = {}) {
+  const values = Object.assign({ type: 'bind', hostPath: '/etc/pl-secrets/plsvc_env_base', mountPath: '/app/' + '.env' }, over);
+  const payload = JSON.stringify({ projectName: 'uplink', serviceName: 'plsvc-app', values });
+  return "python scripts/owner-run/zz-migrate-02-ep-client.py mutate createMount '" + payload + "'";
+}
+
 const cases = [
   // --- UNGOVERNED MCP SSH SERVERS, and the secret store they exposed -------
   // Both defects measured 2026-09-22. Every case here FAILS on the code as it
@@ -202,6 +209,69 @@ const cases = [
       tool_name: 'Bash',
       tool_input: { command: "docker service update --env-add K_FILE=/run/secrets/k svc && docker exec c sh -c 'cat $K_FILE'" },
     },
+  },
+  // ── OPERATION-BOUND: EasyPanel createMount of a /etc/pl-secrets FILE at the dotenv path (2026-10-12) ──
+  // The live regex read the JSON key "type" as the `type` pager. The ONE permitted operation is below; every BLOCK
+  // case keeps most of it and changes exactly one thing, so a widening of the exemption goes red here. The two
+  // bare-pager cases are the positive controls that the deny still fires on the same path.
+  {
+    name: 'PERMITTED: EasyPanel createMount, bind of /etc/pl-secrets/<file> at the dotenv path, via the pinned client, output through the redactor',
+    expect: PASS,
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: MOUNT_OP() + ' 2>&1 | node .claude/hooks/lib/secret-redact.js' } },
+  },
+  {
+    name: 'BLOCKED (by the SEPARATE credential-surface rule, unchanged): the same operation WITHOUT the redactor still must pipe through it',
+    expect: BLOCK,
+    contains: 'credential-surface-redact',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: MOUNT_OP() + ' 2>&1 | tail -3 | cut -c1-200' } },
+  },
+  {
+    name: 'BLOCKED: same operation but the bind source is outside /etc/pl-secrets',
+    expect: BLOCK,
+    contains: 'secret-dump',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: MOUNT_OP({ hostPath: '/etc/shadow' }) } },
+  },
+  {
+    name: 'BLOCKED: same operation with a traversal out of /etc/pl-secrets',
+    expect: BLOCK,
+    contains: 'secret-dump',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: MOUNT_OP({ hostPath: '/etc/pl-secrets/../shadow' }) } },
+  },
+  {
+    name: 'BLOCKED: same operation but a different target path',
+    expect: BLOCK,
+    contains: 'secret-dump',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: MOUNT_OP({ mountPath: '/srv/' + '.env' }) } },
+  },
+  {
+    name: 'BLOCKED: same operation as an inline FILE mount (extra content key carries a literal)',
+    expect: BLOCK,
+    contains: 'secret-dump',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: MOUNT_OP({ content: 'K=v' }) } },
+  },
+  {
+    name: 'BLOCKED: same operation chained with a read of the dotenv path',
+    expect: BLOCK,
+    contains: 'secret-dump',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: MOUNT_OP() + '; cat /app/' + '.env' } },
+  },
+  {
+    name: 'BLOCKED: the same JSON handed to any other program',
+    expect: BLOCK,
+    contains: 'secret-dump',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: MOUNT_OP().replace('zz-migrate-02-ep-client.py', 'other.py') } },
+  },
+  {
+    name: 'BLOCKED (control): a bare pager on the dotenv path still fires',
+    expect: BLOCK,
+    contains: 'secret-dump',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: t('ty', 'pe /app/', '.env') } },
+  },
+  {
+    name: 'BLOCKED (control): cat on the dotenv path still fires',
+    expect: BLOCK,
+    contains: 'secret-dump',
+    payload: { session_id: SID, tool_name: 'Bash', tool_input: { command: t('ca', 't /app/', '.env') } },
   },
   {
     name: 'BLOCKED: docker run with -e/--env-add style path + a command prints the secret',

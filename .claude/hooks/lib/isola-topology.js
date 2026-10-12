@@ -532,6 +532,41 @@ function isSecretPathSettingOnly(cmd) {
   return fileSettings > 0;
 }
 
+/**
+ * OPERATION-BOUND EXEMPTION (2026-10-12): an EasyPanel createMount that points a service's dotenv path at a root-only
+ * secret FILE under /etc/pl-secrets. It reads nothing and prints nothing - it records "bind <file> at /app/.env" in the
+ * service definition. SECRET_DUMP_RE refused it because the payload's JSON key "type" matched the Windows pager `type`
+ * and /app/.env is a secret-file path (probe of the live regex: matched text = `type":"bind","hostPath":...,"mountPath":"/app/.env`).
+ *
+ * NOT a loosening of SECRET_DUMP_RE and NOT a path exemption. The WHOLE command must be exactly
+ *   [cd <dir>;] python[3] <dir>/zz-migrate-02-ep-client.py mutate createMount '<json>' [2>&1] [| tail|head -N] [| cut -c..] [| node ...secret-redact.js]
+ * and the JSON must be exactly {projectName, serviceName, values:{type:'bind', hostPath, mountPath}} with
+ * hostPath = /etc/pl-secrets/<plain file name> (no traversal, no extra segment) and mountPath exactly /app/.env.
+ * Any chained command, other procedure, extra key (e.g. an inline file `content`), other source directory or other target
+ * keeps the deny. Pure predicate: no I/O; exported for the selftest.
+ */
+const PLSECRETS_MOUNT_CMD_RE = new RegExp(
+  '^(?:cd [A-Za-z0-9_./:~-]+ ?; ?)?(?:python3?|py) (?:[A-Za-z0-9_./\\\\:~-]*[\\\\/])?zz-migrate-02-ep-client\\.py mutate createMount ' +
+  "'(\\{[^'\\n]*\\})'" +
+  '(?: 2>&1)?(?: \\| (?:tail|head) -[0-9]{1,4})?(?: \\| cut -c[0-9,-]{1,12})?' +
+  '(?: 2>&1)?(?: \\| node "?[A-Za-z0-9_.:/\\\\-]*secret-redact\\.js"?)?$'
+);
+function isPlSecretsBindMountOnly(cmd) {
+  const m = PLSECRETS_MOUNT_CMD_RE.exec(String(cmd || '').trim());
+  if (!m) return false;
+  let j;
+  try { j = JSON.parse(m[1]); } catch { return false; }
+  const keys = (o) => Object.keys(o || {}).sort().join(',');
+  if (!j || keys(j) !== 'projectName,serviceName,values') return false;
+  if (!/^[a-z0-9_-]{1,64}$/.test(j.projectName) || !/^[a-z0-9_-]{1,64}$/.test(j.serviceName)) return false;
+  const v = j.values;
+  if (!v || keys(v) !== 'hostPath,mountPath,type') return false;
+  if (v.type !== 'bind') return false;
+  if (typeof v.hostPath !== 'string' || v.hostPath.includes('..')) return false;
+  if (!/^\/etc\/pl-secrets\/[A-Za-z0-9_][A-Za-z0-9_.-]{0,80}$/.test(v.hostPath)) return false;
+  return v.mountPath === '/app/.env';
+}
+
 /** Commands that would dump an environment or print a secret file to stdout. */
 /**
  * A secret-bearing FILE reference, as opposed to an identifier that merely
@@ -1231,6 +1266,7 @@ module.exports = {
   SECRET_FILE_RE,
   SECRET_STORE_PATH_RE,
   isSecretPathSettingOnly,
+  isPlSecretsBindMountOnly,
   SECRET_DUMP_RE,
   CREDENTIAL_SURFACE_RE,
   MCP_EXEC_TOOL_RE,
