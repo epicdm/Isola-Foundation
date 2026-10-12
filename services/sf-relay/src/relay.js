@@ -615,18 +615,37 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
 
     if (turn.ok && looksLikeToolMarkup(turn.text)) {
       log({ event: "tool_markup_retry", ...ctx });
-      binding = { ...binding, sessionId: `cw-chatwoot-${scope.accountId}-${ev.conversationId}-r${ev.messageId}`, conversationId: null, conversationCapability: null, phase: "processing", pendingMessageId: ev.messageId };
-      if (!await persistConversationBinding(ev, binding)) {
-        await handoff(ev, "retry binding could not be durably recorded", { tellCustomer: true });
+      // rc10l: the same safe rule as the rotation. The first turn WAS accepted by Uplink (it advanced the current conversation), so the preserved binding is that conversation;
+      // it is replaced only when the retry is ACCEPTED. Only a marker is stored while the retry is in flight, and the retry carries a context signed for ITS OWN session
+      // (the old context named the old session and conversation, so the real verifier refused every retry: measured 2026-10-12, 403 invalid_channel_context).
+      const previousBinding = { ...binding, conversationId: turn.conversationId ?? binding.conversationId, conversationCapability: turn.conversationCapability ?? binding.conversationCapability, phase: "ready", pendingMessageId: null };
+      const retrySessionId = `cw-chatwoot-${scope.accountId}-${ev.conversationId}-r${ev.messageId}`;
+      const retryMarker = { ...previousBinding, phase: "rotating", pendingMessageId: ev.messageId, rotation: { sessionId: retrySessionId, messageId: ev.messageId } };
+      if (!await persistConversationBinding(ev, retryMarker)) {
+        await handoff(ev, "retry marker could not be durably recorded", { tellCustomer: true });
         return;
       }
+      let retryContext = null;
+      try { retryContext = makeRelayContext(ev, { ...binding, sessionId: retrySessionId, conversationId: null }, plAssertion); } catch { retryContext = null; }
       turn = await seldon.turn({
         message: ev.content,
         conversationId: null,
-        sessionId: binding.sessionId,
+        sessionId: retrySessionId,
         channelMeta: { source: "chatwoot", account_id: scope.accountId, inbox_id: scope.inboxId, conversation_id: ev.conversationId },
-        relayContext,
+        relayContext: retryContext,
       });
+      const retryAccepted = Boolean(turn.conversationId && turn.conversationCapability);
+      const retryAmbiguous = !retryAccepted && !turn.ok && (turn.reason === "timeout" || turn.reason === "unreachable");
+      if (retryAccepted) {
+        binding = { ...previousBinding, sessionId: retrySessionId, conversationId: null, conversationCapability: null, phase: "processing", pendingMessageId: ev.messageId };
+      } else if (retryAmbiguous) {
+        log({ event: "tool_markup_retry_ambiguous", reason: turn.reason, state: "rotating_marker_kept", ...ctx });
+        binding = retryMarker;
+      } else {
+        const restored = await persistConversationBinding(ev, previousBinding);
+        log({ event: "tool_markup_retry_refused_previous_binding_kept", reason: turn.reason, restored, ...ctx });
+        binding = previousBinding;
+      }
     }
 
     // rc10c (launch blocker, measured in source da08b734): metered pilot traffic allows MAX_PUBLIC_TURNS_PER_CONVERSATION=5 per Uplink

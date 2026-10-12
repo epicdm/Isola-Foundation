@@ -671,3 +671,53 @@ test("rc10k rotated turn: context carries messageSha256 of the sent text AND ori
   const ok = verifyRelayContext(rotated.relayContext, { keys: { ctx1: BRIDGE_KEY }, nowSec: Math.floor(NOW / 1000), expected: { accountId: 2, inboxId: 11, workspaceId: SCOPE.workspaceId, agentId: SCOPE.agentId, agentSlug: SCOPE.agentSlug, sessionId: rotated.sessionId, uplinkConversationId: null, chatwootConversationId: "41", chatwootMessageId: "7009", messageSha256: claims.messageSha256 } });
   assert.equal(ok.ok, true, JSON.stringify(ok));
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// rc10l (2026-10-12): the tool-markup retry follows the rotation's rule - the previous binding survives until the retry is ACCEPTED, and the retry carries a context signed for ITS OWN session.
+// Reproduced in the isolated acceptance harness against the REAL Uplink verifier: the pre-rc10l retry reused the old context (old session) -> 403 invalid_channel_context -> handoff, and the
+// replaced (null) binding made the next message start a fresh Uplink conversation without carry-over.
+const MARKUP = { ok: true, text: '<invoke name="pl_journey"></invoke>', conversationId: "sf-conv", conversationCapability: "visitor-bound-capability" };
+test("rc10l tool-markup retry (positive control): the retry context verifies with the real verifier for the retry session; new conversation bound only after acceptance", async () => {
+  const { f, seq } = await primed();
+  seq.push(MARKUP, ACCEPTED(11));
+  await run(f, messageFor(f, 7011, "What was I planning to do tomorrow?"));
+  const retry = f.seldon.turnInputs[f.seldon.turnInputs.length - 1];
+  assert.equal(retry.conversationId, null);
+  const v = verifyRelayContext(retry.relayContext, { keys: { ctx1: BRIDGE_KEY }, nowSec: Math.floor(NOW / 1000), expected: {
+    accountId: 2, inboxId: 11, workspaceId: SCOPE.workspaceId, agentId: SCOPE.agentId, agentSlug: SCOPE.agentSlug, sessionId: retry.sessionId, uplinkConversationId: null,
+    chatwootConversationId: "41", chatwootMessageId: "7011", messageSha256: createHash("sha256").update("What was I planning to do tomorrow?").digest("hex") } });
+  assert.equal(v.ok, true, JSON.stringify(v));
+  // CONTROL: the pre-rc10l shape (context of the OLD session) is refused by the same verifier, so this test can fail.
+  const stale = f.seldon.turnInputs[f.seldon.turnInputs.length - 2].relayContext;
+  const old = verifyRelayContext(stale, { keys: { ctx1: BRIDGE_KEY }, nowSec: Math.floor(NOW / 1000), expected: {
+    accountId: 2, inboxId: 11, workspaceId: SCOPE.workspaceId, agentId: SCOPE.agentId, agentSlug: SCOPE.agentSlug, sessionId: retry.sessionId, uplinkConversationId: null,
+    chatwootConversationId: "41", chatwootMessageId: "7011", messageSha256: createHash("sha256").update("What was I planning to do tomorrow?").digest("hex") } });
+  assert.equal(old.ok, false);
+  const b = await storedBinding(f);
+  assert.equal(b.conversationId, "sf-conv-11"); assert.equal(b.phase, "ready"); assert.equal(b.rotation, undefined);
+  assert.equal(handedOff(f), false);
+});
+
+test("rc10l tool-markup retry refused: the previous binding is kept, handoff only; control: the next message continues on the preserved conversation", async () => {
+  const { f, seq } = await primed();
+  seq.push(MARKUP, { ok: false, reason: "http_403", error: "invalid_channel_context", conversationId: null });
+  await run(f, messageFor(f, 7012, "What was I planning to do tomorrow?"));
+  const kept = await storedBinding(f);
+  assert.equal(kept.conversationId, "sf-conv"); assert.equal(kept.conversationCapability, "visitor-bound-capability"); assert.equal(kept.phase, "ready"); assert.equal(kept.rotation, undefined);
+  assert.equal(handedOff(f), true);
+  const before = f.seldon.turnInputs.length;
+  seq.push(ACCEPTED(12));
+  await run(f, messageFor(f, 7013, "Hello again"));
+  assert.equal(f.seldon.turnInputs[before].conversationId, "sf-conv");   // the preserved conversation, not a fresh orphan
+});
+
+test("rc10l tool-markup retry timeout: marker kept with the previous binding; the same message after a restart is a duplicate (no second retry)", async () => {
+  const { f, seq } = await primed();
+  seq.push(MARKUP, { ok: false, reason: "timeout", conversationId: null });
+  await run(f, messageFor(f, 7014, "What was I planning to do tomorrow?"));
+  const marker = await storedBinding(f);
+  assert.equal(marker.phase, "rotating"); assert.equal(marker.conversationId, "sf-conv");
+  const turns = f.seldon.turnInputs.length;
+  const r2 = restart(f); await r2.accept(messageFor(f, 7014, "What was I planning to do tomorrow?")).done;
+  assert.equal(f.seldon.turnInputs.length, turns);
+});
