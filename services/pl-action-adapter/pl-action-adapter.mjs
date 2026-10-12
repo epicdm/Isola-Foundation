@@ -67,6 +67,7 @@ export function verifyContext(token, cfg, nowMs = Date.now()) {
   if (claims.workspaceId !== cfg.workspaceId || claims.agentId !== cfg.agentId || claims.agentSlug !== cfg.agentSlug) return { ok: false, why: 'wrong_agent' }
   if (!/^\d{1,20}$/.test(String(claims.chatwootConversationId)) || !/^\d{1,20}$/.test(String(claims.chatwootMessageId))) return { ok: false, why: 'bad_context_fields' }
   if (!/^[a-f0-9]{64}$/.test(String(claims.messageSha256))) return { ok: false, why: 'bad_context_fields' }
+  if (claims.originalMessageSha256 !== undefined && !/^[a-f0-9]{64}$/.test(String(claims.originalMessageSha256))) return { ok: false, why: 'bad_context_fields' }   // rc13j: optional, signed with the context
   return { ok: true, claims }
 }
 
@@ -98,7 +99,8 @@ export async function resolveSender(cfg, claims, f = fetch) {
   const wamid = String(msg.source_id ?? '')
   if (!/^wamid\.[A-Za-z0-9+/=_-]{8,120}$/.test(wamid)) return { ok: false, why: 'no_whatsapp_message_id' }
   const content = String(msg.content ?? '')
-  if (!eq(sha256hex(content), claims.messageSha256)) return { ok: false, why: 'message_digest_mismatch' }
+  // rc13j: on a ROTATED Uplink turn the context's messageSha256 binds the text Uplink received (carry-over framing + message); originalMessageSha256 binds the customer's own Chatwoot message.
+  if (!eq(sha256hex(content), claims.originalMessageSha256 ?? claims.messageSha256)) return { ok: false, why: 'message_digest_mismatch' }
   const contact = (await cw(cfg, `/contacts/${contactId}`, f))?.payload ?? null
   const ci = (contact?.contact_inboxes ?? []).filter((x) => Number(x?.inbox?.id ?? x?.inbox_id) === cfg.cwInbox)
   const all = [...new Set(ci.map((x) => String(x.source_id)))]

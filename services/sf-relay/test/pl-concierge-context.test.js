@@ -651,3 +651,23 @@ test("rc10k an accepted turn whose reply is unusable (empty text) still binds th
   assert.equal(b.conversationId, "sf-conv-7"); assert.equal(b.phase, "ready");
   assert.equal(handedOff(f), true);
 });
+
+// rc10k: the adapter binds the exact CHATWOOT message (sha256 of what the customer wrote) while Uplink binds the text it RECEIVES (the carry-over framing on a rotated turn).
+// The signed context therefore carries BOTH hashes on a rotated turn: messageSha256 (sent text, for Uplink) and originalMessageSha256 (the customer's own message, for the adapter).
+const payloadOf = (token) => JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"));
+test("rc10k rotated turn: context carries messageSha256 of the sent text AND originalMessageSha256 of the customer's message; an ordinary turn carries no original hash (control)", async () => {
+  const { f, seq } = await primed();
+  const ordinary = payloadOf(f.seldon.turnInputs[0].relayContext);
+  assert.equal(ordinary.originalMessageSha256, undefined);
+  assert.equal(ordinary.messageSha256, createHash("sha256").update(f.event.content).digest("hex"));
+  seq.push(LIMIT503, ACCEPTED(8));
+  const q = "What was I planning to do tomorrow?";
+  await run(f, messageFor(f, 7009, q));
+  const rotated = f.seldon.turnInputs[2];
+  const claims = payloadOf(rotated.relayContext);
+  assert.equal(claims.messageSha256, createHash("sha256").update(rotated.message).digest("hex"));
+  assert.equal(claims.originalMessageSha256, createHash("sha256").update(q).digest("hex"));
+  assert.notEqual(claims.messageSha256, claims.originalMessageSha256);
+  const ok = verifyRelayContext(rotated.relayContext, { keys: { ctx1: BRIDGE_KEY }, nowSec: Math.floor(NOW / 1000), expected: { accountId: 2, inboxId: 11, workspaceId: SCOPE.workspaceId, agentId: SCOPE.agentId, agentSlug: SCOPE.agentSlug, sessionId: rotated.sessionId, uplinkConversationId: null, chatwootConversationId: "41", chatwootMessageId: "7009", messageSha256: claims.messageSha256 } });
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+});

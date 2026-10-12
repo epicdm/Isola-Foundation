@@ -71,7 +71,7 @@ const b64url = (value) => Buffer.from(value, "utf8").toString("base64url");
 /** Short-lived relay-to-native-runtime envelope; it is never stored in Chatwoot or returned to the visitor. */
 const AGENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-export function mintRelayContext({ key, kid, accountId, inboxId, workspaceId, agentId, agentSlug, sessionId, uplinkConversationId = null, chatwootConversationId, chatwootMessageId, message, plAssertion, nowSec, nonce = randomBytes(16).toString("base64url") }) {
+export function mintRelayContext({ key, kid, accountId, inboxId, workspaceId, agentId, agentSlug, sessionId, uplinkConversationId = null, chatwootConversationId, chatwootMessageId, message, originalMessage = null, plAssertion, nowSec, nonce = randomBytes(16).toString("base64url") }) {
   if (typeof key !== "string" || Buffer.byteLength(key, "utf8") < 32) throw new Error("relay_context_key_invalid");
   if (typeof kid !== "string" || !CONTEXT_KID.test(kid)) throw new Error("relay_context_kid_invalid");
   if (!Number.isSafeInteger(accountId) || accountId !== 2 || !Number.isSafeInteger(inboxId) || inboxId !== 11) throw new Error("relay_context_scope_invalid");
@@ -89,6 +89,7 @@ export function mintRelayContext({ key, kid, accountId, inboxId, workspaceId, ag
     kid, accountId, inboxId, workspaceId, agentId, agentSlug, sessionId, uplinkConversationId,
     chatwootConversationId, chatwootMessageId,
     messageSha256: createHash("sha256").update(message, "utf8").digest("hex"),
+    ...(typeof originalMessage === "string" && originalMessage !== message ? { originalMessageSha256: createHash("sha256").update(originalMessage, "utf8").digest("hex") } : {}),
     plAssertion, iat: nowSec, nonce,
   };
   const encoded = b64url(JSON.stringify(payload));

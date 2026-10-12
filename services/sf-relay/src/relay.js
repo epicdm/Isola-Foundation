@@ -460,6 +460,7 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
       chatwootConversationId: String(ev.conversationId),
       chatwootMessageId: String(ev.messageId),
       message,
+      originalMessage: ev.content,
       plAssertion,
       nowSec: Math.floor(now() / 1000),
     });
