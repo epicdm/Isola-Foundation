@@ -519,3 +519,29 @@ test("rc10e: carry the last verified buttons forward when the reply names one of
   assert.equal(f.posted.filter((m) => !m.private)[2].items, null);
   void g;
 });
+
+// rc10j (measured live 2026-10-12): the rotated turn sent the CARRIED message but the signed relay context bound sha256(ev.content); Uplink answered 403 invalid_channel_context.
+test("rc10j: rotated turn with carry-over - the relay context binds the message actually SENT (verifies with the real verifier)", async () => {
+  const lim = { ok: false, reason: "http_503", error: "PUBLIC_CHAT_CONVERSATION_LIMIT", conversationId: null };
+  const f = fixture({ turnSeq: [lim] });
+  f.chatwoot.listMessages = async () => ({ payload: [
+    { id: 6990, message_type: 0, private: false, content: "I am planning to call my sister tomorrow." },
+    { id: 6991, message_type: 1, private: false, content: "Lovely, enjoy." },
+  ] });
+  await run(f);
+  assert.equal(f.seldon.turnInputs.length, 2);
+  const rotated = f.seldon.turnInputs[1];
+  assert.match(rotated.message, /Earlier in this same WhatsApp chat/);
+  assert.notEqual(rotated.message, f.event.content);
+  const expected = (message) => ({
+    accountId: 2, inboxId: 11, workspaceId: SCOPE.workspaceId, agentId: SCOPE.agentId, agentSlug: SCOPE.agentSlug,
+    sessionId: rotated.sessionId, uplinkConversationId: null, chatwootConversationId: "41", chatwootMessageId: "7001",
+    messageSha256: createHash("sha256").update(message).digest("hex"),
+  });
+  const ok = verifyRelayContext(rotated.relayContext, { keys: { ctx1: BRIDGE_KEY }, nowSec: Math.floor(NOW / 1000), expected: expected(rotated.message) });
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+  // CONTROL: the pre-rc10j shape (context signed over the ORIGINAL text) is refused by the same verifier, so this test can fail.
+  const old = verifyRelayContext(rotated.relayContext, { keys: { ctx1: BRIDGE_KEY }, nowSec: Math.floor(NOW / 1000), expected: expected(f.event.content) });
+  assert.equal(old.ok, false);
+  assert.equal(old.reason, "binding_mismatch:messageSha256");
+});

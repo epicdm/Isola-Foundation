@@ -445,7 +445,7 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
     });
   }
 
-  function makeRelayContext(ev, binding, plAssertion) {
+  function makeRelayContext(ev, binding, plAssertion, message = ev.content) {
     if (!plConcierge || !plAssertion) return null;
     return mintRelayContext({
       key: plConcierge.bridgeKey,
@@ -459,7 +459,7 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
       uplinkConversationId: binding.conversationId,
       chatwootConversationId: String(ev.conversationId),
       chatwootMessageId: String(ev.messageId),
-      message: ev.content,
+      message,
       plAssertion,
       nowSec: Math.floor(now() / 1000),
     });
@@ -628,8 +628,6 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
         await handoff(ev, "rotated binding could not be durably recorded", { tellCustomer: true });
         return;
       }
-      let rotatedContext = null;
-      try { rotatedContext = makeRelayContext(ev, binding, plAssertion); } catch { rotatedContext = null; }
       // rc10i: carry the recent same-conversation context into the fresh Uplink conversation (best effort: any failure falls back to the bare message).
       try {
         const carried = buildCarryOver((await chatwoot.listMessages(ev.conversationId))?.payload, ev.messageId, binding.opening ?? null);
@@ -639,6 +637,10 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
         turnMessage = ev.content;
         log({ event: "uplink_conversation_context_carry_failed", reason: err instanceof Error ? err.name : "failed", ...ctx });
       }
+      // rc10j: the signed relay context binds sha256(message). Mint it for the message actually SENT (the carried one), after it is built;
+      // signing ev.content made Uplink refuse the rotated turn (403 invalid_channel_context, measured live 2026-10-12).
+      let rotatedContext = null;
+      try { rotatedContext = makeRelayContext(ev, binding, plAssertion, turnMessage); } catch { rotatedContext = null; }
       turn = await seldon.turn({
         message: turnMessage,
         conversationId: null,
