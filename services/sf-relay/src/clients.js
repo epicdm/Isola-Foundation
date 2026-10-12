@@ -86,6 +86,8 @@ export function chatwootClient({ baseUrl, accountId, token, fetchImpl = fetch, t
       }
     },
     getContact: async (id) => call("GET", `/contacts/${id}`),
+    // rc10i: recent messages of ONE conversation (same tenant, same bot token), used only to carry context across an Uplink conversation rotation.
+    listMessages: async (id) => call("GET", `/conversations/${id}/messages`),
     updateConversationCustomAttributes: (id, customAttributes) =>
       call("POST", `/conversations/${id}/custom_attributes`, {
         custom_attributes: customAttributes,
