@@ -53,13 +53,10 @@ const HAS_APP = new Set(['active', 'registered_no_call']);
     const hasLine = state !== 'no_line';
     check(`A ${state}/${topic}: both adapters answered with facts (instrument sanity)`, !!o && !!n && !res.old.t.isError && !res.new.t.isError, res.new.t.text.slice(0, 80));
     if (!o || !n) continue;
-    check(`A ${state}/${topic}: CONTROL old adapter has NO app fact`, o.app === undefined);
-    if (hasLine) {
-      const want = state === 'setup_not_activated';
-      check(`A ${state}/${topic}: new facts.app present, install_needed=${want}`, n.app && n.app.install_needed === want && n.app.ios_url === IOS && n.app.android_url === AND && /ONLY when install_needed/.test(n.app.note), JSON.stringify(n.app || null).slice(0, 160));
-      const rest = (x) => JSON.stringify({ ...x, app: undefined });
-      check(`A ${state}/${topic}: nothing else in the facts changed (same as old)`, rest(o) === rest(n));
-    } else check(`A ${state}/${topic}: no line -> no account-specific app fact (unchanged answer)`, n.app === undefined && JSON.stringify(o) === JSON.stringify(n));
+    // v3: pl_guide facts are deliberately UNCHANGED (the extra top-level app object pushed the request over the 32,768 B cap in production). Control: byte-equal answers, and facts.app (links) already present in both.
+    check(`A ${state}/${topic}: pl_guide answer is byte-identical old vs new (no size growth)`, JSON.stringify(o) === JSON.stringify(n), `${JSON.stringify(n).length} B`);
+    check(`A ${state}/${topic}: no top-level app object added (size guard)`, n.app === undefined && o.app === undefined);
+    if (hasLine) check(`A ${state}/${topic}: existing facts.app already carries both verified store links`, n.facts?.app?.ios_app_store === IOS && n.facts?.app?.android_google_play === AND, JSON.stringify(n.facts?.app || null).slice(0, 90));
   }
   console.log('=== B. deterministic menu path (taps) for states that offer Calling help ===');
   for (const [state, oldH, newH] of STATES.filter(([s]) => HAS_APP.has(s))) {

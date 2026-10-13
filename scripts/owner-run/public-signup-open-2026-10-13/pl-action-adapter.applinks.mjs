@@ -836,9 +836,6 @@ export function makeHandlers(cfg, db, stats, f = fetch) {
       out.facts = { ...modelFacts(j), plan_covers_us_canada: bal?.known === true ? bal.pool === 'shared' : null }
       if (o) out.rates = { dominica_after_included: '13.5 EC cents a minute (from wallet credit)', us_canada_when_not_included: `EC$${o.overage_uscan_xcd} a minute (from wallet credit)` }
       out.dialing = { dominica: '+1 767 then the 7-digit number', us_canada: '+1 then the 10-digit number', app: 'Cloud Softphone on this phone' }
-      out.app = { name: 'Cloud Softphone', ios_url: IOS_URL, android_url: ANDROID_URL, install_needed: needsInstall(j.state),
-        next_action: needsInstall(j.state) ? 'install Cloud Softphone, then open it' : 'open Cloud Softphone, check it shows connected, then make the call',
-        note: 'Give the store links ONLY when install_needed is true or the customer says they do not have or cannot find the app; otherwise give just the next action. Each link opens the app page: Open if installed, Install if not.' }
       if (topic === 'calling' || topic === 'how_to_call' || topic === 'calling_help') out.choices = titlesOf([ACT.call_dominica, ACT.call_uscan, ACT.call_failed])
       else if (topic === 'call_failed' || topic === 'troubleshoot') {
         const d = composeCallFailed(fx, bal, j.state)

@@ -4,7 +4,7 @@
 #   - APP_LINKS_LINE + needsInstall(state): links line returned only when the app still has to be installed
 #   - composeCallGuide(dest,o,bal,state) / composeCallFailed(fx,bal,state): optional 4th/3rd arg; with no state the old output is byte-identical except links are appended (unknown => needs install)
 #   - calling_help_menu text names the app; links only when install is needed
-#   - pl_guide facts gain out.app {name, open, ios_url, android_url, install_needed, next_action, note} so the AGENT decides from a fact (the skill promised one)
+#   - (v3) pl_guide facts are NOT changed: the existing facts.app already carries the links; the extra out.app (v2) caused request_too_large
 # usage: python3 mk-adapter-applinks.py <deployed.mjs> <out.mjs>
 import io, sys, hashlib, difflib
 src, out = sys.argv[1], sys.argv[2]
@@ -48,12 +48,8 @@ rep("tap *Continue setup* for a fresh link.`].join('\\n') }\n  const known = bal
 rep("const d = composeCallFailed(fx, bal)\n        return say(", "const d = composeCallFailed(fx, bal, j.state)\n        return say(")
 rep("const d = composeCallFailed(fx, bal)\n        out.diagnosis", "const d = composeCallFailed(fx, bal, j.state)\n        out.diagnosis")
 
-# pl_guide facts
-rep("out.dialing = { dominica: '+1 767 then the 7-digit number', us_canada: '+1 then the 10-digit number', app: 'Cloud Softphone on this phone' }",
-    "out.dialing = { dominica: '+1 767 then the 7-digit number', us_canada: '+1 then the 10-digit number', app: 'Cloud Softphone on this phone' }\n"
-    "      out.app = { name: 'Cloud Softphone', ios_url: IOS_URL, android_url: ANDROID_URL, install_needed: needsInstall(j.state),\n"
-    "        next_action: needsInstall(j.state) ? 'install Cloud Softphone, then open it' : 'open Cloud Softphone, check it shows connected, then make the call',\n"
-    "        note: 'Give the store links ONLY when install_needed is true or the customer says they do not have or cannot find the app; otherwise give just the next action. Each link opens the app page: Open if installed, Install if not.' }")
+# pl_guide facts: NOT changed. The existing facts.app (from modelFacts, in pl_journey AND pl_guide) already carries the two verified store links; a second top-level `app` object
+# added 524 B per pl_guide result and pushed the 2-call request over the public-pilot 32,768 B cap on 2026-10-13 18:31Z (request_too_large -> relay handoff). Removed in v3 of this delta.
 
 io.open(out, 'w', encoding='utf-8', newline='').write(s)
 o = io.open(src, encoding='utf-8', newline='').read()
