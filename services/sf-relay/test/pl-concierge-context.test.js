@@ -476,6 +476,70 @@ test("rc10c: a rotated retry that also fails is handed off once (no loop)", asyn
   assert.equal(handedOff(f), true);
 });
 
+// rc10m (2026-10-13, owner S3): Uplink refuses a public-pilot request over 32,768 bytes BEFORE the model call (degraded, reason request_too_large). That is a property of the
+// Uplink conversation's rebuilt history, so the relay rotates to ONE fresh Uplink conversation (with carry-over) and retries once, instead of telling the customer a teammate will come.
+const TOO_BIG = { ok: false, reason: "request_too_large", conversationId: "sf-conv", conversationCapability: "visitor-bound-capability" };
+const noOutgoingYet = async () => ({ payload: [{ id: 7001, message_type: 0, private: false, content: "Tell me about Personal Line." }] });
+test("rc10m: request_too_large (customer's own message, nothing delivered yet) -> ONE fresh Uplink conversation, reply posted, NO handoff (the S3 failure now answers)", async () => {
+  const f = fixture({ turnSeq: [{ ...TOO_BIG }] });
+  f.chatwoot.listMessages = noOutgoingYet;
+  await run(f);
+  assert.equal(f.seldon.turnInputs.length, 2);
+  assert.equal(f.seldon.turnInputs[1].conversationId, null);
+  assert.notEqual(f.seldon.turnInputs[1].sessionId, f.seldon.turnInputs[0].sessionId);
+  assert.deepEqual(f.posted.filter((m) => !m.private).map((m) => m.content), ["Here are the verified Personal Line details."]);
+  assert.equal(handedOff(f), false);
+});
+test("rc10m CONTROL: a genuine non-size failure (pilot unavailable 503) still hands off with no retry", async () => {
+  const f = fixture({ turnSeq: [{ ok: false, reason: "http_503", error: "PUBLIC_CHAT_UNAVAILABLE", conversationId: null }] });
+  f.chatwoot.listMessages = noOutgoingYet;
+  await run(f);
+  assert.equal(f.seldon.turnInputs.length, 1);
+  assert.equal(handedOff(f), true);
+});
+test("rc10m CONTROL: other degraded reasons (e.g. summary_failed-style, provider errors) still hand off with no retry", async () => {
+  const f = fixture({ turnSeq: [{ ok: false, reason: "llm_not_configured", conversationId: "sf-conv", conversationCapability: "visitor-bound-capability" }] });
+  f.chatwoot.listMessages = noOutgoingYet;
+  await run(f);
+  assert.equal(f.seldon.turnInputs.length, 1);
+  assert.equal(handedOff(f), true);
+});
+test("rc10m: a rotated retry that is ALSO too large is handed off once (no loop)", async () => {
+  const f = fixture({ turnSeq: [{ ...TOO_BIG }, { ...TOO_BIG }] });
+  f.chatwoot.listMessages = noOutgoingYet;
+  await run(f);
+  assert.equal(f.seldon.turnInputs.length, 2);
+  assert.equal(handedOff(f), true);
+});
+test("rc10m GUARD: size refusal AFTER a message was already delivered to the customer is NOT retried (no duplicate send)", async () => {
+  const f = fixture({ turnSeq: [{ ...TOO_BIG }] });
+  f.chatwoot.listMessages = async () => ({ payload: [{ id: 7001, message_type: 0, private: false, content: "x" }, { id: 7002, message_type: 1, private: false, content: "Setup form sent" }] });
+  await run(f);
+  assert.equal(f.seldon.turnInputs.length, 1);
+  assert.equal(handedOff(f), true);
+});
+test("rc10m GUARD: a bare \"1\" (offer confirmation, provisioning possible) is never auto-retried after a size refusal", async () => {
+  const f = fixture({ turnSeq: [{ ...TOO_BIG }] });
+  f.event.content = "1";
+  f.chatwoot.listMessages = noOutgoingYet;
+  await run(f);
+  assert.equal(f.seldon.turnInputs.length, 1);
+  assert.equal(handedOff(f), true);
+});
+test("rc10m GUARD: unreadable Chatwoot history fails closed (hand off, no retry); positive control above shows the same refusal rotates when readable", async () => {
+  const f = fixture({ turnSeq: [{ ...TOO_BIG }] });
+  f.chatwoot.listMessages = async () => { throw new Error("chatwoot unreachable"); };
+  await run(f);
+  assert.equal(f.seldon.turnInputs.length, 1);
+  assert.equal(handedOff(f), true);
+});
+test("rc10m: the turn-limit rotation is unchanged (positive control for the shared branch)", async () => {
+  const f = fixture({ turnSeq: [{ ok: false, reason: "http_503", error: "PUBLIC_CHAT_CONVERSATION_LIMIT", conversationId: null }] });
+  await run(f);
+  assert.equal(f.seldon.turnInputs.length, 2);
+  assert.equal(handedOff(f), false);
+});
+
 // rc10d: wrong/missing next action. FAILING CONTROL = the exact staging S2 reply (2026-10-11 after_rc10b) that told the customer to tap
 // Check connection while only [Continue setup | Talk to a person] were attached.
 import { unofferedTaps } from "../src/relay.js";

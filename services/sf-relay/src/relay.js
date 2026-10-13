@@ -652,8 +652,21 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
     // conversation and then answers 503 PUBLIC_CHAT_CONVERSATION_LIMIT - which made every WhatsApp customer's 6th message a handoff.
     // The customer's thread is long-lived; the Uplink conversation is not. Start ONE fresh Uplink conversation for the same Chatwoot
     // conversation (new session, re-minted signed context) and retry once; the agent re-reads verified state with pl_journey.
-    if (!turn.ok && turn.error === "PUBLIC_CHAT_CONVERSATION_LIMIT") {
-      log({ event: "uplink_conversation_rotated", reason: "conversation_turn_limit", ...ctx });
+    // rc10m (2026-10-13, owner S3): the Uplink runtime refuses a public-pilot request over its 32,768-byte cap BEFORE the model call (degraded, reason request_too_large). That is a
+    // property of THIS Uplink conversation (its rebuilt history), not of the customer or the agent: start ONE fresh Uplink conversation with carry-over and retry once, exactly like the turn limit.
+    // Guard: the refusal can come on the SECOND model request of a turn, after a tool already delivered a message to the customer (e.g. the setup form). Re-running the tools would send it twice,
+    // so the retry happens only when NO public outgoing message newer than the customer's message exists; unreadable = fail closed (hand off, as before).
+    const sizeRefused = !turn.ok && turn.reason === "request_too_large";
+    let rotateNow = !turn.ok && turn.error === "PUBLIC_CHAT_CONVERSATION_LIMIT";
+    if (sizeRefused) {
+      // A bare "1" is the customer CONFIRMING an offer: the turn may have provisioned a line before the refusal. Never re-run that turn automatically (hand off, as before).
+      let delivered = String(ev.content ?? "").trim() === "1";
+      if (!delivered) try { delivered = ((await chatwoot.listMessages(ev.conversationId))?.payload ?? []).some((m) => Number(m.id) > Number(ev.messageId) && !m.private && (m.message_type === 1 || m.message_type === "outgoing")); } catch { delivered = true; }
+      if (delivered) log({ event: "size_refusal_not_retried", reason: "customer_already_received_a_message_or_unverifiable", ...ctx });
+      else rotateNow = true;
+    }
+    if (rotateNow) {
+      log({ event: "uplink_conversation_rotated", reason: sizeRefused ? "request_too_large" : "conversation_turn_limit", ...ctx });
       // rc10k: the PREVIOUS binding (old Uplink conversation id and capability) is kept until the rotated request is ACCEPTED. Only a marker is stored while the
       // rotated request is in flight; the new conversation is bound only when Uplink answers with a new conversation id and capability.
       const previousBinding = { ...binding, phase: "ready", pendingMessageId: null };
