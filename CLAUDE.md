@@ -461,3 +461,22 @@ PORT: read <what was checked> · wrote <entities>
 
 or, when genuinely nothing applies, `PORT: no register impact`. Silence is never ambiguous
 again. Reports without the footer bounce, exactly as reports without lane + HEAD do.
+
+## 9. Standing protocol — Uplink plan-governed execution (installed 2026-10-13)
+
+Applies to every lane and every executor/subagent working on Uplink, the native
+concierge or Personal Line delivery. Port wins over this paragraph.
+
+1. **Read before acting.** At the start of each task and after any context
+   compaction, read in Port:
+   `protocol-uplink-plan-governed-execution-and-drift-control-2026-10-13` and
+   `plan-uplink-native-concierge-current-delivery-2026-10-13` (latest version).
+   Briefs to executors must name both records.
+2. **Configuration first.** Use the existing native agent's supported settings,
+   knowledge and connectors. A platform code change is a separate proposal that
+   explains why configuration cannot do the task. No new route, engine, relay
+   recovery variant or memory project without it.
+3. **Respect holds.** Codex development, RC3 and any release stay held unless the
+   plan says otherwise. Preserve candidates and acceptance evidence.
+4. **Write back and read back.** Results go to Port and are read back against the
+   plan version, stating items satisfied and deviations.
