@@ -1,0 +1,82 @@
+# PRODUCTION READ-ONLY cross-check of the accepted walk line ...5099 (Magnus user 614), 2026-10-11 ~21:0xZ. Masked. Source: scripts zz-acct2-h03-prod-ro.sh / zz-acct2-prod-ro.mjs (no write/create/unlink anywhere).
+
+## run 1: plsvc concierge READ endpoints (line-status, balance, journey) via loopback, minted assertion; (each writes its own audit row)
+== plsvc prod account row (read-only txn) ==
+BEGIN
+cmv402yk5003f01o73mevn907 | 5099 | lt_yrhv8426n5 | 614 |  | activated | 2026-10-11T15:51
+active | 2026-10-11T15:51 | 2026-10-18T15:51 | trial | 3
+COMMIT
+odooPartnerId= (used for the Odoo read)
+target ok: /plsvc-prod-host03.1.wrho26w8e169gneumy01yriwq (PRODUCTION, READ-ONLY)
+{
+ "assertion_config": {
+  "kid_present": true,
+  "key_present": true,
+  "pnid_present": true,
+  "port": "3000"
+ },
+ "engine": {
+  "line_status": {
+   "http": 200,
+   "code": "line_status",
+   "did": "+1 767 818 5099",
+   "registration": "reachable",
+   "listener_connected": true,
+   "softphone_activated": true,
+   "first_call_done": true,
+   "plan": "trial",
+   "plan_expires_at": "2026-10-18T15:51:05.396Z",
+   "next_step": "done"
+  },
+  "balance": {
+   "http": 200,
+   "code": "balance",
+   "known": true,
+   "kind": "included",
+   "plan": "trial",
+   "minutes_included": 60,
+   "minutes_remaining": 59,
+   "wallet_xcd": "0.00",
+   "expires_at": "2026-10-18T15:51:05.396Z"
+  },
+  "journey": {
+   "http": 200,
+   "state": "active",
+   "registration": "reachable",
+   "minutes_remaining": 59,
+   "wallet_xcd": "0.00"
+  }
+ },
+ "magnus_host": "voice00.epic.dm",
+ "magnus_error": "ERR_TLS_CERT_ALTNAME_INVALID",
+ "magnus_user": "NO ROW",
+ "magnus_sip": [],
+ "magnus_offerUse": [],
+ "magnus_offer": "active offerUse rows: 0",
+ "magnus_pkg_cdr": {
+  "rows": 0,
+  "answered": 0,
+  "calls": []
+ },
+ "control_magnus_reads_work": false,
+ "odoo_host": "epic-communications-inc.odoo.com",
+ "odoo": "no odooPartnerId on the account"
+}
+
+## run 2: Magnus pinned to voice03 name (HTTP 403 on every signed read - instrument blocked, NOT 'no data')
+ "magnus_host": "voice03.epic.dm",
+ "magnus_user": "NO ROW",
+ "magnus_sip": [],
+ "magnus_offerUse": [],
+ "magnus_offer": "active offerUse rows: 0",
+ "magnus_pkg_cdr": {
+  "rows": 0,
+  "answered": 0,
+  "calls": []
+ },
+ "control_magnus_reads_work": false,
+ "odoo_host": "epic-communications-inc.odoo.com",
+ "odoo": "no odooPartnerId on the account"
+}
+
+## run 3: Magnus pinned to 157.245.83.64 (voice00 old host, HTTP 200): control read OK, user 614 absent there; Odoo (authoritative host) read-only

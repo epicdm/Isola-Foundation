@@ -1,0 +1,10 @@
+{"n":11,"label":"webhook UNSIGNED","expect":401,"http":401,"pass":true,"body":{"ok":false,"error":"invalid_signature"}}
+{"n":12,"label":"webhook old ts -400 s","expect":401,"http":401,"pass":true,"body":{"ok":false,"error":"invalid_signature"}}
+{"n":13,"label":"webhook wrong key","expect":401,"http":401,"pass":true,"body":{"ok":false,"error":"invalid_signature"}}
+{"n":14,"label":"right key, OTHER workspace path (not connected there)","expect":503,"http":503,"pass":true,"body":{"ok":false,"error":"personal_line_not_configured"}}
+{"n":15,"label":"signed, type with no valid source","expect":422,"http":422,"pass":true,"body":{"ok":false,"error":"invalid_event"}}
+{"n":16,"label":"signed pl.line_created A (positive; creates the trusted link)","expect":200,"http":200,"pass":true,"body":{"ok":true,"status":"processed","contactId":"d649fb26-97a5-46bd-8532-00f23a23a67e","factsApplied":true,"emitted":true,"activity":true}}
+{"n":17,"label":"same event_id replayed (no-op)","expect":200,"http":200,"pass":true,"body":{"ok":true,"status":"duplicate"}}
+{"n":18,"label":"signed pl.line_created B (positive)","expect":200,"http":200,"pass":true,"body":{"ok":true,"status":"processed","contactId":"104c323c-62df-420b-ab3c-3d9320ef4f35","factsApplied":true,"emitted":true,"activity":true}}
+{"n":19,"label":"registration_changed v5 (applied)","expect":200,"http":200,"pass":true,"body":{"ok":true,"status":"processed","contactId":"d649fb26-97a5-46bd-8532-00f23a23a67e","factsApplied":true,"emitted":true,"activity":true}}
+{"n":20,"label":"registration_changed v4 arrives late (stale: facts kept, not announced)","expect":200,"http":200,"pass":true,"body":{"ok":true,"status":"processed","contactId":"d649fb26-97a5-46bd-8532-00f23a23a67e","factsApplied":false,"emitted":false,"activity":true}}
