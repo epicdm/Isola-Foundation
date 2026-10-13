@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""pl-watch: the MINIMUM operational monitor for the Personal Line stack on host04. NOT INSTALLED (design + script only, recipients unknown).
+One root-owned script, run by cron every 2 minutes. It detects a DEAD PATH (a service down, replies not flowing, queues stuck, errors rising, spend about to cut service) and mails the recipients.
+  Usage:  pl-watch.py --dry-run     print every check, send nothing (safe to run any time, read-only)
+          pl-watch.py                run the checks and mail on a state change / every 30 min while a check stays failed
+Recipients: /etc/pl-watch/recipients (one address per line). The file does not exist until the coordinator supplies addresses; with no file the script refuses to send.
+Alert path: SMTP2GO through the IP allowlist that already works for host04 (no credentials are stored or needed). Nothing here posts to a customer, calls Meta, or changes any state."""
+import json, os, re, subprocess, sys, time, smtplib, ssl
+from email.message import EmailMessage
+DRY = "--dry-run" in sys.argv
+STATE = "/var/lib/pl-watch/state.json"; RECIP = "/etc/pl-watch/recipients"
+def sh(cmd, t=25):
+    try: return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=t).stdout.strip()
+    except Exception as e: return "ERR %s" % e
+def cid(name): return sh("docker ps -q -f name=%s | head -1" % name)
+checks = []   # (name, ok, detail)
+def chk(name, ok, detail=""): checks.append((name, bool(ok), detail))
+R, P, AD, CH, SK = cid("uplink_sf-relay-pl-prod"), cid("uplink_plsvc-app"), cid("uplink_pl-action-adapter"), cid("uplink_chat."), cid("uplink_chatwoot-sidekiq")
+DB = cid("uplink_uplink-db-prod"); RD = cid("uplink_chatwoot-redis")
+# 1-4 services answer
+chk("relay healthz", R and sh("docker exec %s node -e 'fetch(\"http://127.0.0.1:3000/healthz\").then(r=>console.log(r.status))'" % R) == "200")
+ph = bool(P) and "healthy" in sh("docker ps --format '{{.Status}}' -f id=%s" % P)
+offer_js = "/usr/local/lib/pl-watch/offer-once.js"   # the signed read-only /offer probe (copy of zz-offer-once.js); proves plsvc -> Magnus reads
+def offer_probe():
+    """Signed read-only /offer probe (plsvc -> Magnus read). Runs at most once per 10 minutes (cached result), one call, no retry, so a Magnus problem cannot be turned into a lockout by this monitor."""
+    OF = "/var/lib/pl-watch/offer.json"
+    try: c = json.load(open(OF))
+    except Exception: c = {"t": 0, "ok": False, "detail": "never run"}
+    if "--induce-offer" in sys.argv: return False, "induced failure (self-test), no call made"
+    if time.time() - c["t"] < 600: return c["ok"], "cached %ds ago: %s" % (time.time() - c["t"], c["detail"])
+    out = sh("docker exec -i %s sh -c 'cd /app && node -' < %s" % (P, offer_js), 40)
+    ok = "HTTP 200" in out and "code: offer" in out
+    detail = (out.split("|")[0] + "|" + (out.split("|")[1] if "|" in out else "")).strip()[:80]
+    os.makedirs(os.path.dirname(OF), exist_ok=True); json.dump({"t": time.time(), "ok": ok, "detail": detail}, open(OF, "w"))
+    return ok, detail
+if os.path.exists(offer_js) and P: po, pod = offer_probe()
+else: po, pod = (not os.path.exists(offer_js)), "probe not installed (health only)"
+chk("plsvc healthy and Magnus read (/offer) works", ph and po, "probe: %s" % pod)
+chk("adapter /health", AD and sh("docker exec %s node -e 'fetch(\"http://127.0.0.1:9100/health\").then(r=>console.log(r.status))'" % AD) == "200")
+chk("Chatwoot web answers", sh("curl -sk -o /dev/null -w '%{http_code}' --max-time 10 --resolve inbox.epic.dm:443:127.0.0.1 https://inbox.epic.dm/") in ("200", "301", "302"))
+# 5 sidekiq backlog / retry / dead growth (counts only; redis password read INSIDE the container, never printed)
+q = sh("docker exec %s sh -c 'for k in queue:default queue:high queue:critical queue:medium queue:low; do redis-cli -a \"$REDIS_PASSWORD\" --no-auth-warning llen $k; done; redis-cli -a \"$REDIS_PASSWORD\" --no-auth-warning zcard retry; redis-cli -a \"$REDIS_PASSWORD\" --no-auth-warning zcard dead' | tr '\\n' ' '" % RD) if RD else ""
+nums = [int(x) for x in re.findall(r"\d+", q)]
+dead = nums[-1] if len(nums) == 7 else None; retry = nums[-2] if len(nums) == 7 else None; backlog = sum(nums[:5]) if len(nums) == 7 else None
+chk("sidekiq backlog < 200 and retry < 20", backlog is not None and backlog < 200 and retry < 20, "backlog=%s retry=%s" % (backlog, retry))
+# 6 spend gate headroom (>= 20% left and the window has > 48 h)
+g = sh("docker exec %s psql -U uplink -d uplink -X -At -F ' ' -c \"select spent_micro_usd::float/budget_micro_usd, extract(epoch from expires_at-now())/3600, enabled from public_turn_spend_gates limit 1\"" % DB) if DB else ""
+try: frac, hrs, en = g.split(); ok = float(frac) < 0.8 and float(hrs) > 48 and en == "t"
+except Exception: frac = hrs = None; ok = False
+chk("Uplink spend gate: spent < 80% of ceiling, window > 48 h, enabled", ok, "spent_fraction=%s window_hours=%s" % (frac, hrs))
+# 7 relay error rate over the last 15 minutes (agent_unavailable / handoff / bad_signature / pl_tool_readback_unavailable)
+ev = sh("docker logs --since 15m %s 2>&1 | grep -c -E '\"event\":\"(agent_unavailable|handoff|pl_tool_readback_unavailable|owner_assignment_failed)\"|\"reason\":\"bad_signature\"'" % R) if R else "999"
+chk("relay error events in 15 min < 5", ev.isdigit() and int(ev) < 5, "events=%s" % ev)
+# 8 Flow endpoint: Meta's own signed pings must not be refused (enforce) and the endpoint answers the plain health ping
+fl = sh("docker logs --since 15m %s 2>&1 | grep '\\[flows\\] signature' | grep -c refused" % P) if P else "999"
+chk("Flow endpoint: no refused signatures in 15 min (Meta pings valid)", fl.isdigit() and int(fl) == 0, "refused=%s" % fl)
+# 9 certificates (days left)
+for h in ("inbox.epic.dm", "uplink.epic.dm", "go.uplink.epic.dm", "pl-adapter.uplink.epic.dm"):
+    d = sh("echo | openssl s_client -connect 127.0.0.1:443 -servername %s 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2" % h)
+    try: days = (time.mktime(time.strptime(d, "%b %d %H:%M:%S %Y %Z")) - time.time()) / 86400
+    except Exception: days = -1
+    chk("TLS %s > 14 days" % h, days > 14, "days=%.0f" % days)
+# 10 Meta webhook liveness is INFORMATIONAL only (silence can be a quiet night); reported, never alerts
+last = sh("docker exec %s psql -U postgres -d isola -X -At -c \"select extract(epoch from now()-max(created_at))/3600 from messages where message_type=0\"" % cid("uplink_chatwoot-db")) if cid("uplink_chatwoot-db") else ""
+info = "last incoming WhatsApp message %.1f h ago (informational)" % float(last) if re.fullmatch(r"[\d.]+", last or "") else "last incoming message age unknown"
+fails = [(n, d) for n, ok, d in checks if not ok]
+for n, ok, d in checks: print(("OK   " if ok else "FAIL ") + n + ((" | " + d) if d else ""))
+print("INFO " + info)
+# ---- alert sink: a PRIVATE NOTE with an @mention of the staff owner, in a dedicated internal conversation of the existing no-outbound API inbox 12 ----
+# Inbox 12 (Channel::Api, no webhook_url) cannot deliver to any customer; private=true is never delivered anyway. Email is an optional extra when /etc/pl-watch/recipients exists.
+CW_ACCT, CW_INBOX, CW_STAFF_ID, CW_STAFF_NAME = 2, 12, 16, "Eric Giraud"; CW_TOKEN_FILE = "/etc/pl-secrets/cw_agent_token"
+def cw(method, path, body=None):
+    import http.client
+    tok = open(CW_TOKEN_FILE).read().strip()
+    c = http.client.HTTPSConnection("127.0.0.1", 443, context=ssl._create_unverified_context(), timeout=20)
+    h = {"api_access_token": tok, "Content-Type": "application/json", "Host": "inbox.epic.dm"}
+    c.request(method, "/api/v1/accounts/%d/%s" % (CW_ACCT, path), json.dumps(body) if body is not None else None, h)
+    r = c.getresponse(); d = r.read().decode()
+    try: j = json.loads(d)
+    except Exception: j = {}
+    return r.status, j
+def load_state():
+    try: return json.load(open(STATE))
+    except Exception: return {"failing": [], "last_mail": 0}
+def setup():
+    st = load_state()
+    s, f = cw("GET", "contacts/search?q=pl-watch-internal-host04&include_contacts=true")
+    hit = [x for x in (f.get("payload") or []) if x.get("identifier") == "pl-watch-internal-host04"] if s == 200 else []
+    if hit: c = {"payload": {"contact": hit[0]}}
+    else:
+        s, c = cw("POST", "contacts", {"name": "PL watch (internal, staff-only)", "identifier": "pl-watch-internal-host04", "inbox_id": CW_INBOX}); assert s in (200, 201), s
+    pc = c.get("payload", c); ct = pc.get("contact", pc); src = ct["contact_inboxes"][0]["source_id"]; cid_ = ct["id"]
+    s, v = cw("POST", "conversations", {"source_id": src, "inbox_id": CW_INBOX, "contact_id": cid_, "status": "open", "assignee_id": CW_STAFF_ID}); assert s in (200, 201), s
+    st["cw_conv"] = v["id"]; os.makedirs(os.path.dirname(STATE), exist_ok=True); json.dump(st, open(STATE, "w")); print("setup: conversation id", v["id"], "inbox", v.get("inbox_id"), "assignee", v.get("meta", {}).get("assignee", {}).get("id"))
+def notify(text):
+    st = load_state(); conv = st.get("cw_conv")
+    if not conv: print("alert sink not set up (run --setup)"); return False
+    mention = "[@%s](mention://user/%d/%s)" % (CW_STAFF_NAME, CW_STAFF_ID, CW_STAFF_NAME.replace(" ", "%20"))
+    s, v = cw("POST", "conversations/%d/messages" % conv, {"content": mention + " " + text, "message_type": "outgoing", "private": True})
+    print("alert private note ->", s, "private=%s" % v.get("private")); return s == 200 and v.get("private") is True
+if "--setup" in sys.argv: setup(); sys.exit(0)
+if "--induce" in sys.argv: checks.append(("SELFTEST induced condition (harmless, expected)", False, "induced by --induce")); fails = [(n, d) for n, ok, d in checks if not ok]
+for n, ok, d in checks: print(("OK   " if ok else "FAIL ") + n + ((" | " + d) if d else ""))
+print("INFO " + info)
+if DRY: print("dry-run: nothing sent; %d check(s) failing" % len(fails)); sys.exit(0)
+os.makedirs(os.path.dirname(STATE), exist_ok=True)
+st = load_state(); now = time.time(); names = sorted(n for n, _ in fails)
+if names and (names != st["failing"] or now - st["last_mail"] > 1800) or (not names and st["failing"]):
+    body = ("PL watch: %d failing: %s" % (len(names), "; ".join(names[:4]))) if names else "PL watch: all checks OK again"
+    detail = "\n".join(("FAIL " if (n, d) in fails else "OK   ") + n + (" | " + d if d else "") for n, ok, d in checks) + "\n" + info + "\nhost04 " + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    sent = notify(body + "\n\n" + detail)
+    if os.path.exists(RECIP):
+        to = [l.strip() for l in open(RECIP) if l.strip() and not l.startswith("#")]
+        m = EmailMessage(); m["From"] = "PL watch <no-reply@epic.dm>"; m["To"] = ", ".join(to); m["Subject"] = "[PL watch] " + body; m.set_content(detail)
+        with smtplib.SMTP("mail.smtp2go.com", 587, timeout=20) as s: s.starttls(context=ssl.create_default_context()); s.send_message(m)
+    if sent or os.path.exists(RECIP): st.update({"failing": names, "last_mail": now}); json.dump(st, open(STATE, "w"))

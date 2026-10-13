@@ -125,15 +125,21 @@ def public_checks():
             for x in dr[:3]: chk("duplicate account %s" % x.split("|")[0], False, "more than one live account for one owner number, newest created in the last 24 h (masked; the old pre-existing duplicate on ...8382 is tracked separately and does not alert) - PAUSE criterion" if minc == 2 else "control: threshold forced to 1")
         else: chk("no owner number holds more than one live account", True, "")
     CDR = "/usr/local/lib/pl-watch/cdr-check.js"; CF = "/var/lib/pl-watch/cdr.json"
-    try: c = json.load(open(CF))
-    except Exception: c = {"t": 0}
-    ctrl = "cdr" in CTRL
-    if ctrl or time.time() - c.get("t", 0) > 600:
-        out = sh("docker exec -i %s sh -c 'cd /app && node - %s' < %s" % (P, "--control" if ctrl else "", CDR), 50)
-        m = re.search(r"CDR_CHECK n=(\d+) mode=(\w+)", out); c = {"t": time.time(), "n": int(m.group(1)) if m else None, "mode": m.group(2) if m else "error", "raw": out[:80]}
-        if not ctrl: os.makedirs(os.path.dirname(CF), exist_ok=True); json.dump(c, open(CF, "w"))
-    if ctrl: chk("false-charge probe control: plan-18 CDRs visible in 7 days", False, "visible=%s (a non-zero reading proves the probe can see rows)" % c.get("n"))
-    else: chk("no billed trial call (plan-18 trial users bill 0 inside the trial)", c.get("n") == 0, "billed_trial_calls_24h=%s%s" % (c.get("n"), "" if c.get("n") is not None else " probe=" + str(c.get("raw"))))
+    if "cdr" in CTRL:
+        out = sh("docker exec -i %s sh -c 'cd /app && node - --control' < %s" % (P, CDR), 60)
+        for ln in out.splitlines():
+            if ln.startswith("CASE "):
+                nm, _, res = ln[5:].rpartition(": ")
+                chk("false-charge control %s" % nm, res.strip() != "ALARM", "result=%s" % res.strip())   # an ALARM case shows as FAIL (the instrument fired); silent cases show OK
+        if "CASE" not in out: chk("false-charge control ran", False, "no output: %s" % out[:80])
+    else:
+        try: c = json.load(open(CF))
+        except Exception: c = {"t": 0}
+        if time.time() - c.get("t", 0) > 600:
+            out = sh("docker exec -i %s sh -c 'cd /app && node -' < %s" % (P, CDR), 60)
+            m = re.search(r"CDR_CHECK n=(\d+) mode=(\w+)", out); c = {"t": time.time(), "n": int(m.group(1)) if m else None, "raw": out[:80]}
+            os.makedirs(os.path.dirname(CF), exist_ok=True); json.dump(c, open(CF, "w"))
+        chk("no charge on a trial-covered call (bundle prefix, trial active, bundle minutes remaining)", c.get("n") == 0, "covered_calls_billed_24h=%s%s" % (c.get("n"), "" if c.get("n") is not None else " probe=" + str(c.get("raw"))))
 if PGC: public_checks()
 # 13 flags-file guard: admission is configured only by explicit values in runtime-flags.json. Since the 2026-10-13 admission release a missing/unreadable file or key falls back to FAIL-CLOSED compiled defaults (it can no longer silently open signup), but the configured allowlist and flags would be lost, so alert on drift.
 RF = os.environ.get("PLW_FLAGS", "/home/epicadmin/plprod/runtime-flags.json")
