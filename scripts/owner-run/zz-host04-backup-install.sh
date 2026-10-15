@@ -48,7 +48,7 @@ rc=$?
 if [[ $rc -eq 3 ]]; then echo "warning: restic rc=3 (snapshot saved; some files vanished while reading)"; elif [[ $rc -ne 0 ]]; then FAILS+=("restic-backup:rc$rc"); fi
 restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune --tag host04 || FAILS+=("restic-forget")
 SECS=$(( $(date +%s) - START ))
-if [[ ${#FAILS[@]} -eq 0 ]]; then date -u +%FT%TZ > "$ST/last-success"; echo "=== $(date -u +%FT%TZ) OK in ${SECS}s ==="
+if [[ ${#FAILS[@]} -eq 0 ]]; then date -u +%FT%TZ > "$ST/last-success"; rm -f "$ST/last-failure"; echo "=== $(date -u +%FT%TZ) OK in ${SECS}s ==="
 else echo "${FAILS[*]}" > "$ST/last-failure"; echo "=== $(date -u +%FT%TZ) FAILED: ${FAILS[*]} ==="; exit 1; fi
 EOS
 chmod 0700 /usr/local/sbin/host04-backup.sh
