@@ -256,6 +256,11 @@ export function readEvent(p) {
 export function decide(ev, scope) {
   if (ev.event !== "message_created") return { act: "ignore", reason: "event" };
   if (ev.accountId !== scope.accountId || ev.inboxId !== scope.inboxId) return { act: "ignore", reason: "scope" };
+  // War room (owner 2026-10-15): a staff PRIVATE note that starts with "@hold" stops this conversation's pending supervised draft.
+  // Only a Chatwoot user (staff) can write a private note; a customer's message is never private and never counts.
+  if (ev.isPrivate && (ev.messageType === "outgoing" || ev.messageType === 1) && ev.senderType === "user" && /^@hold\b/i.test(ev.content)) {
+    return ev.conversationId === null ? { act: "ignore", reason: "no_ids" } : { act: "staff_hold" };
+  }
   const incoming = ev.messageType === "incoming" || ev.messageType === 0;
   if (!incoming) return { act: "ignore", reason: "not_incoming" };
   if (ev.isPrivate) return { act: "ignore", reason: "private" };
@@ -280,7 +285,22 @@ export function holdFromRecord(record) {
   return record.status === "pending" ? null : "status_not_pending";
 }
 
-export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatwoot, seldon, requireCapability = false, conversationStateKey = null, plConcierge = null, adapter = null, presence = null, presenceRefreshMs = 20_000, presenceMaxRefresh = 4, timers = { setInterval, clearInterval }, logger = () => {}, now = () => Date.now(), dedupTtlMs = 3_600_000 }) {
+/**
+ * War room: one staff-readable line describing what the agent did this turn (tools called, any that failed, reply size, buttons).
+ * Goes ONLY into private notes. Tool inputs and outputs are never included.
+ */
+export function traceLine(inspection, items, text) {
+  const calls = Array.isArray(inspection?.toolCalls) ? inspection.toolCalls : [];
+  const results = Array.isArray(inspection?.toolResults) ? inspection.toolResults : [];
+  const tools = calls.map((c, i) => {
+    const r = results[i];
+    const failed = isRecord(r) && (r.ok === false || r.isError === true);
+    return `${String(c?.name ?? "?").replace(/^pl-action-adapter__/, "")}${failed ? " (failed)" : ""}`;
+  });
+  return `Agent trace: ${tools.length ? tools.join(", ") : "no tools"} · reply ${String(text ?? "").length} chars · ${Array.isArray(items) ? items.length : 0} button(s)`;
+}
+
+export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatwoot, seldon, requireCapability = false, conversationStateKey = null, plConcierge = null, adapter = null, presence = null, presenceRefreshMs = 20_000, presenceMaxRefresh = 4, timers = { setInterval, clearInterval }, logger = () => {}, now = () => Date.now(), dedupTtlMs = 3_600_000, supervisedHoldMs = 0, traceNotes = false, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
   if (adapter && (!plConcierge || typeof adapter.act !== "function")) throw new Error("adapter_actions_require_pl_concierge");
   if (requireCapability && (!conversationStateKey || !scope?.workspaceId || !scope?.agentId || !scope?.agentSlug)) {
     throw new Error("conversation_capability_configuration_incomplete");
@@ -299,6 +319,7 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
   const sfConversation = new Map(); // chatwoot conversation id -> seldonframe conversation id
   const lastChoices = new Map(); // chatwoot conversation id -> { items, at } (rc10e: last verified buttons, in-memory, short-lived)
   const inflight = new Set();
+  const holds = new Map(); // war room: chatwoot conversation id -> time of the latest staff "@hold" note (in-memory; a restart drops the draft, never sends it)
 
   const log = (fields) => logger({ ts: new Date(now()).toISOString(), ...fields });
 
@@ -791,8 +812,41 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
       const prev = lastChoices.get(ev.conversationId);
       if (prev && now() - prev.at <= 15 * 60_000 && unofferedTaps(turn.text, null).length > 0 && unofferedTaps(turn.text, prev.items).length === 0) items = prev.items;
     }
+    // War room supervised mode (owner 2026-10-15: 20 s): the model's reply is first shown to staff as a PRIVATE draft with the agent
+    // trace, and goes out after the hold unless staff type "@hold" or reply themselves (a staff reply turns the conversation Open,
+    // which the ownership re-read below already treats as a takeover). Deterministic adapter actions are not held: only model text is.
+    if (supervisedHoldMs > 0) {
+      const draftAt = now();
+      const secs = Math.round(supervisedHoldMs / 1000);
+      const drafted = await safe("draft_note", () => chatwoot.postMessage(ev.conversationId,
+        `DRAFT - sends in ${secs} s unless you type @hold or reply yourself.\n\n${turn.text}\n\n${traceLine(inspection, items, turn.text)}`, { private: true }), ctx);
+      if (drafted) {
+        log({ event: "draft_posted", holdMs: supervisedHoldMs, chars: turn.text.length, ...ctx });
+        await sleep(supervisedHoldMs);
+        if ((holds.get(ev.conversationId) ?? -1) >= draftAt) {
+          holds.delete(ev.conversationId);
+          log({ event: "reply_held_by_staff", ...ctx });
+          return handoff(ev, "staff held the supervised draft; it was not sent", { tellCustomer: false });
+        }
+        let after;
+        try {
+          after = holdFromRecord(await chatwoot.getConversation(ev.conversationId));
+        } catch (err) {
+          log({ event: "ownership_unreadable", stage: "after_supervised_hold", error: err instanceof Error ? err.message : "unreadable", ...ctx });
+          return handoff(ev, "ownership could not be verified after the supervised hold; the draft was withheld", { tellCustomer: false });
+        }
+        if (after) {
+          log({ event: "reply_discarded", outcome: "takeover_during_supervised_hold", hold: after, ...ctx });
+          return;
+        }
+      } else {
+        // The hold only makes sense with a visible draft. Without one, the reply goes out exactly as it did before the war room.
+        log({ event: "draft_note_failed", ...ctx });
+      }
+    }
     const sent = await safe("reply", () => chatwoot.postMessage(ev.conversationId, turn.text, { private: false, items }), ctx);
     log({ event: "reply", outcome: sent ? "sent" : "send_failed", chars: turn.text.length, buttons: items ? items.length : 0, ...ctx });
+    if (sent && traceNotes && !(supervisedHoldMs > 0)) await safe("trace_note", () => chatwoot.postMessage(ev.conversationId, traceLine(inspection, items, turn.text), { private: true }), ctx);
     // rc10d monitor hook: a reply that names a button it does not carry is a wrong/missing next action (journey monitor exception).
     const missing = plConcierge ? unofferedTaps(turn.text, items) : [];
     if (missing.length > 0) log({ event: "monitor_exception", kind: "next_action_not_offered", titles: missing, ...ctx });
@@ -929,6 +983,12 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
   function accept(payload) {
     const ev = readEvent(payload);
     const decision = decide(ev, scope);
+    if (decision.act === "staff_hold") {
+      // Recorded at once, outside the conversation's queue: the draft it targets is waiting INSIDE that queue.
+      holds.set(ev.conversationId, now());
+      log({ event: "staff_hold", conversationId: ev.conversationId, messageId: ev.messageId });
+      return { outcome: "accepted", reason: "staff_hold", done: Promise.resolve() };
+    }
     if (decision.act === "ignore") {
       log({ event: "ignored", reason: decision.reason, conversationId: ev.conversationId, messageId: ev.messageId, ...(decision.reason === "not_contact" ? { senderType: ev.senderType, senderShape: ev.senderShape } : {}) });
       return { outcome: "ignored", reason: decision.reason, done: Promise.resolve() };

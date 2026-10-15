@@ -98,6 +98,18 @@ export function buildPresence({ env, logger, fallbackPhoneNumberId = null, readF
   }
 }
 
+/** War room: RELAY_SUPERVISED_HOLD_MS - unset/empty = 0 (off); a whole number 0..60000 = that hold; anything else = 0 with a logged warning. */
+export function parseSupervisedHoldMs(raw, logger = () => {}) {
+  if (raw === undefined || raw === null || String(raw).trim() === "") return 0;
+  const s = String(raw).trim();
+  const n = /^\d{1,5}$/.test(s) ? Number(s) : NaN;
+  if (!Number.isSafeInteger(n) || n < 0 || n > 60_000) {
+    logger({ event: "config_ignored", key: "RELAY_SUPERVISED_HOLD_MS", reason: "not a whole number of ms between 0 and 60000; supervised hold is OFF" });
+    return 0;
+  }
+  return n;
+}
+
 export function validatePlAssertionConfig({ enabled, accountId, inboxId, key, kid, bridgeKey, bridgeKid, phoneNumberId, sfToken }) {
   if (!enabled) return;
   if (accountId !== 2 || inboxId !== 11) throw new Error("pl_concierge_assertions_are_scoped_to_account2_inbox11");
@@ -152,7 +164,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   // rc10g: WhatsApp read receipt + typing indicator (owner 2026-10-11). OPTIONAL: any problem with its credential disables it
   // and the relay still boots (2026-10-11: a malformed optional secret crash-looped the production relay for ~1.5 min).
   const presence = buildPresence({ env, logger, fallbackPhoneNumberId: plPhoneNumberId });
+  // War room (owner 2026-10-15): supervised hold and staff trace notes. OPTIONAL and never boot-fatal: a bad value means OFF, logged.
+  const supervisedHoldMs = parseSupervisedHoldMs(env.RELAY_SUPERVISED_HOLD_MS, logger);
+  const traceNotes = env.RELAY_TRACE_NOTES === "1";
   const relay = createRelay({
+    supervisedHoldMs,
+    traceNotes,
     adapter,
     presence,
     scope: { accountId, inboxId, workspaceId, agentId, agentSlug },
@@ -167,6 +184,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   });
   const port = Number(env.PORT ?? 3000);
   createServer(createHandler({ secret, relay, logger })).listen(port, () =>
-    logger({ event: "boot", port, accountId, inboxId, escalationReadback: escalationReadback === "1" && sfToken !== null, adapterActions: adapter !== null, presence: presence !== null }),
+    logger({ event: "boot", port, accountId, inboxId, escalationReadback: escalationReadback === "1" && sfToken !== null, adapterActions: adapter !== null, presence: presence !== null, supervisedHoldMs, traceNotes }),
   );
 }
