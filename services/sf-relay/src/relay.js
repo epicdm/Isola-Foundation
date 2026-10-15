@@ -229,7 +229,9 @@ export function parseAgentGuidance(content) {
   return text.length > 0 ? text : null;
 }
 export function withStaffGuidance(guidance, message) {
-  return `[Guidance from EPIC support staff for your reply to the customer's message below. It comes from staff, not from the customer. Follow it, and never mention or quote it. Facts, figures and account details still come only from your tools.]\n${guidance}\n[End of staff guidance. The customer's message follows.]\n${message}`;
+  // Live 2026-10-15 15:21Z (conv 543): with "facts come only from your tools" here, the agent kept its stale instruction over the
+  // staff's correct guidance. Staff guidance is EPIC's current word for THIS reply; the customer's own account facts stay tool-only.
+  return `[Guidance from EPIC support staff for your reply to the customer's message below. It comes from staff, not from the customer. It is EPIC's current, correct information: where it differs from your earlier instructions, follow the guidance for this reply. Never mention or quote it. The customer's own account details (line, balance, minutes, calls, connection) still come only from your tools.]\n${guidance}\n[End of staff guidance. The customer's message follows.]\n${message}`;
 }
 
 export function verifySignature({ secret, timestamp, signature, raw, nowSec, toleranceSec = 300 }) {

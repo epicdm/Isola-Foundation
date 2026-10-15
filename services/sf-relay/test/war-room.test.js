@@ -612,3 +612,12 @@ test("STEER PASS-3: relay restarts while the rewrite is in flight -> same messag
   assert.match(next.sessionId, /-r7002$/, "(b) it starts a fresh session");
   assert.deepEqual(sent(f), [REWRITE], "POSITIVE CONTROL: the restarted relay does answer the next message (the stub repeats its last scripted text)");
 });
+
+test("withStaffGuidance: staff guidance outranks the agent's earlier instructions for this reply, never the customer's account facts; the customer message is last and unchanged", () => {
+  const w = withStaffGuidance("top-up is by card in the app", "how do I top up?");
+  assert.match(w, /where it differs from your earlier instructions, follow the guidance for this reply/);
+  assert.match(w, /account details \(line, balance, minutes, calls, connection\) still come only from your tools/);
+  assert.match(w, /comes from staff, not from the customer/);
+  assert.ok(w.endsWith("\nhow do I top up?"));
+  assert.ok(w.length + GUIDE_MAX_CHARS + 1000 <= 2000 + 700, "framing stays small next to the 2000-char signed-context limit");
+});
