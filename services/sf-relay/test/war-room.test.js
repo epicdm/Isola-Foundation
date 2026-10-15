@@ -3,9 +3,13 @@
 // Revised after Codex review (DO NOT SHIP, 4 findings): staff-reply race at hold end, draft-post failure, staff identity, test gaps.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createRelay, decide, readEvent, traceLine } from "../src/relay.js";
+import { createHash } from "node:crypto";
+import { createRelay, decide, readEvent, traceLine, parseAgentGuidance, withStaffGuidance, GUIDE_MAX_CHARS } from "../src/relay.js";
 import { parseSupervisedHoldMs, resolveSelfUserId } from "../src/server.js";
 const RELAY_USER = 20;
+const PL_KEY = "synthetic-pl-assertion-key-material-32-bytes-minimum";
+const PL_BRIDGE_KEY = "synthetic-relay-context-key-material-32-bytes-minimum";
+const PL_CONTACT = { payload: { id: 541, phone_number: "+17670000000", contact_inboxes: [{ source_id: "17679990001", inbox: { id: 11, channel_type: "Channel::Whatsapp", provider: "whatsapp_cloud" } }] } };
 
 const SCOPE = { accountId: 2, inboxId: 11, workspaceId: "48467787-a471-4260-8265-a9893e2b2cae", agentId: "4c47c17f-f26a-46a7-a2e4-aa6f58a305b6", agentSlug: "pl-staging-test-agent" };
 const MODEL_TEXT = "Your line is ready. Open Cloud Softphone to make your first call.";
@@ -13,17 +17,18 @@ const EVIDENCE = { known: true, currentTurnVerified: true, escalated: false,
   toolCalls: [{ name: "pl-action-adapter__pl_journey", input: {} }, { name: "pl-action-adapter__pl_next_step", input: {} }],
   toolResults: [{ ok: true }, { ok: false, isError: true }] };
 
-function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread = false, failOwnershipAfter = false, truncateTo = 0, beforePublicPost = null, dropCustomerFromFirstRead = false, stalePageWithoutDraft = false, dropSentFromSecondRead = false, frozenClock = false, duringDraftPost = null, duringModelTurn = null, selfUserId = RELAY_USER } = {}) {
+function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread = false, failOwnershipAfter = false, truncateTo = 0, beforePublicPost = null, dropCustomerFromFirstRead = false, stalePageWithoutDraft = false, dropSentFromSecondRead = false, frozenClock = false, duringDraftPost = null, duringModelTurn = null, selfUserId = RELAY_USER, texts = null, pl = false, turnSeq = null } = {}) {
   let reads = 0;
   let t = 1_797_000_000_000;
   const posted = [], statuses = [], logs = [], thread = [];
   let nextId = 9000;
-  const row = { id: 41, account_id: 2, inbox_id: 11, status: "pending", custom_attributes: {}, meta: { sender: { id: 541 }, assignee: { id: 16 } } };
+  const row = { id: 41, account_id: 2, inbox_id: 11, status: "pending", custom_attributes: {}, meta: { channel: "Channel::Whatsapp", sender: { id: 541 }, assignee: { id: 16 } } };
   let release = null;
-  const sleep = () => new Promise((r) => { release = r; });
+  let sleeps = 0;
+  const sleep = () => new Promise((r) => { sleeps += 1; release = r; });
   const chatwoot = {
     async getConversation() { if (failOwnershipAfter && release !== null) throw new Error("chatwoot read timeout"); return structuredClone(row); },
-    async getContact() { return {}; },
+    async getContact() { return pl ? structuredClone(PL_CONTACT) : {}; },
     async listMessages() {
       if (failThread) throw new Error("chatwoot 500");
       reads += 1;
@@ -45,12 +50,18 @@ function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread
     async toggleStatus(id, s) { statuses.push(s); row.status = s; }, async assignOwner() {}, async assignTeam() {},
   };
   const seldon = {
-    turns: 0,
-    async turn() { seldon.turns += 1; if (duringModelTurn) { const h = duringModelTurn; duringModelTurn = null; h(api); } return { ok: true, text: MODEL_TEXT, conversationId: "sf-conv", conversationCapability: "cap" }; },
+    turns: 0, turnInputs: [],
+    async turn(input) {
+      seldon.turns += 1; seldon.turnInputs.push(input);
+      if (duringModelTurn) { const h = duringModelTurn; duringModelTurn = null; h(api); }
+      if (turnSeq && turnSeq.length) return turnSeq.shift();
+      return { ok: true, text: texts ? texts[Math.min(seldon.turns, texts.length) - 1] : MODEL_TEXT, conversationId: "sf-conv", conversationCapability: "cap" };
+    },
     async escalation() { return { known: true, escalated: false }; },
     async inspectTurn() { return structuredClone(EVIDENCE); },
   };
   const relay = createRelay({ scope: SCOPE, ownerUserId: 16, chatwoot, seldon, requireCapability: true, conversationStateKey: "synthetic-state-key-material-long-enough-32",
+    plConcierge: pl ? { key: PL_KEY, kid: "uat1", bridgeKey: PL_BRIDGE_KEY, bridgeKid: "ctx1", phoneNumberId: "1023804347491554" } : null,
     now: () => (frozenClock ? t : (t += 1000)), logger: (o) => logs.push(o), supervisedHoldMs: holdMs, selfUserId, traceNotes, sleep });
   const conv = { id: 41, status: "pending", meta: { sender: { id: 541 } } };
   const customer = (id = 7001, content = "Hi") => {   // the incoming message is also in Chatwoot's thread, as in production
@@ -64,7 +75,7 @@ function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread
   const storeSelf = (content) => thread.push({ id: ++nextId, content, private: false, message_type: 1, sender_type: "User", sender_id: RELAY_USER, created_at: Math.floor(t / 1000) });
   const selfMsg = (id, content) => ({ event: "message_created", id, content, message_type: "outgoing", private: false, sender: { type: "user", id: RELAY_USER }, account: { id: 2 }, inbox: { id: 11 }, conversation: conv });
   const until = async (pred) => { for (let i = 0; i < 200 && !pred(); i++) await new Promise((r) => setImmediate(r)); assert.ok(pred(), "condition never became true"); };
-  const api = { relay, posted, statuses, logs, row, seldon, customer, staffMsg, storeStaff, storeSelf, selfMsg, until, release: () => release && release(), get waiting() { return release !== null; } };
+  const api = { relay, posted, statuses, logs, row, seldon, customer, staffMsg, storeStaff, storeSelf, selfMsg, until, release: () => release && release(), get waiting() { return release !== null; }, get sleeps() { return sleeps; } };
   return api;
 }
 const publicTexts = (f) => f.posted.filter((m) => !m.private).map((m) => m.content);
@@ -93,7 +104,7 @@ test("hold ON: staff first see a PRIVATE draft with the agent trace; the reply i
   const f = fixture({ holdMs: 20000 });
   await heldRun(f, async () => {
     assert.equal(drafts(f).length, 1);
-    assert.match(drafts(f)[0].content, /sends in 20 s unless you type @hold or reply yourself/);
+    assert.match(drafts(f)[0].content, /^DRAFT - sends in 20 s unless you type @hold, @agent <guidance>, or reply yourself/);
     assert.ok(drafts(f)[0].content.includes(MODEL_TEXT));
     assert.match(drafts(f)[0].content, /Agent trace: pl_journey, pl_next_step \(failed\)/);
     assert.deepEqual(publicTexts(f), [], "nothing reaches the customer during the hold");
@@ -346,4 +357,152 @@ test("resolveSelfUserId: the profile id when readable; otherwise null with a log
   assert.equal(await resolveSelfUserId({ getProfile: async () => { throw new Error("HTTP 401"); } }, (o) => logs.push(o)), null);
   assert.equal(await resolveSelfUserId({ getProfile: async () => ({}) }, (o) => logs.push(o)), null);
   assert.equal(logs.filter((l) => l.event === "config_ignored").length, 2);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// War room STEERING (owner 2026-10-15: "we could interject and steer the agents before the agent answers"): "@agent <guidance>" during the hold.
+const REWRITE = "Top-ups are in your Cloud Softphone app: open the EPIC tab and tap Add credit.";
+const sent = (f) => publicTexts(f);
+async function steeredRun(f, actions) {   // actions[i] runs during hold i (null = do nothing); every hold is released in turn
+  const run = f.relay.accept(f.customer(7001, "how do I top up?")).done;
+  for (let i = 0; i < actions.length; i++) {
+    await f.until(() => f.sleeps === i + 1);
+    if (actions[i]) await actions[i]();
+    f.release();
+  }
+  await run;
+}
+
+test("STEER: @agent on the webhook during the hold -> draft discarded, the agent answers the SAME message again with the guidance, the REWRITE gets its own hold, then only the rewrite is sent", async () => {
+  const f = fixture({ holdMs: 10000, texts: [MODEL_TEXT, REWRITE] });
+  await steeredRun(f, [
+    async () => { assert.equal(f.relay.accept(f.staffMsg(8301, "@agent tell him top-up is in the Cloud Softphone app, Add credit")).reason, "staff_guide"); },
+    async () => {
+      assert.equal(drafts(f).length, 2);
+      assert.match(drafts(f)[1].content, /^DRAFT \(rewritten with your @agent guidance\) - sends in 10 s/);
+      assert.ok(drafts(f)[1].content.includes(REWRITE));
+      assert.deepEqual(sent(f), [], "nothing public during either hold");
+    },
+  ]);
+  assert.deepEqual(sent(f), [REWRITE], "only the rewritten reply reaches the customer; the first draft never does");
+  assert.equal(f.seldon.turns, 2);
+  const guided = f.seldon.turnInputs[1];
+  assert.equal(guided.message, withStaffGuidance("tell him top-up is in the Cloud Softphone app, Add credit", "how do I top up?"));
+  assert.ok(guided.message.endsWith("\nhow do I top up?"), "the customer's message is last");
+  assert.equal(guided.conversationId, "sf-conv", "same Uplink conversation (continuation), not a new one");
+  assert.equal(guided.conversationCapability, "cap");
+  assert.ok(!f.logs.some((l) => JSON.stringify(l).includes("Add credit")), "guidance text is never logged");
+  assert.ok(f.logs.some((l) => l.event === "guided_rewrite" && l.round === 1));
+});
+
+test("STEER CONTROL: an ordinary staff private note (not @agent, not @hold) during the hold changes nothing - one turn, the first draft is sent", async () => {
+  const f = fixture({ holdMs: 10000, texts: [MODEL_TEXT, REWRITE] });
+  await steeredRun(f, [async () => { f.relay.accept(f.staffMsg(8302, "looks fine to me")); f.storeStaff("agent: looks fine", true); }]);
+  assert.deepEqual(sent(f), [MODEL_TEXT]);
+  assert.equal(f.seldon.turns, 1);
+});
+
+test("STEER: an @agent note found ONLY in the thread (webhook lost) also steers; the rewrite is sent", async () => {
+  const f = fixture({ holdMs: 10000, texts: [MODEL_TEXT, REWRITE] });
+  await steeredRun(f, [async () => { f.storeStaff("@agent mention Add credit in the app", true); }, null]);
+  assert.deepEqual(sent(f), [REWRITE]);
+  assert.match(f.seldon.turnInputs[1].message, /mention Add credit in the app/);
+});
+
+test("STEER: an @agent typed while the MODEL is still working (after the customer spoke, before the draft) steers that draft", async () => {
+  const f = fixture({ holdMs: 10000, texts: [MODEL_TEXT, REWRITE], duringModelTurn: (api) => api.relay.accept(api.staffMsg(9500, "@agent keep it short")) });
+  await steeredRun(f, [null, null]);
+  assert.deepEqual(sent(f), [REWRITE]);
+  assert.equal(f.seldon.turns, 2);
+});
+
+test("STEER: an @agent OLDER than the customer message is not guidance for it (positive twin above); a customer typing @agent is not staff", async () => {
+  const f = fixture({ holdMs: 10000, texts: [MODEL_TEXT, REWRITE] });
+  f.relay.accept(f.staffMsg(6000, "@agent stale guidance for an earlier message"));
+  await steeredRun(f, [null]);
+  assert.deepEqual(sent(f), [MODEL_TEXT], "the first draft was sent unchanged");
+  assert.ok(!f.seldon.turnInputs.some((t) => /stale guidance/.test(t.message)));
+  assert.equal(decide(readEvent(f.customer(7003, "@agent do x")), { ...SCOPE, selfUserId: RELAY_USER }).act, "answer");
+});
+
+test("STEER + @hold: @hold wins over @agent in the same hold - nothing is sent, the conversation goes to staff, no second turn", async () => {
+  const f = fixture({ holdMs: 10000, texts: [MODEL_TEXT, REWRITE] });
+  await steeredRun(f, [async () => { f.relay.accept(f.staffMsg(8401, "@agent say X")); f.relay.accept(f.staffMsg(8402, "@hold")); }]);
+  assert.deepEqual(sent(f), []);
+  assert.equal(f.seldon.turns, 1);
+  assert.ok(f.statuses.includes("open"));
+});
+
+test("STEER: @hold during the REWRITE's hold also stops it (the rewrite is never sent)", async () => {
+  const f = fixture({ holdMs: 10000, texts: [MODEL_TEXT, REWRITE] });
+  await steeredRun(f, [async () => { f.relay.accept(f.staffMsg(8501, "@agent say Y")); }, async () => { f.relay.accept(f.staffMsg(8502, "@hold")); }]);
+  assert.deepEqual(sent(f), []);
+  assert.equal(f.seldon.turns, 2);
+});
+
+test("STEER LIMIT: two rewrites are allowed; guidance a THIRD time withholds the draft and brings in a person (never an endless loop of paid turns)", async () => {
+  const f = fixture({ holdMs: 10000, texts: [MODEL_TEXT, "rewrite one", "rewrite two"] });
+  await steeredRun(f, [
+    async () => { f.relay.accept(f.staffMsg(8601, "@agent one")); },
+    async () => { f.relay.accept(f.staffMsg(8602, "@agent two")); },
+    async () => { f.relay.accept(f.staffMsg(8603, "@agent three")); },
+  ]);
+  assert.deepEqual(sent(f), []);
+  assert.equal(f.seldon.turns, 3);
+  assert.ok(f.posted.some((m) => m.private && /steered this reply 2 times/.test(m.content)));
+});
+
+test("STEER POSITIVE TWIN of the limit: two rewrites then silence -> the second rewrite is sent", async () => {
+  const f = fixture({ holdMs: 10000, texts: [MODEL_TEXT, "rewrite one", "rewrite two"] });
+  await steeredRun(f, [async () => { f.relay.accept(f.staffMsg(8701, "@agent one")); }, async () => { f.relay.accept(f.staffMsg(8702, "@agent two")); }, null]);
+  assert.deepEqual(sent(f), ["rewrite two"]);
+});
+
+test("STEER: the rewrite goes through the SAME checks as any turn - a rewrite that claims a human takeover is withheld and handed off, not sent", async () => {
+  const f = fixture({ holdMs: 10000, texts: [MODEL_TEXT, "I've connected you with a person from our team."] });
+  await steeredRun(f, [async () => { f.relay.accept(f.staffMsg(8801, "@agent hand off")); }]);
+  assert.deepEqual(sent(f).filter((t) => /connected you with/.test(t)), []);
+  assert.ok(f.logs.some((l) => l.event === "unbacked_handoff_language"));
+});
+
+test("STEER: the guided turn hitting the Uplink conversation limit -> withheld, staff told to reply themselves (no rotation of a steered turn)", async () => {
+  const f = fixture({ holdMs: 10000, turnSeq: [{ ok: true, text: MODEL_TEXT, conversationId: "sf-conv", conversationCapability: "cap" }, { ok: false, reason: "http_503", error: "PUBLIC_CHAT_CONVERSATION_LIMIT", conversationId: null }] });
+  await steeredRun(f, [async () => { f.relay.accept(f.staffMsg(8901, "@agent say Z")); }]);
+  assert.deepEqual(sent(f), []);
+  assert.ok(f.posted.some((m) => m.private && /could not take the staff guidance/.test(m.content)));
+});
+
+test("STEER, hold OFF: @agent is an ignored non-incoming event, logged exactly as before (no guidance state, no extra turn)", async () => {
+  const f = fixture();
+  const r = f.relay.accept(f.staffMsg(9001, "@agent say W"));
+  assert.deepEqual([r.outcome, r.reason], ["ignored", "not_incoming"]);
+  await f.relay.accept(f.customer()).done;
+  assert.deepEqual(f.posted, [{ content: MODEL_TEXT, private: false }]);
+  assert.equal(f.seldon.turns, 1);
+});
+
+test("STEER, signed context: the guided turn's context binds the text SENT (guidance + message) and still carries the customer's own message digest for the adapter; it verifies", async () => {
+  const f = fixture({ holdMs: 10000, texts: [MODEL_TEXT, REWRITE], pl: true });
+  await steeredRun(f, [async () => { f.relay.accept(f.staffMsg(9101, "@agent mention Add credit")); }, null]);
+  const [first, guided] = f.seldon.turnInputs;
+  assert.ok(first.relayContext && guided.relayContext, "both turns carry a signed context (positive control: PL identity resolved)");
+  const claims = JSON.parse(Buffer.from(guided.relayContext.split(".")[1], "base64url").toString("utf8"));
+  const sha = (x) => createHash("sha256").update(x).digest("hex");
+  assert.equal(claims.messageSha256, sha(guided.message));
+  assert.equal(claims.originalMessageSha256, sha("how do I top up?"));
+  assert.deepEqual(sent(f), [REWRITE]);
+});
+
+test("parseAgentGuidance: only '@agent <text>' with real text; control characters collapsed; capped", () => {
+  assert.equal(parseAgentGuidance("@agent  say  hi\n\nnow"), "say hi now");
+  assert.equal(parseAgentGuidance("@Agent x"), "x");
+  assert.equal(parseAgentGuidance("@agent"), null);
+  assert.equal(parseAgentGuidance("@agents x"), null);
+  assert.equal(parseAgentGuidance("hello @agent x"), null);
+  assert.equal(parseAgentGuidance("@agent " + "a".repeat(900)).length, GUIDE_MAX_CHARS);
+  const d = (content, priv = true, senderId = 16) => decide(readEvent({ event: "message_created", id: 1, content, message_type: "outgoing", private: priv, sender: { type: "user", id: senderId }, account: { id: 2 }, inbox: { id: 11 }, conversation: { id: 41 } }), { ...SCOPE, selfUserId: RELAY_USER }).act;
+  assert.equal(d("@agent say hi"), "staff_guide");
+  assert.equal(d("@agent say hi", false), "staff_reply", "a PUBLIC @agent is a staff reply, never guidance");
+  assert.equal(d("@agent say hi", true, RELAY_USER), "ignore", "the relay's own note is never guidance");
+  assert.equal(d("@agent"), "ignore", "empty guidance is not guidance");
 });
