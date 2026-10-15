@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createRelay, decide, readEvent, traceLine, parseAgentGuidance, withStaffGuidance, GUIDE_MAX_CHARS } from "../src/relay.js";
 import { parseSupervisedHoldMs, resolveSelfUserId } from "../src/server.js";
+import { openConversationBinding, CONVERSATION_BINDING_ATTRIBUTE } from "../src/conversation-binding.js";
 const RELAY_USER = 20;
 const PL_KEY = "synthetic-pl-assertion-key-material-32-bytes-minimum";
 const PL_BRIDGE_KEY = "synthetic-relay-context-key-material-32-bytes-minimum";
@@ -505,4 +506,54 @@ test("parseAgentGuidance: only '@agent <text>' with real text; control character
   assert.equal(d("@agent say hi", false), "staff_reply", "a PUBLIC @agent is a staff reply, never guidance");
   assert.equal(d("@agent say hi", true, RELAY_USER), "ignore", "the relay's own note is never guidance");
   assert.equal(d("@agent"), "ignore", "empty guidance is not guidance");
+});
+
+// Codex steer pass 1 (DO NOT SHIP, 3 defects + test gap): staff actions visible only in the thread beat webhook guidance; the rewrite is
+// durably marked in flight before Uplink sees it; a rewrite that cannot be signed is never sent.
+test("STEER PASS-1: @agent on the webhook but an @hold visible ONLY in the thread -> no rewrite turn, nothing sent, conversation to staff", async () => {
+  const f = fixture({ holdMs: 10000, texts: [MODEL_TEXT, REWRITE] });
+  await steeredRun(f, [async () => { f.relay.accept(f.staffMsg(9201, "@agent say X")); f.storeStaff("@hold", true); }]);
+  assert.deepEqual(sent(f), []);
+  assert.equal(f.seldon.turns, 1, "the guidance never reached Uplink");
+  assert.ok(f.statuses.includes("open"));
+});
+
+test("STEER PASS-1: @agent on the webhook but a staff PUBLIC reply visible ONLY in the thread -> no rewrite turn, the draft is dropped", async () => {
+  const f = fixture({ holdMs: 10000, texts: [MODEL_TEXT, REWRITE] });
+  await steeredRun(f, [async () => { f.relay.accept(f.staffMsg(9202, "@agent say X")); f.storeStaff("Eric here, I'll take this.", false); }]);
+  assert.deepEqual(sent(f), [], "only the staff reply (stored directly, not via the relay) exists");
+  assert.equal(f.seldon.turns, 1);
+});
+
+test("STEER PASS-1: the conversation turned Open during the hold beats @agent (ownership is read even when guidance is pending)", async () => {
+  const f = fixture({ holdMs: 10000, texts: [MODEL_TEXT, REWRITE] });
+  await steeredRun(f, [async () => { f.relay.accept(f.staffMsg(9203, "@agent say X")); f.row.status = "open"; }]);
+  assert.deepEqual(sent(f), []);
+  assert.equal(f.seldon.turns, 1);
+});
+
+test("STEER PASS-1: the rewrite is durably marked processing for THIS message BEFORE Uplink sees it; vet() returns it to ready with the new continuation", async () => {
+  const f = fixture({ holdMs: 10000, turnSeq: [{ ok: true, text: MODEL_TEXT, conversationId: "sf-conv", conversationCapability: "cap" }, { ok: true, text: REWRITE, conversationId: "sf-conv", conversationCapability: "cap-2" }] });
+  const atTurn = [];
+  const orig = f.seldon.turn;
+  f.seldon.turn = async (input) => { atTurn.push(openConversationBinding(f.row.custom_attributes[CONVERSATION_BINDING_ATTRIBUTE], "synthetic-state-key-material-long-enough-32")); return orig.call(f.seldon, input); };
+  await steeredRun(f, [async () => { f.relay.accept(f.staffMsg(9204, "@agent say X")); }, null]);
+  assert.equal(atTurn.length, 2);
+  assert.deepEqual([atTurn[1].phase, atTurn[1].pendingMessageId], ["processing", 7001], "in flight before the rewrite turn");
+  const final = openConversationBinding(f.row.custom_attributes[CONVERSATION_BINDING_ATTRIBUTE], "synthetic-state-key-material-long-enough-32");
+  assert.deepEqual([final.phase, final.conversationCapability, final.lastCompletedMessageId], ["ready", "cap-2", 7001]);
+  assert.deepEqual(sent(f), [REWRITE]);
+});
+
+test("STEER PASS-1: guidance + customer message too long to sign -> the rewrite is NEVER sent unsigned; withheld, staff told; (positive twin: the signed-context test above)", async () => {
+  const f = fixture({ holdMs: 10000, texts: [MODEL_TEXT, REWRITE], pl: true });
+  const long = "I need help with my line please. ".repeat(48).trim();   // ~1580 chars: signs alone, not with framing + 500 chars of guidance
+  const run = f.relay.accept(f.customer(7001, long)).done;
+  await f.until(() => f.sleeps === 1);
+  f.relay.accept(f.staffMsg(9205, "@agent " + "be very kind and explain the Add credit steps in the app clearly. ".repeat(10)));
+  f.release(); await run;
+  assert.ok(f.seldon.turnInputs[0].relayContext, "CONTROL: the original turn was signed");
+  assert.equal(f.seldon.turns, 1, "the unsigned rewrite never reached Uplink");
+  assert.deepEqual(sent(f), []);
+  assert.ok(f.logs.some((l) => l.event === "guided_rewrite_unsigned"));
 });

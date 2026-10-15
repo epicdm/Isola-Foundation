@@ -889,8 +889,9 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
         log({ event: "reply_discarded", outcome: "staff_replied_during_supervised_hold", ...ctx });
         return;
       }
+      // Codex steer pass 1: guidance never short-cuts the ownership and thread checks - a staff @hold or reply visible only in the
+      // thread must still win over an "@agent" seen on the webhook.
       let guide = freshGuide(guides.get(ev.conversationId));
-      if (!guide) {
       let after;
       try {
         after = holdFromRecord(await chatwoot.getConversation(ev.conversationId));
@@ -930,13 +931,14 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
       }
       // The webhook for an "@agent" note can lag too: the thread read finds it (newest wins).
       const threadGuide = late.filter((m) => m.private === true && parseAgentGuidance(m.content) !== null).sort((a, b) => b.id - a.id)[0];
-      if (threadGuide) guide = freshGuide({ id: threadGuide.id, text: parseAgentGuidance(threadGuide.content) });
-      }
+      const fromThread = threadGuide ? freshGuide({ id: threadGuide.id, text: parseAgentGuidance(threadGuide.content) }) : null;
+      if (fromThread && (!guide || fromThread.id > guide.id)) guide = fromThread;
       if (staffHeld() || staffReplied()) {
         log({ event: "reply_discarded", outcome: "staff_acted_at_hold_end", ...ctx });
         return;
       }
-      if (!guide) guide = freshGuide(guides.get(ev.conversationId));
+      const lateMemo = freshGuide(guides.get(ev.conversationId));
+      if (lateMemo && (!guide || lateMemo.id > guide.id)) guide = lateMemo;
       if (!guide) break;   // nobody intervened: send the draft
       if (round >= GUIDE_MAX_ROUNDS) {
         log({ event: "reply_held_by_staff", via: "guidance_limit", rounds: round, ...ctx });
@@ -947,6 +949,18 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
       log({ event: "guided_rewrite", round: round + 1, guideChars: guide.text.length, ...ctx });
       let guidedContext = null;
       try { guidedContext = makeRelayContext(ev, binding, plAssertion, turnMessage); } catch { guidedContext = null; }
+      if (relayContext && !guidedContext) {
+        // Codex steer pass 1: a rewrite must carry the same signed identity as the original turn (e.g. guidance + message over the
+        // context's size limit). Never send it unsigned.
+        log({ event: "guided_rewrite_unsigned", ...ctx });
+        return handoff(ev, "the staff guidance could not be signed with the customer's identity (too long?); the draft was withheld - reply yourself", { tellCustomer: false });
+      }
+      // Codex steer pass 1: durably mark the rewrite in flight BEFORE Uplink sees it (same rule as the original turn), so a restart
+      // never resumes from a stale continuation; vet() records the accepted turn's conversation + capability and returns it to ready.
+      binding = { ...binding, phase: "processing", pendingMessageId: ev.messageId };
+      if (!await persistConversationBinding(ev, binding)) {
+        return handoff(ev, "the staff-guided rewrite could not be durably recorded; the draft was withheld", { tellCustomer: false });
+      }
       turn = await seldon.turn({
         message: turnMessage,
         conversationId: binding.conversationId,
