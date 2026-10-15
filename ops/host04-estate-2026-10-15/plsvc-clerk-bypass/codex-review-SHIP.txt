@@ -1,0 +1,592 @@
+Reading additional input from stdin...
+OpenAI Codex v0.162.1
+--------
+workdir: C:\epic-workspace\Isola-Foundation\.workbench\codex-handoff-plsvc-window-and-brand-2026-10-14\work
+model: gpt-6-luna
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: medium
+reasoning summaries: none
+session id: 01a13f5e-95a0-7892-afbe-90c49ab6e216
+--------
+user
+You are reviewing a small AUTH-ADJACENT change to a Next.js middleware (plsvc, Personal Line service). Reply with the verdict word SHIP or DO NOT SHIP FIRST, then numbered findings (file:line, severity). You may read at most 6 files. The diff is below; also see test/middleware-clerk-bypass-personal-line.test.ts and middleware.ts in the current directory.
+CONTEXT (measured): plsvc was built with a Clerk DEVELOPMENT publishable key; clerkMiddleware therefore answers every real-browser navigation (Sec-Fetch-Dest: document) with a 307 to <instance>.clerk.accounts.dev/v1/client/handshake, which fails with host_invalid on our domain. The owner's phone could not open the one-time activation page /go/<nonce>. The change adds '/go/', '/join', '/call-dominica', '/api/lite/' to CLERK_BYPASS_PREFIXES so NextResponse.next() is returned and clerkHandler is skipped for those paths.
+CLAIM TO CHECK: every route under app/api/lite, app/go, app/join, app/call-dominica is ALREADY listed in isPublicRoute (so Clerk never enforced auth.protect on them) and none reads a Clerk session (auth(), currentUser(), getSessionUser). So the bypass removes no authentication that existed. Verify or refute with the actual files (enumerate app/api/lite/**/route.ts against the isPublicRoute patterns; grep those handlers for Clerk session use).
+ALSO: (a) any handler under these prefixes that would now break because it expects clerkMiddleware to have run (e.g. calls auth() which throws without the middleware); (b) prefix over-matching: '/join' also matches '/joinX', '/go/' vs '/gozzz'; any real route that could be unintentionally exposed; (c) test quality: positive controls present?
+=== DIFF
+diff --git a/middleware.ts b/middleware.ts
+index 603d0a4..49b8a33 100644
+--- a/middleware.ts
++++ b/middleware.ts
+@@ -177,6 +177,16 @@ const CLERK_BYPASS_PREFIXES = [
+   '/uat-online',
+   '/api/brand/',    // public brand assets (QR, etc)      // public UAT test page for Arique — Clerk must not read Bearer header here
+   '/agent-tools/',  // bt-agent-tools-invoke-adapter — bearer-token auth (ISOLA_AGENT_TOOLS_TOKEN), not Clerk
++  // Personal Line customer-facing BROWSER NAVIGATIONS (2026-10-15). These pages are public by design and read no Clerk
++  // session. plsvc is built with whatever publishable key the build host published; when that is a Clerk DEVELOPMENT key,
++  // clerkMiddleware answers every real-browser navigation with a 307 to <instance>.clerk.accounts.dev/v1/client/handshake,
++  // which fails on this domain with {"code":"host_invalid"} - measured on the owner's phone during the 9610 walk: the
++  // activation link /go/<nonce> never rendered. A plain curl does not reproduce it (no Sec-Fetch-Dest: document), which is
++  // how it passed every earlier check. Bypass Clerk here exactly as for the webhook/internal routes above.
++  '/go/',              // activation page, /go/back return page, short links
++  '/join',             // invite-gated signup landing page
++  '/call-dominica',
++  '/api/lite/',        // includes /api/lite/acrobits/tab-entry, which Acrobits opens as a page navigation
+ ]
+ 
+ export default function middleware(request: NextRequest) {
+2026-10-15T11:42:10.668868Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest("http/request failed: error sending request for url (https://127.0.0.1:27124/mcp/)")))
+2026-10-15T11:42:12.955810Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest("http/request failed: error sending request for url (https://127.0.0.1:27124/mcp/)")))
+codex
+I’ll inspect the middleware, the specified test, and the route handlers and public-route definitions needed to verify the claim. I’ll keep the review to six files maximum.
+exec
+"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'Get-Content middleware.ts; Get-Content test/middleware-clerk-bypass-personal-line.test.ts; rg --files app/api/lite app/go app/join app/call-dominica' in C:\epic-workspace\Isola-Foundation\.workbench\codex-handoff-plsvc-window-and-brand-2026-10-14\work
+ succeeded in 838ms:
+import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
+import { type NextRequest, NextResponse } from "next/server";
+
+// Public routes that don't require auth
+const isPublicRoute = createRouteMatcher([
+  "/",
+  "/privacy",
+  "/terms",
+  "/login(.*)",
+  "/signup(.*)",
+  "/sign-in(.*)",
+  "/sign-up(.*)",
+  "/api/business/scan",
+  "/api/business/recommend",
+  "/api/webhook(.*)",
+  "/api/whatsapp/webhook(.*)",
+  "/api/whatsapp/account-update(.*)",
+  "/api/whatsapp/flows(.*)",
+  "/api/preview/personal-line(.*)",  // THROWAWAY preview harness, staging only �?" see route.ts header
+  "/api/internal/(.*)",
+  "/api/cron/(.*)",
+  "/api/voice/context(.*)",
+  "/api/voice/lookup(.*)",
+  "/api/voice/otp-callback(.*)",
+  "/api/voice/otp-pending(.*)",
+  "/api/voice/transcribe-wav",
+  "/api/voice/otp-capture(.*)",
+  "/api/voice/number-manager/(.*)",
+  "/api/chatwoot/webhook(.*)",  // Chatwoot webhook
+  "/api/chatwoot/agent-bot(.*)",  // Agent-bot webhook �?" secret-param auth
+  "/api/chatwoot/concierge-bot-ack(.*)",  // 0001 Agent Bot URL �?" acknowledge-only, Chatwoot HMAC signature (docs/chatwoot/0001-supervision-contract.md)
+  "/api/billing/webhook(.*)",
+  "/api/billing/isola-webhook(.*)",  // Stripe TENANT webhook (stripe-signature auth)
+  "/api/telegram/bff-ops(.*)",
+  "/api/health",
+  "/api/lite/summary",
+  "/api/lite/calls",
+  "/api/lite/debug-probe",
+  "/api/lite/topup",
+  "/api/lite/topup/webhook(.*)",
+  "/api/lite/topup/options",       // PWA Add Credit bundle picker �?" self-gated via requireLiteAuth
+  "/api/lite/topup/start",         // PWA Add Credit checkout start �?" self-gated via requireLiteAuth
+  "/api/lite/ledger",              // PWA Add Credit ledger �?" self-gated via requireLiteAuth
+  "/api/lite/airtime/(.*)",
+  "/api/lite/data/(.*)",
+  "/api/lite/billpay/(.*)",
+  "/api/lite/callback(.*)",
+  "/api/lite/call-state/(.*)",  // SSE call-state proxy �?" callId is auth token
+  "/api/lite/call-link/(.*)",
+  "/api/lite/referral(.*)",
+  "/api/lite/wallet",
+  "/api/lite/plans(.*)",           // GET plan ladder + POST purchase �?" self-gated via
+                                    // resolveLiteAccount, same convention as wallet above.
+                                    // POST /purchase also carries its own
+                                    // LITE_PLANS_PURCHASE_ENABLED/ALLOWLIST rollout gate
+                                    // inside the handler. Without this entry Clerk 401s
+                                    // every caller here before resolveLiteAccount ever runs
+                                    // �?" wallet worked, plans didn't, same credential.
+  "/api/lite/assistant/(.*)",      // GET history + POST message �?" self-gated via
+                                    // resolveLiteAccount, same convention as wallet/plans
+                                    // above. SAME INCIDENT CLASS, measured live 2026-09-18:
+                                    // a real Acrobits webview with valid u/k got 401
+                                    // {"error":"Unauthorized"} from THIS middleware, never
+                                    // reaching the route's own resolveLiteAccount logic at
+                                    // all �?" first real owner-device acceptance attempt
+                                    // after a fully reviewed, Codex-passed, externally
+                                    // verified-deployed backend. Every prior verification
+                                    // (unit tests, both Codex passes, the external
+                                    // /api/lite/assistant/history probe that got a clean
+                                    // 401 for having NO credential) exercised the route
+                                    // handler directly or without one �?" none of them could
+                                    // have caught a middleware-level gate the route code
+                                    // never sees.
+  "/api/lite/mirror-account",   // internal-secret auth �?" mirrors EMA/Foundation Magnus accounts into LiteAccount
+  "/api/lite/number",
+  "/api/lite/routing",
+  "/api/lite/softphone-activation",
+  "/api/lite/wa-open(.*)",
+  "/api/lite/testimonials/(.*)",  // public GET (site fetch) + token-gated remove link
+  "/api/chat",                    // PWA agent chat �?" self-gated (x-internal-secret + x-isola-phone, or Clerk legacy)
+  "/api/workspace/wallet",        // PWA wallet �?" self-gated
+  "/api/voice/request-callback",  // PWA callback �?" self-gated
+  "/api/otp/(.*)",                // phone OTP delivery �?" self-gated via x-internal-secret
+  "/api/lite/provision",
+  "/api/lite/signup/(.*)",
+  "/api/lite/signin/(.*)",
+  "/api/lite/catches(.*)",
+  "/api/lite/demo-catch",
+  "/api/lite/spotlight(.*)",
+  "/api/lite/activate/(.*)",  // Acrobits cloud-provisioning XML �?" one-time ?k= nonce is the auth
+  // Acrobits InitialProvisioningUrl / extProvUrl target. PUBLIC BY NECESSITY:
+  // the caller is the Acrobits app itself, which has no Clerk session and never
+  // will. Self-gated �?" requireLiteAuth(username, password) + the canary
+  // allowlist inside the handler; an unauthenticated caller gets the same 403
+  // XML as a wrong password, so it is not an oracle for which accounts exist.
+  "/api/lite/acrobits/(.*)",
+  "/go/(.*)",  // tappable one-time activation page (nonce + WhatsApp OTP)
+  "/call-dominica(.*)",
+  // Invite-gated Lite signup landing page. PUBLIC BY NECESSITY: the customer
+  // arriving on this link has no Clerk account and is here precisely to not need
+  // one. Without this entry Clerk 307s /join to /sign-in and the page never
+  // renders �?" measured on the live host before the page shipped, which is the
+  // second time in this feature that a link landed somewhere useless while
+  // looking perfectly correct (the first was /signup dropping ?invite=).
+  // It is NOT unguarded: the signup APIs behind it enforce the invite gate
+  // themselves, and are public for the same reason (/api/lite/signup/(.*) above).
+  "/join(.*)",
+  "/api/dashboard/(.*)",
+  "/isola(.*)",
+  "/api/isola/signup",
+  "/api/isola/available-numbers",
+  "/api/isola/provision-number",
+  "/api/isola/provision-status",
+  "/api/isola/inbox/(.*)",      // self-gated via requireInternalSecret + x-shell-tenant-id (CW-INBOX-AUTH-FIX)
+  "/api/isola/customer/(.*)",   // self-gated via requireInternalSecret + x-shell-tenant-id
+  "/api/provision",
+  "/api/platform/(.*)",
+  "/api/onboard/isola",
+  "/api/wa-desk/(.*)",
+  "/api/whatsapp/onboard(.*)",
+  "/api/billing/subscribe",
+  "/upgrade(.*)",
+  "/demo(.*)",
+]);
+
+// Clerk handler �?" only used for non-internal routes
+const clerkHandler = clerkMiddleware(async (auth, request) => {
+  if (!isPublicRoute(request)) {
+    const { userId, redirectToSignIn } = await auth();
+    if (!userId) {
+      // API routes return 401, page routes redirect to sign-in
+      const url = new URL(request.url);
+      if (url.pathname.startsWith("/api/")) {
+        return new Response(JSON.stringify({ error: "Unauthorized" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      // Reconstruct public URL from forwarded headers (nginx proxies to localhost:3004)
+      const proto = request.headers.get('x-forwarded-proto') || 'https'
+      const host  = request.headers.get('x-forwarded-host') || request.headers.get('host') || 'bff.epic.dm'
+      const publicUrl = `${proto}://${host}${request.nextUrl.pathname}${request.nextUrl.search}`
+      return redirectToSignIn({ returnBackUrl: publicUrl });
+    }
+  }
+});
+
+/**
+ * Top-level middleware.
+ * These route prefixes bypass Clerk entirely �?" clerkMiddleware adds response headers
+ * that trigger Next.js 16 PPR prerender cache, causing the route handler to be bypassed.
+ *
+ * Affected routes:
+ *   /api/internal/   �?" internal ops (x-internal-secret auth)
+ *     includes: /api/internal/agent-bindings  (read-only agent bindings)
+ *               /api/internal/ops/components  (component health check)
+ *               /api/internal/ops/restart     (whitelisted service restart)
+ *   /api/whatsapp/   �?" Meta webhook POSTs (x-hub-signature-256 auth)
+ *   /api/cron/       �?" cron jobs (x-cron-secret auth)
+ *   /api/billing/webhook �?" Stripe webhook (stripe-signature auth)
+ *   /webhooks/       �?" legacy Meta webhook path (nginx rewrites to /api/whatsapp/)
+ */
+const CLERK_BYPASS_PREFIXES = [
+  '/api/internal/',
+  '/api/whatsapp/',
+  '/api/inngest',     // Inngest serve() (dev: localhost-trusted; prod: signing-key auth)
+  '/api/inngest-relay', // L3-S6 Block 1.5 �?" apps/isola �+' BFF event relay (x-relay-secret auth)
+  '/api/cron/',
+  '/api/chatwoot/webhook',  // Chatwoot webhook �?" secret-param auth, not Clerk
+  '/api/chatwoot/agent-bot',  // Agent-bot webhook �?" secret-param auth, not Clerk
+  '/api/chatwoot/concierge-bot-ack',  // 0001 Agent Bot URL �?" acknowledge-only, Chatwoot HMAC signature, not Clerk
+  '/api/billing/webhook',
+  '/webhooks/',
+  '/api/platform/',   // service-JWT auth
+  '/api/odoo/',       // signed Odoo bridge cookie auth; Clerk must not intercept
+  '/api/fleet/',      // service-JWT auth (Verify-Gate S4.A provision-status batch read); Clerk must not intercept
+  '/uat-online',
+  '/api/brand/',    // public brand assets (QR, etc)      // public UAT test page for Arique �?" Clerk must not read Bearer header here
+  '/agent-tools/',  // bt-agent-tools-invoke-adapter �?" bearer-token auth (ISOLA_AGENT_TOOLS_TOKEN), not Clerk
+  // Personal Line customer-facing BROWSER NAVIGATIONS (2026-10-15). These pages are public by design and read no Clerk
+  // session. plsvc is built with whatever publishable key the build host published; when that is a Clerk DEVELOPMENT key,
+  // clerkMiddleware answers every real-browser navigation with a 307 to <instance>.clerk.accounts.dev/v1/client/handshake,
+  // which fails on this domain with {"code":"host_invalid"} - measured on the owner's phone during the 9610 walk: the
+  // activation link /go/<nonce> never rendered. A plain curl does not reproduce it (no Sec-Fetch-Dest: document), which is
+  // how it passed every earlier check. Bypass Clerk here exactly as for the webhook/internal routes above.
+  '/go/',              // activation page, /go/back return page, short links
+  '/join',             // invite-gated signup landing page
+  '/call-dominica',
+  '/api/lite/',        // includes /api/lite/acrobits/tab-entry, which Acrobits opens as a page navigation
+]
+
+export default function middleware(request: NextRequest) {
+  const path = request.nextUrl.pathname
+  if (CLERK_BYPASS_PREFIXES.some(prefix => path.startsWith(prefix))) {
+    return NextResponse.next()
+  }
+  return clerkHandler(request)
+}
+
+export const config = {
+  matcher: [
+    // Skip Next.js internals and static files
+    "/((?!_next|[^?]*\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)",
+    // Always run for API routes
+    "/(api|trpc)(.*)",
+  ],
+};
+/**
+ * Personal Line customer-facing browser pages must NOT go through Clerk's middleware.
+ *
+ * Measured 2026-10-15 (owner's phone, 9610 new-customer walk): the activation link /go/<nonce> showed
+ * {"errors":[{"code":"host_invalid"...}]}. plsvc was built with a Clerk DEVELOPMENT publishable key (copied from the build
+ * host's published page), so clerkMiddleware answered every real-browser navigation with a 307 to
+ * <instance>.clerk.accounts.dev/v1/client/handshake. curl never reproduced it (no Sec-Fetch-Dest: document).
+ *
+ * The Clerk handler is replaced here by a marker that behaves like that handshake. Every assertion that a path BYPASSES
+ * it has a positive twin proving a non-exempt path still REACHES it, in the same file - otherwise "bypassed" would pass
+ * if the marker were simply never reachable.
+ */
+import { describe, it, expect, vi } from 'vitest'
+import { NextRequest, NextResponse } from 'next/server'
+
+vi.mock('@clerk/nextjs/server', () => ({
+  createRouteMatcher: () => () => true,
+  clerkMiddleware: () => (req: any) => new NextResponse(null, { status: 307, headers: { location: 'https://dev.clerk.accounts.dev/v1/client/handshake', 'x-test-clerk-handshake': '1' } }),
+}))
+
+import middleware from '@/middleware'
+
+const nav = (path: string) => new NextRequest(`https://bff.epic.dm${path}`, { headers: { 'sec-fetch-dest': 'document', accept: 'text/html' } })
+const handshook = (res: any) => res?.headers?.get('x-test-clerk-handshake') === '1'
+
+describe('Personal Line browser pages bypass Clerk', () => {
+  for (const path of ['/go/abcdef0123456789abcdef0123456789', '/go/back', '/go/Ab3dEf9h', '/join', '/join?invite=x', '/call-dominica', '/api/lite/acrobits/tab-entry', '/api/lite/summary', '/api/lite/acrobits/provision']) {
+    it(`${path} is not handed to Clerk`, async () => {
+      const res = await (middleware as any)(nav(path))
+      expect(handshook(res)).toBe(false)
+      expect(res.status).not.toBe(307)
+    })
+  }
+})
+
+describe('CONTROL: the handshake marker is reachable, so the bypass assertions above can fail', () => {
+  for (const path of ['/dashboard', '/sign-in', '/', '/settings']) {
+    it(`${path} still goes through Clerk`, async () => {
+      const res = await (middleware as any)(nav(path))
+      expect(handshook(res)).toBe(true)
+    })
+  }
+  it('a path that only resembles a bypassed one does not slip through (/gozzz is not /go/)', async () => {
+    expect(handshook(await (middleware as any)(nav('/gozzz')))).toBe(true)
+  })
+})
+app/call-dominica\page.tsx
+app/join\page.tsx
+app/join\join-client.tsx
+app/go\back\route.ts
+app/api/lite\acrobits\tab-exchange\route.ts
+app/go\[code]\route.ts
+app/api/lite\acrobits\provision\route.ts
+app/api/lite\plans\route.ts
+app/api/lite\spotlight\route.ts
+app/api/lite\testimonials\remove\route.ts
+app/api/lite\wallet\route.ts
+app/api/lite\plans\purchase\route.ts
+app/api/lite\demo-catch\route.ts
+app/api/lite\routing\route.ts
+app/api/lite\softphone-activation\route.ts
+app/api/lite\mirror-account\route.ts
+app/api/lite\testimonials\public\route.ts
+app/api/lite\acrobits\tab-entry\route.ts
+app/api/lite\debug-probe\route.ts
+app/api/lite\number\route.ts
+app/api/lite\signup\verify\route.ts
+app/api/lite\wa-open\route.ts
+app/api/lite\summary\route.ts
+app/api/lite\call-state\[callId]\route.ts
+app/api/lite\topup\route.ts
+app/api/lite\provision\route.ts
+app/api/lite\referral\route.ts
+app/api/lite\catches\[id]\audio\route.ts
+app/api/lite\signup\start\route.ts
+app/api/lite\catches\route.ts
+app/api/lite\ledger\route.ts
+app/api/lite\wa-open\exchange\route.ts
+app/api/lite\topup\webhook\route.ts
+app/api/lite\topup\options\route.ts
+app/api/lite\signin\verify\route.ts
+app/api/lite\signin\start\route.ts
+app/api/lite\calls\route.ts
+app/api/lite\referral\claim\route.ts
+app/api/lite\topup\start\route.ts
+app/api/lite\assistant\history\route.ts
+app/api/lite\assistant\message\route.ts
+app/api/lite\activate\[sipUser]\route.ts
+app/api/lite\callback\route.ts
+app/api/lite\call-link\connect\route.ts
+app/api/lite\airtime\detect\route.ts
+app/api/lite\airtime\options\route.ts
+app/api/lite\billpay\pay\route.ts
+app/api/lite\billpay\lookup\route.ts
+app/api/lite\airtime\send\route.ts
+app/api/lite\callback\agent\route.ts
+app/api/lite\airtime\quote\route.ts
+app/api/lite\airtime\pay-link\route.ts
+
+2026-10-15T11:42:16.026698Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest("http/request failed: error sending request for url (https://127.0.0.1:27124/mcp/)")))
+exec
+"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n -i \"\\b(auth|currentUser|getSessionUser|clerkMiddleware)\\s*\\(\" app/api/lite app/go app/join app/call-dominica; rg -n \""'^export (async )?function (GET|POST|PUT|PATCH|DELETE)|''^export const (GET|POST|PUT|PATCH|DELETE)" app/api/lite' in C:\epic-workspace\Isola-Foundation\.workbench\codex-handoff-plsvc-window-and-brand-2026-10-14\work
+ succeeded in 701ms:
+app/api/lite\activate\[sipUser]\route.ts:7: * Auth (D-CONCIERGE-004 lock): the ?k= value is a ONE-TIME, OTP-verified nonce
+app/api/lite\provision\route.ts:7: * AUTH (one of):
+app/api/lite\wallet\route.ts:44:export async function GET(req: NextRequest) {
+app/api/lite\number\route.ts:40:export async function GET(req: NextRequest) {
+app/api/lite\number\route.ts:65:export async function PATCH(req: NextRequest) {
+app/api/lite\signup\verify\route.ts:36:export async function POST(req: NextRequest) {
+app/api/lite\wa-open\route.ts:149:export async function GET(req: NextRequest) {
+app/api/lite\activate\[sipUser]\route.ts:39:export async function GET(
+app/api/lite\callback\route.ts:93:export async function POST(req: NextRequest) {
+app/api/lite\summary\route.ts:37:export async function GET(req: NextRequest) {
+app/api/lite\wa-open\exchange\route.ts:32:export async function POST(req: NextRequest) {
+app/api/lite\mirror-account\route.ts:21:export async function POST(req: NextRequest) {
+app/api/lite\signup\start\route.ts:20:export async function POST(req: NextRequest) {
+app/api/lite\spotlight\route.ts:121:export async function GET(req: NextRequest) {
+app/api/lite\acrobits\tab-exchange\route.ts:65:export async function POST(req: NextRequest) {
+app/api/lite\billpay\pay\route.ts:24:export async function POST(req: NextRequest) {
+app/api/lite\acrobits\tab-entry\route.ts:66:export async function GET(req: NextRequest) {
+app/api/lite\softphone-activation\route.ts:47:export async function POST(req: NextRequest) {
+app/api/lite\assistant\message\route.ts:105:export async function POST(req: NextRequest) {
+app/api/lite\acrobits\provision\route.ts:175:export async function GET(req: NextRequest) {
+app/api/lite\topup\webhook\route.ts:37:export async function POST(req: NextRequest) {
+app/api/lite\topup\options\route.ts:49:export async function GET(req: NextRequest) {
+app/api/lite\ledger\route.ts:47:export async function GET(req: NextRequest) {
+app/api/lite\assistant\history\route.ts:45:export async function GET(req: NextRequest) {
+app/api/lite\billpay\lookup\route.ts:13:export async function GET(req: NextRequest) {
+app/api/lite\referral\route.ts:37:export async function GET(req: NextRequest) {
+app/api/lite\testimonials\remove\route.ts:22:export async function GET(req: NextRequest) {
+app/api/lite\signin\verify\route.ts:43:export async function POST(req: NextRequest) {
+app/api/lite\topup\start\route.ts:47:export async function POST(req: NextRequest) {
+app/api/lite\calls\route.ts:37:export async function GET(req: NextRequest) {
+app/api/lite\testimonials\public\route.ts:28:export async function GET(req: NextRequest) {
+app/api/lite\airtime\send\route.ts:16:export async function POST(req: NextRequest) {
+app/api/lite\referral\claim\route.ts:16:export async function POST(req: NextRequest) {
+app/api/lite\catches\route.ts:33:export async function GET(req: NextRequest) {
+app/api/lite\demo-catch\route.ts:27:export async function GET(req: NextRequest) {
+app/api/lite\topup\route.ts:44:export async function POST(req: NextRequest) {
+app/api/lite\call-state\[callId]\route.ts:29:export async function GET(
+app/api/lite\catches\[id]\audio\route.ts:40:export async function GET(
+app/api/lite\airtime\options\route.ts:34:export async function POST(req: NextRequest) {
+app/api/lite\call-link\connect\route.ts:29:export async function POST(req: NextRequest) {
+app/api/lite\airtime\quote\route.ts:17:export async function POST(req: NextRequest) {
+app/api/lite\debug-probe\route.ts:10:export async function GET(req: NextRequest) {
+app/api/lite\provision\route.ts:112:export async function POST(req: NextRequest) {
+app/api/lite\signin\start\route.ts:47:export async function POST(req: NextRequest) {
+app/api/lite\callback\agent\route.ts:50:export async function POST(req: NextRequest) {
+app/api/lite\routing\route.ts:76:export async function GET(req: NextRequest) {
+app/api/lite\routing\route.ts:112:export async function POST(req: NextRequest) {
+app/api/lite\airtime\detect\route.ts:13:export async function GET(req: NextRequest) {
+app/api/lite\airtime\pay-link\route.ts:50:export async function POST(req: NextRequest) {
+app/api/lite\plans\route.ts:28:export async function GET(req: NextRequest) {
+app/api/lite\plans\purchase\route.ts:49:export async function POST(req: NextRequest) {
+
+exec
+"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$n=0; Get-Content middleware.ts | ForEach-Object { $n++; if ($n -ge 20 -and $n -le 100 -or $n -ge 175 -and $n -le 205) { '"'{0}:{1}' -f "'$n,$_ } }; $n=0; Get-Content test/middleware-clerk-bypass-personal-line.test.ts | ForEach-Object { $n++; '"'{0}:{1}' -f "'$n,$_ }' in C:\epic-workspace\Isola-Foundation\.workbench\codex-handoff-plsvc-window-and-brand-2026-10-14\work
+ succeeded in 753ms:
+20:  "/api/internal/(.*)",
+21:  "/api/cron/(.*)",
+22:  "/api/voice/context(.*)",
+23:  "/api/voice/lookup(.*)",
+24:  "/api/voice/otp-callback(.*)",
+25:  "/api/voice/otp-pending(.*)",
+26:  "/api/voice/transcribe-wav",
+27:  "/api/voice/otp-capture(.*)",
+28:  "/api/voice/number-manager/(.*)",
+29:  "/api/chatwoot/webhook(.*)",  // Chatwoot webhook
+30:  "/api/chatwoot/agent-bot(.*)",  // Agent-bot webhook �?" secret-param auth
+31:  "/api/chatwoot/concierge-bot-ack(.*)",  // 0001 Agent Bot URL �?" acknowledge-only, Chatwoot HMAC signature (docs/chatwoot/0001-supervision-contract.md)
+32:  "/api/billing/webhook(.*)",
+33:  "/api/billing/isola-webhook(.*)",  // Stripe TENANT webhook (stripe-signature auth)
+34:  "/api/telegram/bff-ops(.*)",
+35:  "/api/health",
+36:  "/api/lite/summary",
+37:  "/api/lite/calls",
+38:  "/api/lite/debug-probe",
+39:  "/api/lite/topup",
+40:  "/api/lite/topup/webhook(.*)",
+41:  "/api/lite/topup/options",       // PWA Add Credit bundle picker �?" self-gated via requireLiteAuth
+42:  "/api/lite/topup/start",         // PWA Add Credit checkout start �?" self-gated via requireLiteAuth
+43:  "/api/lite/ledger",              // PWA Add Credit ledger �?" self-gated via requireLiteAuth
+44:  "/api/lite/airtime/(.*)",
+45:  "/api/lite/data/(.*)",
+46:  "/api/lite/billpay/(.*)",
+47:  "/api/lite/callback(.*)",
+48:  "/api/lite/call-state/(.*)",  // SSE call-state proxy �?" callId is auth token
+49:  "/api/lite/call-link/(.*)",
+50:  "/api/lite/referral(.*)",
+51:  "/api/lite/wallet",
+52:  "/api/lite/plans(.*)",           // GET plan ladder + POST purchase �?" self-gated via
+53:                                    // resolveLiteAccount, same convention as wallet above.
+54:                                    // POST /purchase also carries its own
+55:                                    // LITE_PLANS_PURCHASE_ENABLED/ALLOWLIST rollout gate
+56:                                    // inside the handler. Without this entry Clerk 401s
+57:                                    // every caller here before resolveLiteAccount ever runs
+58:                                    // �?" wallet worked, plans didn't, same credential.
+59:  "/api/lite/assistant/(.*)",      // GET history + POST message �?" self-gated via
+60:                                    // resolveLiteAccount, same convention as wallet/plans
+61:                                    // above. SAME INCIDENT CLASS, measured live 2026-09-18:
+62:                                    // a real Acrobits webview with valid u/k got 401
+63:                                    // {"error":"Unauthorized"} from THIS middleware, never
+64:                                    // reaching the route's own resolveLiteAccount logic at
+65:                                    // all �?" first real owner-device acceptance attempt
+66:                                    // after a fully reviewed, Codex-passed, externally
+67:                                    // verified-deployed backend. Every prior verification
+68:                                    // (unit tests, both Codex passes, the external
+69:                                    // /api/lite/assistant/history probe that got a clean
+70:                                    // 401 for having NO credential) exercised the route
+71:                                    // handler directly or without one �?" none of them could
+72:                                    // have caught a middleware-level gate the route code
+73:                                    // never sees.
+74:  "/api/lite/mirror-account",   // internal-secret auth �?" mirrors EMA/Foundation Magnus accounts into LiteAccount
+75:  "/api/lite/number",
+76:  "/api/lite/routing",
+77:  "/api/lite/softphone-activation",
+78:  "/api/lite/wa-open(.*)",
+79:  "/api/lite/testimonials/(.*)",  // public GET (site fetch) + token-gated remove link
+80:  "/api/chat",                    // PWA agent chat �?" self-gated (x-internal-secret + x-isola-phone, or Clerk legacy)
+81:  "/api/workspace/wallet",        // PWA wallet �?" self-gated
+82:  "/api/voice/request-callback",  // PWA callback �?" self-gated
+83:  "/api/otp/(.*)",                // phone OTP delivery �?" self-gated via x-internal-secret
+84:  "/api/lite/provision",
+85:  "/api/lite/signup/(.*)",
+86:  "/api/lite/signin/(.*)",
+87:  "/api/lite/catches(.*)",
+88:  "/api/lite/demo-catch",
+89:  "/api/lite/spotlight(.*)",
+90:  "/api/lite/activate/(.*)",  // Acrobits cloud-provisioning XML �?" one-time ?k= nonce is the auth
+91:  // Acrobits InitialProvisioningUrl / extProvUrl target. PUBLIC BY NECESSITY:
+92:  // the caller is the Acrobits app itself, which has no Clerk session and never
+93:  // will. Self-gated �?" requireLiteAuth(username, password) + the canary
+94:  // allowlist inside the handler; an unauthenticated caller gets the same 403
+95:  // XML as a wrong password, so it is not an oracle for which accounts exist.
+96:  "/api/lite/acrobits/(.*)",
+97:  "/go/(.*)",  // tappable one-time activation page (nonce + WhatsApp OTP)
+98:  "/call-dominica(.*)",
+99:  // Invite-gated Lite signup landing page. PUBLIC BY NECESSITY: the customer
+100:  // arriving on this link has no Clerk account and is here precisely to not need
+175:  '/api/odoo/',       // signed Odoo bridge cookie auth; Clerk must not intercept
+176:  '/api/fleet/',      // service-JWT auth (Verify-Gate S4.A provision-status batch read); Clerk must not intercept
+177:  '/uat-online',
+178:  '/api/brand/',    // public brand assets (QR, etc)      // public UAT test page for Arique �?" Clerk must not read Bearer header here
+179:  '/agent-tools/',  // bt-agent-tools-invoke-adapter �?" bearer-token auth (ISOLA_AGENT_TOOLS_TOKEN), not Clerk
+180:  // Personal Line customer-facing BROWSER NAVIGATIONS (2026-10-15). These pages are public by design and read no Clerk
+181:  // session. plsvc is built with whatever publishable key the build host published; when that is a Clerk DEVELOPMENT key,
+182:  // clerkMiddleware answers every real-browser navigation with a 307 to <instance>.clerk.accounts.dev/v1/client/handshake,
+183:  // which fails on this domain with {"code":"host_invalid"} - measured on the owner's phone during the 9610 walk: the
+184:  // activation link /go/<nonce> never rendered. A plain curl does not reproduce it (no Sec-Fetch-Dest: document), which is
+185:  // how it passed every earlier check. Bypass Clerk here exactly as for the webhook/internal routes above.
+186:  '/go/',              // activation page, /go/back return page, short links
+187:  '/join',             // invite-gated signup landing page
+188:  '/call-dominica',
+189:  '/api/lite/',        // includes /api/lite/acrobits/tab-entry, which Acrobits opens as a page navigation
+190:]
+191:
+192:export default function middleware(request: NextRequest) {
+193:  const path = request.nextUrl.pathname
+194:  if (CLERK_BYPASS_PREFIXES.some(prefix => path.startsWith(prefix))) {
+195:    return NextResponse.next()
+196:  }
+197:  return clerkHandler(request)
+198:}
+199:
+200:export const config = {
+201:  matcher: [
+202:    // Skip Next.js internals and static files
+203:    "/((?!_next|[^?]*\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)",
+204:    // Always run for API routes
+205:    "/(api|trpc)(.*)",
+1:/**
+2: * Personal Line customer-facing browser pages must NOT go through Clerk's middleware.
+3: *
+4: * Measured 2026-10-15 (owner's phone, 9610 new-customer walk): the activation link /go/<nonce> showed
+5: * {"errors":[{"code":"host_invalid"...}]}. plsvc was built with a Clerk DEVELOPMENT publishable key (copied from the build
+6: * host's published page), so clerkMiddleware answered every real-browser navigation with a 307 to
+7: * <instance>.clerk.accounts.dev/v1/client/handshake. curl never reproduced it (no Sec-Fetch-Dest: document).
+8: *
+9: * The Clerk handler is replaced here by a marker that behaves like that handshake. Every assertion that a path BYPASSES
+10: * it has a positive twin proving a non-exempt path still REACHES it, in the same file - otherwise "bypassed" would pass
+11: * if the marker were simply never reachable.
+12: */
+13:import { describe, it, expect, vi } from 'vitest'
+14:import { NextRequest, NextResponse } from 'next/server'
+15:
+16:vi.mock('@clerk/nextjs/server', () => ({
+17:  createRouteMatcher: () => () => true,
+18:  clerkMiddleware: () => (req: any) => new NextResponse(null, { status: 307, headers: { location: 'https://dev.clerk.accounts.dev/v1/client/handshake', 'x-test-clerk-handshake': '1' } }),
+19:}))
+20:
+21:import middleware from '@/middleware'
+22:
+23:const nav = (path: string) => new NextRequest(`https://bff.epic.dm${path}`, { headers: { 'sec-fetch-dest': 'document', accept: 'text/html' } })
+24:const handshook = (res: any) => res?.headers?.get('x-test-clerk-handshake') === '1'
+25:
+26:describe('Personal Line browser pages bypass Clerk', () => {
+27:  for (const path of ['/go/abcdef0123456789abcdef0123456789', '/go/back', '/go/Ab3dEf9h', '/join', '/join?invite=x', '/call-dominica', '/api/lite/acrobits/tab-entry', '/api/lite/summary', '/api/lite/acrobits/provision']) {
+28:    it(`${path} is not handed to Clerk`, async () => {
+29:      const res = await (middleware as any)(nav(path))
+30:      expect(handshook(res)).toBe(false)
+31:      expect(res.status).not.toBe(307)
+32:    })
+33:  }
+34:})
+35:
+36:describe('CONTROL: the handshake marker is reachable, so the bypass assertions above can fail', () => {
+37:  for (const path of ['/dashboard', '/sign-in', '/', '/settings']) {
+38:    it(`${path} still goes through Clerk`, async () => {
+39:      const res = await (middleware as any)(nav(path))
+40:      expect(handshook(res)).toBe(true)
+41:    })
+42:  }
+43:  it('a path that only resembles a bypassed one does not slip through (/gozzz is not /go/)', async () => {
+44:    expect(handshook(await (middleware as any)(nav('/gozzz')))).toBe(true)
+45:  })
+46:})
+
+codex
+SHIP
+
+1. **No authentication removed.** Every listed route under `app/api/lite/**/route.ts` matches an existing `/api/lite` entry in `isPublicRoute`; the broad `/api/lite/acrobits/(.*)`, `/api/lite/catches(.*)`, `/api/lite/plans(.*)`, and similar patterns cover the nested routes. The `/go/[code]`, `/go/back`, `/join`, and `/call-dominica` routes are also already public. A search of those handlers found no calls to Clerk session APIs such as `auth()`, `currentUser()`, or `getSessionUser()`.
+
+2. **No middleware dependency found.** The bypassed routes do not appear to rely on `clerkMiddleware` having run. Their existing route-specific gates remain in place.
+
+3. **Prefix over-match has no identified exposure.** `/join` and `/call-dominica` also bypass Clerk for names beginning with those strings; `/go/` does not match `/gozzz`, and `/api/lite/` requires the slash boundary. Since the matching public-route patterns already cover `/join…` and `/call-dominica…`, the broader bypass does not remove Clerk protection from those paths.
+
+4. **Test controls are present.** The test checks the handshake marker on non-bypassed paths and verifies `/gozzz` still reaches it. It does not check `/joinX` or `/call-dominicaX`; those would be useful boundary cases, but do not change the verdict given the existing public-route patterns.
+tokens used
+22,148
+SHIP
+
+1. **No authentication removed.** Every listed route under `app/api/lite/**/route.ts` matches an existing `/api/lite` entry in `isPublicRoute`; the broad `/api/lite/acrobits/(.*)`, `/api/lite/catches(.*)`, `/api/lite/plans(.*)`, and similar patterns cover the nested routes. The `/go/[code]`, `/go/back`, `/join`, and `/call-dominica` routes are also already public. A search of those handlers found no calls to Clerk session APIs such as `auth()`, `currentUser()`, or `getSessionUser()`.
+
+2. **No middleware dependency found.** The bypassed routes do not appear to rely on `clerkMiddleware` having run. Their existing route-specific gates remain in place.
+
+3. **Prefix over-match has no identified exposure.** `/join` and `/call-dominica` also bypass Clerk for names beginning with those strings; `/go/` does not match `/gozzz`, and `/api/lite/` requires the slash boundary. Since the matching public-route patterns already cover `/join…` and `/call-dominica…`, the broader bypass does not remove Clerk protection from those paths.
+
+4. **Test controls are present.** The test checks the handshake marker on non-bypassed paths and verifies `/gozzz` still reaches it. It does not check `/joinX` or `/call-dominicaX`; those would be useful boundary cases, but do not change the verdict given the existing public-route patterns.
+CODEX_EXIT=0

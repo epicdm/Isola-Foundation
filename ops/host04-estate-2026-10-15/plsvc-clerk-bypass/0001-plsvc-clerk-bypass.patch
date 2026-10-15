@@ -1,0 +1,92 @@
+From c426a9d7094e4a471559fb0a53ad126434ba29a6 Mon Sep 17 00:00:00 2001
+From: EPICDM <it@epic.dm>
+Date: Thu, 15 Oct 2026 08:31:44 -0400
+Subject: [PATCH] plsvc: exempt Personal Line browser pages from Clerk's
+ development handshake (running image f313649f)
+
+A real-browser navigation to /go/<nonce> was redirected to the Clerk instance handshake and failed with host_invalid. 39/39 isolated, sabotage fails exactly the 9 bypass tests, Codex SHIP.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FC4YNi2CBzRxEZtiGGaonH
+---
+ middleware.ts                                 | 10 ++++
+ ...dleware-clerk-bypass-personal-line.test.ts | 46 +++++++++++++++++++
+ 2 files changed, 56 insertions(+)
+ create mode 100644 test/middleware-clerk-bypass-personal-line.test.ts
+
+diff --git a/middleware.ts b/middleware.ts
+index 603d0a4..49b8a33 100644
+--- a/middleware.ts
++++ b/middleware.ts
+@@ -177,6 +177,16 @@ const CLERK_BYPASS_PREFIXES = [
+   '/uat-online',
+   '/api/brand/',    // public brand assets (QR, etc)      // public UAT test page for Arique — Clerk must not read Bearer header here
+   '/agent-tools/',  // bt-agent-tools-invoke-adapter — bearer-token auth (ISOLA_AGENT_TOOLS_TOKEN), not Clerk
++  // Personal Line customer-facing BROWSER NAVIGATIONS (2026-10-15). These pages are public by design and read no Clerk
++  // session. plsvc is built with whatever publishable key the build host published; when that is a Clerk DEVELOPMENT key,
++  // clerkMiddleware answers every real-browser navigation with a 307 to <instance>.clerk.accounts.dev/v1/client/handshake,
++  // which fails on this domain with {"code":"host_invalid"} - measured on the owner's phone during the 9610 walk: the
++  // activation link /go/<nonce> never rendered. A plain curl does not reproduce it (no Sec-Fetch-Dest: document), which is
++  // how it passed every earlier check. Bypass Clerk here exactly as for the webhook/internal routes above.
++  '/go/',              // activation page, /go/back return page, short links
++  '/join',             // invite-gated signup landing page
++  '/call-dominica',
++  '/api/lite/',        // includes /api/lite/acrobits/tab-entry, which Acrobits opens as a page navigation
+ ]
+ 
+ export default function middleware(request: NextRequest) {
+diff --git a/test/middleware-clerk-bypass-personal-line.test.ts b/test/middleware-clerk-bypass-personal-line.test.ts
+new file mode 100644
+index 0000000..3e617f1
+--- /dev/null
++++ b/test/middleware-clerk-bypass-personal-line.test.ts
+@@ -0,0 +1,46 @@
++/**
++ * Personal Line customer-facing browser pages must NOT go through Clerk's middleware.
++ *
++ * Measured 2026-10-15 (owner's phone, 9610 new-customer walk): the activation link /go/<nonce> showed
++ * {"errors":[{"code":"host_invalid"...}]}. plsvc was built with a Clerk DEVELOPMENT publishable key (copied from the build
++ * host's published page), so clerkMiddleware answered every real-browser navigation with a 307 to
++ * <instance>.clerk.accounts.dev/v1/client/handshake. curl never reproduced it (no Sec-Fetch-Dest: document).
++ *
++ * The Clerk handler is replaced here by a marker that behaves like that handshake. Every assertion that a path BYPASSES
++ * it has a positive twin proving a non-exempt path still REACHES it, in the same file - otherwise "bypassed" would pass
++ * if the marker were simply never reachable.
++ */
++import { describe, it, expect, vi } from 'vitest'
++import { NextRequest, NextResponse } from 'next/server'
++
++vi.mock('@clerk/nextjs/server', () => ({
++  createRouteMatcher: () => () => true,
++  clerkMiddleware: () => (req: any) => new NextResponse(null, { status: 307, headers: { location: 'https://dev.clerk.accounts.dev/v1/client/handshake', 'x-test-clerk-handshake': '1' } }),
++}))
++
++import middleware from '@/middleware'
++
++const nav = (path: string) => new NextRequest(`https://bff.epic.dm${path}`, { headers: { 'sec-fetch-dest': 'document', accept: 'text/html' } })
++const handshook = (res: any) => res?.headers?.get('x-test-clerk-handshake') === '1'
++
++describe('Personal Line browser pages bypass Clerk', () => {
++  for (const path of ['/go/abcdef0123456789abcdef0123456789', '/go/back', '/go/Ab3dEf9h', '/join', '/join?invite=x', '/call-dominica', '/api/lite/acrobits/tab-entry', '/api/lite/summary', '/api/lite/acrobits/provision']) {
++    it(`${path} is not handed to Clerk`, async () => {
++      const res = await (middleware as any)(nav(path))
++      expect(handshook(res)).toBe(false)
++      expect(res.status).not.toBe(307)
++    })
++  }
++})
++
++describe('CONTROL: the handshake marker is reachable, so the bypass assertions above can fail', () => {
++  for (const path of ['/dashboard', '/sign-in', '/', '/settings']) {
++    it(`${path} still goes through Clerk`, async () => {
++      const res = await (middleware as any)(nav(path))
++      expect(handshook(res)).toBe(true)
++    })
++  }
++  it('a path that only resembles a bypassed one does not slip through (/gozzz is not /go/)', async () => {
++    expect(handshook(await (middleware as any)(nav('/gozzz')))).toBe(true)
++  })
++})
+-- 
+2.53.0.windows.2
+
