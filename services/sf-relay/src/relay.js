@@ -751,7 +751,7 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
 
     // War room steering: every check below runs on EVERY model turn for this message - the first one and each "@agent" rewrite
     // (closure over the current turn/turnMessage/binding). Returns { ok: true, ... } only when the reply may be drafted or sent.
-    const vet = async () => {
+    const vet = async (guided = false) => {
     if (turn.conversationId && turn.conversationCapability) {
       binding = { ...binding, conversationId: turn.conversationId, conversationCapability: turn.conversationCapability, phase: "ready", pendingMessageId: null, lastCompletedMessageId: ev.messageId };
       if (!await persistConversationBinding(ev, binding)) {
@@ -800,6 +800,12 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
       return handoff(ev, "Personal Line tool result could not be verified; reply withheld", { tellCustomer: true });
     }
     if (esc.known === false) log({ event: "escalation_unknown", ...ctx });
+    if (guided && ((esc.known && esc.escalated) || (plConcierge && canonicalPersonalLineOffer(inspection).status === "valid"))) {
+      // Codex steer pass 2: these two outcomes post to the customer at once (no draft). Staff are steering THIS reply right now, so a
+      // rewrite never takes either path unsupervised: it is withheld and staff reply themselves.
+      log({ event: "guided_rewrite_withheld", reason: esc.known && esc.escalated ? "agent_requested_person" : "canonical_offer", ...ctx });
+      return handoff(ev, `the guided rewrite ${esc.known && esc.escalated ? "asked for a person" : "produced a plan offer"}; it was withheld - reply yourself`, { tellCustomer: false });
+    }
     if (esc.known && esc.escalated) {
       const noted = await safe("handoff_note", () => chatwoot.postMessage(ev.conversationId, `Relay handoff: agent asked for a person: ${esc.reason ?? "no reason given"}`, { private: true }), ctx);
       const opened = await safe("handoff_open", () => chatwoot.toggleStatus(ev.conversationId, "open"), ctx);
@@ -973,7 +979,7 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
         log({ event: "agent_unavailable", reason: "guided_rewrite_turn_limit", ...ctx });
         return handoff(ev, "the agent could not take the staff guidance (conversation length limit); reply yourself", { tellCustomer: false });
       }
-      vetted = await vet();
+      vetted = await vet(true);
       if (!vetted?.ok) return;
       ({ inspection, items } = vetted);
     }

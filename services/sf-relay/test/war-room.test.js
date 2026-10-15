@@ -18,7 +18,7 @@ const EVIDENCE = { known: true, currentTurnVerified: true, escalated: false,
   toolCalls: [{ name: "pl-action-adapter__pl_journey", input: {} }, { name: "pl-action-adapter__pl_next_step", input: {} }],
   toolResults: [{ ok: true }, { ok: false, isError: true }] };
 
-function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread = false, failOwnershipAfter = false, truncateTo = 0, beforePublicPost = null, dropCustomerFromFirstRead = false, stalePageWithoutDraft = false, dropSentFromSecondRead = false, frozenClock = false, duringDraftPost = null, duringModelTurn = null, selfUserId = RELAY_USER, texts = null, pl = false, turnSeq = null } = {}) {
+function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread = false, failOwnershipAfter = false, truncateTo = 0, beforePublicPost = null, dropCustomerFromFirstRead = false, stalePageWithoutDraft = false, dropSentFromSecondRead = false, frozenClock = false, duringDraftPost = null, duringModelTurn = null, selfUserId = RELAY_USER, texts = null, pl = false, turnSeq = null, evidenceSeq = null } = {}) {
   let reads = 0;
   let t = 1_797_000_000_000;
   const posted = [], statuses = [], logs = [], thread = [];
@@ -59,7 +59,7 @@ function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread
       return { ok: true, text: texts ? texts[Math.min(seldon.turns, texts.length) - 1] : MODEL_TEXT, conversationId: "sf-conv", conversationCapability: "cap" };
     },
     async escalation() { return { known: true, escalated: false }; },
-    async inspectTurn() { return structuredClone(EVIDENCE); },
+    async inspectTurn() { return structuredClone(evidenceSeq ? evidenceSeq[Math.min(seldon.turns, evidenceSeq.length) - 1] : EVIDENCE); },
   };
   const relay = createRelay({ scope: SCOPE, ownerUserId: 16, chatwoot, seldon, requireCapability: true, conversationStateKey: "synthetic-state-key-material-long-enough-32",
     plConcierge: pl ? { key: PL_KEY, kid: "uat1", bridgeKey: PL_BRIDGE_KEY, bridgeKid: "ctx1", phoneNumberId: "1023804347491554" } : null,
@@ -556,4 +556,29 @@ test("STEER PASS-1: guidance + customer message too long to sign -> the rewrite 
   assert.equal(f.seldon.turns, 1, "the unsigned rewrite never reached Uplink");
   assert.deepEqual(sent(f), []);
   assert.ok(f.logs.some((l) => l.event === "guided_rewrite_unsigned"));
+});
+
+// Codex steer pass 2 (DO NOT SHIP): two vet() outcomes post to the customer at once (agent asked for a person; verified plan offer).
+// On a guided rewrite neither may go out unsupervised: withheld, staff reply themselves.
+const OFFER_EVIDENCE = { known: true, currentTurnVerified: true, escalated: false,
+  toolCalls: [{ id: "call-1", name: "pl-action-adapter__pl_present_offer", input: { offer_key: "trial" } }],
+  toolResults: [{ toolCallId: "call-1", ok: true, output: { isError: false, content: [{ type: "text", text: JSON.stringify({ code: "offer_issued", offer_key: "trial", confirm_with: "1", customer_message: "Free trial: 7 days with 60 minutes included. Reply 1 to start it now." }) }] } }] };
+test("STEER PASS-2: a rewrite whose turn ESCALATES (agent asked for a person) is withheld - nothing public, staff reply themselves; CONTROL: the same escalation on the ORIGINAL turn still posts as before", async () => {
+  const f = fixture({ holdMs: 10000, texts: [MODEL_TEXT, "Let me get someone."], evidenceSeq: [EVIDENCE, { ...EVIDENCE, escalated: true, reason: "customer upset" }] });
+  await steeredRun(f, [async () => { f.relay.accept(f.staffMsg(9301, "@agent apologise")); }]);
+  assert.deepEqual(sent(f), []);
+  assert.ok(f.logs.some((l) => l.event === "guided_rewrite_withheld" && l.reason === "agent_requested_person"));
+  const c = fixture({ holdMs: 10000, evidenceSeq: [{ ...EVIDENCE, escalated: true, reason: "customer upset" }] });
+  await c.relay.accept(c.customer()).done;
+  assert.equal(sent(c).length, 1, "CONTROL: unchanged original-turn escalation still answers the customer");
+});
+
+test("STEER PASS-2: a rewrite that produces a verified plan OFFER is withheld (never posted without a hold); CONTROL: the same offer on the original turn still posts", async () => {
+  const f = fixture({ holdMs: 10000, pl: true, texts: [MODEL_TEXT, "Here is the offer."], evidenceSeq: [EVIDENCE, OFFER_EVIDENCE] });
+  await steeredRun(f, [async () => { f.relay.accept(f.staffMsg(9302, "@agent offer the trial")); }]);
+  assert.deepEqual(sent(f), []);
+  assert.ok(f.logs.some((l) => l.event === "guided_rewrite_withheld" && l.reason === "canonical_offer"));
+  const c = fixture({ holdMs: 10000, pl: true, evidenceSeq: [OFFER_EVIDENCE] });
+  await c.relay.accept(c.customer()).done;
+  assert.deepEqual(sent(c), ["Free trial: 7 days with 60 minutes included. Reply 1 to start it now."], "CONTROL: the offer path itself works in this harness");
 });
