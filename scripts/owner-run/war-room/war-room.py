@@ -17,7 +17,8 @@ CWL = "https://inbox.epic.dm/app/accounts/2/conversations/%s"
 RB = "https://claude.ai/artifact/KVJwphfYCuXkGjeMAPTJSC#%s"   # War Room page runbook anchors
 INBOX11 = "https://inbox.epic.dm/app/accounts/2/settings/inboxes/11"
 def conv_btn(d): return [("Open conversation", CWL % d)]
-WIN = int(os.environ.get("WR_WINDOW_S", "150"))   # log look-back; > the 60 s timer so nothing falls between runs (dedup removes overlap)
+WIN = int(os.environ.get("WR_WINDOW_S", "150"))
+BOT_WAIT_S = int(os.environ.get("WR_BOT_WAIT_S", "90"))   # 60 s + the relay's 20 s supervised hold (a normal supervised reply measured at 57 s)   # log look-back; > the 60 s timer so nothing falls between runs (dedup removes overlap)
 def sh(cmd, t=30):
     try: return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=t).stdout
     except Exception as e: return ""
@@ -76,7 +77,7 @@ def inbox_settings():
 
 if SELF:   # synthetic inputs: every rule must fire exactly once on pass 1 and nothing on pass 2
     FX = {"relay": [{"event": "handoff", "outcome": "agent unavailable (empty_reply)", "conversationId": 9001, "messageId": 1, "ts": "x"}],
-          "new": [["9002", "Test Customer", "+17670000001"]], "wait": [["9003", "2", "77", "75", "Waiting Bot", "+17670000002"], ["9004", "0", "78", "400", "Waiting Human", "+17670000003"], ["9005", "2", "79", "20", "Too Soon", "+17670000004"]],
+          "new": [["9002", "Test Customer", "+17670000001"]], "wait": [["9003", "2", "77", "100", "Waiting Bot", "+17670000002"], ["9008", "2", "80", "75", "Normal Supervised Reply Time", "+17670000007"], ["9004", "0", "78", "400", "Waiting Human", "+17670000003"], ["9005", "2", "79", "20", "Too Soon", "+17670000004"]],
           "inc": [["501", "9006", "Upset", "+17670000005", "this is useless I want a real person"], ["502", "9007", "Calm", "+17670000006", "what are your prices"]],
           "prov": 2, "pay": (3, 0), "spend": 0.55, "inbox": (False, 1)}
     relay_events = lambda: FX["relay"]; new_conversations = lambda: FX["new"]; waiting = lambda: FX["wait"]; recent_incoming = lambda: FX["inc"]
@@ -95,7 +96,7 @@ def evaluate():
         ev.append(("new:%s" % d, 86400, False, "New 0001 conversation: %s %s" % (name, m4(ph)), "Watch it; take over if the agent goes wrong.", conv_btn(d)))
     for d, status, mid, age, name, ph in waiting():
         age = int(age); bot = status == "2"
-        if (bot and age >= 60) or ((not bot) and age >= 300):
+        if (bot and age >= BOT_WAIT_S) or ((not bot) and age >= 300):
             act = ("The agent has not answered. Assign the conversation to yourself and reply." if bot else "You own this conversation. Reply now, or Resolve to give it back to the agent.")
             ev.append(("wait:%s:%s" % (d, mid), 86400, True, "NO REPLY for %ds: %s %s is waiting (%s)" % (age, name, m4(ph), "agent owns it" if bot else "you own it"), act, conv_btn(d)))
     for mid, d, name, ph, txt in recent_incoming():
@@ -144,8 +145,8 @@ if SELF:
     p2 = run(st, send=False)
     expect = sorted(["ho", "new", "wait", "wait", "fr", "prov", "pay", "spend50", "drift-lock"])
     print("pass 1 fired:", keys1); print("pass 2 fired:", [k for k, _, _ in p2])
-    ok = keys1 == expect and not p2 and not any(k.startswith("wait:9005") or k.startswith("fr:502") for k, _, _ in p1)
-    print("SELFTEST", "PASS" if ok else "FAIL", "(controls: a 20 s wait and a calm message must NOT fire)")
+    ok = keys1 == expect and not p2 and not any(k.startswith("wait:9005") or k.startswith("wait:9008") or k.startswith("fr:502") for k, _, _ in p1)
+    print("SELFTEST", "PASS" if ok else "FAIL", "(controls: a 20 s wait, a 75 s supervised wait and a calm message must NOT fire)")
     sys.exit(0 if ok else 1)
 st = load()
 fired = run(st, send=not DRY)
