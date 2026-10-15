@@ -259,7 +259,9 @@ export function decide(ev, scope) {
   // War room (owner 2026-10-15): a staff PRIVATE note that starts with "@hold" stops this conversation's pending supervised draft.
   // Only a Chatwoot user (staff) can write a private note; a customer's message is never private and never counts.
   // Chatwoot only lets members of THIS account post as a "user", and the webhook is account-scoped above.
-  const fromStaff = (ev.messageType === "outgoing" || ev.messageType === 1) && ev.senderType === "user" && Number.isSafeInteger(ev.senderId) && ev.senderId > 0;
+  // The relay itself posts as a Chatwoot USER (measured 2026-10-15: user 20 "PL Relay Bot"), so its own id is never staff.
+  const fromStaff = (ev.messageType === "outgoing" || ev.messageType === 1) && ev.senderType === "user" && Number.isSafeInteger(ev.senderId) && ev.senderId > 0
+    && ev.senderId !== scope.selfUserId;
   if (fromStaff && ev.isPrivate && /^@hold\b/i.test(ev.content)) {
     return ev.conversationId === null ? { act: "ignore", reason: "no_ids" } : { act: "staff_hold" };
   }
@@ -304,7 +306,7 @@ export function traceLine(inspection, items, text) {
   return `Agent trace: ${tools.length ? tools.join(", ") : "no tools"} · reply ${String(text ?? "").length} chars · ${Array.isArray(items) ? items.length : 0} button(s)`;
 }
 
-export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatwoot, seldon, requireCapability = false, conversationStateKey = null, plConcierge = null, adapter = null, presence = null, presenceRefreshMs = 20_000, presenceMaxRefresh = 4, timers = { setInterval, clearInterval }, logger = () => {}, now = () => Date.now(), dedupTtlMs = 3_600_000, supervisedHoldMs = 0, traceNotes = false, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatwoot, seldon, requireCapability = false, conversationStateKey = null, plConcierge = null, adapter = null, presence = null, presenceRefreshMs = 20_000, presenceMaxRefresh = 4, timers = { setInterval, clearInterval }, logger = () => {}, now = () => Date.now(), dedupTtlMs = 3_600_000, supervisedHoldMs: requestedHoldMs = 0, selfUserId = null, traceNotes = false, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
   if (adapter && (!plConcierge || typeof adapter.act !== "function")) throw new Error("adapter_actions_require_pl_concierge");
   if (requireCapability && (!conversationStateKey || !scope?.workspaceId || !scope?.agentId || !scope?.agentSlug)) {
     throw new Error("conversation_capability_configuration_incomplete");
@@ -323,6 +325,9 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
   const sfConversation = new Map(); // chatwoot conversation id -> seldonframe conversation id
   const lastChoices = new Map(); // chatwoot conversation id -> { items, at } (rc10e: last verified buttons, in-memory, short-lived)
   const inflight = new Set();
+  // The hold needs the relay's own user id to tell staff from itself; without it the hold is OFF (never a guess).
+  const supervisedHoldMs = requestedHoldMs > 0 && Number.isSafeInteger(selfUserId) && selfUserId > 0 ? requestedHoldMs : 0;
+  const decideScope = { ...scope, selfUserId };
   const holds = new Map(); // war room: chatwoot conversation id -> id of the latest staff "@hold" note (in-memory; a restart drops the draft, never sends it)
   const staffReplies = new Map(); // war room: chatwoot conversation id -> id of the latest staff PUBLIC reply seen on the webhook
 
@@ -823,7 +828,8 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
     // than the CUSTOMER message being answered means a person engaged after the customer spoke, so the draft is not sent. Nothing is ever
     // cleared, so no window exists in which a staff action is lost; the webhook markers and the thread read apply the same rule.
     const sinceCustomer = (id) => Number.isSafeInteger(id) && id > ev.messageId;
-    const byStaff = (m) => (m?.message_type === 1 || m?.message_type === "outgoing") && String(m?.sender_type ?? m?.sender?.type ?? "").toLowerCase() === "user";
+    const byStaff = (m) => (m?.message_type === 1 || m?.message_type === "outgoing") && String(m?.sender_type ?? m?.sender?.type ?? "").toLowerCase() === "user"
+      && Number(m?.sender_id ?? m?.sender?.id) !== selfUserId;   // never the relay's own posts
     if (supervisedHoldMs > 0) {
       const secs = Math.round(supervisedHoldMs / 1000);
       let draft = null;
@@ -1053,7 +1059,7 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
    */
   function accept(payload) {
     const ev = readEvent(payload);
-    const decision = decide(ev, scope);
+    const decision = decide(ev, decideScope);
     if ((decision.act === "staff_hold" || decision.act === "staff_reply") && !(supervisedHoldMs > 0)) {
       // Hold OFF: exactly the pre-war-room handling (a staff message is an ignored non-incoming event, logged identically).
       log({ event: "ignored", reason: "not_incoming", conversationId: ev.conversationId, messageId: ev.messageId });

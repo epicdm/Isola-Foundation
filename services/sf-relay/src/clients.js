@@ -86,6 +86,12 @@ export function chatwootClient({ baseUrl, accountId, token, fetchImpl = fetch, t
       }
     },
     getContact: async (id) => call("GET", `/contacts/${id}`),
+    // war room: the relay's OWN Chatwoot user (its posts are "user" messages); used so they never count as staff.
+    getProfile: async () => {
+      const res = await fetchImpl(`${baseUrl.replace(/\/+$/, "")}/api/v1/profile`, { headers: { api_access_token: token }, redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
+      if (!res.ok) throw new Error(`chatwoot GET /profile -> HTTP ${res.status}`);
+      return res.json();
+    },
     // rc10i: recent messages of ONE conversation (same tenant, same bot token), used only to carry context across an Uplink conversation rotation.
     listMessages: async (id) => call("GET", `/conversations/${id}/messages`),
     updateConversationCustomAttributes: (id, customAttributes) =>

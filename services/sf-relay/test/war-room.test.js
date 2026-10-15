@@ -4,7 +4,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRelay, decide, readEvent, traceLine } from "../src/relay.js";
-import { parseSupervisedHoldMs } from "../src/server.js";
+import { parseSupervisedHoldMs, resolveSelfUserId } from "../src/server.js";
+const RELAY_USER = 20;
 
 const SCOPE = { accountId: 2, inboxId: 11, workspaceId: "48467787-a471-4260-8265-a9893e2b2cae", agentId: "4c47c17f-f26a-46a7-a2e4-aa6f58a305b6", agentSlug: "pl-staging-test-agent" };
 const MODEL_TEXT = "Your line is ready. Open Cloud Softphone to make your first call.";
@@ -12,7 +13,7 @@ const EVIDENCE = { known: true, currentTurnVerified: true, escalated: false,
   toolCalls: [{ name: "pl-action-adapter__pl_journey", input: {} }, { name: "pl-action-adapter__pl_next_step", input: {} }],
   toolResults: [{ ok: true }, { ok: false, isError: true }] };
 
-function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread = false, failOwnershipAfter = false, truncateTo = 0, beforePublicPost = null, dropCustomerFromFirstRead = false, stalePageWithoutDraft = false, dropSentFromSecondRead = false, frozenClock = false, duringDraftPost = null, duringModelTurn = null } = {}) {
+function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread = false, failOwnershipAfter = false, truncateTo = 0, beforePublicPost = null, dropCustomerFromFirstRead = false, stalePageWithoutDraft = false, dropSentFromSecondRead = false, frozenClock = false, duringDraftPost = null, duringModelTurn = null, selfUserId = RELAY_USER } = {}) {
   let reads = 0;
   let t = 1_797_000_000_000;
   const posted = [], statuses = [], logs = [], thread = [];
@@ -37,7 +38,8 @@ function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread
       if (failDraft && opts.private === true && content.startsWith("DRAFT")) throw new Error("chatwoot 500");
       if (beforePublicPost && opts.private !== true) { const hook = beforePublicPost; beforePublicPost = null; hook(api); }
       if (duringDraftPost && opts.private === true && content.startsWith("DRAFT")) { const hook = duringDraftPost; duringDraftPost = null; hook(api); }
-      const m = { id: ++nextId, content, private: opts.private === true, message_type: 1, sender_type: "AgentBot", created_at: Math.floor(t / 1000) };
+      // PRODUCTION SHAPE (measured 2026-10-15): the relay posts as a Chatwoot USER, id 20 "PL Relay Bot" - not as an AgentBot.
+      const m = { id: ++nextId, content, private: opts.private === true, message_type: 1, sender_type: "User", sender_id: RELAY_USER, created_at: Math.floor(t / 1000) };
       posted.push({ content, private: opts.private === true }); thread.push(m); return m;
     },
     async toggleStatus(id, s) { statuses.push(s); row.status = s; }, async assignOwner() {}, async assignTeam() {},
@@ -49,7 +51,7 @@ function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread
     async inspectTurn() { return structuredClone(EVIDENCE); },
   };
   const relay = createRelay({ scope: SCOPE, ownerUserId: 16, chatwoot, seldon, requireCapability: true, conversationStateKey: "synthetic-state-key-material-long-enough-32",
-    now: () => (frozenClock ? t : (t += 1000)), logger: (o) => logs.push(o), supervisedHoldMs: holdMs, traceNotes, sleep });
+    now: () => (frozenClock ? t : (t += 1000)), logger: (o) => logs.push(o), supervisedHoldMs: holdMs, selfUserId, traceNotes, sleep });
   const conv = { id: 41, status: "pending", meta: { sender: { id: 541 } } };
   const customer = (id = 7001, content = "Hi") => {   // the incoming message is also in Chatwoot's thread, as in production
     if (!thread.some((m) => m.id === id)) thread.push({ id, content, private: false, message_type: 0, sender_type: "Contact", created_at: Math.floor(t / 1000) });
@@ -57,9 +59,12 @@ function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread
   };
   const staffMsg = (id, content, priv = true) => ({ event: "message_created", id, content, message_type: "outgoing", private: priv, sender: { type: "user", id: 16 }, account: { id: 2 }, inbox: { id: 11 }, conversation: conv });
   // a staff message stored in Chatwoot's thread (what listMessages returns) WITHOUT its webhook having reached the relay
-  const storeStaff = (content, priv) => thread.push({ id: ++nextId, content, private: priv, message_type: 1, sender_type: "User", created_at: Math.floor(t / 1000) });
+  const storeStaff = (content, priv) => thread.push({ id: ++nextId, content, private: priv, message_type: 1, sender_type: "User", sender_id: 16, created_at: Math.floor(t / 1000) });
+  // the relay/adapter's OWN post stored in the thread (same Chatwoot user as the relay) - must never count as staff
+  const storeSelf = (content) => thread.push({ id: ++nextId, content, private: false, message_type: 1, sender_type: "User", sender_id: RELAY_USER, created_at: Math.floor(t / 1000) });
+  const selfMsg = (id, content) => ({ event: "message_created", id, content, message_type: "outgoing", private: false, sender: { type: "user", id: RELAY_USER }, account: { id: 2 }, inbox: { id: 11 }, conversation: conv });
   const until = async (pred) => { for (let i = 0; i < 200 && !pred(); i++) await new Promise((r) => setImmediate(r)); assert.ok(pred(), "condition never became true"); };
-  const api = { relay, posted, statuses, logs, row, seldon, customer, staffMsg, storeStaff, until, release: () => release && release(), get waiting() { return release !== null; } };
+  const api = { relay, posted, statuses, logs, row, seldon, customer, staffMsg, storeStaff, storeSelf, selfMsg, until, release: () => release && release(), get waiting() { return release !== null; } };
   return api;
 }
 const publicTexts = (f) => f.posted.filter((m) => !m.private).map((m) => m.content);
@@ -308,4 +313,37 @@ test("PASS-6 FINDING: a STALE page (holds the customer message but not the draft
   const g = fixture({ holdMs: 20000 });
   await heldRun(g);
   assert.deepEqual(publicTexts(g), [MODEL_TEXT], "POSITIVE TWIN: a fresh page that holds the draft lets the send through");
+});
+
+test("PRODUCTION SHAPE: the relay's OWN posts (Chatwoot user 20) during a turn never suppress the draft - webhook and thread views", async () => {
+  const f = fixture({ holdMs: 20000, duringModelTurn: (fx) => { fx.relay.accept(fx.selfMsg(8600, "Your setup button is above")); fx.storeSelf("Your setup button is above"); } });
+  await heldRun(f);
+  assert.deepEqual(publicTexts(f), [MODEL_TEXT], "the agent reply still goes out");
+  assert.ok(!f.logs.some((l) => l.event === "reply_discarded"));
+  const g = fixture({ holdMs: 20000, duringModelTurn: (fx) => fx.storeStaff("Eric here.", false) });
+  await heldRun(g);
+  assert.deepEqual(publicTexts(g), [], "POSITIVE TWIN: a real staff user's reply in the same place still suppresses it");
+});
+
+test("decide(): the relay's own user id is never staff, even for a private @hold", () => {
+  const base = { event: "message_created", account: { id: 2 }, inbox: { id: 11 }, conversation: { id: 41, status: "pending", meta: { sender: { id: 541 } } }, id: 1 };
+  const d = (over) => decide(readEvent({ ...base, ...over }), { ...SCOPE, selfUserId: RELAY_USER }).act;
+  assert.notEqual(d({ content: "@hold", message_type: "outgoing", private: true, sender: { type: "user", id: RELAY_USER } }), "staff_hold");
+  assert.notEqual(d({ content: "hi", message_type: "outgoing", private: false, sender: { type: "user", id: RELAY_USER } }), "staff_reply");
+  assert.equal(d({ content: "@hold", message_type: "outgoing", private: true, sender: { type: "user", id: 16 } }), "staff_hold", "CONTROL: a staff user still counts");
+});
+
+test("the hold REFUSES to run when the relay does not know its own user id (behaves exactly like hold OFF)", async () => {
+  const f = fixture({ holdMs: 20000, selfUserId: null });
+  await f.relay.accept(f.customer()).done;
+  assert.deepEqual(f.posted, [{ content: MODEL_TEXT, private: false }], "no draft, immediate reply");
+});
+
+test("resolveSelfUserId: the profile id when readable; otherwise null with a logged warning (never boot-fatal)", async () => {
+  const logs = [];
+  assert.equal(await resolveSelfUserId({ getProfile: async () => ({ id: 20, name: "PL Relay Bot" }) }, (o) => logs.push(o)), 20);
+  assert.equal(logs.length, 0);
+  assert.equal(await resolveSelfUserId({ getProfile: async () => { throw new Error("HTTP 401"); } }, (o) => logs.push(o)), null);
+  assert.equal(await resolveSelfUserId({ getProfile: async () => ({}) }, (o) => logs.push(o)), null);
+  assert.equal(logs.filter((l) => l.event === "config_ignored").length, 2);
 });

@@ -98,6 +98,16 @@ export function buildPresence({ env, logger, fallbackPhoneNumberId = null, readF
   }
 }
 
+/** War room: the relay's own Chatwoot user id, read once at boot. Null (and the hold OFF, logged) when it cannot be read - never boot-fatal. */
+export async function resolveSelfUserId(chatwoot, logger = () => {}) {
+  try {
+    const p = await chatwoot.getProfile();
+    if (Number.isSafeInteger(p?.id) && p.id > 0) return p.id;
+  } catch { /* logged below */ }
+  logger({ event: "config_ignored", key: "RELAY_SUPERVISED_HOLD_MS", reason: "the relay could not read its own Chatwoot user id; supervised hold is OFF" });
+  return null;
+}
+
 /** War room: RELAY_SUPERVISED_HOLD_MS - unset/empty = 0 (off); a whole number 0..60000 = that hold; anything else = 0 with a logged warning. */
 export function parseSupervisedHoldMs(raw, logger = () => {}) {
   if (raw === undefined || raw === null || String(raw).trim() === "") return 0;
@@ -167,8 +177,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   // War room (owner 2026-10-15): supervised hold and staff trace notes. OPTIONAL and never boot-fatal: a bad value means OFF, logged.
   const supervisedHoldMs = parseSupervisedHoldMs(env.RELAY_SUPERVISED_HOLD_MS, logger);
   const traceNotes = env.RELAY_TRACE_NOTES === "1";
+  const chatwoot = chatwootClient({ baseUrl: need("CHATWOOT_BASE_URL"), accountId, token: botToken });
+  const selfUserId = supervisedHoldMs > 0 ? await resolveSelfUserId(chatwoot, logger) : null;
   const relay = createRelay({
-    supervisedHoldMs,
+    supervisedHoldMs: selfUserId ? supervisedHoldMs : 0,
+    selfUserId,
     traceNotes,
     adapter,
     presence,
@@ -178,12 +191,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     requireCapability,
     conversationStateKey,
     plConcierge: plAssertionsEnabled ? { key: plAssertionKey, kid: plKid, bridgeKey: plContextKey, bridgeKid: plContextKid, phoneNumberId: plPhoneNumberId } : null,
-    chatwoot: chatwootClient({ baseUrl: need("CHATWOOT_BASE_URL"), accountId, token: botToken }),
+    chatwoot,
     seldon: seldonClient({ baseUrl: need("SF_BASE_URL"), slug: agentSlug, workspaceId, agentId, token: sfToken }),
     logger,
   });
   const port = Number(env.PORT ?? 3000);
   createServer(createHandler({ secret, relay, logger })).listen(port, () =>
-    logger({ event: "boot", port, accountId, inboxId, escalationReadback: escalationReadback === "1" && sfToken !== null, adapterActions: adapter !== null, presence: presence !== null, supervisedHoldMs, traceNotes }),
+    logger({ event: "boot", port, accountId, inboxId, escalationReadback: escalationReadback === "1" && sfToken !== null, adapterActions: adapter !== null, presence: presence !== null, supervisedHoldMs: selfUserId ? supervisedHoldMs : 0, selfUserIdKnown: selfUserId !== null, traceNotes }),
   );
 }
