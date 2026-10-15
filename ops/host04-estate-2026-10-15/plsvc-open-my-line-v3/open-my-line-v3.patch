@@ -1,0 +1,456 @@
+diff --git a/app/go/[code]/route.ts b/app/go/[code]/route.ts
+index 5d1089e..3d97703 100644
+--- a/app/go/[code]/route.ts
++++ b/app/go/[code]/route.ts
+@@ -46,7 +46,7 @@ import { buildInAppBrowserEscapeBody } from '@/app/lib/wa-inapp-escape-page'
+ export const dynamic = 'force-dynamic'
+ 
+ /**
+- * Where "back to your Isola app" should send someone.
++ * Where "back to your EPIC app" should send someone.
+  *
+  * Derived from ISOLA_SIGNIN_URL -- the SAME setting /api/lite/wa-open
+  * redirects to -- rather than hardcoded. This link previously pointed at
+@@ -197,7 +197,7 @@ function launchHandoffPage(h: Handoff, platform: Platform, did?: string): NextRe
+     // A way back, always. appBase() returns '' for anything that is not a
+     // plain https origin, so a bad setting renders no link rather than
+     // emitting something executable into an href.
+-    (appBase() ? `<p class="muted" style="margin-top:6px"><a href="${esc(appBase())}" style="color:#4b7a33;font-weight:700">&larr; Back to Isola</a></p>` : '') +
++    (appBase() ? `<p class="muted" style="margin-top:6px"><a href="${esc(appBase())}" style="color:#4b7a33;font-weight:700">&larr; Back to EPIC</a></p>` : '') +
+     `<script>(function(){var u=${jsString(uri)};var armed=false;var caught=false;var timer=null;` +
+     `function show(id){['launching','install','opened'].forEach(function(x){document.getElementById(x).hidden=(x!==id)});}` +
+     `function go(){armed=true;caught=false;show('launching');try{window.location.href=u}catch(e){}` +
+@@ -221,13 +221,13 @@ function launchHandoffPage(h: Handoff, platform: Platform, did?: string): NextRe
+ 
+ function html(body: string): NextResponse {
+   return new NextResponse(
+-    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Set up Cloud Softphone · Isola</title>` +
++    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Set up Cloud Softphone · EPIC</title>` +
+       `<style>body{font-family:-apple-system,system-ui,sans-serif;margin:0;background:#f5f3ee;color:#1b2a1f}.brand{display:flex;align-items:center;justify-content:center;gap:8px;padding:22px 0 4px;font-weight:700;font-size:18px;color:#1b2a1f}.brand i{display:inline-block;height:10px;width:10px;border-radius:50%;background:#5cb22e;box-shadow:0 0 0 4px rgba(92,178,46,.18)}.kicker{color:#4b7a33;font-size:12px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;margin:0 0 6px}` +
+       `.card{max-width:420px;margin:0 auto;padding:32px 22px;text-align:center}` +
+       `h2{font-size:22px;margin:.2em 0}.btn{display:block;background:#5cb22e;color:#fff;padding:16px;border-radius:12px;text-decoration:none;font-size:18px;font-weight:600;border:0;width:100%;cursor:pointer}` +
+       `.btn-secondary{display:block;background:transparent;color:#555;padding:14px;border-radius:12px;text-decoration:none;font-size:15px;font-weight:600;border:1px solid #ccc;width:100%;cursor:pointer;box-sizing:border-box;margin-top:14px}` +
+       `.muted{color:#666;font-size:14px;line-height:1.5}.did{font-size:20px;font-weight:700}</style></head>` +
+-      `<body><div class="brand"><i></i>Isola</div><div class="card"><p class="kicker">Cloud Softphone setup</p>${body}</div></body></html>`,
++      `<body><div class="brand"><i></i>EPIC</div><div class="card"><p class="kicker">Cloud Softphone setup</p>${body}</div></body></html>`,
+     { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } },
+   )
+ }
+@@ -247,10 +247,9 @@ function html(body: string): NextResponse {
+  */
+ function activationUnavailablePage(): NextResponse {
+   return html(
+-    `<h2>Setup is temporarily unavailable</h2>` +
+-      `<p class="muted">We&apos;re improving how calling credentials are delivered, so app setup links are paused.<br><br>` +
+-      `<b>If your app is already set up it keeps working</b> - nothing about your line or your number has changed.` +
+-      `<br><br>Setup links work for ${Math.round(NONCE_TTL_MS / 60_000)} minutes. Reply <b>resend</b> in your EPIC WhatsApp chat for a fresh one, or reply <b>help</b> and someone will set your device up with you.</p>` +
++    `<h2>This setup link is no longer valid</h2>` +
++      `<p class="muted">It may have expired or been replaced. <b>If your app is already set up, it keeps working</b> - nothing about your line or number has changed.` +
++      `<br><br>To get a fresh link, tap <b>Open my line</b> or reply <b>new link</b> in your EPIC WhatsApp chat.</p>` +
+       // RESOLVED 2026-09-02. This used to be hardcoded to
+       // isola-connect.vercel.app with a note that app.isola.epic.dm pointed at
+       // "an unrelated, stale host (a leftover marketing page)". That was true
+@@ -262,7 +261,7 @@ function activationUnavailablePage(): NextResponse {
+       // sending customers to a DIFFERENT ORIGIN where their session does not
+       // exist. Reading the setting means the next move corrects itself.
+       (appBase()
+-        ? `<a class="btn-secondary" href="${esc(appBase())}">&larr; Back to your Isola app</a>`
++        ? `<a class="btn-secondary" href="${esc(appBase())}">&larr; Back to EPIC</a>`
+         : ''),
+   )
+ }
+@@ -316,6 +315,23 @@ function chatActivatePage(req: NextRequest, nonce: string, did?: string): NextRe
+   )
+ }
+ 
++/**
++ * A chat-verified link that was already used on a phone, opened in a browser that does not hold its binding. Credential-free and code-free:
++ * the code to the customer's OWN WhatsApp goes out only when they tap the button (a POST), so a GET - preview bot, prefetch, a visitor who
++ * holds the URL - sends nothing and releases nothing.
++ */
++function chatReopenPage(req: NextRequest, nonce: string, did?: string): NextResponse {
++  return html(
++    `<h2>Open your line on this phone</h2>` +
++      (did ? `<p class="did">${esc(did)}</p>` : '') +
++      `<p class="muted">This setup link was already used. To open your line on this phone, we will send a 6-digit code to your EPIC WhatsApp chat.</p>` +
++      `<form method="POST" action="/go/${encodeURIComponent(nonce)}">` +
++      `<input type="hidden" name="resend" value="1">` +
++      `<button class="btn" type="submit">Send me a code on WhatsApp</button></form>` +
++      stuckFallbackSection(req, nonce),
++  )
++}
++
+ /** A chat tap that did not come from this service's own landing page. Credential-free. */
+ function chatTapRefusedPage(): NextResponse {
+   const r = html(
+@@ -586,7 +602,13 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ cod
+     // signup-session hand-off, so a session cookie cannot turn a GET into a
+     // release either. The customer's TAP (POST chat=1 + this page's token,
+     // same origin) claims the first hand-off.
+-    if (begun.chatVerified) return chatActivatePage(_req, code, begun.did)
++    // A chat link that is already bound (credential released once) is NOT offered to a bare tap again: without the binding cookie the
++    // browser falls through to the code sent to the customer's own WhatsApp below (the "Open my line" re-open; plan v1.9, 2026-10-15).
++    if (begun.chatVerified && !begun.handedOff) return chatActivatePage(_req, code, begun.did)
++    // ... and a bound chat link in a browser without the binding cookie gets a page that ASKS for a code - sent only on an explicit tap (POST),
++    // never on a GET (link previews, prefetch, a visitor), and BEFORE the signup-session shortcut below so that cookie cannot turn a GET into a
++    // release (Codex #231 P1, still in force; independent review 2026-10-15).
++    if (begun.chatVerified) return chatReopenPage(_req, code, begun.did)
+     if (sessionProvedNow(begun, sessionUserId)) {
+       return handoff(code, begun, _req, { setCookie: true })
+     }
+@@ -729,7 +751,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ cod
+     if (begun.state === 'verified' && handoffCookieProves(req.cookies.get(HANDOFF_COOKIE)?.value, code)) {
+       return handoff(code, begun, req, { setCookie: false })
+     }
+-    if (begun.state === 'verified' && begun.chatVerified) {
++    if (begun.state === 'verified' && begun.chatVerified && !begun.handedOff) {
+       return handoff(code, begun, req, { setCookie: true, firstBindOnly: true })
+     }
+     // Not a chat-verified link: exactly the ordinary code path.
+diff --git a/app/lib/lite-activation.ts b/app/lib/lite-activation.ts
+index f93e4bb..42f03cf 100644
+--- a/app/lib/lite-activation.ts
++++ b/app/lib/lite-activation.ts
+@@ -121,6 +121,8 @@ function digitsOf(s: string | null | undefined): string {
+ // after the message was read. A slower customer re-requests a code, which is a
+ // fail-safe path, not a failure.
+ const OTP_TTL_MS = 5 * 60 * 1000
++/** Minimum gap between two forced code sends for the same chat link (see beginActivation). */
++const OTP_RESEND_COOLDOWN_MS = 60 * 1000
+ const OTP_MAX_ATTEMPTS = 5
+ 
+ function sha(s: string): string {
+@@ -330,7 +332,7 @@ export async function beginActivation(
+      */
+     deferOtp?: boolean
+   } = {},
+-): Promise<{ state: GoState; sipUsername?: string; did?: string; userId?: string; nonceExpiresAt?: number; chatVerified?: boolean }> {
++): Promise<{ state: GoState; sipUsername?: string; did?: string; userId?: string; nonceExpiresAt?: number; chatVerified?: boolean; handedOff?: boolean }> {
+   const r = await loadRow(nonce)
+   if (!r) return { state: 'expired' }
+   const m = r.m
+@@ -341,7 +343,9 @@ export async function beginActivation(
+   if (Date.now() > (m.nonceExpiresAt ?? 0)) return { state: 'expired' }
+   // `force` on a verified row is the second-browser path: a fresh code goes
+   // out and this browser must type it to earn its own handoff cookie.
+-  if (m.verified && !force) return { state: 'verified', sipUsername: m.sipUsername, did: m.did, userId: m.userId, nonceExpiresAt: m.nonceExpiresAt, chatVerified: m.chatVerified === true }
++  // handedOff: the credential has already been released once for this link (xmlFetched). The route uses it to decide that a chat link
++  // which is already bound is re-opened by the bound browser (cookie) or by a code sent to the customer's OWN WhatsApp - never by a bare tap.
++  if (m.verified && !force) return { state: 'verified', sipUsername: m.sipUsername, did: m.did, userId: m.userId, nonceExpiresAt: m.nonceExpiresAt, chatVerified: m.chatVerified === true, handedOff: m.xmlFetched === true }
+ 
+   // NOT A HUMAN: report, never act. Measured 2026-09-15 00:33:15Z — WhatsApp's
+   // link-preview fetcher (UA "WhatsApp/2.2635.100 W") opened a pasted /go link
+@@ -361,11 +365,15 @@ export async function beginActivation(
+     return { state: 'verified', sipUsername: m.sipUsername, did: m.did, userId: m.userId, nonceExpiresAt: m.nonceExpiresAt }
+   }
+ 
+-  if (force || !m.otpHash || Date.now() > (m.otpExpiresAt ?? 0)) {
++  // COOLDOWN (chat links only): a forced re-send within OTP_RESEND_COOLDOWN_MS keeps the code already sent (and its attempt counter) instead
++  // of issuing another, so repeated taps cannot flood the owner's WhatsApp or reset the attempt limit. Non-chat links behave exactly as before.
++  const coolingDown = force && m.chatVerified === true && Date.now() - Number(m.otpSentAt ?? 0) < OTP_RESEND_COOLDOWN_MS && !!m.otpHash && Date.now() <= (m.otpExpiresAt ?? 0)
++  if (!coolingDown && (force || !m.otpHash || Date.now() > (m.otpExpiresAt ?? 0))) {
+     const code = generateOtp()
+     m.otpHash = sha(code)
+     m.otpExpiresAt = Date.now() + OTP_TTL_MS
+     m.otpAttempts = 0
++    m.otpSentAt = Date.now()
+     await prisma.agentActivity.update({ where: { id: r.id }, data: { metadata: m } }).catch(() => null)
+     if (m.ownerPhone) {
+       try {
+diff --git a/app/lib/lite-registration-followups.ts b/app/lib/lite-registration-followups.ts
+index bd329f3..76052fd 100644
+--- a/app/lib/lite-registration-followups.ts
++++ b/app/lib/lite-registration-followups.ts
+@@ -159,12 +159,33 @@ export async function deliverRegistrationFollowup(args: {
+  * retried after handback exactly as before; a definitive "no" (stopped, outside the window, no conversation, state already
+  * moved on, already delivered) is SETTLED - stamped, with the reason - so it is never knocked on again.
+  */
+-async function deliverViaConcierge(acct: { ownerPhone: string | null }, row: { id: string; metadata: any }, m: any, key: FollowupKey): Promise<FollowupResult> {
++/** True when a DIFFERENT lite_activation row of the same account already carries a delivered (or settled-as-heard) stamp for this verdict. Fails closed to "not spoken" only on a read error (the caller then lets the normal dedupe decide). */
++async function spokenOnEarlierHandoff(liteAccountId: string, exceptRowId: string, key: FollowupKey): Promise<boolean> {
++  const rows = await prisma.agentActivity.findMany({ where: { type: 'lite_activation', metadata: { path: ['liteAccountId'], equals: liteAccountId } }, select: { id: true, metadata: true } })
++  // Only a DELIVERED stamp counts. settle() also stamps definitive NON-deliveries (STOP, outside the 24 h window, no conversation, state moved on):
++  // those never reached the customer, so a later valid hand-off must still be allowed to celebrate.
++  return rows.some((r: any) => {
++    if (r.id === exceptRowId) return false
++    const md = r.metadata ?? {}
++    if (!(md.followups ?? {})[key]) return false
++    return !NOT_DELIVERED_SETTLEMENTS.has(String((md.followupsSettled ?? {})[key] ?? ''))
++  })
++}
++const NOT_DELIVERED_SETTLEMENTS = new Set(['stopped', 'outside_window', 'no_conversation', 'superseded_by_state'])
++
++async function deliverViaConcierge(acct: { id?: string; ownerPhone: string | null }, row: { id: string; metadata: any }, m: any, key: FollowupKey): Promise<FollowupResult> {
+   const heldEarlier = !!((m.followupsHeld ?? {}) as Record<string, number>)[key]
+   if (heldEarlier && (key === 'stalled:link_not_opened' || key === 'stalled:no_handoff')) {
+     await supersede(row.id, m, key)
+     return { key, action: 'superseded_by_takeover' }
+   }
++  // ONCE PER ACCOUNT for the celebrations: a later hand-off row (a re-activation after the first link expired, e.g. via "Open my line")
++  // is a new row with no stamps, and would otherwise celebrate again - "Yay, your phone is online" every time. Already spoken on ANY earlier
++  // hand-off of this account = settled, not sent. Stalled nudges stay per hand-off.
++  if ((key === 'activated' || key === 'first_call') && acct.id) {
++    const spoken = await spokenOnEarlierHandoff(acct.id, row.id, key).catch(() => false)
++    if (spoken) { await settle(row.id, m, key, 'already_celebrated_for_account'); return { key, action: 'already_sent', detail: 'already_celebrated_for_account' } }
++  }
+   const { sendProactiveViaAdapter } = await import('@/app/lib/pl-concierge/proactive')
+   const r = await sendProactiveViaAdapter({ waId: String(acct.ownerPhone ?? ''), key, ref: row.id })
+   if (r.code === 'sent') {
+@@ -183,7 +204,7 @@ async function deliverViaConcierge(acct: { ownerPhone: string | null }, row: { i
+ }
+ 
+ /** rc12: the first successful call on an activated hand-off (Magnus CDR via getFirstCallStatus), once per hand-off. */
+-export async function deliverFirstCallFollowup(args: { acct: { ownerPhone: string | null }; row: { id: string; metadata: any } }): Promise<FollowupResult> {
++export async function deliverFirstCallFollowup(args: { acct: { id?: string; ownerPhone: string | null }; row: { id: string; metadata: any } }): Promise<FollowupResult> {
+   if ((process.env.REGISTRATION_FOLLOWUPS ?? 'direct') !== 'chatwoot') return { key: 'first_call', action: 'disabled' }
+   const m = (args.row.metadata ?? {}) as any
+   if (handoffBeforeFollowupCutoff(m)) return { key: 'first_call', action: 'disabled', detail: 'before_cutoff' }
+diff --git a/app/lib/lite-softphone-activation.ts b/app/lib/lite-softphone-activation.ts
+index e6ed845..d40be18 100644
+--- a/app/lib/lite-softphone-activation.ts
++++ b/app/lib/lite-softphone-activation.ts
+@@ -49,6 +49,8 @@ import { prisma } from '@/app/lib/prisma'
+  * (Codex #231).
+  */
+ export const REUSE_MIN_REMAINING_MS = 5 * 60 * 1000
++/** A bound chat link is re-offered for ALL but its last half-minute: a replacement minted while it is still bound-and-live would be revoked by the one-bound-link rule. */
++export const REUSE_MIN_REMAINING_BOUND_MS = 30 * 1000
+ 
+ export async function findOutstandingActivationUrl(userId: string, opts: { chatVerifiedSender?: string } = {}): Promise<string | null> {
+   return (await findOutstandingActivation(userId, opts))?.url ?? null
+@@ -74,8 +76,13 @@ export async function findOutstandingActivation(userId: string, opts: { chatVeri
+     const now = Date.now()
+     for (const r of rows) {
+       const m = (r.metadata ?? {}) as any
+-      if (m.xmlFetched === true || m.revokedAt || !m.nonce) continue
+-      if ((m.nonceExpiresAt ?? 0) - now < REUSE_MIN_REMAINING_MS) continue
++      if (m.revokedAt || !m.nonce) continue
++      // A BOUND (already handed-off) CHAT link is re-offered to the same sender while it is still live - "Open my line" must not mint a
++      // second chat link that the one-bound-link rule (Codex #231) would revoke. Re-opening it needs the binding cookie or a code sent to
++      // the customer's own WhatsApp (route). A bound OTP-gated link is never re-offered, as before.
++      const bound = m.xmlFetched === true
++      if (bound && !(wantChat && m.chatVerified === true)) continue
++      if ((m.nonceExpiresAt ?? 0) - now < (bound ? REUSE_MIN_REMAINING_BOUND_MS : REUSE_MIN_REMAINING_MS)) continue
+       if ((m.chatVerified === true) !== wantChat) continue
+       // A chat link is handed back only to the SAME sender it was minted for.
+       if (wantChat && m.chatVerifiedPhone !== wantSender) continue
+diff --git a/test/go-chat-verified-activation.test.ts b/test/go-chat-verified-activation.test.ts
+index 6a9fa8a..43884ef 100644
+--- a/test/go-chat-verified-activation.test.ts
++++ b/test/go-chat-verified-activation.test.ts
+@@ -163,6 +163,23 @@ async function tap(nonce: string, cookie = '', o: { token?: string | null; origi
+   return res
+ }
+ const nonceOf = (url: string) => url.split('/go/')[1]
++
++/** Tap "Send me a code on WhatsApp" on the re-open page (POST resend=1). */
++async function postResend(nonce: string, cookie = '') {
++  const fd = new FormData(); fd.set('resend', '1')
++  const req = new NextRequest(`https://bff.epic.dm/go/${nonce}`, { method: 'POST', body: fd, headers: { ...HUMAN, ...(cookie ? { cookie } : {}) } })
++  const res = await POST(req, { params: Promise.resolve({ code: nonce }) })
++  await new Promise(r => setTimeout(r, 25))
++  return res
++}
++/** Type the code the customer received in WhatsApp (the OTP form's POST). */
++async function postCode(nonce: string, code: string, cookie = '') {
++  const fd = new FormData(); fd.set('otp', code)
++  const req = new NextRequest(`https://bff.epic.dm/go/${nonce}`, { method: 'POST', body: fd, headers: { ...HUMAN, ...(cookie ? { cookie } : {}) } })
++  const res = await POST(req, { params: Promise.resolve({ code: nonce }) })
++  await new Promise(r => setTimeout(r, 25))
++  return res
++}
+ const row = () => H.store.rows.find((r: any) => r.type === 'lite_activation')
+ 
+ describe('chat-verified link: no OTP, first browser binds', () => {
+@@ -221,14 +238,54 @@ describe('chat-verified link: no OTP, first browser binds', () => {
+     expect(await again.text()).toContain('csc:')
+   })
+ 
+-  it('a SECOND browser (forwarded link, no cookie) opening it after the first open is REFUSED — no credential, no code sent', async () => {
++  it('a SECOND browser (forwarded link, no cookie) opening a BOUND link: a GET sends NOTHING and releases NOTHING; an explicit tap sends ONE code to the account owner, rate-limited', async () => {
+     const m = await mintActivationLink('canary1', OWNER, undefined, undefined, { chatVerifiedSender: OWNER })
+-    await tap(nonceOf(m.url))                             // the customer's own first tap
+-    const second = await tap(nonceOf(m.url))              // someone else, no cookie
+-    const page = await second.text()
+-    expect(page).toContain('This link was already used')
++    await tap(nonceOf(m.url))                             // the customer's own first tap (binds browser 1)
++    SENT.length = 0
++    const landing = await get(nonceOf(m.url))             // someone else, no cookie
++    const page = await landing.text()
++    expect(page).toContain('Send me a code on WhatsApp')  // asks; does not send
++    expect(page).not.toContain('name="chat" value="1"')   // no bare-tap button
+     expect(page).not.toContain('csc:')
+     expect(page.toLowerCase()).not.toContain(SIP_PASS.toLowerCase())
++    expect(SENT).toHaveLength(0)                          // a GET (preview bot, prefetch, a visitor) sends no code
++    await get(nonceOf(m.url)); await get(nonceOf(m.url)) // ...however many times it is fetched
++    expect(SENT).toHaveLength(0)
++    const asked = await (await postResend(nonceOf(m.url))).text()   // the explicit tap
++    expect(asked).toContain('6-digit code')
++    expect(SENT).toHaveLength(1)                          // ONE code, to the account's owner phone
++    await postResend(nonceOf(m.url)); await postResend(nonceOf(m.url))
++    expect(SENT).toHaveLength(1)                          // cooldown: repeated taps do not flood the owner or reset the attempt limit
++    const bare = await (await tap(nonceOf(m.url))).text() // a bare chat tap from that browser is not enough either
++    expect(bare).toContain('6-digit code'); expect(bare).not.toContain('csc:')
++    expect(SENT).toHaveLength(1)
++    expect(await (await postCode(nonceOf(m.url), '000000')).text()).not.toContain('csc:')   // a wrong code earns nothing
++  })
++
++  it('...a signup-session cookie must NOT turn that GET into a release (the bypass the independent review found), and typing the real code re-opens it: credential again, binding cookie issued, NO second first-signup hand-off', async () => {
++    const m = await mintActivationLink('canary1', OWNER, undefined, undefined, { chatVerifiedSender: OWNER })
++    await tap(nonceOf(m.url))
++    const notesAfterFirst = H.store.payloads.length
++    SENT.length = 0
++    ;(H as any).sessionUserId = 'canary1'                 // this browser proved the account at signup
++    const sessionGet = await (await get(nonceOf(m.url))).text()
++    expect(sessionGet).not.toContain('csc:')              // still no credential on a GET
++    expect(sessionGet).toContain('Send me a code on WhatsApp')
++    expect(SENT).toHaveLength(0)
++    ;(H as any).sessionUserId = null
++    await postResend(nonceOf(m.url))
++    const res = await postCode(nonceOf(m.url), SENT[SENT.length - 1])
++    expect(await res.text()).toContain('csc:')
++    expect(cookieOf(res)).toMatch(/^lite_go=/)
++    expect(row().metadata.handoffCount).toBe(2)           // a REPEAT hand-off of the same link
++    expect(H.store.payloads.length).toBe(notesAfterFirst) // no second 'handed to Cloud Softphone' note
++  })
++
++  it('CONTROL (positive twin): an UNBOUND chat link still gets the one-tap page, never a code', async () => {
++    const m = await mintActivationLink('canary1', OWNER, undefined, undefined, { chatVerifiedSender: OWNER })
++    const page = await (await get(nonceOf(m.url))).text()
++    expect(page).toContain('Set up my line in Cloud Softphone')
++    expect(page).not.toContain('6-digit code')
+     expect(SENT).toHaveLength(0)
+   })
+ 
+@@ -237,10 +294,10 @@ describe('chat-verified link: no OTP, first browser binds', () => {
+     row().metadata.nonceExpiresAt = Date.now() - 1
+     const page = await (await get(nonceOf(m.url))).text()
+     expect(page).not.toContain('csc:')
+-    expect(page).toContain('Setup is temporarily unavailable')
++    expect(page).toContain('This setup link is no longer valid')
+     const tapped = await (await tap(nonceOf(m.url))).text()
+     expect(tapped).not.toContain('csc:')
+-    expect(tapped).toContain('Setup is temporarily unavailable')
++    expect(tapped).toContain('This setup link is no longer valid')
+     expect(SENT).toHaveLength(0)
+   })
+ 
+@@ -331,6 +388,24 @@ describe('everything else keeps the OTP exactly as today (controls)', () => {
+   })
+ })
+ 
++describe('"Open my line" re-offers the live bound link instead of minting one the one-bound-link rule would revoke', () => {
++  it('a BOUND chat link is re-offered to the SAME sender while it is live; not to another sender, not an OTP link, not in its last half-minute', async () => {
++    const chat = await mintActivationLink('canary1', OWNER, undefined, undefined, { chatVerifiedSender: OWNER })
++    await tap(nonceOf(chat.url))
++    expect(await findOutstandingActivationUrl('canary1', { chatVerifiedSender: OWNER })).toBe(chat.url)
++    expect(await findOutstandingActivationUrl('canary1', { chatVerifiedSender: '17679999999' })).toBeNull()
++    expect(await findOutstandingActivationUrl('canary1')).toBeNull()                       // a web/PWA request is never handed a chat link
++    row().metadata.nonceExpiresAt = Date.now() + 10_000
++    expect(await findOutstandingActivationUrl('canary1', { chatVerifiedSender: OWNER })).toBeNull()   // about to expire: a fresh one will be minted
++  })
++  it('a REVOKED bound link is not re-offered', async () => {
++    const chat = await mintActivationLink('canary1', OWNER, undefined, undefined, { chatVerifiedSender: OWNER })
++    await tap(nonceOf(chat.url))
++    row().metadata.revokedAt = Date.now()
++    expect(await findOutstandingActivationUrl('canary1', { chatVerifiedSender: OWNER })).toBeNull()
++  })
++})
++
+ describe('the chat doors mint chat-verified links', () => {
+   it('"I\'ve installed it" (handleInstalledButton) sends a chat-verified link, and the copy promises no code and 15 minutes', async () => {
+     const outcome = await handleInstalledButton({ phone: OWNER, userId: 'canary1', incomingPhoneId: '1023804347491554', gate: { purpose: 'conversation_reply', senderPath: 't', userId: 'canary1' } })
+diff --git a/test/go-first-call-note.test.ts b/test/go-first-call-note.test.ts
+index d76f788..7697f35 100644
+--- a/test/go-first-call-note.test.ts
++++ b/test/go-first-call-note.test.ts
+@@ -333,7 +333,7 @@ describe('/go — the link is redeemable for its TTL by the browser that typed t
+       const res = await get(nonce, HUMAN, c)
+       const page = await res.text()
+       expect(page).not.toContain('csc:')
+-      expect(page).toContain('resend')
++      expect(page).toContain('new link')   // the unavailable page now says how to get a fresh one: tap Open my line or reply "new link"
+     }
+   })
+ 
+diff --git a/test/lib/lite-registration-followups.test.ts b/test/lib/lite-registration-followups.test.ts
+index 7932312..12c1497 100644
+--- a/test/lib/lite-registration-followups.test.ts
++++ b/test/lib/lite-registration-followups.test.ts
+@@ -57,7 +57,8 @@ const H = vi.hoisted(() => {
+     }
+     return { code: 'allow_service_message', reason: 'ok', auditId: 'a' }
+   })
+-  return { store, fakePrisma, gateAndDispatch }
++  const proactive = vi.fn(async (_a: any) => ({ code: 'sent' as const }))
++  return { store, fakePrisma, gateAndDispatch, proactive }
+ })
+ 
+ vi.mock('@/app/lib/prisma', () => ({ prisma: H.fakePrisma }))
+@@ -66,6 +67,7 @@ vi.mock('@/app/lib/wa-send-gate', async (orig) => {
+   return { ...real, gateAndDispatch: (...a: any[]) => (H.gateAndDispatch as any)(...a), evaluateWaSend: vi.fn() }
+ })
+ vi.mock('@/app/lib/lite-signup', () => ({ generateOtp: () => '424242', sendOtpWhatsApp: async () => {} }))
++vi.mock('@/app/lib/pl-concierge/proactive', () => ({ sendProactiveViaAdapter: (a: any) => (H.proactive as any)(a) }))
+ vi.mock('@/app/lib/paperclip', () => ({ paperclipMirrorOutbound: async () => {} }))
+ vi.mock('@/app/lib/lite-activation-allowlist-store', () => ({ storedActivationAllowlist: () => [] }))
+ vi.mock('@/app/lib/runtime-settings', () => ({ getSetting: () => '' }))
+@@ -78,7 +80,7 @@ vi.mock('@/app/lib/lite-concierge', () => ({
+   mirrorStaffNote: async (_agent: any, _conv: string, _phone: string, text: string) => { H.store.staffNotes.push(text) },
+ }))
+ 
+-import { deliverRegistrationFollowup, followupKeyFor, handoffBeforeFollowupCutoff, STAFF_NOTE_PEER_ABSENT } from '@/app/lib/lite-registration-followups'
++import { deliverRegistrationFollowup, deliverFirstCallFollowup, followupKeyFor, handoffBeforeFollowupCutoff, STAFF_NOTE_PEER_ABSENT } from '@/app/lib/lite-registration-followups'
+ import { FIRST_CALL_NOTE_MESSAGE_ID, STALLED_NUDGE_MESSAGE_ID, LINK_EXPIRED_MESSAGE_ID, HANDOFF_NOTE_MESSAGE_ID } from '@/app/lib/lite-post-provision'
+ 
+ const SIP_PASS = 'THE-' + 'FOLLOWUP-SECRET-9'
+@@ -283,3 +285,49 @@ describe('REGISTRATION_FOLLOWUPS_NOT_BEFORE — the celebration speaks to NEW ha
+     expect(handoffBeforeFollowupCutoff({ chatVerifiedAt: Date.parse('2026-10-14T23:55:00Z') }, env)).toBe(false)
+   })
+ })
++
++describe('REGISTRATION_FOLLOWUPS=chatwoot — the celebration is once per ACCOUNT, not once per hand-off (owner 2026-10-15)', () => {
++  const act = { state: 'activated', reason: null, registeredAt: new Date() }
++  beforeEach(() => { H.proactive.mockClear(); process.env.REGISTRATION_FOLLOWUPS = 'chatwoot' })
++  it('POSITIVE CONTROL: the first hand-off of an account is celebrated through the adapter, once, and stamped', async () => {
++    const r = await deliver(act)
++    expect(r).toEqual({ key: 'activated', action: 'sent' })
++    expect(H.proactive).toHaveBeenCalledTimes(1)
++    expect(H.proactive.mock.calls[0][0]).toMatchObject({ key: 'activated', ref: 'act_handoff' })
++    expect(stored().metadata.followups.activated).toEqual(expect.any(Number))
++  })
++  it('a LATER hand-off row of an account that already heard it (e.g. a re-activation after "Open my line") is settled, not celebrated again', async () => {
++    H.store.rows.push({ id: 'act_earlier', type: 'lite_activation', summary: 'b'.repeat(32), createdAt: new Date(Date.now() - 3_600_000), resolved: false,
++      metadata: { nonce: 'b'.repeat(32), liteAccountId: 'la_1', followups: { activated: Date.now() - 3_000_000 } } })
++    const r = await deliver(act)
++    expect(r).toEqual({ key: 'activated', action: 'already_sent', detail: 'already_celebrated_for_account' })
++    expect(H.proactive).not.toHaveBeenCalled()
++    expect(stored().metadata.followupsSettled.activated).toBe('already_celebrated_for_account')
++  })
++  it('CONTROL: an earlier stamp on ANOTHER account never suppresses this account celebration', async () => {
++    H.store.rows.push({ id: 'act_other_account', type: 'lite_activation', summary: 'c'.repeat(32), createdAt: new Date(Date.now() - 3_600_000), resolved: false,
++      metadata: { nonce: 'c'.repeat(32), liteAccountId: 'la_OTHER', followups: { activated: Date.now() - 3_000_000 } } })
++    expect(await deliver(act)).toEqual({ key: 'activated', action: 'sent' })
++    expect(H.proactive).toHaveBeenCalledTimes(1)
++  })
++  it('an earlier verdict that was SETTLED AS NOT DELIVERED (outside the window / STOP / no conversation) does not silence a later valid celebration', async () => {
++    H.store.rows.push({ id: 'act_undelivered', type: 'lite_activation', summary: 'f'.repeat(32), createdAt: new Date(Date.now() - 3_600_000), resolved: false,
++      metadata: { nonce: 'f'.repeat(32), liteAccountId: 'la_1', followups: { activated: Date.now() - 3_000_000 }, followupsSettled: { activated: 'outside_window' } } })
++    expect(await deliver(act)).toEqual({ key: 'activated', action: 'sent' })
++    expect(H.proactive).toHaveBeenCalledTimes(1)
++  })
++  it('the first-call message is once per account too', async () => {
++    H.store.rows.push({ id: 'act_earlier2', type: 'lite_activation', summary: 'd'.repeat(32), createdAt: new Date(Date.now() - 3_600_000), resolved: false,
++      metadata: { nonce: 'd'.repeat(32), liteAccountId: 'la_1', followups: { first_call: Date.now() - 3_000_000 } } })
++    const r = await deliverFirstCallFollowup({ acct: ACCT, row: { id: row.id, metadata: row.metadata } })
++    expect(r).toMatchObject({ key: 'first_call', action: 'already_sent' })
++    expect(H.proactive).not.toHaveBeenCalled()
++  })
++  it('stalled nudges stay per hand-off (an earlier celebration does not silence a genuinely new problem)', async () => {
++    H.store.rows.push({ id: 'act_earlier3', type: 'lite_activation', summary: 'e'.repeat(32), createdAt: new Date(Date.now() - 3_600_000), resolved: false,
++      metadata: { nonce: 'e'.repeat(32), liteAccountId: 'la_1', followups: { activated: Date.now() - 3_000_000 } } })
++    await deliver({ state: 'stalled', reason: 'handoff_no_register', registeredAt: null } as any)
++    expect(H.proactive).toHaveBeenCalledTimes(1)
++    expect(H.proactive.mock.calls[0][0]).toMatchObject({ key: 'stalled:handoff_no_register' })
++  })
++})

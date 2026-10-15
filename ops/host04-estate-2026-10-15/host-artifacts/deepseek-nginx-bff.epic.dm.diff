@@ -1,0 +1,35 @@
+--- bff.epic.dm.bak-20261015T0633Z-pre-paylink-peel	2026-10-12 06:25:54.700753034 +0000
++++ bff.epic.dm	2026-10-15 06:33:31.305585531 +0000
+@@ -91,6 +91,32 @@
+     }
+ 
+ 
++    # PL cutover (pay link): hosted pay page reads/charges Personal Line card links on plsvc (host04) FIRST; a 404 (legacy link minted by this bff-v2) falls back to local.
++    location ^~ /api/internal/payment-link/ {
++        proxy_pass https://pl-edge.uplink.epic.dm;
++        proxy_ssl_server_name on;
++        proxy_ssl_name pl-edge.uplink.epic.dm;
++        proxy_http_version 1.1;
++        proxy_set_header Host pl-edge.uplink.epic.dm;
++        proxy_set_header X-Original-Host $host;
++        proxy_set_header X-Real-IP $remote_addr;
++        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
++        proxy_set_header X-Forwarded-Host $host;
++        proxy_set_header X-Forwarded-Proto $scheme;
++        proxy_read_timeout 60s;
++        proxy_intercept_errors on;
++        error_page 404 = @bff_internal_local;
++    }
++    location @bff_internal_local {
++        proxy_pass http://127.0.0.1:3005;
++        proxy_http_version 1.1;
++        proxy_set_header Host $host;
++        proxy_set_header X-Real-IP $remote_addr;
++        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
++        proxy_set_header X-Forwarded-Proto $scheme;
++        proxy_read_timeout 60s;
++    }
++
+     # BFF V2 internal ops routes (isolav2 on port 3005)
+     location /api/internal/ {
+         proxy_pass http://127.0.0.1:3005/api/internal/;
