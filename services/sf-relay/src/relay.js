@@ -258,9 +258,13 @@ export function decide(ev, scope) {
   if (ev.accountId !== scope.accountId || ev.inboxId !== scope.inboxId) return { act: "ignore", reason: "scope" };
   // War room (owner 2026-10-15): a staff PRIVATE note that starts with "@hold" stops this conversation's pending supervised draft.
   // Only a Chatwoot user (staff) can write a private note; a customer's message is never private and never counts.
-  if (ev.isPrivate && (ev.messageType === "outgoing" || ev.messageType === 1) && ev.senderType === "user" && /^@hold\b/i.test(ev.content)) {
+  // Chatwoot only lets members of THIS account post as a "user", and the webhook is account-scoped above.
+  const fromStaff = (ev.messageType === "outgoing" || ev.messageType === 1) && ev.senderType === "user" && Number.isSafeInteger(ev.senderId) && ev.senderId > 0;
+  if (fromStaff && ev.isPrivate && /^@hold\b/i.test(ev.content)) {
     return ev.conversationId === null ? { act: "ignore", reason: "no_ids" } : { act: "staff_hold" };
   }
+  // A staff member's own PUBLIC reply is recorded too, so a supervised draft never goes out on top of it (Codex review finding 1).
+  if (fromStaff && !ev.isPrivate && ev.conversationId !== null) return { act: "staff_reply" };
   const incoming = ev.messageType === "incoming" || ev.messageType === 0;
   if (!incoming) return { act: "ignore", reason: "not_incoming" };
   if (ev.isPrivate) return { act: "ignore", reason: "private" };
@@ -319,7 +323,8 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
   const sfConversation = new Map(); // chatwoot conversation id -> seldonframe conversation id
   const lastChoices = new Map(); // chatwoot conversation id -> { items, at } (rc10e: last verified buttons, in-memory, short-lived)
   const inflight = new Set();
-  const holds = new Map(); // war room: chatwoot conversation id -> time of the latest staff "@hold" note (in-memory; a restart drops the draft, never sends it)
+  const holds = new Map(); // war room: chatwoot conversation id -> id of the latest staff "@hold" note (in-memory; a restart drops the draft, never sends it)
+  const staffReplies = new Map(); // war room: chatwoot conversation id -> id of the latest staff PUBLIC reply seen on the webhook
 
   const log = (fields) => logger({ ts: new Date(now()).toISOString(), ...fields });
 
@@ -813,39 +818,105 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
       if (prev && now() - prev.at <= 15 * 60_000 && unofferedTaps(turn.text, null).length > 0 && unofferedTaps(turn.text, prev.items).length === 0) items = prev.items;
     }
     // War room supervised mode (owner 2026-10-15: 20 s): the model's reply is first shown to staff as a PRIVATE draft with the agent
-    // trace, and goes out after the hold unless staff type "@hold" or reply themselves (a staff reply turns the conversation Open,
-    // which the ownership re-read below already treats as a takeover). Deterministic adapter actions are not held: only model text is.
+    // trace, and goes out after the hold unless staff type "@hold" or reply themselves. Deterministic adapter actions are not held.
+    // ONE reference point (Codex pass 5): Chatwoot message ids only increase. ANY staff public reply or "@hold" note whose id is greater
+    // than the CUSTOMER message being answered means a person engaged after the customer spoke, so the draft is not sent. Nothing is ever
+    // cleared, so no window exists in which a staff action is lost; the webhook markers and the thread read apply the same rule.
+    const sinceCustomer = (id) => Number.isSafeInteger(id) && id > ev.messageId;
+    const byStaff = (m) => (m?.message_type === 1 || m?.message_type === "outgoing") && String(m?.sender_type ?? m?.sender?.type ?? "").toLowerCase() === "user";
     if (supervisedHoldMs > 0) {
-      const draftAt = now();
       const secs = Math.round(supervisedHoldMs / 1000);
-      const drafted = await safe("draft_note", () => chatwoot.postMessage(ev.conversationId,
-        `DRAFT - sends in ${secs} s unless you type @hold or reply yourself.\n\n${turn.text}\n\n${traceLine(inspection, items, turn.text)}`, { private: true }), ctx);
-      if (drafted) {
-        log({ event: "draft_posted", holdMs: supervisedHoldMs, chars: turn.text.length, ...ctx });
-        await sleep(supervisedHoldMs);
-        if ((holds.get(ev.conversationId) ?? -1) >= draftAt) {
-          holds.delete(ev.conversationId);
-          log({ event: "reply_held_by_staff", ...ctx });
-          return handoff(ev, "staff held the supervised draft; it was not sent", { tellCustomer: false });
-        }
-        let after;
-        try {
-          after = holdFromRecord(await chatwoot.getConversation(ev.conversationId));
-        } catch (err) {
-          log({ event: "ownership_unreadable", stage: "after_supervised_hold", error: err instanceof Error ? err.message : "unreadable", ...ctx });
-          return handoff(ev, "ownership could not be verified after the supervised hold; the draft was withheld", { tellCustomer: false });
-        }
-        if (after) {
-          log({ event: "reply_discarded", outcome: "takeover_during_supervised_hold", hold: after, ...ctx });
-          return;
-        }
-      } else {
-        // The hold only makes sense with a visible draft. Without one, the reply goes out exactly as it did before the war room.
+      let draft = null;
+      try {
+        draft = await chatwoot.postMessage(ev.conversationId,
+          `DRAFT - sends in ${secs} s unless you type @hold or reply yourself.\n\n${turn.text}\n\n${traceLine(inspection, items, turn.text)}`, { private: true });
+      } catch (err) {
+        log({ event: "chatwoot_write_failed", step: "draft_note", error: err instanceof Error ? err.message.slice(0, 160) : "failed", ...ctx });
+      }
+      if (!isRecord(draft)) {
+        // Supervision that staff cannot see is not supervision (Codex pass 1 finding 3). Withhold and bring in a person.
         log({ event: "draft_note_failed", ...ctx });
+        return handoff(ev, "the supervised draft could not be shown to staff; the reply was withheld", { tellCustomer: true });
+      }
+      const draftId = Number.isSafeInteger(draft.id) ? draft.id : null;
+      log({ event: "draft_posted", holdMs: supervisedHoldMs, chars: turn.text.length, ...ctx });
+      await sleep(supervisedHoldMs);
+      const staffHeld = () => sinceCustomer(holds.get(ev.conversationId));
+      const staffReplied = () => sinceCustomer(staffReplies.get(ev.conversationId));
+      if (staffHeld()) {
+        log({ event: "reply_held_by_staff", ...ctx });
+        return handoff(ev, "staff held the supervised draft; it was not sent", { tellCustomer: false });
+      }
+      if (staffReplied()) {
+        log({ event: "reply_discarded", outcome: "staff_replied_during_supervised_hold", ...ctx });
+        return;
+      }
+      let after;
+      try {
+        after = holdFromRecord(await chatwoot.getConversation(ev.conversationId));
+      } catch (err) {
+        log({ event: "ownership_unreadable", stage: "after_supervised_hold", error: err instanceof Error ? err.message : "unreadable", ...ctx });
+        return handoff(ev, "ownership could not be verified after the supervised hold; the draft was withheld", { tellCustomer: false });
+      }
+      if (after) {
+        log({ event: "reply_discarded", outcome: "takeover_during_supervised_hold", hold: after, ...ctx });
+        return;
+      }
+      // The webhook and the status can both lag a staff action: read the thread itself (Codex pass 1 finding 1).
+      let thread;
+      try {
+        const r = await chatwoot.listMessages(ev.conversationId);
+        thread = Array.isArray(r?.payload) ? r.payload : null;
+        if (!thread) throw new Error("no payload");
+      } catch (err) {
+        log({ event: "thread_unreadable", stage: "after_supervised_hold", error: err instanceof Error ? err.message.slice(0, 120) : "unreadable", ...ctx });
+        return handoff(ev, "the thread could not be read after the supervised hold; the draft was withheld", { tellCustomer: false });
+      }
+      // Chatwoot returns only the latest page. It is complete for this rule only if it still holds the customer's own message (passes 2-3).
+      // Codex pass 6: the page must also be at least as FRESH as the draft (the newest message this relay knows exists), so a stale page
+      // cannot pass. Freshness beyond the draft is the recorded best-effort instant, covered by the post-send check.
+      if (!thread.some((m) => m?.id === ev.messageId) || draftId === null || !thread.some((m) => m?.id === draftId)) {
+        log({ event: "thread_coverage_unknown", stage: "after_supervised_hold", page: thread.length, draftIdKnown: draftId !== null, ...ctx });
+        return handoff(ev, "too much happened in the thread to confirm nobody replied during the supervised hold; the draft was withheld", { tellCustomer: false });
+      }
+      const late = thread.filter((m) => sinceCustomer(m?.id) && byStaff(m));
+      if (late.some((m) => m.private === true && /^@hold\b/i.test(String(m.content ?? "").trim()))) {
+        log({ event: "reply_held_by_staff", via: "thread_read", ...ctx });
+        return handoff(ev, "staff held the supervised draft; it was not sent", { tellCustomer: false });
+      }
+      if (late.some((m) => m.private !== true)) {
+        log({ event: "reply_discarded", outcome: "staff_replied_during_supervised_hold", via: "thread_read", ...ctx });
+        return;
+      }
+      if (staffHeld() || staffReplied()) {
+        log({ event: "reply_discarded", outcome: "staff_acted_at_hold_end", ...ctx });
+        return;
       }
     }
-    const sent = await safe("reply", () => chatwoot.postMessage(ev.conversationId, turn.text, { private: false, items }), ctx);
+    let sentMsg = null;
+    const sent = await safe("reply", async () => { sentMsg = await chatwoot.postMessage(ev.conversationId, turn.text, { private: false, items }); }, ctx);
     log({ event: "reply", outcome: sent ? "sent" : "send_failed", chars: turn.text.length, buttons: items ? items.length : 0, ...ctx });
+    if (sent && supervisedHoldMs > 0) {
+      // Best effort in the final instant (dec-laneA-supervised-hold-final-instant-best-effort-2026-10-15): Chatwoot has no atomic
+      // "send only if nobody replied". Re-read the thread; a staff reply between the customer's message and this send is made VISIBLE
+      // to staff in a private note, and a page that cannot confirm it says so. Nothing is retracted or re-sent.
+      const UNCONFIRMED = "The agent's reply was sent after the supervised hold, but I could not confirm nobody replied at the same moment. Check the thread.";
+      try {
+        const r = await chatwoot.listMessages(ev.conversationId);
+        const page = Array.isArray(r?.payload) ? r.payload : null;
+        const sentId = Number.isSafeInteger(sentMsg?.id) ? sentMsg.id : null;
+        if (!page || sentId === null || !page.some((m) => m?.id === ev.messageId) || !page.some((m) => m?.id === sentId)) {
+          log({ event: "supervised_overlap_unconfirmed", ...ctx });
+          await safe("overlap_note", () => chatwoot.postMessage(ev.conversationId, UNCONFIRMED, { private: true }), ctx);
+        } else if (page.some((m) => sinceCustomer(m?.id) && m.id < sentId && byStaff(m) && m.private !== true)) {
+          log({ event: "supervised_overlap", ...ctx });
+          await safe("overlap_note", () => chatwoot.postMessage(ev.conversationId, "Heads up: a staff reply and the agent's draft went out at the same moment. Check the thread and correct anything the customer now has twice.", { private: true }), ctx);
+        }
+      } catch {
+        log({ event: "supervised_overlap_unconfirmed", ...ctx });
+        await safe("overlap_note", () => chatwoot.postMessage(ev.conversationId, UNCONFIRMED, { private: true }), ctx);
+      }
+    }
     if (sent && traceNotes && !(supervisedHoldMs > 0)) await safe("trace_note", () => chatwoot.postMessage(ev.conversationId, traceLine(inspection, items, turn.text), { private: true }), ctx);
     // rc10d monitor hook: a reply that names a button it does not carry is a wrong/missing next action (journey monitor exception).
     const missing = plConcierge ? unofferedTaps(turn.text, items) : [];
@@ -983,11 +1054,21 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
   function accept(payload) {
     const ev = readEvent(payload);
     const decision = decide(ev, scope);
+    if ((decision.act === "staff_hold" || decision.act === "staff_reply") && !(supervisedHoldMs > 0)) {
+      // Hold OFF: exactly the pre-war-room handling (a staff message is an ignored non-incoming event, logged identically).
+      log({ event: "ignored", reason: "not_incoming", conversationId: ev.conversationId, messageId: ev.messageId });
+      return { outcome: "ignored", reason: "not_incoming", done: Promise.resolve() };
+    }
     if (decision.act === "staff_hold") {
       // Recorded at once, outside the conversation's queue: the draft it targets is waiting INSIDE that queue.
-      holds.set(ev.conversationId, now());
+      holds.set(ev.conversationId, Math.max(holds.get(ev.conversationId) ?? 0, ev.messageId ?? 0));   // the latest staff @hold message id
       log({ event: "staff_hold", conversationId: ev.conversationId, messageId: ev.messageId });
       return { outcome: "accepted", reason: "staff_hold", done: Promise.resolve() };
+    }
+    if (decision.act === "staff_reply") {
+      staffReplies.set(ev.conversationId, Math.max(staffReplies.get(ev.conversationId) ?? 0, ev.messageId ?? 0));   // the latest staff reply message id
+      log({ event: "ignored", reason: "not_incoming", staffReplySeen: true, conversationId: ev.conversationId, messageId: ev.messageId });
+      return { outcome: "ignored", reason: "not_incoming", done: Promise.resolve() };
     }
     if (decision.act === "ignore") {
       log({ event: "ignored", reason: decision.reason, conversationId: ev.conversationId, messageId: ev.messageId, ...(decision.reason === "not_contact" ? { senderType: ev.senderType, senderShape: ev.senderShape } : {}) });
