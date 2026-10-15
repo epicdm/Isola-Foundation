@@ -721,3 +721,33 @@ test("rc10l tool-markup retry timeout: marker kept with the previous binding; th
   const r2 = restart(f); await r2.accept(messageFor(f, 7014, "What was I planning to do tomorrow?")).done;
   assert.equal(f.seldon.turnInputs.length, turns);
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// 2026-10-15 live (Chatwoot conv 528): Uplink's continuation capability expires after 24 h (PUBLIC_CONVERSATION_CAPABILITY_TTL_SECONDS). A customer who
+// came back after 31 h got 404 conversation_not_found and an instant handoff. An expired CONTINUATION now rotates exactly like the turn limit.
+const EXPIRED404 = { ok: false, reason: "http_404", error: "conversation_not_found", conversationId: null };
+test("expired continuation (404 conversation_not_found on an existing binding) -> ONE fresh Uplink conversation with carry-over, reply posted, no handoff", async () => {
+  const { f, seq } = await primed();
+  seq.push(EXPIRED404, ACCEPTED(4));
+  await run(f, messageFor(f, 7004, "Can I port my flow number in?"));
+  assert.equal(f.seldon.turnInputs[1].conversationId, "sf-conv", "the old conversation was tried first");
+  assert.equal(f.seldon.turnInputs[2].conversationId, null, "then a fresh one");
+  assert.match(f.seldon.turnInputs[2].message, /Earlier in this same WhatsApp chat/);
+  assert.ok(publicReplies(f).includes("rotated reply 4"));
+  assert.equal(handedOff(f), false);
+  const b = await storedBinding(f);
+  assert.equal(b.conversationId, "sf-conv-4"); assert.equal(b.phase, "ready");
+});
+test("expired-continuation CONTROLS: a 404 with no binding to continue, or a different 404 error, still hands off with no retry", async () => {
+  const fresh = fixture({ turnSeq: [EXPIRED404] });
+  fresh.chatwoot.listMessages = async () => ({ payload: [] });
+  await run(fresh);
+  assert.equal(fresh.seldon.turnInputs.length, 1, "a brand-new conversation's 404 is not rotated");
+  assert.equal(handedOff(fresh), true);
+  const { f, seq } = await primed();
+  seq.push({ ok: false, reason: "http_404", error: "agent_not_found", conversationId: null });
+  const before = f.seldon.turnInputs.length;
+  await run(f, messageFor(f, 7005, "hello"));
+  assert.equal(f.seldon.turnInputs.length, before + 1, "agent_not_found is not a continuation expiry: no rotation");
+  assert.equal(handedOff(f), true);
+});

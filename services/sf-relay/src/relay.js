@@ -705,8 +705,12 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
     // conversation and then answers 503 PUBLIC_CHAT_CONVERSATION_LIMIT - which made every WhatsApp customer's 6th message a handoff.
     // The customer's thread is long-lived; the Uplink conversation is not. Start ONE fresh Uplink conversation for the same Chatwoot
     // conversation (new session, re-minted signed context) and retry once; the agent re-reads verified state with pl_journey.
-    if (!turn.ok && turn.error === "PUBLIC_CHAT_CONVERSATION_LIMIT") {
-      log({ event: "uplink_conversation_rotated", reason: "conversation_turn_limit", ...ctx });
+    // 2026-10-15 (live, conv 528): Uplink's continuation capability lives 24 h (PUBLIC_CONVERSATION_CAPABILITY_TTL_SECONDS); a customer who
+    // returns after a day of silence got 404 conversation_not_found and an instant handoff. A CONTINUATION refused that way is rotated the
+    // same way as the turn limit; a brand-new conversation's 404 (nothing to continue) still hands off.
+    const continuationExpired = !turn.ok && turn.reason === "http_404" && turn.error === "conversation_not_found" && Boolean(binding.conversationId);
+    if (!turn.ok && (turn.error === "PUBLIC_CHAT_CONVERSATION_LIMIT" || continuationExpired)) {
+      log({ event: "uplink_conversation_rotated", reason: continuationExpired ? "continuation_expired" : "conversation_turn_limit", ...ctx });
       // rc10k: the PREVIOUS binding (old Uplink conversation id and capability) is kept until the rotated request is ACCEPTED. Only a marker is stored while the
       // rotated request is in flight; the new conversation is bound only when Uplink answers with a new conversation id and capability.
       const previousBinding = { ...binding, phase: "ready", pendingMessageId: null };
