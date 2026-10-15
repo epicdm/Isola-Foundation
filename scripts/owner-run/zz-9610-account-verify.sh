@@ -1,0 +1,17 @@
+#!/bin/bash
+# READ-ONLY: the owner's new account state, subscription, sends, handoff flags, chat transcript since 07:18Z (content first 200 chars), plus the real-model spend of his Uplink conversation (cost fields only).
+C=$(docker ps -q -f name=uplink_plsub_restore_db | head -1); CW=$(docker ps -q -f name=uplink_chatwoot-db | head -1); UD=$(docker ps -q -f name=uplink_uplink-db-prod | head -1)
+q()  { docker exec -i $C  psql -U postgres -d isolav2_prod -X -At -F ' | ' -c "$1" </dev/null 2>&1; }
+qc() { docker exec -i $CW psql -U postgres -d isola       -X -At -F ' | ' -c "$1" </dev/null 2>&1; }
+qu() { docker exec -i $UD psql -U uplink  -d uplink       -X -At -F ' | ' -c "$1" </dev/null 2>&1; }
+echo "== $(date -u +%T)"
+echo "### account row (non-secret)"; q "select right(did,4) did, \"registrationState\", to_char(\"registrationHandoffAt\",'HH24:MI:SS') handoff, to_char(\"registeredAt\",'HH24:MI:SS') registered, to_char(\"registrationCheckedAt\",'HH24:MI:SS') checked, to_char(\"installSelfReportedAt\",'HH24:MI:SS') install_report, \"magnusUserId\" mu, to_char(\"createdAt\",'HH24:MI:SS') created from lite_accounts where \"ownerPhone\" in ('17672859610','+17672859610')"
+echo "### columns on lite_accounts that look like seat/lumen/odoo/first-call:"; q "select column_name from information_schema.columns where table_name='lite_accounts' and (column_name ilike '%seat%' or column_name ilike '%lumen%' or column_name ilike '%odoo%' or column_name ilike '%call%' or column_name ilike '%welcome%') order by 1" | tr '\n' ' '; echo
+echo "### subscription"; q "select s.state, to_char(s.\"startedAt\",'MM-DD HH24:MI'), to_char(s.\"expiresAt\",'MM-DD HH24:MI'), s.\"usCanSecondsUsed\", p.code from lite_plan_subscriptions s join lite_plans p on p.id=s.\"planId\" where s.\"liteAccountId\"=(select id from lite_accounts where \"ownerPhone\" in ('17672859610','+17672859610'))" 2>&1 | head -3
+echo "### wa_send_audit since 07:18Z"; q "select to_char(\"createdAt\",'HH24:MI:SS'), purpose, decision, coalesce(\"dispatchStatus\",'-'), coalesce(\"senderPath\",'-') from wa_send_audit where phone like '%7672859610%' and \"createdAt\" > '2026-10-14 07:18' order by \"createdAt\""
+echo "### concierge audit since 07:18Z (excl probe)"; q "select to_char(created_at,'HH24:MI:SS'), endpoint, code from pl_concierge_audit where wa_last4='9610' and rid not like 'cw-offer-once%' and created_at > '2026-10-14 07:18' order by created_at"
+echo "### chat transcript since 07:18Z"; qc "select m.id, to_char(m.created_at,'HH24:MI:SS'), m.message_type, left(replace(m.content,E'\n',' / '),210) from messages m join conversations c on c.id=m.conversation_id where c.contact_id in (98,541) and m.created_at > '2026-10-14 07:18' order by m.id"
+echo "### Uplink conversation(s) since 07:18Z: columns for cost"; qu "select column_name from information_schema.columns where table_name='agent_conversations' and (column_name ilike '%cost%' or column_name ilike '%token%' or column_name ilike '%turn%') order by 1" | tr '\n' ' '; echo
+qu "select to_char(started_at,'HH24:MI:SS'), turn_count, llm_cost_cents, tokens_in, tokens_out from agent_conversations where started_at > '2026-10-14 07:18'"
+echo "### spend gate and recent reservations/settlements since 07:18Z"; qu "select state, count(*), sum(reserved_micro_usd), sum(coalesce(actual_micro_usd,0)) from public_turn_spend_reservations where created_at > '2026-10-14 07:18' group by 1" 2>&1 | head -4
+qu "select spent_micro_usd, reserved_micro_usd, uncertain_micro_usd from public_turn_spend_gates"

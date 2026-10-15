@@ -1,0 +1,6 @@
+#!/bin/bash
+# READ-ONLY: locate and grep the pilot-overlay source files inside the RUNNING uplink-app-prod container (line numbers only for the restriction sites; no env values).
+C=$(docker ps -q -f name=uplink_uplink-app-prod -f status=running | head -1)
+docker exec $C sh -c 'cd /app/packages/crm/src 2>/dev/null || cd /app/packages/crm; pwd; for f in "app/api/v1/public/agent/[slug]/turn/route.ts" lib/agents/public-pilot-controls.ts lib/agents/public-turn-spend.ts lib/agents/runtime.ts lib/agents/mcp/relay-context.ts; do [ -f "$f" ] && echo "FOUND $f $(sha256sum "$f" | cut -c1-16) $(wc -l < "$f") lines" || echo "MISSING $f"; done' </dev/null
+echo "=== grep sites (running container)"
+docker exec $C sh -c 'cd /app/packages/crm/src 2>/dev/null || cd /app/packages/crm; grep -n -E "isVerifiedRelay|relayContext|verifiedRelay|MAX_PUBLIC|resolvePublicPilotTarget|agentHasPilotGate|pilotPublicRequest|canReservePilotSpend|parsePublicPilotEnvelope|maxSerializedRequestBytes|98_304|98304|32_768|rateLimit|checkRateLimit|retryAfter|status: 429|PUBLIC_CHAT_" "app/api/v1/public/agent/[slug]/turn/route.ts" lib/agents/public-turn-spend.ts lib/agents/runtime.ts lib/agents/mcp/relay-context.ts | cut -c1-230' </dev/null
