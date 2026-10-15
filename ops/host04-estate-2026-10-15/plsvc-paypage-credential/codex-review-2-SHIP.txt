@@ -1,0 +1,12 @@
+SHIP
+
+1. **RESOLVED** — The charge route documents the accepted scope and retains its per-link attempt caps and retired-account refusal: [internal-auth.ts](/C:/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/app/lib/internal-auth.ts:39). The test pins that the pay-page secret is refused by mint and an unrelated internal route, while the primary secret reaches authenticated outcomes: [payment-link-paypage-secret.test.ts](/C:/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/test/payment-link-paypage-secret.test.ts:124).
+
+2. **RESOLVED** — Positive controls assert exact outcomes: mint returns 400 after authentication, and resolve-action-target returns 200: [payment-link-paypage-secret.test.ts](/C:/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/test/payment-link-paypage-secret.test.ts:125).
+
+3. **RESOLVED** — The configured value is trimmed before the empty check; tests cover surrounding whitespace/newline and whitespace-only configuration failing closed: [internal-auth.ts](/C:/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/app/lib/internal-auth.ts:50), [payment-link-paypage-secret.test.ts](/C:/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/test/payment-link-paypage-secret.test.ts:69).
+
+**New findings:** None. Trimming can shorten a configured value when its non-whitespace content is short, but the length check compares the presented header against that trimmed value, and an empty result is rejected. There is no separate minimum-length policy in this validator.
+
+`validatePayPageSecret` has exactly two production call sites: the payment-link lookup and charge routes ([lookup](/C:/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/app/api/internal/payment-link/%5Btoken%5D/route.ts:17), [charge](/C:/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/app/api/internal/payment-link/%5Btoken%5D/charge/route.ts:89)).
+codex exit 0
