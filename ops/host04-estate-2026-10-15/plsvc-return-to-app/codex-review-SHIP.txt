@@ -1,0 +1,2393 @@
+Reading additional input from stdin...
+OpenAI Codex v0.162.1
+--------
+workdir: C:\epic-workspace\Isola-Foundation\.workbench\codex-handoff-plsvc-window-and-brand-2026-10-14\work
+model: gpt-6-luna
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: medium
+reasoning summaries: none
+session id: 01a13f08-744d-7bc2-b07b-b3e23098579c
+--------
+user
+You are reviewing a small change to plsvc (a Next.js money-path service: Fiserv card pay links for a phone-line product). Read the diff in /c/Users/girau/AppData/Local/Temp/claude/C--epic-workspace-Isola-Foundation/1c7451ee-e7e7-473f-b5a3-0dc68985598e/scratchpad/v22.diff and the surrounding files in the current directory (app/lib/payment-link.ts, app/api/internal/payment-link/[token]/charge/route.ts, app/go/[code]/route.ts).
+Intent (owner ruling): after a card attempt (paid, declined OR cancelled) the pay page redirects the payer to the link's returnUrl. It used to be a signed-in PWA URL; payers landed on a signed-out screen. New: a public static page https://bff.epic.dm/go/back that launches the Cloud Softphone app via its URL scheme cloudsip: (verified in Acrobits docs), and mintPaymentLink defaults returnUrl to it ONLY when liteAccountId is set and no returnUrl was passed.
+Review for: (1) any way this changes charge/credit/idempotency behaviour or tenant isolation; (2) anything that makes /go/back leak identity, tokens or payment state, or claim a payment outcome (it is shown to declined/cancelled payers too); (3) route-precedence problem between app/go/back/route.ts and app/go/[code]/route.ts in Next.js App Router; (4) open-redirect or XSS in the page (it takes no input); (5) other mint paths that still bypass the default (list them); (6) test quality: do the tests have positive controls and could the new assertions pass vacuously?
+Reply with: SHIP or DO NOT SHIP, then numbered findings with file:line and severity. Be concrete; no style nits.
+
+LIMITS: you have at most 8 file reads. The full diff is below; the pay page itself is NOT in this repo (do not search for it). Finish with the verdict line FIRST in your final message.
+=== DIFF
+diff --git a/app/api/internal/personal-line/[liteAccountId]/topup/route.ts b/app/api/internal/personal-line/[liteAccountId]/topup/route.ts
+index 7984f9c..556d26d 100644
+--- a/app/api/internal/personal-line/[liteAccountId]/topup/route.ts
++++ b/app/api/internal/personal-line/[liteAccountId]/topup/route.ts
+@@ -69,7 +69,7 @@ async function walletRefusal(magnusUserId: string): Promise<NextResponse | null>
+ // sets it explicitly too, matching returnUrl's documented purpose ("set by
+ // the minting caller") so this route doesn't depend on that default being
+ // correct for this specific payer population.
+-const WALLET_RETURN_URL = 'https://app.isola.epic.dm/wallet'
++import { PAY_RETURN_URL } from '@/app/lib/pay-return' // owner 2026-10-15: back to the Cloud Softphone app, not the signed-in PWA
+ 
+ /**
+  * GET /api/internal/personal-line/:liteAccountId/topup
+@@ -169,7 +169,7 @@ export async function POST(
+       liteAccountId: account.id,
+       createdBy: `personal-line-pwa:${liteAccountId}`,
+       expiresInMinutes: 24 * 60,
+-      returnUrl: WALLET_RETURN_URL,
++      returnUrl: PAY_RETURN_URL,
+     })
+ 
+     if (!result.ok) {
+@@ -195,7 +195,7 @@ export async function POST(
+     liteAccountId: account.id,
+     createdBy: `personal-line-pwa:${liteAccountId}`,
+     expiresInMinutes: 24 * 60,
+-    returnUrl: WALLET_RETURN_URL,
++    returnUrl: PAY_RETURN_URL,
+   })
+ 
+   if (!result.ok) {
+diff --git a/app/api/lite/airtime/pay-link/route.ts b/app/api/lite/airtime/pay-link/route.ts
+index 54cf567..a97561c 100644
+--- a/app/api/lite/airtime/pay-link/route.ts
++++ b/app/api/lite/airtime/pay-link/route.ts
+@@ -27,7 +27,7 @@ import { resolveAirtimeOptions, airtimeOptionsFailed, airtimeSendAvailable, mint
+ const ALLOWED_ORIGINS = ['https://test.epic.dm', 'https://isola-connect.vercel.app', 'https://staging.isola.epic.dm', 'https://app.isola.epic.dm']
+ 
+ // Same return target as /api/lite/topup/start: the PWA's wallet route.
+-const WALLET_RETURN_URL = 'https://app.isola.epic.dm/wallet'
++import { PAY_RETURN_URL } from '@/app/lib/pay-return' // owner 2026-10-15: back to the Cloud Softphone app, not the signed-in PWA
+ 
+ function corsHeaders(origin: string | null) {
+   const o = ALLOWED_ORIGINS.includes(origin ?? '') ? (origin ?? ALLOWED_ORIGINS[0]) : ALLOWED_ORIGINS[0]
+@@ -94,7 +94,7 @@ export async function POST(req: NextRequest) {
+     faceUsd:          option.amountUsd,
+     customerPriceUsd: option.customerPriceUsd,
+     createdBy:        `app-airtime:${maskForAudit(username!)}`,
+-    returnUrl:        WALLET_RETURN_URL,
++    returnUrl: PAY_RETURN_URL,
+     currency:         chargeCurrency,
+     chargeAmount,
+   }).catch((e: any) => ({ ok: false as const, error: String(e?.message ?? e) }))
+diff --git a/app/api/lite/topup/start/route.ts b/app/api/lite/topup/start/route.ts
+index a761ef5..58a38e3 100644
+--- a/app/api/lite/topup/start/route.ts
++++ b/app/api/lite/topup/start/route.ts
+@@ -29,7 +29,7 @@ const ALLOWED_ORIGINS = ['https://test.epic.dm', 'https://isola-connect.vercel.a
+ // unset and the payment page falls back to its own hardcoded default, which
+ // does not match this PWA's actual wallet route — a 404 after every card
+ // attempt started from here, success or decline.
+-const WALLET_RETURN_URL = 'https://app.isola.epic.dm/wallet'
++import { PAY_RETURN_URL } from '@/app/lib/pay-return' // owner 2026-10-15: back to the Cloud Softphone app, not the signed-in PWA
+ 
+ function corsHeaders(origin: string | null) {
+   const o = ALLOWED_ORIGINS.includes(origin ?? '') ? (origin ?? ALLOWED_ORIGINS[0]) : ALLOWED_ORIGINS[0]
+@@ -82,7 +82,7 @@ export async function POST(req: NextRequest) {
+         liteAccountId: la.id,
+         createdBy: `pwa-topup:${username}`,
+         expiresInMinutes: 24 * 60,
+-        returnUrl: WALLET_RETURN_URL,
++        returnUrl: PAY_RETURN_URL,
+       })
+ 
+       if (!result.ok) {
+@@ -108,7 +108,7 @@ export async function POST(req: NextRequest) {
+       liteAccountId: la.id,
+       createdBy: `pwa-topup:${username}`,
+       expiresInMinutes: 24 * 60,
+-      returnUrl: WALLET_RETURN_URL,
++      returnUrl: PAY_RETURN_URL,
+     })
+ 
+     if (!result.ok) {
+diff --git a/app/go/back/route.ts b/app/go/back/route.ts
+new file mode 100644
+index 0000000..4a34d5a
+--- /dev/null
++++ b/app/go/back/route.ts
+@@ -0,0 +1,40 @@
++/**
++ * GET /go/back - public, unauthenticated "back to your line" page.
++ *
++ * The card pay page's returnUrl (app/lib/pay-return.ts). After paying, the payer taps Open and lands here; the page
++ * launches the Cloud Softphone app via its URL scheme. A button is always shown too, because a browser may block a
++ * script-initiated custom-scheme navigation (iOS Safari asks first) - the tap is the reliable path.
++ *
++ * It reads nothing, writes nothing and takes no parameters: no identity, no account, no payment state. Customer wording
++ * is EPIC-branded (no "Isola").
++ */
++import { NextResponse } from 'next/server'
++import { SOFTPHONE_APP_URI } from '@/app/lib/pay-return'
++
++export const dynamic = 'force-dynamic'
++
++const ANDROID_STORE = 'https://play.google.com/store/apps/details?id=cz.acrobits.softphone.cloudphone'
++const IOS_STORE = 'https://apps.apple.com/us/app/cloud-softphone/id567475545'
++
++export function backPageHtml(): string {
++  return `<!doctype html>
++<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
++<title>Back to your EPIC line</title>
++<style>body{font:16px/1.5 system-ui,sans-serif;margin:0;padding:32px 20px;text-align:center;color:#111}
++a.btn{display:block;max-width:320px;margin:24px auto 12px;padding:16px;border-radius:12px;background:#0a7d4b;color:#fff;font-weight:600;text-decoration:none}
++small{color:#555}</style></head>
++<body>
++<h1>Back to your EPIC line</h1>
++<p>Tap the button to return to your EPIC Personal Line. A confirmation with your new balance arrives on WhatsApp once a payment goes through.</p>
++<a class="btn" href="${SOFTPHONE_APP_URI}">Open Cloud Softphone</a>
++<p><small>Don't have the app on this phone? <a href="${IOS_STORE}">iPhone</a> &middot; <a href="${ANDROID_STORE}">Android</a></small></p>
++<script>setTimeout(function(){location.href=${JSON.stringify(SOFTPHONE_APP_URI)}},400)</script>
++</body></html>`
++}
++
++export async function GET() {
++  return new NextResponse(backPageHtml(), {
++    status: 200,
++    headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
++  })
++}
+diff --git a/app/lib/pay-return.ts b/app/lib/pay-return.ts
+new file mode 100644
+index 0000000..a1e69bf
+--- /dev/null
++++ b/app/lib/pay-return.ts
+@@ -0,0 +1,14 @@
++/**
++ * pay-return.ts — where the card pay page sends the payer after a payment attempt.
++ *
++ * Owner ruling 2026-10-15: the payer started the payment from inside the Cloud Softphone (Acrobits) app, so "Open" after
++ * paying must lead BACK to that app. It used to be https://app.isola.epic.dm/wallet, a PWA that needs a signed-in browser
++ * session; a payer whose pay page opened in the system browser has none and landed on "Open Isola from WhatsApp".
++ *
++ * The pay page only accepts an http(s) returnUrl (payment-link.ts), so this is an https page (app/go/back/route.ts) that
++ * hands off to the app's own URL scheme. It carries NO identity, token or account data - it is the same page for everyone.
++ */
++export const PAY_RETURN_URL = process.env.PL_PAY_RETURN_URL || 'https://bff.epic.dm/go/back'
++
++/** Cloud Softphone's URL scheme (doc.acrobits.net, Call URIs: "Cloud Softphone | cloudsip"); `cloudsip:` alone launches the app. */
++export const SOFTPHONE_APP_URI = 'cloudsip:'
+diff --git a/app/lib/payment-link.ts b/app/lib/payment-link.ts
+index cd2bfe2..d224bfe 100644
+--- a/app/lib/payment-link.ts
++++ b/app/lib/payment-link.ts
+@@ -11,6 +11,7 @@
+ //   - amount pinned server-side, 2-decimal precision enforced
+ //   - token generated here, never client-supplied
+ //   - returns the same shape the HTTP route responds with
++import { PAY_RETURN_URL } from '@/app/lib/pay-return'
+ import { randomBytes } from 'node:crypto'
+ import { prisma } from '@/app/lib/prisma'
+ import { isRetiredLiteAccount } from '@/app/lib/lite-retire'
+@@ -168,7 +169,8 @@ export async function mintPaymentLink(
+       liteAccountId,
+       expiresAt,
+       creditAmountEcd: creditAmountEcd !== undefined ? creditAmountEcd.toFixed(2) : undefined,
+-      returnUrl,
++      // A Personal Line payer with no explicit return target goes back to the app (pay-return.ts); every other payer is untouched.
++      returnUrl: returnUrl ?? (liteAccountId ? PAY_RETURN_URL : undefined),
+       reloadlyOperatorId,
+       reloadlyRecipientPhone,
+       reloadlyFaceAmountUsd: reloadlyFaceAmountUsd !== undefined ? reloadlyFaceAmountUsd.toFixed(2) : undefined,
+diff --git a/test/api/lite/airtime-app-paylink.test.ts b/test/api/lite/airtime-app-paylink.test.ts
+index e6ef67e..816218e 100644
+--- a/test/api/lite/airtime-app-paylink.test.ts
++++ b/test/api/lite/airtime-app-paylink.test.ts
+@@ -126,7 +126,7 @@ describe('airtime app routes', () => {
+       expect(mockMint.mock.calls[0][0]).toMatchObject({
+         amount: 30.24, currency: 'XCD', liteAccountId: 'la-fixture-01',
+         reloadlyOperatorId: 677, reloadlyRecipientPhone: '7672855555', reloadlyFaceAmountUsd: 10,
+-        returnUrl: 'https://app.isola.epic.dm/wallet', expiresInMinutes: 30,
++        returnUrl: 'https://bff.epic.dm/go/back', expiresInMinutes: 30,
+       })
+       expect(mockMint.mock.calls[0][0].createdBy).toMatch(/^app-airtime:\*\*\*/)
+       expect(mockMint.mock.calls[0][0].createdBy).not.toContain(CREDS.username)
+diff --git a/test/pay-return-to-app.test.ts b/test/pay-return-to-app.test.ts
+new file mode 100644
+index 0000000..2127bfb
+--- /dev/null
++++ b/test/pay-return-to-app.test.ts
+@@ -0,0 +1,70 @@
++/**
++ * After paying, the payer must be led BACK TO THE CLOUD SOFTPHONE APP (owner 2026-10-15), not to the signed-in PWA.
++ * Measured: the 2026-10-15 first real payment landed on "Open Isola from WhatsApp" because the old returnUrl needed a session.
++ *
++ * Two things are pinned here, each with a positive twin:
++ *   1. GET /go/back launches the app scheme, makes no payment claim (the pay page also sends declined/cancelled payers
++ *      there), says nothing branded "Isola", and reads no identity.
++ *   2. mintPaymentLink stores the app-return URL for a Personal Line payer who supplied no returnUrl, keeps an explicit
++ *      returnUrl untouched, and leaves a NON-Personal-Line payer (A/R reminder) without a forced redirect.
++ */
++import { describe, it, expect, vi, beforeEach } from 'vitest'
++
++const mockPrisma: any = vi.hoisted(() => ({ paymentLink: { create: async ({ data }: any) => ({ ...data, id: 'pl-1' }) }, liteAccount: { findUnique: async () => ({ id: 'la-1', status: 'active' }) } }))
++vi.mock('@/app/lib/prisma', () => ({ prisma: mockPrisma }))
++vi.mock('@/app/lib/lite-retire', () => ({ isRetiredLiteAccount: () => false }))
++vi.mock('@/app/lib/magnus-sqlinject-guard', () => ({ regenerateUntilMagnusSafe: async (f: any) => f() }))
++
++import { GET, backPageHtml } from '@/app/go/back/route'
++import { mintPaymentLink } from '@/app/lib/payment-link'
++import { PAY_RETURN_URL, SOFTPHONE_APP_URI } from '@/app/lib/pay-return'
++
++const base = { amount: 10, currency: 'XCD', description: 'Top up' } as any
++const storedReturnUrl = () => mockPrisma.paymentLink.create.mock.calls.at(-1)?.[0]?.data?.returnUrl
++
++beforeEach(() => { vi.restoreAllMocks(); vi.spyOn(mockPrisma.paymentLink, 'create') })
++
++describe('GET /go/back', () => {
++  it('launches the Cloud Softphone scheme via a tappable button and an auto-launch, uncached', async () => {
++    const res = await GET()
++    const html = await res.text()
++    expect(res.status).toBe(200)
++    expect(res.headers.get('cache-control')).toBe('no-store')
++    expect(html).toContain(`href="${SOFTPHONE_APP_URI}"`)
++    expect(html).toContain(`location.href=${JSON.stringify(SOFTPHONE_APP_URI)}`)
++    expect(SOFTPHONE_APP_URI).toBe('cloudsip:')
++  })
++  it('makes no payment-outcome claim and carries no Isola brand word', () => {
++    const html = backPageHtml()
++    expect(html).not.toMatch(/your payment (went|was|has)|you're all set|thank/i)
++    expect(html).not.toMatch(/isola/i)
++    // CONTROL: the same patterns do fire on text that makes the claim, so the two assertions above can fail.
++    expect('Your payment went through').toMatch(/your payment (went|was|has)/i)
++    expect('Welcome to Isola').toMatch(/isola/i)
++    // positive twin: the page still tells the payer where the confirmation arrives.
++    expect(html).toMatch(/confirmation with your new balance arrives on WhatsApp once a payment goes through/)
++  })
++})
++
++describe('mintPaymentLink return target', () => {
++  it('Personal Line payer with no returnUrl -> the app-return page', async () => {
++    const r: any = await mintPaymentLink({ ...base, liteAccountId: 'la-1' })
++    expect(r.ok).toBe(true)
++    expect(storedReturnUrl()).toBe(PAY_RETURN_URL)
++    expect(PAY_RETURN_URL).toMatch(/^https:\/\/.+\/go\/back$/)
++  })
++  it('an explicit returnUrl is never overridden (Hermes A/R no-redirect convention survives)', async () => {
++    await mintPaymentLink({ ...base, liteAccountId: 'la-1', returnUrl: 'https://pay.isola.epic.dm/no-redirect' })
++    expect(storedReturnUrl()).toBe('https://pay.isola.epic.dm/no-redirect')
++  })
++  it('a payer with NO Personal Line account is not given a forced redirect (control: distinct from the case above)', async () => {
++    await mintPaymentLink({ ...base, tenantId: 't-1' })
++    expect(storedReturnUrl()).toBeUndefined()
++  })
++  it('the stored default passes the mint validator (http(s) only) - the same input accepted end to end', async () => {
++    const r: any = await mintPaymentLink({ ...base, liteAccountId: 'la-2' })
++    expect(r.ok).toBe(true)
++    const bad: any = await mintPaymentLink({ ...base, liteAccountId: 'la-2', returnUrl: SOFTPHONE_APP_URI })
++    expect(bad.ok).toBe(false) // why a bare cloudsip: cannot be the returnUrl itself and the https hand-off page exists
++  })
++})
+2026-10-15T10:08:03.746021Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest("http/request failed: error sending request for url (https://127.0.0.1:27124/mcp/)")))
+codex
+I’ll inspect the requested diff and the three surrounding files, keeping to the eight-read limit. I’ll also check the available route/test context only if needed to resolve a specific review question.
+2026-10-15T10:08:06.033666Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest("http/request failed: error sending request for url (https://127.0.0.1:27124/mcp/)")))
+exec
+"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Raw 'C:\\Users\\girau\\AppData\\Local\\Temp\\claude\\C--epic-workspace-Isola-Foundation\\1c7451ee-e7e7-473f-b5a3-0dc68985598e\\scratchpad\\v22.diff'" in C:\epic-workspace\Isola-Foundation\.workbench\codex-handoff-plsvc-window-and-brand-2026-10-14\work
+ succeeded in 804ms:
+diff --git a/app/api/internal/personal-line/[liteAccountId]/topup/route.ts b/app/api/internal/personal-line/[liteAccountId]/topup/route.ts
+index 7984f9c..556d26d 100644
+--- a/app/api/internal/personal-line/[liteAccountId]/topup/route.ts
++++ b/app/api/internal/personal-line/[liteAccountId]/topup/route.ts
+@@ -69,7 +69,7 @@ async function walletRefusal(magnusUserId: string): Promise<NextResponse | null>
+ // sets it explicitly too, matching returnUrl's documented purpose ("set by
+ // the minting caller") so this route doesn't depend on that default being
+ // correct for this specific payer population.
+-const WALLET_RETURN_URL = 'https://app.isola.epic.dm/wallet'
++import { PAY_RETURN_URL } from '@/app/lib/pay-return' // owner 2026-10-15: back to the Cloud Softphone app, not the signed-in PWA
+ 
+ /**
+  * GET /api/internal/personal-line/:liteAccountId/topup
+@@ -169,7 +169,7 @@ export async function POST(
+       liteAccountId: account.id,
+       createdBy: `personal-line-pwa:${liteAccountId}`,
+       expiresInMinutes: 24 * 60,
+-      returnUrl: WALLET_RETURN_URL,
++      returnUrl: PAY_RETURN_URL,
+     })
+ 
+     if (!result.ok) {
+@@ -195,7 +195,7 @@ export async function POST(
+     liteAccountId: account.id,
+     createdBy: `personal-line-pwa:${liteAccountId}`,
+     expiresInMinutes: 24 * 60,
+-    returnUrl: WALLET_RETURN_URL,
++    returnUrl: PAY_RETURN_URL,
+   })
+ 
+   if (!result.ok) {
+diff --git a/app/api/lite/airtime/pay-link/route.ts b/app/api/lite/airtime/pay-link/route.ts
+index 54cf567..a97561c 100644
+--- a/app/api/lite/airtime/pay-link/route.ts
++++ b/app/api/lite/airtime/pay-link/route.ts
+@@ -27,7 +27,7 @@ import { resolveAirtimeOptions, airtimeOptionsFailed, airtimeSendAvailable, mint
+ const ALLOWED_ORIGINS = ['https://test.epic.dm', 'https://isola-connect.vercel.app', 'https://staging.isola.epic.dm', 'https://app.isola.epic.dm']
+ 
+ // Same return target as /api/lite/topup/start: the PWA's wallet route.
+-const WALLET_RETURN_URL = 'https://app.isola.epic.dm/wallet'
++import { PAY_RETURN_URL } from '@/app/lib/pay-return' // owner 2026-10-15: back to the Cloud Softphone app, not the signed-in PWA
+ 
+ function corsHeaders(origin: string | null) {
+   const o = ALLOWED_ORIGINS.includes(origin ?? '') ? (origin ?? ALLOWED_ORIGINS[0]) : ALLOWED_ORIGINS[0]
+@@ -94,7 +94,7 @@ export async function POST(req: NextRequest) {
+     faceUsd:          option.amountUsd,
+     customerPriceUsd: option.customerPriceUsd,
+     createdBy:        `app-airtime:${maskForAudit(username!)}`,
+-    returnUrl:        WALLET_RETURN_URL,
++    returnUrl: PAY_RETURN_URL,
+     currency:         chargeCurrency,
+     chargeAmount,
+   }).catch((e: any) => ({ ok: false as const, error: String(e?.message ?? e) }))
+diff --git a/app/api/lite/topup/start/route.ts b/app/api/lite/topup/start/route.ts
+index a761ef5..58a38e3 100644
+--- a/app/api/lite/topup/start/route.ts
++++ b/app/api/lite/topup/start/route.ts
+@@ -29,7 +29,7 @@ const ALLOWED_ORIGINS = ['https://test.epic.dm', 'https://isola-connect.vercel.a
+ // unset and the payment page falls back to its own hardcoded default, which
+ // does not match this PWA's actual wallet route �?" a 404 after every card
+ // attempt started from here, success or decline.
+-const WALLET_RETURN_URL = 'https://app.isola.epic.dm/wallet'
++import { PAY_RETURN_URL } from '@/app/lib/pay-return' // owner 2026-10-15: back to the Cloud Softphone app, not the signed-in PWA
+ 
+ function corsHeaders(origin: string | null) {
+   const o = ALLOWED_ORIGINS.includes(origin ?? '') ? (origin ?? ALLOWED_ORIGINS[0]) : ALLOWED_ORIGINS[0]
+@@ -82,7 +82,7 @@ export async function POST(req: NextRequest) {
+         liteAccountId: la.id,
+         createdBy: `pwa-topup:${username}`,
+         expiresInMinutes: 24 * 60,
+-        returnUrl: WALLET_RETURN_URL,
++        returnUrl: PAY_RETURN_URL,
+       })
+ 
+       if (!result.ok) {
+@@ -108,7 +108,7 @@ export async function POST(req: NextRequest) {
+       liteAccountId: la.id,
+       createdBy: `pwa-topup:${username}`,
+       expiresInMinutes: 24 * 60,
+-      returnUrl: WALLET_RETURN_URL,
++      returnUrl: PAY_RETURN_URL,
+     })
+ 
+     if (!result.ok) {
+diff --git a/app/go/back/route.ts b/app/go/back/route.ts
+new file mode 100644
+index 0000000..4a34d5a
+--- /dev/null
++++ b/app/go/back/route.ts
+@@ -0,0 +1,40 @@
++/**
++ * GET /go/back - public, unauthenticated "back to your line" page.
++ *
++ * The card pay page's returnUrl (app/lib/pay-return.ts). After paying, the payer taps Open and lands here; the page
++ * launches the Cloud Softphone app via its URL scheme. A button is always shown too, because a browser may block a
++ * script-initiated custom-scheme navigation (iOS Safari asks first) - the tap is the reliable path.
++ *
++ * It reads nothing, writes nothing and takes no parameters: no identity, no account, no payment state. Customer wording
++ * is EPIC-branded (no "Isola").
++ */
++import { NextResponse } from 'next/server'
++import { SOFTPHONE_APP_URI } from '@/app/lib/pay-return'
++
++export const dynamic = 'force-dynamic'
++
++const ANDROID_STORE = 'https://play.google.com/store/apps/details?id=cz.acrobits.softphone.cloudphone'
++const IOS_STORE = 'https://apps.apple.com/us/app/cloud-softphone/id567475545'
++
++export function backPageHtml(): string {
++  return `<!doctype html>
++<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
++<title>Back to your EPIC line</title>
++<style>body{font:16px/1.5 system-ui,sans-serif;margin:0;padding:32px 20px;text-align:center;color:#111}
++a.btn{display:block;max-width:320px;margin:24px auto 12px;padding:16px;border-radius:12px;background:#0a7d4b;color:#fff;font-weight:600;text-decoration:none}
++small{color:#555}</style></head>
++<body>
++<h1>Back to your EPIC line</h1>
++<p>Tap the button to return to your EPIC Personal Line. A confirmation with your new balance arrives on WhatsApp once a payment goes through.</p>
++<a class="btn" href="${SOFTPHONE_APP_URI}">Open Cloud Softphone</a>
++<p><small>Don't have the app on this phone? <a href="${IOS_STORE}">iPhone</a> &middot; <a href="${ANDROID_STORE}">Android</a></small></p>
++<script>setTimeout(function(){location.href=${JSON.stringify(SOFTPHONE_APP_URI)}},400)</script>
++</body></html>`
++}
++
++export async function GET() {
++  return new NextResponse(backPageHtml(), {
++    status: 200,
++    headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
++  })
++}
+diff --git a/app/lib/pay-return.ts b/app/lib/pay-return.ts
+new file mode 100644
+index 0000000..a1e69bf
+--- /dev/null
++++ b/app/lib/pay-return.ts
+@@ -0,0 +1,14 @@
++/**
++ * pay-return.ts �?" where the card pay page sends the payer after a payment attempt.
++ *
++ * Owner ruling 2026-10-15: the payer started the payment from inside the Cloud Softphone (Acrobits) app, so "Open" after
++ * paying must lead BACK to that app. It used to be https://app.isola.epic.dm/wallet, a PWA that needs a signed-in browser
++ * session; a payer whose pay page opened in the system browser has none and landed on "Open Isola from WhatsApp".
++ *
++ * The pay page only accepts an http(s) returnUrl (payment-link.ts), so this is an https page (app/go/back/route.ts) that
++ * hands off to the app's own URL scheme. It carries NO identity, token or account data - it is the same page for everyone.
++ */
++export const PAY_RETURN_URL = process.env.PL_PAY_RETURN_URL || 'https://bff.epic.dm/go/back'
++
++/** Cloud Softphone's URL scheme (doc.acrobits.net, Call URIs: "Cloud Softphone | cloudsip"); `cloudsip:` alone launches the app. */
++export const SOFTPHONE_APP_URI = 'cloudsip:'
+diff --git a/app/lib/payment-link.ts b/app/lib/payment-link.ts
+index cd2bfe2..d224bfe 100644
+--- a/app/lib/payment-link.ts
++++ b/app/lib/payment-link.ts
+@@ -11,6 +11,7 @@
+ //   - amount pinned server-side, 2-decimal precision enforced
+ //   - token generated here, never client-supplied
+ //   - returns the same shape the HTTP route responds with
++import { PAY_RETURN_URL } from '@/app/lib/pay-return'
+ import { randomBytes } from 'node:crypto'
+ import { prisma } from '@/app/lib/prisma'
+ import { isRetiredLiteAccount } from '@/app/lib/lite-retire'
+@@ -168,7 +169,8 @@ export async function mintPaymentLink(
+       liteAccountId,
+       expiresAt,
+       creditAmountEcd: creditAmountEcd !== undefined ? creditAmountEcd.toFixed(2) : undefined,
+-      returnUrl,
++      // A Personal Line payer with no explicit return target goes back to the app (pay-return.ts); every other payer is untouched.
++      returnUrl: returnUrl ?? (liteAccountId ? PAY_RETURN_URL : undefined),
+       reloadlyOperatorId,
+       reloadlyRecipientPhone,
+       reloadlyFaceAmountUsd: reloadlyFaceAmountUsd !== undefined ? reloadlyFaceAmountUsd.toFixed(2) : undefined,
+diff --git a/test/api/lite/airtime-app-paylink.test.ts b/test/api/lite/airtime-app-paylink.test.ts
+index e6ef67e..816218e 100644
+--- a/test/api/lite/airtime-app-paylink.test.ts
++++ b/test/api/lite/airtime-app-paylink.test.ts
+@@ -126,7 +126,7 @@ describe('airtime app routes', () => {
+       expect(mockMint.mock.calls[0][0]).toMatchObject({
+         amount: 30.24, currency: 'XCD', liteAccountId: 'la-fixture-01',
+         reloadlyOperatorId: 677, reloadlyRecipientPhone: '7672855555', reloadlyFaceAmountUsd: 10,
+-        returnUrl: 'https://app.isola.epic.dm/wallet', expiresInMinutes: 30,
++        returnUrl: 'https://bff.epic.dm/go/back', expiresInMinutes: 30,
+       })
+       expect(mockMint.mock.calls[0][0].createdBy).toMatch(/^app-airtime:\*\*\*/)
+       expect(mockMint.mock.calls[0][0].createdBy).not.toContain(CREDS.username)
+diff --git a/test/pay-return-to-app.test.ts b/test/pay-return-to-app.test.ts
+new file mode 100644
+index 0000000..2127bfb
+--- /dev/null
++++ b/test/pay-return-to-app.test.ts
+@@ -0,0 +1,70 @@
++/**
++ * After paying, the payer must be led BACK TO THE CLOUD SOFTPHONE APP (owner 2026-10-15), not to the signed-in PWA.
++ * Measured: the 2026-10-15 first real payment landed on "Open Isola from WhatsApp" because the old returnUrl needed a session.
++ *
++ * Two things are pinned here, each with a positive twin:
++ *   1. GET /go/back launches the app scheme, makes no payment claim (the pay page also sends declined/cancelled payers
++ *      there), says nothing branded "Isola", and reads no identity.
++ *   2. mintPaymentLink stores the app-return URL for a Personal Line payer who supplied no returnUrl, keeps an explicit
++ *      returnUrl untouched, and leaves a NON-Personal-Line payer (A/R reminder) without a forced redirect.
++ */
++import { describe, it, expect, vi, beforeEach } from 'vitest'
++
++const mockPrisma: any = vi.hoisted(() => ({ paymentLink: { create: async ({ data }: any) => ({ ...data, id: 'pl-1' }) }, liteAccount: { findUnique: async () => ({ id: 'la-1', status: 'active' }) } }))
++vi.mock('@/app/lib/prisma', () => ({ prisma: mockPrisma }))
++vi.mock('@/app/lib/lite-retire', () => ({ isRetiredLiteAccount: () => false }))
++vi.mock('@/app/lib/magnus-sqlinject-guard', () => ({ regenerateUntilMagnusSafe: async (f: any) => f() }))
++
++import { GET, backPageHtml } from '@/app/go/back/route'
++import { mintPaymentLink } from '@/app/lib/payment-link'
++import { PAY_RETURN_URL, SOFTPHONE_APP_URI } from '@/app/lib/pay-return'
++
++const base = { amount: 10, currency: 'XCD', description: 'Top up' } as any
++const storedReturnUrl = () => mockPrisma.paymentLink.create.mock.calls.at(-1)?.[0]?.data?.returnUrl
++
++beforeEach(() => { vi.restoreAllMocks(); vi.spyOn(mockPrisma.paymentLink, 'create') })
++
++describe('GET /go/back', () => {
++  it('launches the Cloud Softphone scheme via a tappable button and an auto-launch, uncached', async () => {
++    const res = await GET()
++    const html = await res.text()
++    expect(res.status).toBe(200)
++    expect(res.headers.get('cache-control')).toBe('no-store')
++    expect(html).toContain(`href="${SOFTPHONE_APP_URI}"`)
++    expect(html).toContain(`location.href=${JSON.stringify(SOFTPHONE_APP_URI)}`)
++    expect(SOFTPHONE_APP_URI).toBe('cloudsip:')
++  })
++  it('makes no payment-outcome claim and carries no Isola brand word', () => {
++    const html = backPageHtml()
++    expect(html).not.toMatch(/your payment (went|was|has)|you're all set|thank/i)
++    expect(html).not.toMatch(/isola/i)
++    // CONTROL: the same patterns do fire on text that makes the claim, so the two assertions above can fail.
++    expect('Your payment went through').toMatch(/your payment (went|was|has)/i)
++    expect('Welcome to Isola').toMatch(/isola/i)
++    // positive twin: the page still tells the payer where the confirmation arrives.
++    expect(html).toMatch(/confirmation with your new balance arrives on WhatsApp once a payment goes through/)
++  })
++})
++
++describe('mintPaymentLink return target', () => {
++  it('Personal Line payer with no returnUrl -> the app-return page', async () => {
++    const r: any = await mintPaymentLink({ ...base, liteAccountId: 'la-1' })
++    expect(r.ok).toBe(true)
++    expect(storedReturnUrl()).toBe(PAY_RETURN_URL)
++    expect(PAY_RETURN_URL).toMatch(/^https:\/\/.+\/go\/back$/)
++  })
++  it('an explicit returnUrl is never overridden (Hermes A/R no-redirect convention survives)', async () => {
++    await mintPaymentLink({ ...base, liteAccountId: 'la-1', returnUrl: 'https://pay.isola.epic.dm/no-redirect' })
++    expect(storedReturnUrl()).toBe('https://pay.isola.epic.dm/no-redirect')
++  })
++  it('a payer with NO Personal Line account is not given a forced redirect (control: distinct from the case above)', async () => {
++    await mintPaymentLink({ ...base, tenantId: 't-1' })
++    expect(storedReturnUrl()).toBeUndefined()
++  })
++  it('the stored default passes the mint validator (http(s) only) - the same input accepted end to end', async () => {
++    const r: any = await mintPaymentLink({ ...base, liteAccountId: 'la-2' })
++    expect(r.ok).toBe(true)
++    const bad: any = await mintPaymentLink({ ...base, liteAccountId: 'la-2', returnUrl: SOFTPHONE_APP_URI })
++    expect(bad.ok).toBe(false) // why a bare cloudsip: cannot be the returnUrl itself and the https hand-off page exists
++  })
++})
+
+
+2026-10-15T10:08:09.060520Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest("http/request failed: error sending request for url (https://127.0.0.1:27124/mcp/)")))
+exec
+"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Raw 'app/api/internal/payment-link/[token]/charge/route.ts'" in C:\epic-workspace\Isola-Foundation\.workbench\codex-handoff-plsvc-window-and-brand-2026-10-14\work
+exec
+"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Raw 'app/go/[code]/route.ts'" in C:\epic-workspace\Isola-Foundation\.workbench\codex-handoff-plsvc-window-and-brand-2026-10-14\work
+exec
+"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Raw 'app/lib/payment-link.ts'" in C:\epic-workspace\Isola-Foundation\.workbench\codex-handoff-plsvc-window-and-brand-2026-10-14\work
+ succeeded in 1051ms:
+// app/lib/payment-link.ts
+// Shared core for minting a Fiserv Flow-A payment link. Extracted from
+// POST /api/internal/payment-link so a second caller (the WhatsApp top-up
+// Flow handler, app/api/whatsapp/flows/route.ts) can mint a link directly
+// in-process �?" no HTTP self-call, no need to carry INTERNAL_SECRET into a
+// server-to-server fetch just to talk to itself.
+//
+// The HTTP route (app/api/internal/payment-link/route.ts) still owns
+// request validation + auth; this file owns the actual mint logic so both
+// call sites share one implementation and one set of guarantees:
+//   - amount pinned server-side, 2-decimal precision enforced
+//   - token generated here, never client-supplied
+//   - returns the same shape the HTTP route responds with
+import { PAY_RETURN_URL } from '@/app/lib/pay-return'
+import { randomBytes } from 'node:crypto'
+import { prisma } from '@/app/lib/prisma'
+import { isRetiredLiteAccount } from '@/app/lib/lite-retire'
+import { regenerateUntilMagnusSafe } from '@/app/lib/magnus-sqlinject-guard'
+
+const VALID_CURRENCIES = new Set(['USD', 'XCD'])
+const ISOLA_PAY_BASE_URL = (process.env.PAY_LINK_BASE || process.env.ISOLA_PAY_BASE_URL || 'https://isola.epic.dm').replace(/\/+$/, '')
+
+/** The one place the pay-page URL for a token is spelled; mintPaymentLink() and
+ *  any caller re-sending an EXISTING link (double-tap reuse) must agree. */
+export function paymentLinkUrl(token: string): string {
+  return `${ISOLA_PAY_BASE_URL}/pay/link/${token}`
+}
+
+export interface MintPaymentLinkInput {
+  amount: number
+  currency: string
+  description?: string
+  tenantId?: string
+  agentId?: string
+  createdBy?: string
+  liteAccountId?: string
+  expiresInMinutes?: number
+  // EC$ amount to credit the wallet on payment. `amount` is what the CARD is
+  // CHARGED (the face price the customer was shown); this is what the WALLET
+  // RECEIVES (face + bonus). The two are different figures whenever a bundle
+  // carries a bonus �?" USD diaspora bundles (amountUsd A- peg + bonus) AND the
+  // EC$25/EC$50 local bundles (25 �+' 27.50, 50 �+' 60). Every bundle minter
+  // passes it explicitly (owner ruling 2026-09-15, PKT-TOPUP-PRICE-
+  // CORRECTION); charge/route.ts falls back to `amount` only when it is unset,
+  // which is now the ad-hoc/tenant-link case, not the bundle case.
+  creditAmountEcd?: number
+  // Where to send the payer after they pay or cancel on the hosted pay
+  // page �?" e.g. the EMA/Foundation wallet URL. Absent links fall back to a
+  // hardcoded EMA-app default in the pay page itself (never app.isola.epic.dm).
+  returnUrl?: string
+  // WA airtime top-up seam: when both are set (alongside liteAccountId), the
+  // charge route sends a real Reloadly top-up instead of a Magnus credit on
+  // payment. Leave both unset for an ordinary Magnus-credit link.
+  reloadlyOperatorId?: number
+  reloadlyRecipientPhone?: string
+  // The FACE amount Reloadly should deliver �?" NOT `amount` above, which is
+  // the marked-up Fiserv charge. Required whenever reloadlyRecipientPhone is
+  // set; the charge route has no other source of truth for it.
+  reloadlyFaceAmountUsd?: number
+}
+
+export interface MintPaymentLinkResult {
+  ok: true
+  token: string
+  url: string
+  expiresAt: Date
+}
+
+export interface MintPaymentLinkError {
+  ok: false
+  error: string
+}
+
+/**
+ * The link token. It travels to Magnus: the wallet credit's reference is
+ * `plink:<token>`, written into the refill description marker and used as a
+ * filter value to find it again. base64url can spell SqlInject codes ('eval',
+ * 'copy', 'print', �?�) and a filter value is an identifier the guard refuses �?"
+ * so the token is REGENERATED until guard-safe (magnus-sqlinject-guard.ts).
+ */
+export function generateToken(): string {
+  return regenerateUntilMagnusSafe(() => randomBytes(24).toString('base64url'))
+}
+
+/**
+ * Validates + mints a PaymentLink row. Same validation rules as the
+ * /api/internal/payment-link HTTP route (amount 5.00-500.00, 2dp precision,
+ * currency USD|XCD) �?" kept in sync deliberately; if you loosen one, loosen
+ * both or split the validation explicitly.
+ */
+export async function mintPaymentLink(
+  input: MintPaymentLinkInput,
+): Promise<MintPaymentLinkResult | MintPaymentLinkError> {
+  const { amount, currency, description, tenantId, agentId, createdBy, liteAccountId, expiresInMinutes, creditAmountEcd, returnUrl, reloadlyOperatorId, reloadlyRecipientPhone, reloadlyFaceAmountUsd } = input
+
+  if (typeof amount !== 'number' || !Number.isFinite(amount) || amount < 5 || amount > 500) {
+    return { ok: false, error: 'amount must be a number between 5.00 and 500.00' }
+  }
+  // See app/api/internal/payment-link/route.ts for the float-precision rationale.
+  const cents = Math.round(amount * 100)
+  if (Math.abs(cents / 100 - amount) > 1e-9) {
+    return { ok: false, error: 'amount must have at most 2 decimal places' }
+  }
+  if (typeof currency !== 'string' || !VALID_CURRENCIES.has(currency)) {
+    return { ok: false, error: 'currency must be USD or XCD' }
+  }
+  if (creditAmountEcd !== undefined) {
+    if (typeof creditAmountEcd !== 'number' || !Number.isFinite(creditAmountEcd) || creditAmountEcd <= 0) {
+      return { ok: false, error: 'creditAmountEcd must be a positive number' }
+    }
+    const creditCents = Math.round(creditAmountEcd * 100)
+    if (Math.abs(creditCents / 100 - creditAmountEcd) > 1e-9) {
+      return { ok: false, error: 'creditAmountEcd must have at most 2 decimal places' }
+    }
+  }
+  if (returnUrl !== undefined) {
+    if (typeof returnUrl !== 'string' || !/^https?:\/\//i.test(returnUrl) || returnUrl.length > 2048) {
+      return { ok: false, error: 'returnUrl must be an http(s) URL' }
+    }
+  }
+  // The three Reloadly-airtime fields travel together or not at all �?" a link
+  // with only some of them would fall through EVERY branch in the charge
+  // route (no send, no Magnus credit, no topupError, ok:true) and silently
+  // capture a card charge for nothing.
+  const reloadlyFieldsPresent = [reloadlyOperatorId, reloadlyRecipientPhone, reloadlyFaceAmountUsd].filter(v => v !== undefined).length
+  if (reloadlyFieldsPresent > 0) {
+    if (reloadlyFieldsPresent < 3 || !liteAccountId) {
+      return { ok: false, error: 'reloadlyOperatorId, reloadlyRecipientPhone, reloadlyFaceAmountUsd and liteAccountId must all be set together, or none of them' }
+    }
+    if (typeof reloadlyFaceAmountUsd !== 'number' || !Number.isFinite(reloadlyFaceAmountUsd) || reloadlyFaceAmountUsd <= 0) {
+      return { ok: false, error: 'reloadlyFaceAmountUsd must be a positive number' }
+    }
+  }
+
+  // A RETIRED ACCOUNT GETS NO LINK (2026-09-15, PKT-RETIREMENT-STOPS-MONEY).
+  // Every minter that names a liteAccountId �?" the PWA's /api/lite/topup/start,
+  // Lumen's /api/internal/personal-line/[id]/topup, the generic internal mint,
+  // the WhatsApp concierge �?" lands here, so this is the one place the refusal
+  // has to live. Checked by the row's own renamed columns, never by the
+  // caller's claim. The 09-06 links on �?�252k were minted 3 h and 15 h after
+  // retirement through exactly this function.
+  if (liteAccountId) {
+    const row = await prisma.liteAccount.findUnique({
+      where: { id: liteAccountId },
+      select: { id: true, userId: true, ownerPhone: true },
+    })
+    // A missing row stays a soft reference, as before (the charge route
+    // surfaces it as 'no-magnus-user'); only a RETIRED row is refused here.
+    if (row && isRetiredLiteAccount(row)) {
+      console.warn(`[payment-link] REFUSED mint for retired account ${row.id} (createdBy=${createdBy ?? '-'})`)
+      return { ok: false, error: 'account_retired' }
+    }
+  }
+
+  const ttlMinutes = typeof expiresInMinutes === 'number' && expiresInMinutes > 0 ? expiresInMinutes : 60 * 24
+  const token = generateToken()
+  const expiresAt = new Date(Date.now() + ttlMinutes * 60_000)
+  const amountForStorage = (cents / 100).toFixed(2)
+
+  const link = await prisma.paymentLink.create({
+    data: {
+      token,
+      amount: amountForStorage,
+      currency,
+      description,
+      tenantId,
+      agentId,
+      createdBy,
+      liteAccountId,
+      expiresAt,
+      creditAmountEcd: creditAmountEcd !== undefined ? creditAmountEcd.toFixed(2) : undefined,
+      // A Personal Line payer with no explicit return target goes back to the app (pay-return.ts); every other payer is untouched.
+      returnUrl: returnUrl ?? (liteAccountId ? PAY_RETURN_URL : undefined),
+      reloadlyOperatorId,
+      reloadlyRecipientPhone,
+      reloadlyFaceAmountUsd: reloadlyFaceAmountUsd !== undefined ? reloadlyFaceAmountUsd.toFixed(2) : undefined,
+    },
+  })
+
+  return {
+    ok: true,
+    token: link.token,
+    url: paymentLinkUrl(link.token),
+    expiresAt: link.expiresAt,
+  }
+}
+
+// �"?�"? Reuse-or-mint: one pending intent per (account, bundle) �"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?
+//
+// A WhatsApp double-tap arrives as TWO message ids, so the webhook's dedup
+// cannot see it, and two taps a second apart used to mint two payment intents
+// (PKT-TOPUP-CARD-BUTTON part 2, 2026-09-15). The lookup below reuses the
+// pending, unexpired link this account was already given for the same amount
+// and minter; the customer sees the same link twice and can pay it once (the
+// charge route's atomic pending�+'processing claim).
+//
+// THE RACE, closed in-process (Codex review, pass 3): two webhook invocations
+// for the two taps can interleave between the lookup and the create, and
+// both mint. There is no unique key on payment_link that would refuse the
+// second row, so the lookup+mint is serialised per liteAccountId with the
+// same promise-chain mutex shape magnus.ts uses for DID minting
+// (withProvisionLock). RESIDUAL, named: this is one-process; production runs
+// ONE bff-v2-web process today, and a second instance would reopen the
+// window. The durable fix is a partial unique index carrying the SAME
+// discriminators this lookup uses �?" (liteAccountId, currency, amount, the
+// minter prefix) WHERE status='pending' �?" so two DIFFERENT bundles may still
+// coexist while one bundle cannot be minted twice (Codex pass 4). A schema
+// change, not this packet's.
+const _mintQueues = new Map<string, Promise<unknown>>()
+async function serialisedPerAccount<T>(liteAccountId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = _mintQueues.get(liteAccountId) ?? Promise.resolve()
+  const run = prev.catch(() => undefined).then(fn)
+  _mintQueues.set(liteAccountId, run)
+  try {
+    return await run
+  } finally {
+    if (_mintQueues.get(liteAccountId) === run) _mintQueues.delete(liteAccountId)
+  }
+}
+
+export interface ReuseOrMintResult {
+  result: MintPaymentLinkResult | MintPaymentLinkError
+  /** true when an existing pending link was re-sent instead of a new one minted */
+  reused: boolean
+}
+
+/**
+ * Mint a link for a lite account, unless that account already holds a pending,
+ * unexpired link for the same amount/currency from the same minter (createdBy
+ * prefix) �?" in which case that link is returned again. Serialised per account.
+ */
+export async function reuseOrMintPaymentLink(
+  input: MintPaymentLinkInput & { liteAccountId: string },
+  reuse: { createdByPrefix: string },
+): Promise<ReuseOrMintResult> {
+  return serialisedPerAccount(input.liteAccountId, async () => {
+    const existing = await prisma.paymentLink.findFirst({
+      where: {
+        liteAccountId: input.liteAccountId,
+        status: 'pending',
+        currency: input.currency,
+        amount: input.amount,
+        createdBy: { startsWith: reuse.createdByPrefix },
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { token: true, expiresAt: true },
+    }).catch(() => null)
+    if (existing) {
+      console.log(`[payment-link] reusing pending link for liteAccount=${input.liteAccountId} (${reuse.createdByPrefix}*) �?" no second intent minted`)
+      return { reused: true, result: { ok: true as const, token: existing.token, url: paymentLinkUrl(existing.token), expiresAt: existing.expiresAt } }
+    }
+    return { reused: false, result: await mintPaymentLink(input) }
+  })
+}
+
+
+ exited 1 in 1212ms:
+Get-Content : An object at the specified path app/api/internal/payment-link/[token]/charge/route.ts does not exist, or 
+has been filtered by the -Include or -Exclude parameter.
+At line:2 char:1
++ Get-Content -Raw 'app/api/internal/payment-link/[token]/charge/route. ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (System.String[]:String[]) [Get-Content], Exception
+    + FullyQualifiedErrorId : ItemNotFound,Microsoft.PowerShell.Commands.GetContentCommand
+ 
+
+ exited 1 in 1240ms:
+Get-Content : An object at the specified path app/go/[code]/route.ts does not exist, or has been filtered by the 
+-Include or -Exclude parameter.
+At line:2 char:1
++ Get-Content -Raw 'app/go/[code]/route.ts'
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (System.String[]:String[]) [Get-Content], Exception
+    + FullyQualifiedErrorId : ItemNotFound,Microsoft.PowerShell.Commands.GetContentCommand
+ 
+
+exec
+"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Raw -LiteralPath 'app/api/internal/payment-link/[token]/charge/route.ts'" in C:\epic-workspace\Isola-Foundation\.workbench\codex-handoff-plsvc-window-and-brand-2026-10-14\work
+ succeeded in 699ms:
+// app/api/internal/payment-link/[token]/charge/route.ts
+// POST /api/internal/payment-link/:token/charge
+//
+// Submits card details against a minted payment link. Amount/currency are
+// ALWAYS read from the PaymentLink row, never from the request body �?" a
+// customer cannot alter what they're charged by tampering with the client.
+//
+// Body:
+//   {
+//     card:  { cardNumber, expMonth, expYear, cvv },
+//     payer: { name, email, address },
+//     recaptchaToken?: string,   // accepted, not yet enforced (no RECAPTCHA_SECRET_KEY wired)
+//   }
+//
+// Returns: { ok, status, transactionId? , error? }  �?" NEVER card data.
+// Auth: x-internal-secret. Card fields travel only in this server-side hop.
+//
+// SAFETY CONTRACT (hard �?" matches app/lib/payments/fiserv.ts):
+//   1. PAN/CVV are never logged, stored, or echoed. Only last4 is recorded.
+//   2. A link already 'paid' or expired refuses the charge �?" no double-charge.
+//   3. Decline leaves the link 'pending' so the customer can retry with another card,
+//      up to a 5-failure cap �?" the 6th consecutive decline finds the link 'canceled'.
+//   4. A link is marked 'paid' ONLY when the gateway result is ok AND carries a
+//      transaction ref. Incident 2026-07-07T00:15Z: the gateway returned HTTP 200
+//      with a declined status and no ref; fiserv.ts now rejects that upstream, but
+//      this route independently refuses to trust `result.ok` alone as proof of
+//      payment �?" belt-and-braces, do not remove this check.
+//   5. A link whose liteAccountId is RETIRED is refused BEFORE fiservCharge and
+//      canceled (2026-09-15). The credit-side guard in assertMagnusOwnership
+//      is not enough here: it would fire after the card was charged.
+//
+// CONCURRENCY: the only real double-charge guard is the atomic claim below
+// (updateMany pending->processing gated on count===1). The status checks that
+// follow it are just for a friendly, accurate error message �?" do not rely on
+// a preceding findUnique() read to decide whether to charge; two concurrent
+// requests would both pass a plain read-then-write check.
+//
+// WA TOP-UP WALLET CREDIT (added alongside WA-top-up P-link wiring):
+//   When a link carries liteAccountId (set by the WhatsApp top-up Flow
+//   handler at mint time), a successful payment must ALSO credit the
+//   customer's Magnus wallet �?" this route is the only hop that knows the
+//   charge genuinely succeeded, so it owns firing the credit. Mirrors the
+//   MOTO precedent in app/api/platform/fiserv/charge/route.ts:
+//     resolve liteAccountId -> magnusUserId -> addMagnusCredit -> ledger row
+//     (idempotency key 'plink:<token>') -> fire-and-forget WA confirmation.
+//   A credit failure must NEVER unmark the link as paid �?" the charge already
+//   settled with the processor. Failures are logged loudly and surfaced in
+//   the response as creditError for operator reconciliation.
+//
+// WA AIRTIME TOP-UP (Reloadly) �?" same seam, different purpose:
+//   When a link carries reloadlyRecipientPhone (set by the WA airtime
+//   concierge branch at mint time instead of relying on liteAccountId alone),
+//   a successful payment fires a real Reloadly send instead of a Magnus
+//   credit. Same non-masking rule: a failed send never unmarks the link as
+//   paid �?" the charge already settled. Idempotency key 'plink-airtime:<token>'
+//   (distinct from the Magnus path's 'plink:<token>') on the same
+//   liteMinuteLedger table, checked-then-set before calling Reloadly so a
+//   retried/replayed charge attempt (already blocked by the atomic claim
+//   above) can never fire a second send even if this block were ever reached
+//   twice. Failures surfaced as topupError, never silently dropped.
+import { NextRequest, NextResponse } from 'next/server'
+import { validateInternalSecret, validatePayPageSecret } from '@/app/lib/internal-auth'
+import { prisma }                    from '@/app/lib/prisma'
+import { fiservCharge }              from '@/app/lib/payments/fiserv'
+import { recordFiservCharge }        from '@/app/lib/payments/fiserv-charge-log'
+import { getMagnusUserById } from '@/app/lib/magnus'
+import { creditWalletOnce } from '@/app/lib/wallet-credit'
+import { sendTopup }                 from '@/app/lib/reloadly-client'
+import { sendWhatsAppMessage, sendWhatsAppTemplate } from '@/app/lib/whatsapp'
+import { isRetiredLiteAccount, recordRetiredMoneyRefusal } from '@/app/lib/lite-retire'
+import { isLegacyBonusPricedCardLink } from '@/app/lib/lite-topup'
+import { airtimeSendAvailable, airtimeUnavailable } from '@/app/lib/lite-airtime'
+
+export const dynamic = 'force-dynamic'
+
+// Fixed, honest, customer-facing copy for a genuine card decline. Never show
+// the customer raw/technical gateway text �?" that detail (result.error) is for
+// operators only (lastError column + recordFiservCharge), not the browser.
+// Used ONLY when the gateway actually reported a decline-shaped result
+// (a status was returned, or the ok-without-ref incident case) �?" NOT for
+// config/currency/network errors that never reached a card at all; those
+// keep their own already-plain-English result.error message.
+const DECLINE_MESSAGE_FOR_CUSTOMER = 'Your card was declined �?" no charge was made. Try another card.'
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ token: string }> }
+) {
+  if (!(validateInternalSecret(req) || validatePayPageSecret(req))) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  const { token } = await params
+
+  let body: Record<string, unknown>
+  try {
+    body = (await req.json()) as Record<string, unknown>
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
+
+  const { card, payer } = body as {
+    card?:  { cardNumber?: string; expMonth?: string; expYear?: string; cvv?: string }
+    payer?: { name?: string; email?: string; address?: string }
+  }
+
+  if (!card?.cardNumber || !card?.expMonth || !card?.expYear || !card?.cvv) {
+    return NextResponse.json({ error: 'card.cardNumber, expMonth, expYear, cvv are required' }, { status: 400 })
+  }
+  if (!payer?.name || !payer?.email || !payer?.address) {
+    return NextResponse.json({ error: 'payer.name, email, address are required' }, { status: 400 })
+  }
+
+  const existing = await prisma.paymentLink.findUnique({ where: { token } })
+  if (!existing) {
+    return NextResponse.json({ error: 'not_found' }, { status: 404 })
+  }
+
+  // Atomic claim: the DB only lets one request flip pending -> processing.
+  // This �?" not the reads above or below �?" is what actually kills the race.
+  const claim = await prisma.paymentLink.updateMany({
+    where: { token, status: 'pending' },
+    data:  { status: 'processing' },
+  })
+
+  if (claim.count !== 1) {
+    const current = await prisma.paymentLink.findUnique({ where: { token } })
+    if (!current) {
+      return NextResponse.json({ error: 'not_found' }, { status: 404 })
+    }
+    if (current.status === 'paid') {
+      return NextResponse.json({ ok: false, status: 'ALREADY_PAID', error: 'This link has already been paid.' }, { status: 409 })
+    }
+    if (current.status === 'processing') {
+      return NextResponse.json({ ok: false, status: 'IN_PROGRESS', error: 'A charge is already being processed for this link.' }, { status: 409 })
+    }
+    if (current.status === 'canceled') {
+      return NextResponse.json({ ok: false, status: 'CANCELED', error: 'This link was canceled after too many failed attempts.' }, { status: 410 })
+    }
+    return NextResponse.json({ ok: false, status: 'EXPIRED', error: 'This payment link has expired.' }, { status: 410 })
+  }
+
+  // We now hold the exclusive 'processing' claim on this link.
+  if (existing.expiresAt.getTime() < Date.now()) {
+    // Claimed an already-expired link �?" release it without counting a failed attempt.
+    await prisma.paymentLink.update({ where: { token }, data: { status: 'expired' } })
+    return NextResponse.json({ ok: false, status: 'EXPIRED', error: 'This payment link has expired.' }, { status: 410 })
+  }
+
+  // Any of the three Reloadly fields present routes away from the ordinary
+  // Magnus-credit branch �?" keyed on "any", not just reloadlyRecipientPhone,
+  // so a row that somehow ends up with only a PARTIAL set (manual DDL/DML,
+  // a future writer bypassing mintPaymentLink's all-or-none validation)
+  // fails loud in the branch below instead of silently taking a Magnus
+  // credit for what was actually an airtime purchase. (Hoisted 2026-09-25 so
+  // the pre-charge wallet check keys on the same predicate.)
+  const hasAnyReloadlyField = existing.reloadlyOperatorId != null || existing.reloadlyRecipientPhone != null || existing.reloadlyFaceAmountUsd != null
+
+  // A RETIRED ACCOUNT NEVER REACHES fiservCharge (2026-09-15, PKT-RETIREMENT-
+  // STOPS-MONEY). This is the check that matters: the ownership assertion
+  // inside addMagnusCredit also refuses a retired row, but that runs AFTER the
+  // card has been charged �?" money taken, nothing delivered, which is exactly
+  // what happened twice on �?�252k on 2026-09-06 (links minted before the
+  // retirement, charged hours after it). So the row is read here, before the
+  // processor is contacted, and the link is CANCELED �?" not left 'pending' �?"
+  // so a retry cannot find it again. Not counted as a failed attempt: the
+  // card was never tried. Links minted for tenants (no liteAccountId) are
+  // unaffected.
+  const refuseRetired = async (owner: { id: string }) => {
+    console.warn(`[payment-link/charge] REFUSED before charge: token=${token} liteAccount=${owner.id} account_retired �?" link canceled`)
+    // If this update fails the link stays 'processing', which is itself
+    // fail-closed (a processing link answers IN_PROGRESS to every later
+    // charge and can never reach the processor); the 410 still goes out.
+    await prisma.paymentLink
+      .update({ where: { token }, data: { status: 'canceled', lastError: 'account_retired' } })
+      .catch((e: any) => console.error(`[payment-link/charge] cancel-on-retired failed for token=${token}: ${e?.message} (link left processing �?" no charge is possible in that state)`))
+    await recordRetiredMoneyRefusal({ source: 'fiserv:payment-link/charge', liteAccountId: owner.id, amount: Number(existing.amount), currency: existing.currency, ref: token, detail: 'link canceled before fiservCharge; no money taken' })
+    return NextResponse.json(
+      { ok: false, status: 'ACCOUNT_RETIRED', error: 'This line is no longer in service �?" no charge was made.' },
+      { status: 410 },
+    )
+  }
+  if (existing.liteAccountId) {
+    const owner = await prisma.liteAccount.findUnique({
+      where: { id: existing.liteAccountId },
+      select: { id: true, userId: true, ownerPhone: true, magnusUserId: true },
+    })
+    // Only a RETIRED row is refused here; a missing row on a wallet-credit
+    // link is refused just below (no wallet), before the charge.
+    if (owner && isRetiredLiteAccount(owner)) return refuseRetired(owner)
+
+    // A WALLET THAT CANNOT BE CREDITED NEVER REACHES fiservCharge either
+    // (2026-09-25, def-payment-link-charge-captures-card-before-verifying-
+    // wallet-2026-09-25). A wallet-credit link (liteAccountId and no Reloadly
+    // field -- the SAME predicate the credit branch below uses) whose account
+    // has no magnusUserId, or whose Magnus user getMagnusUserById cannot find,
+    // used to be charged first and then logged 'no-magnus-user': money taken,
+    // nothing credited. Checked here with the same helpers the Personal Line
+    // top-up route uses, before the processor is contacted; not counted as a
+    // failed attempt (the card was never tried). Airtime and tenant links are
+    // not touched.
+    //   - no magnusUserId on the row (or no row): definitive -> link CANCELED
+    //     with lastError, exactly as a retired account is;
+    //   - getMagnusUserById null: no such Magnus user -- but that helper also
+    //     answers null when Magnus is unreachable, so the link is released to
+    //     'pending' (payable later), not canceled;
+    //   - getMagnusUserById throws: unknown -> released to 'pending', 503.
+    // Fail closed in every case: nothing is charged.
+    if (!hasAnyReloadlyField) {
+      let wallet: 'ok' | 'none' | 'not_found' | 'unverifiable' = 'ok'
+      if (!owner?.magnusUserId) {
+        wallet = 'none'
+      } else {
+        try {
+          if (!(await getMagnusUserById(owner.magnusUserId))) wallet = 'not_found'
+        } catch {
+          wallet = 'unverifiable'
+        }
+      }
+      // The probe above awaited Magnus (up to its timeout): the account can be
+      // RETIRED or DELETED meanwhile (Codex on #236; fixture resets hard-delete
+      // lite_accounts). Re-read it right before the charge -- nothing else
+      // awaits between here and fiservCharge: retired -> refused exactly as
+      // above; no row -> the definite no-wallet refusal below.
+      if (wallet === 'ok') {
+        const fresh = await prisma.liteAccount.findUnique({
+          where: { id: existing.liteAccountId },
+          select: { id: true, userId: true, ownerPhone: true },
+        })
+        if (fresh && isRetiredLiteAccount(fresh)) return refuseRetired(fresh)
+        if (!fresh) wallet = 'none'
+      }
+      if (wallet !== 'ok') {
+        const lastError = wallet === 'unverifiable' ? 'wallet_unverifiable' : 'no_wallet'
+        console.warn(`[payment-link/charge] REFUSED before charge: token=${token} liteAccount=${existing.liteAccountId} wallet=${wallet} �?" no charge made`)
+        await prisma.paymentLink
+          .update({ where: { token }, data: wallet === 'none' ? { status: 'canceled', lastError } : { status: 'pending', lastError } })
+          .catch((e: any) => console.error(`[payment-link/charge] release-on-${lastError} failed for token=${token}: ${e?.message} (link left processing �?" no charge is possible in that state)`))
+        if (wallet === 'unverifiable') {
+          return NextResponse.json(
+            { ok: false, status: 'WALLET_UNVERIFIABLE', error: 'We could not confirm the wallet for this line right now �?" no charge was made. Please try again in a few minutes.' },
+            { status: 503 },
+          )
+        }
+        return NextResponse.json(
+          { ok: false, status: 'NO_WALLET', error: 'This line has no wallet we can top up �?" no charge was made. Please contact support.' },
+          { status: wallet === 'none' ? 410 : 409 },
+        )
+      }
+    }
+  }
+
+  // A bundle link minted BEFORE the price correction carries the bonus-
+  // inclusive figure as its charge (27.50 for "EC$25", 60.00 for "EC$50").
+  // The owner ruled EC$25 charges EC$25; that must hold for every charge made
+  // after the fix ships, and the row �?" not the code �?" decides the figure, so
+  // the fix in the minters alone would still let an old link charge the old
+  // price for up to its 24h TTL. Refuse it, exactly as an expired link is
+  // refused: released (not a failed attempt), never charged, and the customer
+  // is told to ask for a fresh link. See isLegacyBonusPricedCardLink().
+  if (isLegacyBonusPricedCardLink(existing)) {
+    await prisma.paymentLink.update({ where: { token }, data: { status: 'expired', lastError: 'superseded: minted at the pre-2026-09-15 bonus-inclusive price' } })
+    return NextResponse.json({ ok: false, status: 'PRICE_SUPERSEDED', error: 'This payment link was issued at an old price and cannot be charged �?" no charge was made. Please request a new top-up link.' }, { status: 410 })
+  }
+
+  // AN AIRTIME LINK THAT CANNOT DELIVER NEVER REACHES fiservCharge (Codex on
+  // #237). The minters (WhatsApp concierge, app /api/lite/airtime/pay-link)
+  // run this preflight when the link is MINTED, but the card can be charged up
+  // to the link's TTL later -- after the send gate was closed or the Reloadly
+  // float spent -- and sendTopup() below runs only AFTER capture: money taken,
+  // no airtime. The same shared preflight runs here, the last await before the
+  // processor. The link is released to 'pending' (not canceled, not an
+  // attempt): the condition is transient and the customer can pay later.
+  // Only a COMPLETE airtime link: a partial Reloadly field set keeps its own
+  // fail-loud handling below, unchanged.
+  if (existing.liteAccountId && existing.reloadlyRecipientPhone && existing.reloadlyOperatorId != null && existing.reloadlyFaceAmountUsd != null) {
+    // The float check is not a reservation (Codex on #237, 2nd pass): two
+    // charges racing for the last of the float would both pass and the second
+    // would capture with no airtime. Every OTHER airtime link currently
+    // 'processing' (claimed, not yet captured -- sendTopup follows capture
+    // within seconds) is counted against the float first. Concurrent charges
+    // that together exceed it both refuse, uncharged, rather than one being
+    // charged for nothing. This narrows the race; it is not a hard reservation.
+    const inFlight = await prisma.paymentLink.findMany({
+      where:  { status: 'processing', token: { not: token }, reloadlyFaceAmountUsd: { not: null } },
+      select: { reloadlyFaceAmountUsd: true },
+    })
+    const reservedUsd = inFlight.reduce((sum: number, l: { reloadlyFaceAmountUsd: unknown }) => sum + Number(l.reloadlyFaceAmountUsd), 0)
+    const airtime = await airtimeSendAvailable(Number(existing.reloadlyFaceAmountUsd), reservedUsd)
+    if (airtimeUnavailable(airtime)) {
+      console.warn(`[payment-link/charge] REFUSED before charge: token=${token} airtime ${airtime.reason} �?" no charge made`)
+      await prisma.paymentLink
+        .update({ where: { token }, data: { status: 'pending', lastError: `airtime_unavailable:${airtime.reason}` } })
+        .catch((e: any) => console.error(`[payment-link/charge] release-on-airtime_unavailable failed for token=${token}: ${e?.message} (link left processing �?" no charge is possible in that state)`))
+      return NextResponse.json(
+        { ok: false, status: 'AIRTIME_UNAVAILABLE', error: 'Airtime top-ups are not available right now �?" no charge was made. Please try again later.' },
+        { status: 503 },
+      )
+    }
+  }
+
+  const last4 = card.cardNumber.replace(/\D/g, '').slice(-4)
+
+  // Amount/currency come from the link row �?" never from the client. `existing`
+  // was read immediately before the atomic claim succeeded, and nothing else
+  // can mutate a 'pending' row except this same claim, so it is still fresh.
+  //
+  // amount is a Prisma Decimal �?" convert explicitly to a plain number for the
+  // two call sites that need one (Fiserv's JSON payload and the local charge
+  // log). Fiserv itself is sent major-currency-unit decimal (e.g. 25.00), not
+  // cents; see fiserv.ts FiservChargeInput.amount doc comment.
+  const amountNumber = Number(existing.amount)
+
+  const result = await fiservCharge({
+    cardNumber:   card.cardNumber,
+    expMonth:     card.expMonth,
+    expYear:      card.expYear,
+    cvv:          card.cvv,
+    amount:       amountNumber,
+    currency:     existing.currency,
+    payerName:    payer.name,
+    payerEmail:   payer.email,
+    payerAddress: payer.address,
+  })
+
+  // Belt-and-braces (2026-07-07T00:15Z incident): a result is only a genuine
+  // payment when it is ok AND carries a transaction ref. fiserv.ts now enforces
+  // this upstream, but this route does not trust `result.ok` alone �?" an
+  // ok-without-ref result is treated as a failure here too, never as 'paid'.
+  const isGenuinePayment = result.ok && Boolean(result.ref)
+
+  // A "genuine decline" is a result the gateway actually adjudicated on the
+  // card (it returned a status), or the incident case (ok-without-ref, which
+  // fiserv.ts now also flags with a status when it can). Distinguish this
+  // from config/network/currency failures, which never reached a card and
+  // should keep their own accurate, already-plain-English message rather than
+  // falsely telling the customer their card was declined.
+  const isGenuineDecline = !isGenuinePayment && !result.disabled && Boolean(result.status)
+
+  recordFiservCharge({
+    accountId: existing.tenantId ?? undefined,
+    amount:    amountNumber,
+    currency:  existing.currency,
+    last4,
+    status:    result.status ?? (result.disabled ? 'disabled' : isGenuinePayment ? 'ok' : 'error'),
+    ref:       result.ref,
+    ok:        isGenuinePayment,
+    createdBy: existing.createdBy ?? undefined,
+  })
+
+  let attempts = existing.attempts
+  let canceledNow = false
+
+  // Populated only on the genuine-payment branch below, when the link
+  // carries a liteAccountId �?" surfaced in the response for operator visibility.
+  // balanceAfter is null when the post-credit readback failed -- the credit
+  // still succeeded, we just refuse to name a balance we did not confirm.
+  let credited: { ecd: number; magnusUserId: string; balanceAfter: number | null } | undefined
+  let creditError: string | undefined
+
+  // Populated only on the genuine-payment branch below, when the link
+  // carries a reloadlyRecipientPhone �?" surfaced in the response for operator
+  // visibility. Mutually exclusive with credited/creditError: a link is
+  // either a Magnus-credit top-up or a Reloadly-airtime top-up, never both.
+  let topup: { transactionId: string; deliveredAmount: number; deliveredAmountCurrency: string } | undefined
+  let topupError: string | undefined
+
+  if (isGenuinePayment) {
+    await prisma.paymentLink.update({
+      where: { token },
+      data:  { status: 'paid', transactionId: result.ref, paidAt: new Date() },
+    })
+
+    // �"?�"? WA top-up wallet credit (the missing hop) �"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?
+    // Only fires when this link was minted with a liteAccountId (the WA
+    // top-up flow does this at mint time; agent-minted Flow-A links for
+    // arbitrary invoices do not, and are unaffected).
+    if (existing.liteAccountId && existing.reloadlyRecipientPhone) {
+      // �"?�"? Airtime top-up (Reloadly) �?" WA "top up my phone" seam �"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?
+      // Checked FIRST and separately from the Magnus-credit branch below: a
+      // link minted for airtime never falls through to a Magnus credit, even
+      // if liteAccountId is also set (it always is, for WA confirmation).
+      try {
+        if (existing.reloadlyOperatorId == null || existing.reloadlyFaceAmountUsd == null) {
+          console.error(`[payment-link/charge] token=${token} has reloadlyRecipientPhone but is missing reloadlyOperatorId/reloadlyFaceAmountUsd �?" cannot send`)
+          topupError = 'missing-operator'
+        } else {
+          const idempotencyRef = `plink-airtime:${token}`
+          const alreadyProcessed = await prisma.liteMinuteLedger.findFirst({
+            where: { stripeSessionId: idempotencyRef },
+          })
+
+          if (alreadyProcessed) {
+            console.log(`[payment-link/charge] airtime already sent for token ${token} �?" skipping (idempotent replay)`)
+            const meta = (alreadyProcessed.meta as any) ?? {}
+            topup = {
+              transactionId:           meta.transactionId ?? '',
+              deliveredAmount:         meta.deliveredAmount ?? 0,
+              deliveredAmountCurrency: meta.deliveredAmountCurrency ?? '',
+            }
+          } else {
+            try {
+              // FACE amount, not amountNumber (the Fiserv charge, which
+              // includes margin) �?" sending the marked-up price to Reloadly
+              // either gets rejected outright (FIXED-denomination operators)
+              // or silently overspends EPIC's float and over-delivers to the
+              // recipient (RANGE operators), in both cases breaking the
+              // amount the confirm message already promised the customer.
+              const faceAmount = Number(existing.reloadlyFaceAmountUsd)
+              const receipt = await sendTopup({
+                operatorId:       existing.reloadlyOperatorId,
+                amount:           faceAmount,
+                recipientPhone:   existing.reloadlyRecipientPhone,
+                customIdentifier: idempotencyRef,
+              })
+
+              topup = {
+                transactionId:           receipt.transactionId,
+                deliveredAmount:         receipt.deliveredAmount,
+                deliveredAmountCurrency: receipt.deliveredAmountCurrency,
+              }
+
+              try {
+                await prisma.liteMinuteLedger.create({
+                  data: {
+                    liteAccountId:   existing.liteAccountId,
+                    type:            'topup',
+                    minutes:         0,
+                    stripeSessionId: idempotencyRef,
+                    meta: {
+                      source:                  'wa_plink_airtime',
+                      recipientPhone:          existing.reloadlyRecipientPhone,
+                      operatorId:              existing.reloadlyOperatorId,
+                      transactionId:           receipt.transactionId,
+                      deliveredAmount:         receipt.deliveredAmount,
+                      deliveredAmountCurrency: receipt.deliveredAmountCurrency,
+                      faceAmountUsd:           faceAmount,
+                      chargedAmount:           amountNumber,
+                      chargedCurrency:         existing.currency,
+                      token,
+                    },
+                  },
+                })
+              } catch (ledgerErr: any) {
+                // Race-condition duplicate write �?" send already happened; log and continue.
+                console.warn(`[payment-link/charge] airtime ledger write failed (possible race): ${ledgerErr.message}`)
+              }
+
+              console.log(`[payment-link/charge] airtime sent -> +${existing.reloadlyRecipientPhone} txn=${receipt.transactionId} token=${token}`)
+
+              // Fire-and-forget, best-effort �?" wrapped so nothing here (sync or
+              // async) can ever propagate and mask the already-settled charge.
+              try {
+                const laForConfirm = await prisma.liteAccount.findUnique({
+                  where:  { id: existing.liteAccountId },
+                  select: { ownerPhone: true },
+                }).catch(() => null)
+                if (laForConfirm?.ownerPhone) {
+                  Promise.resolve(sendWhatsAppMessage(
+                    laForConfirm.ownerPhone,
+                    `Airtime sent: +${existing.reloadlyRecipientPhone} received ${receipt.deliveredAmount} ${receipt.deliveredAmountCurrency}. Ref: ${receipt.transactionId}`,
+                  )).catch((e: any) =>
+                    console.error(`[payment-link/charge] WA airtime confirmation failed (non-fatal) for token=${token}:`, e?.message),
+                  )
+                }
+              } catch (notifyEx: any) {
+                console.error(`[payment-link/charge] airtime WA confirmation setup failed (non-fatal) for token=${token}:`, notifyEx?.message)
+              }
+            } catch (sendEx: any) {
+              // Charge already settled above (status='paid') �?" never mask a
+              // captured payment by reopening/reverting it. Log loudly, surface
+              // topupError, let the operator reconcile or manually retry the
+              // send with the same idempotencyRef.
+              console.error(`[payment-link/charge] sendTopup FAILED token=${token} recipient=${existing.reloadlyRecipientPhone}: ${sendEx.message}`)
+              topupError = 'reloadly-send-failed'
+
+              try {
+                const laForConfirm = await prisma.liteAccount.findUnique({
+                  where:  { id: existing.liteAccountId },
+                  select: { ownerPhone: true },
+                }).catch(() => null)
+                if (laForConfirm?.ownerPhone) {
+                  Promise.resolve(sendWhatsAppMessage(
+                    laForConfirm.ownerPhone,
+                    `Payment received, but airtime delivery failed �?" support will follow up. No second charge will be made.`,
+                  )).catch(() => {})
+                }
+              } catch { /* best-effort notification only �?" topupError above is already set */ }
+            }
+          }
+        }
+      } catch (topupEx: any) {
+        // Unexpected error in the airtime block �?" charge already settled
+        // above; log for reconciliation, do not touch link status.
+        console.error(`[payment-link/charge] airtime block threw (token=${token}, ref=${result.ref}):`, topupEx.message)
+        topupError = 'reloadly-send-exception'
+      }
+    } else if (existing.liteAccountId && !hasAnyReloadlyField) {
+      try {
+        const la = await prisma.liteAccount.findUnique({
+          where:  { id: existing.liteAccountId },
+          select: { id: true, magnusUserId: true, ownerPhone: true, userId: true },
+        })
+
+        if (!la?.magnusUserId) {
+          console.error(`[payment-link/charge] liteAccountId=${existing.liteAccountId} has no magnusUserId �?" cannot credit wallet (token=${token})`)
+          creditError = 'no-magnus-user'
+        } else {
+          // existing.amount is what the CARD was charged, in the link's own
+          // currency. creditAmountEcd is what the WALLET receives, pinned at
+          // mint time by EVERY bundle minter since 2026-09-15 (PKT-TOPUP-
+          // PRICE-CORRECTION): XCD bundles pin creditAmount (25 �+' 27.50,
+          // 50 �+' 60, 10 �+' 10); USD diaspora bundles pin creditAmount (peg +
+          // bonus). The fallback to amountNumber is for ad-hoc links that
+          // carry no bonus �?" it is NOT the bundle path any more, and a bundle
+          // row without creditAmountEcd is a legacy row refused above.
+          const creditEcd = existing.creditAmountEcd != null ? Number(existing.creditAmountEcd) : amountNumber
+
+          // F1 + F2 (def-wallet-credit-double-credit-window-�?�): ONE durable
+          // claim per payment (the ledger row, key 'plink:<token>', created
+          // BEFORE the credit �?" the @unique is the cross-process arbiter), then
+          // the Magnus credit with the same reference as its marker and a
+          // Magnus-side pre-check underneath. The Fiserv ref rides in the text
+          // so the refill is joinable to the processor receipt (G3, HOP 4).
+          // A claim already held �+' already_credited / already_attempted; a
+          // lost reply �+' 'credit_unknown' on the row, pending reconciliation �?"
+          // never a second credit.
+          const idempotencyRef = `plink:${token}`
+          const credit = await creditWalletOnce({
+            liteAccountId: la.id,
+            magnusUserId: la.magnusUserId,
+            amountEcd: creditEcd,
+            currency: existing.currency,
+            reference: idempotencyRef,
+            description: `Isola Lite top-up fiserv:${result.ref}`,
+            type: 'topup',
+            meta: { source: 'wa_plink', transactionId: result.ref, token },
+          })
+          if (credit.outcome === 'refused' || credit.outcome === 'invalid') {
+            console.error(`[payment-link/charge] wallet credit REFUSED for liteAccount=${la.id} token=${token} ref=${result.ref}: ${credit.error}`)
+            creditError = 'wallet-credit-failed'
+          } else if (credit.outcome === 'unknown') {
+            // The call was made and the reply was lost. Magnus MAY hold the
+            // money; the ledger row now says credit_unknown durably, and a
+            // human reconciles from platform-health �?" nothing retries this.
+            console.error(`[payment-link/charge] wallet credit UNKNOWN for liteAccount=${la.id} token=${token} ref=${result.ref}: ${credit.error} �?" ledger ${credit.ledgerId} is credit_unknown, pending reconciliation`)
+            creditError = 'wallet-credit-unknown'
+          } else if (credit.outcome === 'already_attempted') {
+            console.error(`[payment-link/charge] wallet credit already attempted for ${idempotencyRef}: state=${credit.state} �?" ${credit.detail}`)
+            creditError = credit.state === 'credit_unknown' ? 'wallet-credit-unknown' : 'wallet-credit-pending'
+          } else {
+              if (credit.outcome === 'already_credited') {
+                console.log(`[payment-link/charge] already credited for token ${token} �?" replay shows the customer where they stand`)
+              } else if (credit.existingRefillId) {
+                console.warn(`[payment-link/charge] Magnus already held refill ${credit.existingRefillId} for ${idempotencyRef} �?" claim settled, no second credit`)
+              }
+              console.log(`[payment-link/charge] EC$${creditEcd} credited -> liteAccount=${la.id} token=${token} (ledger ${credit.ledgerId}, ${credit.state})`)
+
+              // ONE balance readback, awaited, shared by the HTTP response and
+              // the WhatsApp confirmation below (2.3 -- two separate reads
+              // could disagree, and the customer would be shown two different
+              // balances for the same payment).
+              //
+              // Awaited rather than fire-and-forget because the RESPONSE now
+              // carries it: ruled 2026-09-06, the pay page must be
+              // self-sufficient and show "paid, amount, new balance" without
+              // the customer needing a session. Costs one Magnus REST call on
+              // a path that has already made a SOAP round trip to Fiserv.
+              //
+              // Still a SEPARATE call from addMagnusCredit's own return value,
+              // per CLAUDE.md law 5 -- never trust a call's own success as
+              // proof of the state it produced.
+              const after = await getMagnusUserById(la.magnusUserId!).catch(() => null)
+
+              credited = {
+                ecd: creditEcd,
+                magnusUserId: la.magnusUserId,
+                // null, never a fabricated or stale number. The page shows the
+                // amount and omits the balance rather than inventing one
+                // (law 12: a confident wrong balance is worse than no balance).
+                balanceAfter: after ? after.balance : null,
+              }
+
+              // Fire-and-forget WA confirmation �?" failure here must not affect
+              // the HTTP response; the charge + credit already succeeded.
+              //
+              // 2026-09-03: names the actual new balance, not just "reply
+              // *balance* to check" �?" the owner's stated requirement is
+              // amount + new balance in the same message. The readback is a
+              // SEPARATE call from addMagnusCredit's own return value, per
+              // CLAUDE.md law 5 (never trust a call's own success as proof of
+              // the state it produced); if that readback itself fails, the
+              // message still names the amount and does not silently drop to
+              // a stale/undefined balance.
+              if (la.ownerPhone && credit.outcome === 'credited') {   // a replay of an already-credited claim must not re-send the confirmation
+                (async () => {
+                  // Reuses the single readback hoisted above -- deliberately
+                  // NOT a second call.
+                  if (after == null) {
+                    // Fail closed, not fluent: CLAUDE.md law 12 �?" a
+                    // confirmation naming a fabricated/stale balance is
+                    // worse than no confirmation. The credit itself already
+                    // succeeded; only the WA send is skipped, logged loudly
+                    // for operator reconciliation.
+                    console.error(`[payment-link/charge] balance readback failed for liteAccount=${la.id} token=${token} �?" WA confirmation SKIPPED (not sent with a fabricated balance)`)
+                    return
+                  }
+                  // Sent as an approved WhatsApp TEMPLATE (isola_topup_confirmed),
+                  // always �?" never freeform. Same reason as the sibling
+                  // plan-active send (see lite-plans.ts): freeform is
+                  // permanently blocked here regardless of window state,
+                  // because this recipient always classifies as the
+                  // account's own "owner path" (isOwner === true by
+                  // construction �?" we send to la.ownerPhone), which requires
+                  // an owner_alerts opt-in no real customer has. Templates
+                  // bypass that check entirely.
+                  await sendWhatsAppTemplate(
+                    la.ownerPhone!,
+                    'isola_topup_confirmed',
+                    [creditEcd.toFixed(2), after.balance.toFixed(2)],
+                    'en_US',
+                    undefined,
+                    la.userId ? { userId: la.userId, purpose: 'topup_confirmation' } : undefined,
+                  )
+                })().catch((e: any) =>
+                  console.error(`[payment-link/charge] WA confirmation failed (non-fatal) for token=${token}:`, e?.message),
+                )
+              } else {
+                console.warn(`[payment-link/charge] liteAccount=${la.id} has no ownerPhone �?" skipping WA confirmation (token=${token})`)
+              }
+            }
+          }
+      } catch (creditEx: any) {
+        // Unexpected error in the credit block �?" charge + link status already
+        // settled above; log for reconciliation, do not touch link status.
+        console.error(`[payment-link/charge] credit block threw (token=${token}, ref=${result.ref}):`, creditEx.message)
+        creditError = 'wallet-credit-exception'
+      }
+    } else if (hasAnyReloadlyField) {
+      // Defense in depth: mintPaymentLink() now refuses to create a link
+      // with a partial Reloadly field set (or one missing liteAccountId), so
+      // this should be unreachable �?" but ANY row that lands here (missing
+      // liteAccountId, or missing just reloadlyRecipientPhone while another
+      // field is set) must fail LOUD (a surfaced topupError) rather than
+      // silently falling through to a Magnus credit or falling through both
+      // branches with no send, no credit, no error and no log line.
+      console.error(`[payment-link/charge] token=${token} has a partial Reloadly field set (liteAccountId=${existing.liteAccountId ?? 'null'}, operatorId=${existing.reloadlyOperatorId ?? 'null'}, recipientPhone=${existing.reloadlyRecipientPhone ? 'set' : 'null'}, faceAmount=${existing.reloadlyFaceAmountUsd ?? 'null'}) �?" cannot send or credit`)
+      topupError = existing.liteAccountId ? 'missing-operator' : 'missing-lite-account'
+    }
+  } else if (result.disabled) {
+    // Gateway is disabled-by-default (pre-flip state) �?" not a real attempt
+    // against Fiserv, so it doesn't count toward the attempt cap. Release the claim.
+    await prisma.paymentLink.update({
+      where: { token },
+      data:  { status: 'pending', lastError: result.error },
+    })
+  } else {
+    // Real decline/error �?" count it. 5th failure cancels the link outright so
+    // a card-testing script can't grind against it indefinitely.
+    // result.ok-without-ref (the incident case) lands here too, not in the
+    // paid branch above.
+    attempts += 1
+    canceledNow = attempts >= 5
+    await prisma.paymentLink.update({
+      where: { token },
+      data:  {
+        status:    canceledNow ? 'canceled' : 'pending',
+        attempts,
+        lastError: result.error,
+      },
+    })
+  }
+
+  // Customer-facing error copy:
+  //   - genuine payment: no error
+  //   - disabled gateway / config / currency / network failures: pass through
+  //     the existing plain-English result.error (already safe, and honest �?"
+  //     these never reached a card)
+  //   - genuine card decline: fixed, honest, non-technical copy, never the
+  //     raw gateway string (full detail still lands in lastError + charge log)
+  const customerError = isGenuinePayment
+    ? undefined
+    : isGenuineDecline
+      ? (canceledNow
+          ? `${DECLINE_MESSAGE_FOR_CUSTOMER} This link has been canceled after ${attempts} failed attempts.`
+          : DECLINE_MESSAGE_FOR_CUSTOMER)
+      : result.error
+
+  return NextResponse.json(
+    {
+      ok:            isGenuinePayment,
+      status:        result.status ?? (result.disabled ? 'DISABLED' : 'ERROR'),
+      transactionId: isGenuinePayment ? result.ref : undefined,
+      error:         customerError,
+      ...(credited    ? { credited }    : {}),
+      ...(creditError ? { creditError } : {}),
+      ...(topup       ? { topup }       : {}),
+      ...(topupError  ? { topupError }  : {}),
+    },
+    { status: isGenuinePayment ? 200 : result.disabled ? 503 : 402 }
+  )
+}
+
+
+exec
+"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-Content -Raw -LiteralPath 'app/go/[code]/route.ts'" in C:\epic-workspace\Isola-Foundation\.workbench\codex-handoff-plsvc-window-and-brand-2026-10-14\work
+ succeeded in 749ms:
+/**
+ * /go/[code] �?" public, unauthenticated short-link resolver.
+ *
+ * SUBSTRATE NOTE (agent-full-surface floor): this directory used to be
+ * app/go/[nonce]/route.ts, serving ONLY the Lite Cloud Softphone activation
+ * flow (see app/lib/lite-activation.ts). The agent-full-surface task spec
+ * called for a NEW public route at this exact path �?" app/go/[code]/route.ts
+ * �?" for AgentCampaignLink QR/short-link redirects. Next.js's App Router does
+ * not allow two different dynamic-segment names at the same route level
+ * (`[nonce]` vs `[code]`), so a second, colliding route.ts could not be
+ * added side-by-side; the build would fail with "You cannot use different
+ * slug names for the same dynamic path". This file MERGES both concerns
+ * under a single `[code]` param with zero behavior change for the existing
+ * nonce flow:
+ *
+ *   1. First try resolving `code` as an AgentCampaignLink.code (new).
+ *      AgentCampaignLink.code is always `nanoid(8)` �?" 8 chars, default
+ *      nanoid alphabet (A-Za-z0-9_-).
+ *   2. If no campaign link matches, fall back to the original Lite
+ *      activation nonce flow unchanged (nonce is always a 32-char lowercase
+ *      hex string �?" crypto.randomBytes(16).toString('hex') �?" validated by
+ *      `/^[a-f0-9]{16,64}$/` in lite-activation.ts's loadRow()). An 8-char
+ *      nanoid code can never satisfy that 16-64 length check, so there is
+ *      no realistic collision between the two code spaces.
+ *
+ * This file is NOT runtime soul-dispatch/inbound-message routing code �?" it
+ * is a public landing/redirect page, out of scope of the hard constraint
+ * barring changes to inbound dispatch logic. Flagged as a deviation from
+ * the literal "new file" instruction in the task spec; see task report.
+ */
+import { inboundReachable } from '@/app/lib/lite-offer-copy'
+import { NextRequest, NextResponse } from 'next/server'
+import { prisma } from '@/app/lib/prisma'
+import {
+  beginActivation, verifyActivationOtp, consumeForXml, cscLaunchUri, activationEnabledFor,
+  looksLikeHumanNavigation, looksLikeInAppBrowser, handoffCookieValue, handoffCookieProves, HANDOFF_COOKIE, NONCE_TTL_MS, chatTapToken, chatTapTokenProves,
+  type Handoff,
+} from '@/app/lib/lite-activation'
+import {
+  readSignupSession, SIGNUP_SESSION_COOKIE,
+} from '@/app/lib/lite-signup-session'
+import { appHome } from '@/app/lib/app-home'
+import { resolveSigninShortCode } from '@/app/lib/wa-signin-shortlink'
+import { buildInAppBrowserEscapeBody } from '@/app/lib/wa-inapp-escape-page'
+
+export const dynamic = 'force-dynamic'
+
+/**
+ * Where "back to your EPIC app" should send someone.
+ *
+ * Derived from ISOLA_SIGNIN_URL -- the SAME setting /api/lite/wa-open
+ * redirects to -- rather than hardcoded. This link previously pointed at
+ * https://isola-connect.vercel.app, which stopped being the app's home when
+ * the PWA moved to its branded domain: a customer finishing setup was sent to
+ * a DIFFERENT ORIGIN, where their localStorage session does not exist, and
+ * landed signed out. Hardcoding the new host would just re-arm the same trap,
+ * so this reads the single source of truth instead.
+ */
+function appBase(): string {
+  // The scheme guard and the setting read now live in lib/app-home.ts so the
+  // concierge's eight customer-facing lines derive the SAME origin this page
+  // does (one copy, Law 21). Anything that is not a plain https origin yields
+  // '' and the link is simply not rendered �?" fails closed, never executable.
+  return appHome()
+}
+
+
+/**
+ * Serialize a value for embedding inside an inline <script>.
+ *
+ * JSON.stringify alone is NOT sufficient in an HTML script context: the HTML
+ * parser closes the element on a literal "</script>" before JavaScript ever
+ * parses the string, so a value containing that sequence breaks out into
+ * markup. U+2028/U+2029 are additionally escaped because older JS parsers
+ * treat them as line terminators inside string literals.
+ *
+ * Flagged by review on the credential hand-off page. cscLaunchUri() may well
+ * percent-encode enough that this is not reachable today, but the value here
+ * is a SIP password of unconstrained shape going into the sharpest sink in
+ * the file -- "probably encoded upstream" is not a property worth betting a
+ * credential on.
+ */
+function jsString(value: string): string {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029')
+}
+
+/** Same shell as html(), but for the ONE response that carries the SIP
+ *  credential. 'private' keeps shared caches out of it as well as the
+ *  browser's, matching what the redirect it replaces already set. */
+function htmlPrivate(body: string): NextResponse {
+  const res = html(body)
+  res.headers.set('Cache-Control', 'no-store, private')
+  res.headers.set('Referrer-Policy', 'no-referrer')
+  // Defence in depth on the one page that holds a credential: no external
+  // resources, and critically connect-src 'none' so injected script has no
+  // fetch/XHR/WebSocket path to exfiltrate what is in this page. Inline
+  // script/style are allowed because this page is built from inline strings;
+  // that is what makes the escaping above the real control rather than this.
+  res.headers.set(
+    'Content-Security-Policy',
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+      "connect-src 'none'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  )
+  return res
+}
+
+const APP_STORE_URL = 'https://apps.apple.com/us/app/cloud-softphone/id567475545'
+const PLAY_STORE_URL = 'https://play.google.com/store/apps/details?id=cz.acrobits.softphone.cloudphone'
+
+type Platform = 'ios' | 'android' | 'unknown'
+function platformFromUa(ua: string | null): Platform {
+  if (!ua) return 'unknown'
+  if (/iPhone|iPad|iPod/i.test(ua)) return 'ios'
+  if (/Android/i.test(ua)) return 'android'
+  return 'unknown'
+}
+
+/** Whole minutes this link still has. Floors at 1 so the page never says "0 minutes" for a link that is, right now, live. */
+function minutesLeft(nonceExpiresAt: number | undefined): number {
+  const ms = (nonceExpiresAt ?? Date.now() + NONCE_TTL_MS) - Date.now()
+  return Math.max(1, Math.floor(ms / 60_000))
+}
+
+/**
+ * The hand-off page: fires csc:, then finds out whether anything caught it.
+ *
+ * WHAT THIS PAGE KNOWS AND DOES NOT. bff-v2 has NO "Acrobits received it"
+ * signal -- csc: is fire-and-forget, nothing fetches anything back from us
+ * on this path, and the only proof a device holds the line is its SIP
+ * REGISTER, which is visible on voice00 and not here (accepted limit, PM
+ * 2026-09-15). What the browser CAN observe is whether the page went hidden
+ * after the launch: a handler took the URI (the app opened, the page lost
+ * visibility) or nothing did (the page is still the foreground). That is the
+ * standard deep-link fallback signal; it is a heuristic about the browser,
+ * not a check on the app, and it is used only to choose which copy to show.
+ * It never gates the credential and never claims the line is "set up".
+ *
+ * NO SELF-SORT (ruled 2026-09-15). The previous page asked the customer to
+ * declare "already have it / don't have it yet". The owner walked it cold,
+ * as a new customer would, and was stranded. Now there is one path: launch;
+ * if nothing caught it, lead with INSTALL for the platform we can see in the
+ * User-Agent (both stores when we cannot); when they come back, launch again
+ * -- the link is live for its whole TTL, so leaving for the store costs
+ * nothing (see lite-activation.ts, "REDEEMABLE FOR ITS TTL").
+ *
+ * EXPOSURE, because this file has a P0 in its history for putting a
+ * credential in a page: that P0 was a PUBLIC, UNAUTHENTICATED page with the
+ * OTP gate REMOVED. This response is reached only after OTP possession proof
+ * plus the handoff cookie that binds the nonce to the browser that typed the
+ * code, and an allowlist check; it is no-store/private; the URI is injected
+ * as a JSON string into a script -- never into an href -- so it cannot be
+ * lifted with "copy link address" and never rides in a Referer.
+ */
+function launchHandoffPage(h: Handoff, platform: Platform, did?: string): NextResponse {
+  // h.cloudId is undefined for every normal activation �?" cscLaunchUri's own
+  // default (the production cloud id) applies exactly as before this field
+  // existed. Only a link minted with an explicit override carries one.
+  const uri = cscLaunchUri(h.sipUsername, h.sipPassword, h.cloudId)
+  const mins = minutesLeft(h.nonceExpiresAt)
+  const store =
+    platform === 'ios'
+      ? `<a class="btn" id="store" target="_blank" rel="noopener" href="${APP_STORE_URL}">Install Cloud Softphone (App Store)</a>`
+      : platform === 'android'
+        ? `<a class="btn" id="store" target="_blank" rel="noopener" href="${PLAY_STORE_URL}">Install Cloud Softphone (Google Play)</a>`
+        : `<a class="btn" id="store" target="_blank" rel="noopener" href="${APP_STORE_URL}">Install for iPhone</a>` +
+          `<a class="btn" style="margin-top:10px" target="_blank" rel="noopener" href="${PLAY_STORE_URL}">Install for Android</a>`
+  const body =
+    `<h2>Adding your line to Cloud Softphone</h2>` +
+    (did ? `<p class="did">${esc(did)}</p>` : '') +
+    // No "lets this number ring" while inbound is not established (owner,
+    // 2026-09-24; LITE_INBOUND_REACHABLE via lite-offer-copy.ts).
+    (inboundReachable()
+      ? `<p class="muted">Cloud Softphone is your calling app &mdash; it's included with your line, and it's what lets this number ring like a normal call even when your phone is locked. Your number and password go across automatically. <strong>Nothing to type in.</strong></p>`
+      : `<p class="muted">Cloud Softphone is your calling app &mdash; it's included with your line, and it's where you make calls from this number. Your number and password go across automatically. <strong>Nothing to type in.</strong></p>`) +
+    // State A: launching. Shown first; replaced by B or C by the script.
+    `<div id="launching"><p class="muted">Opening Cloud Softphone&hellip;</p></div>` +
+    // State B: nothing caught the launch -> install leads.
+    `<div id="install" hidden>` +
+      `<p class="muted" style="font-weight:600;color:#1b2a1f">It looks like Cloud Softphone isn't installed yet.</p>` +
+      store +
+      `<p class="muted" style="margin-top:12px">After installing, come back to this page &mdash; your line will be added on its own. ` +
+      `<strong>This link works for the next ${mins} minute${mins === 1 ? '' : 's'}</strong>, as many times as you need.</p>` +
+      `<button class="btn-secondary" id="retry" type="button">I've installed it &mdash; add my line</button>` +
+    `</div>` +
+    // State C: the page went hidden after the launch -> the app took it.
+    `<div id="opened" hidden>` +
+      `<p class="muted" style="font-weight:600;color:#1b2a1f">Cloud Softphone opened &mdash; finish there.</p>` +
+      `<p class="muted">Your line is being added. If it didn't come across, tap below.</p>` +
+      `<button class="btn" id="again" type="button">Add my line again</button>` +
+    `</div>` +
+    `<p class="muted" style="margin-top:18px">Need a fresh link later? Reply <b>resend</b> in your EPIC WhatsApp chat.</p>` +
+    // A way back, always. appBase() returns '' for anything that is not a
+    // plain https origin, so a bad setting renders no link rather than
+    // emitting something executable into an href.
+    (appBase() ? `<p class="muted" style="margin-top:6px"><a href="${esc(appBase())}" style="color:#4b7a33;font-weight:700">&larr; Back to EPIC</a></p>` : '') +
+    `<script>(function(){var u=${jsString(uri)};var armed=false;var caught=false;var timer=null;` +
+    `function show(id){['launching','install','opened'].forEach(function(x){document.getElementById(x).hidden=(x!==id)});}` +
+    `function go(){armed=true;caught=false;show('launching');try{window.location.href=u}catch(e){}` +
+      // 2.5 s: long enough for the OS app-switch to hide the page, short
+      // enough that a customer with no app is not staring at "Opening�?�".
+      // A hide INSIDE this window is the app taking the URI; a hide outside
+      // it is the customer leaving for the store (or anywhere else).
+      `clearTimeout(timer);timer=setTimeout(function(){armed=false;show(caught?'opened':'install')},2500);}` +
+    `function hidden(){if(armed){caught=true}}` +
+    `document.addEventListener('visibilitychange',function(){if(document.hidden){hidden()}` +
+      // Coming back to a page that never launched into the app: they went to
+      // the store. Launch again, on its own -- that is the "come back and
+      // your line will be added" promise above.
+      `else if(!armed&&!caught){go()}});` +
+    `window.addEventListener('pagehide',hidden);` +
+    `document.getElementById('retry').addEventListener('click',go);` +
+    `document.getElementById('again').addEventListener('click',go);` +
+    `setTimeout(go,400);})();</script>`
+  return htmlPrivate(body)
+}
+
+function html(body: string): NextResponse {
+  return new NextResponse(
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Set up Cloud Softphone A� EPIC</title>` +
+      `<style>body{font-family:-apple-system,system-ui,sans-serif;margin:0;background:#f5f3ee;color:#1b2a1f}.brand{display:flex;align-items:center;justify-content:center;gap:8px;padding:22px 0 4px;font-weight:700;font-size:18px;color:#1b2a1f}.brand i{display:inline-block;height:10px;width:10px;border-radius:50%;background:#5cb22e;box-shadow:0 0 0 4px rgba(92,178,46,.18)}.kicker{color:#4b7a33;font-size:12px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;margin:0 0 6px}` +
+      `.card{max-width:420px;margin:0 auto;padding:32px 22px;text-align:center}` +
+      `h2{font-size:22px;margin:.2em 0}.btn{display:block;background:#5cb22e;color:#fff;padding:16px;border-radius:12px;text-decoration:none;font-size:18px;font-weight:600;border:0;width:100%;cursor:pointer}` +
+      `.btn-secondary{display:block;background:transparent;color:#555;padding:14px;border-radius:12px;text-decoration:none;font-size:15px;font-weight:600;border:1px solid #ccc;width:100%;cursor:pointer;box-sizing:border-box;margin-top:14px}` +
+      `.muted{color:#666;font-size:14px;line-height:1.5}.did{font-size:20px;font-weight:700}</style></head>` +
+      `<body><div class="brand"><i></i>EPIC</div><div class="card"><p class="kicker">Cloud Softphone setup</p>${body}</div></body></html>`,
+    { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } },
+  )
+}
+
+
+/**
+ * P0 CONTAINMENT 2026-08-12 - `launchPage()` removed.
+ *
+ * It took a `csc:<sipUsername>:<sipPassword>@EPIC.VOICE.LITE` URI from the
+ * deleted getActivationCsc() and rendered it into an <a href> on this page -
+ * which is public and unauthenticated. The result was the plaintext SIP secret
+ * sitting in the HTML of an anonymously-reachable URL, replayable for the whole
+ * 30-minute nonce TTL.
+ *
+ * There is no safe way to render that page, so there is no page. The nonce
+ * branch now always returns the credential-free notice below.
+ */
+function activationUnavailablePage(): NextResponse {
+  return html(
+    `<h2>This setup link is no longer valid</h2>` +
+      `<p class="muted">It may have expired or been replaced. <b>If your app is already set up, it keeps working</b> - nothing about your line or number has changed.` +
+      `<br><br>To get a fresh link, tap <b>Open my line</b> or reply <b>new link</b> in your EPIC WhatsApp chat.</p>` +
+      // RESOLVED 2026-09-02. This used to be hardcoded to
+      // isola-connect.vercel.app with a note that app.isola.epic.dm pointed at
+      // "an unrelated, stale host (a leftover marketing page)". That was true
+      // when written and is not any more: app.isola.epic.dm was already
+      // registered to the isola-connect Vercel project and simply had no DNS
+      // record; the A record was added on 2026-09-02 and it now serves the
+      // real PWA. The workaround outlived its reason and became the bug --
+      // ISOLA_SIGNIN_URL had moved to the branded host, so this link was
+      // sending customers to a DIFFERENT ORIGIN where their session does not
+      // exist. Reading the setting means the next move corrects itself.
+      (appBase()
+        ? `<a class="btn-secondary" href="${esc(appBase())}">&larr; Back to EPIC</a>`
+        : ''),
+  )
+}
+
+/**
+ * A chat-verified link opened by a SECOND browser (a forwarded link, or the
+ * customer switching browsers). Credential-free and code-free: no OTP is sent
+ * from here. The customer's way on is a fresh link from their own chat.
+ */
+function chatLinkAlreadyOpenedPage(): NextResponse {
+  return chatLinkAlreadyOpenedHtml()
+}
+
+/**
+ * A small, always-visible fallback appended to chatActivatePage/otpPage for
+ * in-app UAs only -- real browsers never see it. Built from the same shared
+ * buildInAppBrowserEscapeBody() used by inAppBrowserEscapePage() below and
+ * by wa-open's interstitial (def-wa-escape-single-intent-unreliable-2026-09-
+ * 29): one shared renderer, never duplicated. Empty string for anything
+ * that is not a detected in-app browser -- the caller just concatenates it.
+ */
+function stuckFallbackSection(req: NextRequest, nonce: string): string {
+  const uaHeader = req.headers.get('user-agent')
+  if (!looksLikeInAppBrowser(uaHeader)) return ''
+  const host = trustedGoHost(req)
+  const path = `/go/${encodeURIComponent(nonce)}`
+  return (
+    `<div style="margin-top:24px;padding-top:20px;border-top:1px solid #ccc">` +
+    `<p class="muted" style="font-weight:600;color:#1b2a1f">Stuck? Open in your browser</p>` +
+    buildInAppBrowserEscapeBody(host, path, platformFromUa(uaHeader)) +
+    `</div>`
+  )
+}
+
+/**
+ * The chat-verified link's landing page: no code to type, one button. The
+ * button is a POST, so the credential is released only by an explicit tap in
+ * a real browser -- never by a GET (link previews, safe-link scanners,
+ * prefetch). NO CREDENTIAL APPEARS ON THIS PAGE.
+ */
+function chatActivatePage(req: NextRequest, nonce: string, did?: string): NextResponse {
+  return html(
+    `<h2>Set up your phone</h2>` +
+      (did ? `<p class="did">${esc(did)}</p>` : '') +
+      `<p class="muted">You're verified in WhatsApp �?" no code needed. Tap below on the phone you want your line on.</p>` +
+      `<form method="POST" action="/go/${encodeURIComponent(nonce)}">` +
+      `<input type="hidden" name="chat" value="1">` +
+      `<input type="hidden" name="t" value="${esc(chatTapToken(nonce))}">` +
+      `<button class="btn" type="submit">Set up my line in Cloud Softphone</button></form>` +
+      stuckFallbackSection(req, nonce),
+  )
+}
+
+/**
+ * A chat-verified link that was already used on a phone, opened in a browser that does not hold its binding. Credential-free and code-free:
+ * the code to the customer's OWN WhatsApp goes out only when they tap the button (a POST), so a GET - preview bot, prefetch, a visitor who
+ * holds the URL - sends nothing and releases nothing.
+ */
+function chatReopenPage(req: NextRequest, nonce: string, did?: string): NextResponse {
+  return html(
+    `<h2>Open your line on this phone</h2>` +
+      (did ? `<p class="did">${esc(did)}</p>` : '') +
+      `<p class="muted">This setup link was already used. To open your line on this phone, we will send a 6-digit code to your EPIC WhatsApp chat.</p>` +
+      `<form method="POST" action="/go/${encodeURIComponent(nonce)}">` +
+      `<input type="hidden" name="resend" value="1">` +
+      `<button class="btn" type="submit">Send me a code on WhatsApp</button></form>` +
+      stuckFallbackSection(req, nonce),
+  )
+}
+
+/** A chat tap that did not come from this service's own landing page. Credential-free. */
+function chatTapRefusedPage(): NextResponse {
+  const r = html(
+    `<h2>Please open the link again</h2>` +
+      `<p class="muted">This setup button did not come from your link. Open the link from your EPIC WhatsApp chat again and tap <b>Set up my line in Cloud Softphone</b>.</p>`,
+  )
+  return new NextResponse(r.body, { status: 403, headers: r.headers })
+}
+
+/** The form POST came from a page on THIS host (Origin, else Sec-Fetch-Site). */
+function sameOriginPost(req: NextRequest): boolean {
+  const host = req.headers.get('x-forwarded-host') ?? req.headers.get('host') ?? req.nextUrl.host
+  const origin = req.headers.get('origin')
+  if (origin) {
+    try { return new URL(origin).host === host } catch { return false }
+  }
+  return req.headers.get('sec-fetch-site') === 'same-origin'
+}
+
+function chatLinkAlreadyOpenedHtml(): NextResponse {
+  return html(
+    `<h2>This link was already used</h2>` +
+      `<p class="muted">For your security, a setup link sent in WhatsApp works only on the <b>first</b> phone that opens it.<br><br>` +
+      `Reply <b>resend</b> in your EPIC WhatsApp chat for a fresh link, and open it on the phone you want your line on.</p>`,
+  )
+}
+
+function esc(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+}
+
+/**
+ * The OTP form. Possession proof: the code went to the customer's own WhatsApp
+ * number, so entering it proves they hold that phone.
+ *
+ * NO CREDENTIAL APPEARS ON THIS PAGE. The only secret-adjacent value is the
+ * nonce, which is already in the URL, is single-use, and is redacted out of
+ * nginx access logs by a dedicated location block (landed 2026-08-18).
+ */
+function otpPage(req: NextRequest, nonce: string, did?: string, error?: string): NextResponse {
+  return html(
+    `<h2>Set up your phone</h2>` +
+      (did ? `<p class="did">${esc(did)}</p>` : '') +
+      // THE SECOND-CODE TRAP, named on the page that receives it.
+      //
+      // The WhatsApp body text CANNOT be made distinguishable from here: this is
+      // a Meta AUTHENTICATION template, whose copy is fixed at approval time and
+      // carries only the code as a parameter. Both codes therefore arrive
+      // looking identical, and a customer who types the signup one gets a flat
+      // refusal. Measured 2026-08-19 on a real signup.
+      //
+      // A new approved template is an owner-gated Meta action. Until then the
+      // honest fix is to say so HERE, on the surface we control, so the customer
+      // knows to look for the newer message rather than re-typing the older one.
+      `<p class="muted">We sent a <b>new</b> 6-digit code to your WhatsApp.<br>` +
+      `It is <b>not</b> the code you used to sign up �?" look for the most recent message.</p>` +
+      (error ? `<p class="muted" style="color:#b91c1c">${esc(error)}</p>` : '') +
+      `<form method="POST" action="/go/${encodeURIComponent(nonce)}">` +
+      `<input name="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="8" placeholder="123456" ` +
+      `style="width:100%;padding:14px;font-size:22px;text-align:center;letter-spacing:4px;border:1px solid #ccc;border-radius:12px;box-sizing:border-box;margin-bottom:14px">` +
+      `<button class="btn" type="submit">Confirm</button></form>` +
+      `<form method="POST" action="/go/${encodeURIComponent(nonce)}">` +
+      `<input type="hidden" name="resend" value="1">` +
+      `<button class="btn-secondary" type="submit">Send a new code</button></form>` +
+      stuckFallbackSection(req, nonce),
+  )
+}
+
+/**
+ * What a MACHINE gets for GET /go/<nonce>: a link-preview crawler, a
+ * prefetch, a scanner. Credential-free, state-free, and it does not send a
+ * code. Identical for a live, expired or unknown nonce, so it is not an
+ * oracle either. See looksLikeHumanNavigation() for how a machine is told
+ * apart from a person and what that cannot catch.
+ */
+function previewPage(): NextResponse {
+  return html(
+    `<h2>Set up your phone</h2>` +
+      `<p class="muted">Open this link on the phone you use for WhatsApp to add your EPIC line to Cloud Softphone.</p>`,
+  )
+}
+
+/**
+ * The self-sort page ("Already have Cloud Softphone / Don't have it yet",
+ * with a one-shot "Open my app" button) that used to live here was removed
+ * 2026-09-15. Its history, kept so nobody re-derives it: "Open my app" led
+ * alone (a dead tap for first-timers) -> install always led (buried the
+ * reactivation path) -> two equal choices -> the owner walked it cold and
+ * was stranded by a tap that spent the link into a phone with no app
+ * (def-go-open-my-app-tap-spends-the-link-with-no-app-installed-2026-09-15).
+ * After OTP the customer now goes straight to launchHandoffPage(), which
+ * launches and then leads with install only if nothing caught the launch.
+ * The "real install detection" once hoped for here does not exist and must
+ * not be built: Cloud Softphone is Acrobits' generic app, no install
+ * callback, no Firebase; the only signal is the SIP REGISTER, which comes
+ * after provisioning (ruled 2026-09-15).
+ */
+
+/**
+ * WA4A / Facebook / Instagram in-app WebView escape (2026-09-28, P1
+ * launch-blocking): def-wa-inapp-webview-hangs-on-go-link-2026-09-28.
+ *
+ * Real-device measurement: WhatsApp's own Android in-app browser GETs this
+ * page fine but never fires the plain <form method="POST"> that every
+ * credential-adjacent page here depends on (chatActivatePage, otpPage). The
+ * tap never reaches the server. Root cause is WA4A's WebView itself, not
+ * this file's CSP -- htmlPrivate()'s `form-action 'none'` only ever applies
+ * to launchHandoffPage(), which is reached AFTER this POST already
+ * succeeded, so it cannot be what's blocking the POST that never fires.
+ *
+ * looksLikeHumanNavigation()'s NON_HUMAN_UA blocklist does not catch this:
+ * it blocks the literal word "WhatsApp", but WA4A's real UA carries
+ * "WA4A/<version>", never that word. That is deliberate on this function's
+ * part too: this is a REAL human tap, not a bot, so it must not get
+ * previewPage() (credential-free but also *helpless* -- no path forward).
+ * It gets routed OUT to a real browser instead, before ANY OTP/chat-tap/
+ * handoff machinery runs -- never racing it, never duplicating it.
+ *
+ * NEVER touches the credential: no SIP username/password, no csc: URI, no
+ * activation state. Just a link back to this same /go/<code> URL, opened in
+ * a real browser.
+ */
+// The only two vhosts nginx actually proxies /go/ from today (production and
+// test.epic.dm's mirrored same-origin path -- see their sites-enabled
+// configs). Codex review, P2: X-Forwarded-Host is client-suppliable through a
+// misconfigured/permissive proxy; this page builds a URL carrying the
+// activation nonce into an href, so �?" unlike sameOriginPost()'s use of the
+// same header just to COMPARE against Origin �?" it must never trust an
+// unvalidated host to CONSTRUCT one. Falls back to the real production host
+// rather than trusting anything outside this allowlist.
+const KNOWN_GO_HOSTS = new Set(['bff.epic.dm', 'test.epic.dm'])
+function trustedGoHost(req: NextRequest): string {
+  const claimed = req.headers.get('x-forwarded-host') ?? req.headers.get('host') ?? ''
+  return KNOWN_GO_HOSTS.has(claimed) ? claimed : 'bff.epic.dm'
+}
+
+function inAppBrowserEscapePage(req: NextRequest, code: string, platform: Platform): NextResponse {
+  const host = trustedGoHost(req)
+  const path = `/go/${encodeURIComponent(code)}`
+  // Escape-page BODY (buttons + copy-link + fallback) is shared with
+  // app/api/lite/wa-open/route.ts via wa-inapp-escape-page.ts
+  // (def-wa-escape-single-intent-unreliable-2026-09-29) -- a single
+  // Chrome-package intent:// button was not reliable on every real device.
+  // Host trust stays HERE, per-route: the shared builder only renders what
+  // it's given, it never validates a host itself.
+  const body =
+    `<h2>Open this in your browser</h2>` +
+    `<p class="muted">To keep your setup link secure, it can't finish inside this app's built-in browser.</p>` +
+    buildInAppBrowserEscapeBody(host, path, platform)
+  return html(body)
+}
+
+/** Resolve the wa.me number for a campaign link's owning Agent, same field
+ *  preference used by tenant/[id]/agents and tenant/[id]/channels routes. */
+function resolveWaNumber(agent: {
+  whatsappNumber: string | null
+  waDisplayNumber: string | null
+  didNumber: string | null
+  phoneNumber: string | null
+}): string | null {
+  const raw = agent.whatsappNumber ?? agent.waDisplayNumber ?? agent.didNumber ?? agent.phoneNumber
+  if (!raw) return null
+  const digits = raw.replace(/\D/g, '')
+  return digits || null
+}
+
+export async function GET(_req: NextRequest, { params }: { params: Promise<{ code: string }> }) {
+  const { code } = await params
+
+  // 1. Campaign link lookup (new �?" agent-full-surface).
+  const link = await prisma.agentCampaignLink.findUnique({ where: { code } }).catch(() => null)
+  if (link) {
+    const agent = await prisma.agent
+      .findUnique({
+        where: { id: link.agentId },
+        select: { whatsappNumber: true, waDisplayNumber: true, didNumber: true, phoneNumber: true },
+      })
+      .catch(() => null)
+
+    await prisma.agentCampaignLink
+      .update({ where: { id: link.id }, data: { clickCount: { increment: 1 } } })
+      .catch(() => null)
+
+    const number = agent ? resolveWaNumber(agent) : null
+    if (!number) {
+      return NextResponse.json({ error: 'campaign-link-agent-has-no-whatsapp-number' }, { status: 404 })
+    }
+
+    const waUrl = link.contextSeed
+      ? `https://wa.me/${number}?text=${encodeURIComponent(link.contextSeed)}`
+      : `https://wa.me/${number}`
+
+    return NextResponse.redirect(waUrl, 302)
+  }
+
+  // 1b. Sign-in short link (2026-09-02).
+  //
+  // The "open my app" URL in the WhatsApp welcome message was ~130 characters
+  // of base64url sitting raw in a chat bubble �?" unreadable, wrapping over
+  // several lines, and looking like something you should not tap. This route
+  // was already the estate's short-link shape; it just only knew how to carry
+  // activation nonces. See wa-signin-shortlink.ts for what is stored (the
+  // phone, never a token) and why the code is sized as a credential.
+  //
+  // Ordered after campaign links and before activation nonces purely to match
+  // the existing "cheapest lookup first" shape; the three code spaces have
+  // different lengths and separate stores, so no code can resolve as two
+  // things.
+  const signinUrl = await resolveSigninShortCode(code)
+  if (signinUrl) return NextResponse.redirect(signinUrl, 302)
+
+  // 2. Lite Cloud Softphone activation nonce flow �?" WIRED 2026-08-18.
+  //
+  // activationUnavailablePage() is now the FLAG-OFF BRANCH ONLY, not a
+  // hardcode. Between 2026-06-20 (326134b5 orphaned the secure path) and today,
+  // this branch returned "unavailable" unconditionally, which is why the secure
+  // XML endpoint had never succeeded once in 40 attempts �?" verifyActivationOtp
+  // had zero callers, so nothing could ever set verified=true.
+  //
+  // THE RESPONSE IS DELIBERATELY IDENTICAL for a disabled account, an unknown
+  // code and an expired nonce. That keeps this route from being an oracle for
+  // whether a given nonce exists �?" the same reason the flag-off page never
+  // mentions why it is unavailable.
+  // NOT A PERSON: no code, no write, no oracle. Link-preview crawlers and
+  // prefetchers land here. Measured 2026-09-15: WhatsApp's fetcher sent the
+  // owner's OTP before he had opened anything.
+  if (!looksLikeHumanNavigation(_req.headers)) return previewPage()
+
+  // DIAGNOSIS CORRECTED 2026-09-29 (def-app-signin-stuck-in-whatsapp-inapp-
+  // browser-regression-2026-09-29): #258 forced EVERY in-app UA straight to
+  // inAppBrowserEscapePage() here, before chatActivatePage/otpPage ever
+  // rendered, on the premise that WA4A's WebView could never complete the
+  // POST those pages depend on. Real device logs proved that premise wrong:
+  // the POST succeeded 9 times for normal WhatsApp (main app) across 15-28
+  // Sep on 3 phone models. The actual failures were Samsung Dual Messenger
+  // (a second, cloned WhatsApp instance with its own broken WebView) on one
+  // test number -- #258 cost every normal customer an extra tap for a bug
+  // that was never theirs. Reverted: in-app UAs render the same pages a
+  // real browser gets. What stays: stuckFallbackSection() below, appended
+  // to chatActivatePage/otpPage, for the rare case the POST really can't
+  // fire.
+  const uaHeader = _req.headers.get('user-agent')
+
+  // The account this browser proved at signup, if any. Passed through so
+  // beginActivation can skip a redundant second OTP �?" and ONLY when it matches
+  // this nonce's own account. See lite-signup-session.ts.
+  const sessionUserId = readSignupSession(_req.cookies.get(SIGNUP_SESSION_COOKIE)?.value)
+  const bound = handoffCookieProves(_req.cookies.get(HANDOFF_COOKIE)?.value, code)
+  const begun = await beginActivation(code, false, sessionUserId).catch(() => null)
+  if (!begun || begun.state === 'expired') return activationUnavailablePage()
+
+  // Per-account gate, re-checked at RENDER time and not only at mint time: a
+  // link minted for the canary must stop working if the canary is removed from
+  // the allowlist, otherwise the allowlist only scopes issuance and not access.
+  if (!(await activationEnabledFor(begun.userId ?? begun.sipUsername))) return activationUnavailablePage()
+
+  if (begun.state === 'verified') {
+    // THIS browser typed the code (or proved the account at signup, in which
+    // case beginActivation just verified it and the cookie is set below):
+    // straight to the hand-off. A re-open after a store trip lands here.
+    // Re-open by the browser that already holds this link's binding cookie.
+    if (bound) return handoff(code, begun, _req, { setCookie: false })
+    // CHAT-VERIFIED link (owner, 2026-09-25): no OTP -- but a GET NEVER
+    // consumes, binds or reveals (Codex #231, P1). WhatsApp's link-preview
+    // fetcher and safe-link scanners GET links posted in chat, and
+    // looksLikeHumanNavigation cannot exclude every one. Checked BEFORE the
+    // signup-session hand-off, so a session cookie cannot turn a GET into a
+    // release either. The customer's TAP (POST chat=1 + this page's token,
+    // same origin) claims the first hand-off.
+    // A chat link that is already bound (credential released once) is NOT offered to a bare tap again: without the binding cookie the
+    // browser falls through to the code sent to the customer's own WhatsApp below (the "Open my line" re-open; plan v1.9, 2026-10-15).
+    if (begun.chatVerified && !begun.handedOff) return chatActivatePage(_req, code, begun.did)
+    // ... and a bound chat link in a browser without the binding cookie gets a page that ASKS for a code - sent only on an explicit tap (POST),
+    // never on a GET (link previews, prefetch, a visitor), and BEFORE the signup-session shortcut below so that cookie cannot turn a GET into a
+    // release (Codex #231 P1, still in force; independent review 2026-10-15).
+    if (begun.chatVerified) return chatReopenPage(_req, code, begun.did)
+    if (sessionProvedNow(begun, sessionUserId)) {
+      return handoff(code, begun, _req, { setCookie: true })
+    }
+    // Verified, but not by this browser: a forwarded link, or a browser that
+    // lost its cookie. Fresh code, typed here, earns this browser its own
+    // cookie. Never a dead end, never a credential without possession proof.
+    const again = await beginActivation(code, true).catch(() => null)
+    if (!again || again.state === 'expired') return activationUnavailablePage()
+    return otpPage(_req, code, again.did)
+  }
+  return otpPage(_req, code, begun.did)
+}
+
+/** beginActivation() reports 'verified' for a signup-session match without a typed code; only then is a cookie-less verified GET this browser's own. */
+function sessionProvedNow(begun: { userId?: string }, sessionUserId: string | null): boolean {
+  return !!sessionUserId && !!begun.userId && sessionUserId === begun.userId
+}
+
+/**
+ * The one place the credential is handed over. Repeat handoffs are what
+ * make the link survive an install trip; the cookie is what keeps "repeat"
+ * meaning "this browser" (lite-activation.ts, HANDOFF_COOKIE).
+ */
+async function handoff(
+  code: string,
+  begun: { sipUsername?: string; did?: string; userId?: string; nonceExpiresAt?: number },
+  req: NextRequest,
+  opts: { setCookie: boolean; firstBindOnly?: boolean },
+): Promise<NextResponse> {
+  if (!begun.sipUsername) return activationUnavailablePage()
+  // firstBindOnly: only the atomic FIRST hand-off may succeed (chat-verified
+  // links have no OTP to fall back on for a second browser).
+  // chatAuthorized: every caller of handoff() has already authorised this
+  // browser (typed code, signup session, bound cookie, or the chat tap POST).
+  const h = await consumeForXml(code, begun.sipUsername, { repeat: !opts.firstBindOnly, chatAuthorized: true }).catch(() => null)
+  if (!h) return opts.firstBindOnly ? chatLinkAlreadyOpenedPage() : activationUnavailablePage()
+  // THE HAND-OFF NOTE (S5) goes out on the FIRST hand-off: "handed to Cloud
+  // Softphone", never "set up" �?" a hand-off is not a phone (the owner's cold
+  // walk, 2026-09-15). "Your line is live" is sent ONLY by the registration
+  // watch on a real REGISTER (lib/lite-registration-followups.ts). Fire-and-
+  // forget, never on the response path; the gate decides. Repeat handoffs
+  // never re-send it: the first-handoff claim in consumeForXml() is atomic.
+  if (h.firstHandoff && h.ownerPhone && begun.userId) {
+    const ownerPhone = h.ownerPhone
+    const userId = begun.userId
+    void (async () => {
+      try {
+        const { sendHandoffNote, resolveLatestInboundRef } = await import('@/app/lib/lite-post-provision')
+        const ref = await resolveLatestInboundRef(ownerPhone)
+        // FROM the number the customer actually wrote to (the concierge
+        // inbound row's metaPhoneId), else the number the concierge
+        // intercepts (lite-concierge.ts CONCIERGE_PHONE_ID �?" the same value
+        // the Flow follow-ups now send from, so a reply to this note routes
+        // back to the concierge). GitHub Codex on PR #123, twice.
+        const { CONCIERGE_PHONE_ID } = await import('@/app/lib/lite-concierge')
+        const fromPhoneId = ref?.metaPhoneId || CONCIERGE_PHONE_ID
+        await sendHandoffNote({
+          phone: ownerPhone, userId,
+          incomingPhoneId: fromPhoneId,
+          gate: {
+            purpose: 'conversation_reply', senderPath: 'go:handoff-note', userId,
+            ...(ref
+              ? { sourceEventType: ref.sourceEventType, sourceEventId: ref.sourceEventId }
+              : { sourceEventType: 'lite_chat_verified_activation', sourceEventId: code }),
+          },
+        })
+      } catch (e: any) {
+        console.error('[go] hand-off note failed (the hand-off itself succeeded):', e?.message)
+      }
+    })()
+  }
+  // REGISTRATION WATCH accelerator: stamp `pending` now so the operator
+  // screen shows the hand-off immediately, and look for the REGISTER ~90 s
+  // out. Best effort only �?" a bff-v2 restart loses this timer and the cron
+  // tick (lib/lite-registration-watch.ts) resumes from the activation row's
+  // xmlFetchedAt regardless. Never on the response path.
+  if (h.firstHandoff && h.liteAccountId) {
+    const liteAccountId = h.liteAccountId
+    try {
+      void prisma.liteAccount
+        .update({ where: { id: liteAccountId }, data: { registrationState: 'pending', registrationReason: null, registrationHandoffAt: new Date(), registrationCheckedAt: null } })
+        .catch((e: any) => console.error('[go] registration pending stamp failed:', e?.message))
+    } catch (e: any) { console.error('[go] registration pending stamp failed:', e?.message) }
+    const t = setTimeout(() => {
+      import('@/app/lib/lite-registration-watch')
+        .then(({ checkOneAccount }) => checkOneAccount(liteAccountId))
+        .catch((e: any) => console.error('[go] early registration check failed (cron will resume):', e?.message))
+    }, 90_000)
+    if (typeof (t as any).unref === 'function') (t as any).unref()
+  }
+  const res = launchHandoffPage(h, platformFromUa(req.headers.get('user-agent')), begun.did)
+  if (opts.setCookie) {
+    const value = handoffCookieValue(code)
+    if (value) {
+      res.cookies.set(HANDOFF_COOKIE, value, {
+        httpOnly: true, secure: true, sameSite: 'lax',
+        path: `/go/${encodeURIComponent(code)}`,
+        maxAge: Math.max(1, Math.floor(((h.nonceExpiresAt ?? Date.now()) - Date.now()) / 1000)),
+      })
+    }
+  }
+  return res
+}
+
+/**
+ * POST /go/<nonce> �?" the OTP form target (and `resend`). Possession proof:
+ * the code was sent to the customer's OWN WhatsApp number, so entering it
+ * demonstrates they hold that phone. A correct code goes STRAIGHT to the
+ * hand-off page �?" no intermediate "which one are you" screen �?" and sets the
+ * handoff cookie so this browser can come back for the credential again
+ * within the link's TTL without a second code.
+ *
+ * `open=1` (the retired "Open my app" button) is still honoured for a tab
+ * rendered before this change: with the cookie it hands off, without it the
+ * browser is asked for a code.
+ */
+export async function POST(req: NextRequest, { params }: { params: Promise<{ code: string }> }) {
+  const { code } = await params
+
+  // DIAGNOSIS CORRECTED 2026-09-29 (def-app-signin-stuck-in-whatsapp-inapp-
+  // browser-regression-2026-09-29): see the GET handler's comment above --
+  // this POST is no longer diverted for in-app UAs either.
+  const uaHeader = req.headers.get('user-agent')
+
+  const form = await req.formData().catch(() => null)
+  const otp = String(form?.get('otp') ?? '').trim()
+  const resend = String(form?.get('resend') ?? '') === '1'
+  const open = String(form?.get('open') ?? '') === '1'
+  const chat = String(form?.get('chat') ?? '') === '1'
+
+  // CHAT-VERIFIED tap (Codex #231, P1): the explicit action that releases the
+  // credential for a no-OTP link. Only a link the mint marked chat-verified
+  // qualifies; anything else falls to the ordinary code path below.
+  if (chat) {
+    // Only a submission of this service's own landing page, from this origin.
+    if (!chatTapTokenProves(String(form?.get('t') ?? ''), code) || !sameOriginPost(req)) return chatTapRefusedPage()
+    const begun = await beginActivation(code, false, null).catch(() => null)
+    if (!begun || begun.state === 'expired') return activationUnavailablePage()
+    if (!(await activationEnabledFor(begun.userId ?? begun.sipUsername))) return activationUnavailablePage()
+    if (begun.state === 'verified' && handoffCookieProves(req.cookies.get(HANDOFF_COOKIE)?.value, code)) {
+      return handoff(code, begun, req, { setCookie: false })
+    }
+    if (begun.state === 'verified' && begun.chatVerified && !begun.handedOff) {
+      return handoff(code, begun, req, { setCookie: true, firstBindOnly: true })
+    }
+    // Not a chat-verified link: exactly the ordinary code path.
+    if (begun.state !== 'verified') return otpPage(req, code, begun.did)
+    const again = await beginActivation(code, true).catch(() => null)
+    if (!again || again.state === 'expired') return activationUnavailablePage()
+    return otpPage(req, code, again.did)
+  }
+
+  if (open) {
+    const begun = await beginActivation(code, false, null).catch(() => null)
+    if (!begun || begun.state === 'expired') return activationUnavailablePage()
+    if (!(await activationEnabledFor(begun.userId ?? begun.sipUsername))) return activationUnavailablePage()
+    if (begun.state === 'verified' && handoffCookieProves(req.cookies.get(HANDOFF_COOKIE)?.value, code)) {
+      return handoff(code, begun, req, { setCookie: false })
+    }
+    const again = await beginActivation(code, true).catch(() => null)
+    if (!again || again.state === 'expired') return activationUnavailablePage()
+    return otpPage(req, code, again.did)
+  }
+
+  if (resend) {
+    const again = await beginActivation(code, true).catch(() => null)
+    if (!again || again.state === 'expired') return activationUnavailablePage()
+    if (!(await activationEnabledFor(again.userId ?? again.sipUsername))) return activationUnavailablePage()
+    return otpPage(req, code, again.did, 'We sent a new code to your WhatsApp.')
+  }
+
+  const v = await verifyActivationOtp(code, otp).catch(() => null)
+  if (!v) return activationUnavailablePage()
+
+  if (v.result === 'ok') {
+    if (!(await activationEnabledFor(v.userId ?? v.sipUsername))) return activationUnavailablePage()
+    return handoff(code, v, req, { setCookie: true })
+  }
+  if (v.result === 'expired') return activationUnavailablePage()
+  if (v.result === 'locked') {
+    return otpPage(req, code, undefined, 'Too many incorrect codes. Request a new one below.')
+  }
+  return otpPage(req, code, undefined, 'That code is not right. Check WhatsApp and try again.')
+}
+
+
+exec
+"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "rg -n \"mintPaymentLink\\(|reuseOrMintPaymentLink\\(\" app --glob '*.ts'" in C:\epic-workspace\Isola-Foundation\.workbench\codex-handoff-plsvc-window-and-brand-2026-10-14\work
+ succeeded in 624ms:
+app\lib\hermes\brief-approve.ts:65:    const mint = await mintPaymentLink({
+app\api\lite\topup\start\route.ts:28:// declined, or cancelled). Without this, mintPaymentLink() leaves returnUrl
+app\api\lite\topup\start\route.ts:77:      const result = await mintPaymentLink({
+app\api\lite\topup\start\route.ts:103:    const result = await mintPaymentLink({
+app\lib\lite-airtime.ts:186:  return mintPaymentLink({
+app\lib\lite-concierge.ts:4713:          // reuseOrMintPaymentLink() re-sends the pending, unexpired link this
+app\lib\lite-concierge.ts:4718:          const { result: mintResult, reused } = await reuseOrMintPaymentLink({
+app\api\internal\payment-link\[token]\charge\route.ts:640:      // Defense in depth: mintPaymentLink() now refuses to create a link
+app\api\internal\payment-link\route.ts:57:  const result = await mintPaymentLink({
+app\api\internal\personal-line\[liteAccountId]\topup\route.ts:10: * mintPaymentLink() (app/lib/payment-link.ts) it already does for its
+app\api\internal\personal-line\[liteAccountId]\topup\route.ts:164:    const result = await mintPaymentLink({
+app\api\internal\personal-line\[liteAccountId]\topup\route.ts:190:  const result = await mintPaymentLink({
+app\lib\payment-link.ts:23:/** The one place the pay-page URL for a token is spelled; mintPaymentLink() and
+app\lib\payment-link.ts:91:export async function mintPaymentLink(
+app\lib\payment-link.ts:232:export async function reuseOrMintPaymentLink(
+app\lib\payment-link.ts:253:    return { reused: false, result: await mintPaymentLink(input) }
+
+codex
+**SHIP**
+
+1. **No charge, credit, idempotency, or tenant-isolation change found.** The mint diff changes only the `returnUrl` value stored on the payment-link row in [payment-link.ts:172](/c/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/app/lib/payment-link.ts:172). The charge route’s amount source, atomic processing claim, Fiserv call, and credit/idempotency paths are unaffected.
+
+2. **No payment-state or identity leak found on `/go/back`.** [route.ts:18](/c/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/app/go/back/route.ts:18) renders fixed content with no request input, and [route.ts:35](/c/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/app/go/back/route.ts:35) serves it uncached. Its copy does not claim the payment succeeded; it says confirmation arrives once payment goes through, which fits declined and cancelled returns too.
+
+3. **No route-precedence issue expected.** Static `/go/back` takes precedence over the sibling dynamic `/go/[code]` route in the App Router. The resolver’s activation/campaign handling in [route.ts:1](/c/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/app/go/[code]/route.ts:1) should not capture the literal `back` path.
+
+4. **No open redirect or XSS issue found.** The page takes no URL parameters and embeds the fixed `cloudsip:` URI and fixed store URLs in [route.ts:14](/c/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/app/go/back/route.ts:14) and [route.ts:28](/c/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/app/go/back/route.ts:28).
+
+5. **Other mint paths:** `app/lib/lite-concierge.ts` (through `reuseOrMintPaymentLink`) and `app/lib/lite-airtime.ts` omit an explicit `returnUrl`; with `liteAccountId` they receive the new default. `app/lib/hermes/brief-approve.ts` and `app/api/internal/payment-link/route.ts` can mint without a `liteAccountId`, so they remain without a forced return. The three changed API routes explicitly pass `PAY_RETURN_URL`. Existing explicit URLs remain in force by design.
+
+6. **Tests have positive controls and non-vacuous assertions.** They check the generated page, stored default, explicit override, and no-account case; they also prove the payment-claim and brand regexes match representative positive strings. The returned `ok` checks and expected stored URL further guard the mint assertions. I found no test-quality issue that changes the verdict.
+tokens used
+39,637
+**SHIP**
+
+1. **No charge, credit, idempotency, or tenant-isolation change found.** The mint diff changes only the `returnUrl` value stored on the payment-link row in [payment-link.ts:172](/c/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/app/lib/payment-link.ts:172). The charge route’s amount source, atomic processing claim, Fiserv call, and credit/idempotency paths are unaffected.
+
+2. **No payment-state or identity leak found on `/go/back`.** [route.ts:18](/c/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/app/go/back/route.ts:18) renders fixed content with no request input, and [route.ts:35](/c/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/app/go/back/route.ts:35) serves it uncached. Its copy does not claim the payment succeeded; it says confirmation arrives once payment goes through, which fits declined and cancelled returns too.
+
+3. **No route-precedence issue expected.** Static `/go/back` takes precedence over the sibling dynamic `/go/[code]` route in the App Router. The resolver’s activation/campaign handling in [route.ts:1](/c/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/app/go/[code]/route.ts:1) should not capture the literal `back` path.
+
+4. **No open redirect or XSS issue found.** The page takes no URL parameters and embeds the fixed `cloudsip:` URI and fixed store URLs in [route.ts:14](/c/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/app/go/back/route.ts:14) and [route.ts:28](/c/epic-workspace/Isola-Foundation/.workbench/codex-handoff-plsvc-window-and-brand-2026-10-14/work/app/go/back/route.ts:28).
+
+5. **Other mint paths:** `app/lib/lite-concierge.ts` (through `reuseOrMintPaymentLink`) and `app/lib/lite-airtime.ts` omit an explicit `returnUrl`; with `liteAccountId` they receive the new default. `app/lib/hermes/brief-approve.ts` and `app/api/internal/payment-link/route.ts` can mint without a `liteAccountId`, so they remain without a forced return. The three changed API routes explicitly pass `PAY_RETURN_URL`. Existing explicit URLs remain in force by design.
+
+6. **Tests have positive controls and non-vacuous assertions.** They check the generated page, stored default, explicit override, and no-account case; they also prove the payment-claim and brand regexes match representative positive strings. The returned `ok` checks and expected stored URL further guard the mint assertions. I found no test-quality issue that changes the verdict.
+CODEX_EXIT=0

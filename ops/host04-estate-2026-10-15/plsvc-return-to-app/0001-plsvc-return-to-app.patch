@@ -1,0 +1,288 @@
+From 5e5b6612afd00007b26c206ea2e802a55dd27852 Mon Sep 17 00:00:00 2001
+From: EPICDM <it@epic.dm>
+Date: Thu, 15 Oct 2026 06:20:38 -0400
+Subject: [PATCH] plsvc: return payers to the Cloud Softphone app after a card
+ attempt (running image b6e4c0bc)
+
+New public GET /go/back (launches cloudsip:, claims no payment outcome); pay-link returnUrl defaults to it for Personal Line payers (payment-link.ts single choke point). Validated 128/128 isolated, sabotage fails the default-return test only; Codex SHIP.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FC4YNi2CBzRxEZtiGGaonH
+---
+ .../[liteAccountId]/topup/route.ts            |  6 +-
+ app/api/lite/airtime/pay-link/route.ts        |  4 +-
+ app/api/lite/topup/start/route.ts             |  6 +-
+ app/go/back/route.ts                          | 40 +++++++++++
+ app/lib/pay-return.ts                         | 14 ++++
+ app/lib/payment-link.ts                       |  4 +-
+ test/api/lite/airtime-app-paylink.test.ts     |  2 +-
+ test/pay-return-to-app.test.ts                | 70 +++++++++++++++++++
+ 8 files changed, 136 insertions(+), 10 deletions(-)
+ create mode 100644 app/go/back/route.ts
+ create mode 100644 app/lib/pay-return.ts
+ create mode 100644 test/pay-return-to-app.test.ts
+
+diff --git a/app/api/internal/personal-line/[liteAccountId]/topup/route.ts b/app/api/internal/personal-line/[liteAccountId]/topup/route.ts
+index 7984f9c..556d26d 100644
+--- a/app/api/internal/personal-line/[liteAccountId]/topup/route.ts
++++ b/app/api/internal/personal-line/[liteAccountId]/topup/route.ts
+@@ -69,7 +69,7 @@ async function walletRefusal(magnusUserId: string): Promise<NextResponse | null>
+ // sets it explicitly too, matching returnUrl's documented purpose ("set by
+ // the minting caller") so this route doesn't depend on that default being
+ // correct for this specific payer population.
+-const WALLET_RETURN_URL = 'https://app.isola.epic.dm/wallet'
++import { PAY_RETURN_URL } from '@/app/lib/pay-return' // owner 2026-10-15: back to the Cloud Softphone app, not the signed-in PWA
+ 
+ /**
+  * GET /api/internal/personal-line/:liteAccountId/topup
+@@ -169,7 +169,7 @@ export async function POST(
+       liteAccountId: account.id,
+       createdBy: `personal-line-pwa:${liteAccountId}`,
+       expiresInMinutes: 24 * 60,
+-      returnUrl: WALLET_RETURN_URL,
++      returnUrl: PAY_RETURN_URL,
+     })
+ 
+     if (!result.ok) {
+@@ -195,7 +195,7 @@ export async function POST(
+     liteAccountId: account.id,
+     createdBy: `personal-line-pwa:${liteAccountId}`,
+     expiresInMinutes: 24 * 60,
+-    returnUrl: WALLET_RETURN_URL,
++    returnUrl: PAY_RETURN_URL,
+   })
+ 
+   if (!result.ok) {
+diff --git a/app/api/lite/airtime/pay-link/route.ts b/app/api/lite/airtime/pay-link/route.ts
+index 54cf567..a97561c 100644
+--- a/app/api/lite/airtime/pay-link/route.ts
++++ b/app/api/lite/airtime/pay-link/route.ts
+@@ -27,7 +27,7 @@ import { resolveAirtimeOptions, airtimeOptionsFailed, airtimeSendAvailable, mint
+ const ALLOWED_ORIGINS = ['https://test.epic.dm', 'https://isola-connect.vercel.app', 'https://staging.isola.epic.dm', 'https://app.isola.epic.dm']
+ 
+ // Same return target as /api/lite/topup/start: the PWA's wallet route.
+-const WALLET_RETURN_URL = 'https://app.isola.epic.dm/wallet'
++import { PAY_RETURN_URL } from '@/app/lib/pay-return' // owner 2026-10-15: back to the Cloud Softphone app, not the signed-in PWA
+ 
+ function corsHeaders(origin: string | null) {
+   const o = ALLOWED_ORIGINS.includes(origin ?? '') ? (origin ?? ALLOWED_ORIGINS[0]) : ALLOWED_ORIGINS[0]
+@@ -94,7 +94,7 @@ export async function POST(req: NextRequest) {
+     faceUsd:          option.amountUsd,
+     customerPriceUsd: option.customerPriceUsd,
+     createdBy:        `app-airtime:${maskForAudit(username!)}`,
+-    returnUrl:        WALLET_RETURN_URL,
++    returnUrl: PAY_RETURN_URL,
+     currency:         chargeCurrency,
+     chargeAmount,
+   }).catch((e: any) => ({ ok: false as const, error: String(e?.message ?? e) }))
+diff --git a/app/api/lite/topup/start/route.ts b/app/api/lite/topup/start/route.ts
+index a761ef5..58a38e3 100644
+--- a/app/api/lite/topup/start/route.ts
++++ b/app/api/lite/topup/start/route.ts
+@@ -29,7 +29,7 @@ const ALLOWED_ORIGINS = ['https://test.epic.dm', 'https://isola-connect.vercel.a
+ // unset and the payment page falls back to its own hardcoded default, which
+ // does not match this PWA's actual wallet route — a 404 after every card
+ // attempt started from here, success or decline.
+-const WALLET_RETURN_URL = 'https://app.isola.epic.dm/wallet'
++import { PAY_RETURN_URL } from '@/app/lib/pay-return' // owner 2026-10-15: back to the Cloud Softphone app, not the signed-in PWA
+ 
+ function corsHeaders(origin: string | null) {
+   const o = ALLOWED_ORIGINS.includes(origin ?? '') ? (origin ?? ALLOWED_ORIGINS[0]) : ALLOWED_ORIGINS[0]
+@@ -82,7 +82,7 @@ export async function POST(req: NextRequest) {
+         liteAccountId: la.id,
+         createdBy: `pwa-topup:${username}`,
+         expiresInMinutes: 24 * 60,
+-        returnUrl: WALLET_RETURN_URL,
++        returnUrl: PAY_RETURN_URL,
+       })
+ 
+       if (!result.ok) {
+@@ -108,7 +108,7 @@ export async function POST(req: NextRequest) {
+       liteAccountId: la.id,
+       createdBy: `pwa-topup:${username}`,
+       expiresInMinutes: 24 * 60,
+-      returnUrl: WALLET_RETURN_URL,
++      returnUrl: PAY_RETURN_URL,
+     })
+ 
+     if (!result.ok) {
+diff --git a/app/go/back/route.ts b/app/go/back/route.ts
+new file mode 100644
+index 0000000..4a34d5a
+--- /dev/null
++++ b/app/go/back/route.ts
+@@ -0,0 +1,40 @@
++/**
++ * GET /go/back - public, unauthenticated "back to your line" page.
++ *
++ * The card pay page's returnUrl (app/lib/pay-return.ts). After paying, the payer taps Open and lands here; the page
++ * launches the Cloud Softphone app via its URL scheme. A button is always shown too, because a browser may block a
++ * script-initiated custom-scheme navigation (iOS Safari asks first) - the tap is the reliable path.
++ *
++ * It reads nothing, writes nothing and takes no parameters: no identity, no account, no payment state. Customer wording
++ * is EPIC-branded (no "Isola").
++ */
++import { NextResponse } from 'next/server'
++import { SOFTPHONE_APP_URI } from '@/app/lib/pay-return'
++
++export const dynamic = 'force-dynamic'
++
++const ANDROID_STORE = 'https://play.google.com/store/apps/details?id=cz.acrobits.softphone.cloudphone'
++const IOS_STORE = 'https://apps.apple.com/us/app/cloud-softphone/id567475545'
++
++export function backPageHtml(): string {
++  return `<!doctype html>
++<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
++<title>Back to your EPIC line</title>
++<style>body{font:16px/1.5 system-ui,sans-serif;margin:0;padding:32px 20px;text-align:center;color:#111}
++a.btn{display:block;max-width:320px;margin:24px auto 12px;padding:16px;border-radius:12px;background:#0a7d4b;color:#fff;font-weight:600;text-decoration:none}
++small{color:#555}</style></head>
++<body>
++<h1>Back to your EPIC line</h1>
++<p>Tap the button to return to your EPIC Personal Line. A confirmation with your new balance arrives on WhatsApp once a payment goes through.</p>
++<a class="btn" href="${SOFTPHONE_APP_URI}">Open Cloud Softphone</a>
++<p><small>Don't have the app on this phone? <a href="${IOS_STORE}">iPhone</a> &middot; <a href="${ANDROID_STORE}">Android</a></small></p>
++<script>setTimeout(function(){location.href=${JSON.stringify(SOFTPHONE_APP_URI)}},400)</script>
++</body></html>`
++}
++
++export async function GET() {
++  return new NextResponse(backPageHtml(), {
++    status: 200,
++    headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
++  })
++}
+diff --git a/app/lib/pay-return.ts b/app/lib/pay-return.ts
+new file mode 100644
+index 0000000..a1e69bf
+--- /dev/null
++++ b/app/lib/pay-return.ts
+@@ -0,0 +1,14 @@
++/**
++ * pay-return.ts — where the card pay page sends the payer after a payment attempt.
++ *
++ * Owner ruling 2026-10-15: the payer started the payment from inside the Cloud Softphone (Acrobits) app, so "Open" after
++ * paying must lead BACK to that app. It used to be https://app.isola.epic.dm/wallet, a PWA that needs a signed-in browser
++ * session; a payer whose pay page opened in the system browser has none and landed on "Open Isola from WhatsApp".
++ *
++ * The pay page only accepts an http(s) returnUrl (payment-link.ts), so this is an https page (app/go/back/route.ts) that
++ * hands off to the app's own URL scheme. It carries NO identity, token or account data - it is the same page for everyone.
++ */
++export const PAY_RETURN_URL = process.env.PL_PAY_RETURN_URL || 'https://bff.epic.dm/go/back'
++
++/** Cloud Softphone's URL scheme (doc.acrobits.net, Call URIs: "Cloud Softphone | cloudsip"); `cloudsip:` alone launches the app. */
++export const SOFTPHONE_APP_URI = 'cloudsip:'
+diff --git a/app/lib/payment-link.ts b/app/lib/payment-link.ts
+index cd2bfe2..d224bfe 100644
+--- a/app/lib/payment-link.ts
++++ b/app/lib/payment-link.ts
+@@ -11,6 +11,7 @@
+ //   - amount pinned server-side, 2-decimal precision enforced
+ //   - token generated here, never client-supplied
+ //   - returns the same shape the HTTP route responds with
++import { PAY_RETURN_URL } from '@/app/lib/pay-return'
+ import { randomBytes } from 'node:crypto'
+ import { prisma } from '@/app/lib/prisma'
+ import { isRetiredLiteAccount } from '@/app/lib/lite-retire'
+@@ -168,7 +169,8 @@ export async function mintPaymentLink(
+       liteAccountId,
+       expiresAt,
+       creditAmountEcd: creditAmountEcd !== undefined ? creditAmountEcd.toFixed(2) : undefined,
+-      returnUrl,
++      // A Personal Line payer with no explicit return target goes back to the app (pay-return.ts); every other payer is untouched.
++      returnUrl: returnUrl ?? (liteAccountId ? PAY_RETURN_URL : undefined),
+       reloadlyOperatorId,
+       reloadlyRecipientPhone,
+       reloadlyFaceAmountUsd: reloadlyFaceAmountUsd !== undefined ? reloadlyFaceAmountUsd.toFixed(2) : undefined,
+diff --git a/test/api/lite/airtime-app-paylink.test.ts b/test/api/lite/airtime-app-paylink.test.ts
+index e6ef67e..816218e 100644
+--- a/test/api/lite/airtime-app-paylink.test.ts
++++ b/test/api/lite/airtime-app-paylink.test.ts
+@@ -126,7 +126,7 @@ describe('airtime app routes', () => {
+       expect(mockMint.mock.calls[0][0]).toMatchObject({
+         amount: 30.24, currency: 'XCD', liteAccountId: 'la-fixture-01',
+         reloadlyOperatorId: 677, reloadlyRecipientPhone: '7672855555', reloadlyFaceAmountUsd: 10,
+-        returnUrl: 'https://app.isola.epic.dm/wallet', expiresInMinutes: 30,
++        returnUrl: 'https://bff.epic.dm/go/back', expiresInMinutes: 30,
+       })
+       expect(mockMint.mock.calls[0][0].createdBy).toMatch(/^app-airtime:\*\*\*/)
+       expect(mockMint.mock.calls[0][0].createdBy).not.toContain(CREDS.username)
+diff --git a/test/pay-return-to-app.test.ts b/test/pay-return-to-app.test.ts
+new file mode 100644
+index 0000000..2127bfb
+--- /dev/null
++++ b/test/pay-return-to-app.test.ts
+@@ -0,0 +1,70 @@
++/**
++ * After paying, the payer must be led BACK TO THE CLOUD SOFTPHONE APP (owner 2026-10-15), not to the signed-in PWA.
++ * Measured: the 2026-10-15 first real payment landed on "Open Isola from WhatsApp" because the old returnUrl needed a session.
++ *
++ * Two things are pinned here, each with a positive twin:
++ *   1. GET /go/back launches the app scheme, makes no payment claim (the pay page also sends declined/cancelled payers
++ *      there), says nothing branded "Isola", and reads no identity.
++ *   2. mintPaymentLink stores the app-return URL for a Personal Line payer who supplied no returnUrl, keeps an explicit
++ *      returnUrl untouched, and leaves a NON-Personal-Line payer (A/R reminder) without a forced redirect.
++ */
++import { describe, it, expect, vi, beforeEach } from 'vitest'
++
++const mockPrisma: any = vi.hoisted(() => ({ paymentLink: { create: async ({ data }: any) => ({ ...data, id: 'pl-1' }) }, liteAccount: { findUnique: async () => ({ id: 'la-1', status: 'active' }) } }))
++vi.mock('@/app/lib/prisma', () => ({ prisma: mockPrisma }))
++vi.mock('@/app/lib/lite-retire', () => ({ isRetiredLiteAccount: () => false }))
++vi.mock('@/app/lib/magnus-sqlinject-guard', () => ({ regenerateUntilMagnusSafe: async (f: any) => f() }))
++
++import { GET, backPageHtml } from '@/app/go/back/route'
++import { mintPaymentLink } from '@/app/lib/payment-link'
++import { PAY_RETURN_URL, SOFTPHONE_APP_URI } from '@/app/lib/pay-return'
++
++const base = { amount: 10, currency: 'XCD', description: 'Top up' } as any
++const storedReturnUrl = () => mockPrisma.paymentLink.create.mock.calls.at(-1)?.[0]?.data?.returnUrl
++
++beforeEach(() => { vi.restoreAllMocks(); vi.spyOn(mockPrisma.paymentLink, 'create') })
++
++describe('GET /go/back', () => {
++  it('launches the Cloud Softphone scheme via a tappable button and an auto-launch, uncached', async () => {
++    const res = await GET()
++    const html = await res.text()
++    expect(res.status).toBe(200)
++    expect(res.headers.get('cache-control')).toBe('no-store')
++    expect(html).toContain(`href="${SOFTPHONE_APP_URI}"`)
++    expect(html).toContain(`location.href=${JSON.stringify(SOFTPHONE_APP_URI)}`)
++    expect(SOFTPHONE_APP_URI).toBe('cloudsip:')
++  })
++  it('makes no payment-outcome claim and carries no Isola brand word', () => {
++    const html = backPageHtml()
++    expect(html).not.toMatch(/your payment (went|was|has)|you're all set|thank/i)
++    expect(html).not.toMatch(/isola/i)
++    // CONTROL: the same patterns do fire on text that makes the claim, so the two assertions above can fail.
++    expect('Your payment went through').toMatch(/your payment (went|was|has)/i)
++    expect('Welcome to Isola').toMatch(/isola/i)
++    // positive twin: the page still tells the payer where the confirmation arrives.
++    expect(html).toMatch(/confirmation with your new balance arrives on WhatsApp once a payment goes through/)
++  })
++})
++
++describe('mintPaymentLink return target', () => {
++  it('Personal Line payer with no returnUrl -> the app-return page', async () => {
++    const r: any = await mintPaymentLink({ ...base, liteAccountId: 'la-1' })
++    expect(r.ok).toBe(true)
++    expect(storedReturnUrl()).toBe(PAY_RETURN_URL)
++    expect(PAY_RETURN_URL).toMatch(/^https:\/\/.+\/go\/back$/)
++  })
++  it('an explicit returnUrl is never overridden (Hermes A/R no-redirect convention survives)', async () => {
++    await mintPaymentLink({ ...base, liteAccountId: 'la-1', returnUrl: 'https://pay.isola.epic.dm/no-redirect' })
++    expect(storedReturnUrl()).toBe('https://pay.isola.epic.dm/no-redirect')
++  })
++  it('a payer with NO Personal Line account is not given a forced redirect (control: distinct from the case above)', async () => {
++    await mintPaymentLink({ ...base, tenantId: 't-1' })
++    expect(storedReturnUrl()).toBeUndefined()
++  })
++  it('the stored default passes the mint validator (http(s) only) - the same input accepted end to end', async () => {
++    const r: any = await mintPaymentLink({ ...base, liteAccountId: 'la-2' })
++    expect(r.ok).toBe(true)
++    const bad: any = await mintPaymentLink({ ...base, liteAccountId: 'la-2', returnUrl: SOFTPHONE_APP_URI })
++    expect(bad.ok).toBe(false) // why a bare cloudsip: cannot be the returnUrl itself and the https hand-off page exists
++  })
++})
+-- 
+2.53.0.windows.2
+
