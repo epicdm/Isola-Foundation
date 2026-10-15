@@ -76,7 +76,7 @@ function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread
   const storeSelf = (content) => thread.push({ id: ++nextId, content, private: false, message_type: 1, sender_type: "User", sender_id: RELAY_USER, created_at: Math.floor(t / 1000) });
   const selfMsg = (id, content) => ({ event: "message_created", id, content, message_type: "outgoing", private: false, sender: { type: "user", id: RELAY_USER }, account: { id: 2 }, inbox: { id: 11 }, conversation: conv });
   const until = async (pred) => { for (let i = 0; i < 200 && !pred(); i++) await new Promise((r) => setImmediate(r)); assert.ok(pred(), "condition never became true"); };
-  const api = { relay, posted, statuses, logs, row, seldon, customer, staffMsg, storeStaff, storeSelf, selfMsg, until, release: () => release && release(), get waiting() { return release !== null; }, get sleeps() { return sleeps; } };
+  const api = { relay, chatwoot, posted, statuses, logs, row, seldon, customer, staffMsg, storeStaff, storeSelf, selfMsg, until, release: () => release && release(), get waiting() { return release !== null; }, get sleeps() { return sleeps; } };
   return api;
 }
 const publicTexts = (f) => f.posted.filter((m) => !m.private).map((m) => m.content);
@@ -581,4 +581,34 @@ test("STEER PASS-2: a rewrite that produces a verified plan OFFER is withheld (n
   const c = fixture({ holdMs: 10000, pl: true, evidenceSeq: [OFFER_EVIDENCE] });
   await c.relay.accept(c.customer()).done;
   assert.deepEqual(sent(c), ["Free trial: 7 days with 60 minutes included. Reply 1 to start it now."], "CONTROL: the offer path itself works in this harness");
+});
+
+// Codex steer pass 3: "a restart after Uplink accepted the rewrite but before vet() saved it leaves a stale continuation". Measured here
+// against the REAL restart path: the durable marker is phase=processing for this message, so (a) a redelivery of the SAME message is a
+// durable duplicate (no second turn, no reply - the in-memory draft is lost, as with any hold restart), and (b) the NEXT customer message
+// starts a FRESH Uplink session (conversationId null) instead of continuing the possibly-advanced one.
+test("STEER PASS-3: relay restarts while the rewrite is in flight -> same message redelivered = no turn, no reply; next message = fresh Uplink session, never the stale continuation", async () => {
+  const f = fixture({ holdMs: 10000, texts: [MODEL_TEXT, REWRITE] });
+  const orig = f.seldon.turn;
+  let hang = false;
+  f.seldon.turn = async (input) => { const r = await orig.call(f.seldon, input); if (hang) return new Promise(() => {}); return r; };   // the rewrite reaches Uplink, the response never returns (process gone)
+  f.relay.accept(f.customer(7001, "how do I top up?"));
+  await f.until(() => f.sleeps === 1);
+  hang = true;
+  f.relay.accept(f.staffMsg(9401, "@agent say Add credit"));
+  f.release();
+  await f.until(() => f.seldon.turns === 2);
+  const marker = openConversationBinding(f.row.custom_attributes[CONVERSATION_BINDING_ATTRIBUTE], "synthetic-state-key-material-long-enough-32");
+  assert.deepEqual([marker.phase, marker.pendingMessageId], ["processing", 7001], "the durable state says: a turn for 7001 is in flight");
+  hang = false;
+  const fresh = createRelay({ scope: SCOPE, ownerUserId: 16, chatwoot: f.chatwoot, seldon: f.seldon, requireCapability: true, conversationStateKey: "synthetic-state-key-material-long-enough-32",
+    now: () => 1_797_000_100_000, logger: () => {}, supervisedHoldMs: 0, selfUserId: RELAY_USER });
+  await fresh.accept(f.customer(7001, "how do I top up?")).done;
+  assert.equal(f.seldon.turns, 2, "(a) the redelivered message started no third turn");
+  assert.deepEqual(sent(f), [], "(a) and sent nothing");
+  await fresh.accept(f.customer(7002, "hello?")).done;
+  const next = f.seldon.turnInputs[2];
+  assert.equal(next.conversationId, null, "(b) the next message does NOT continue the possibly-advanced Uplink conversation");
+  assert.match(next.sessionId, /-r7002$/, "(b) it starts a fresh session");
+  assert.deepEqual(sent(f), [REWRITE], "POSITIVE CONTROL: the restarted relay does answer the next message (the stub repeats its last scripted text)");
 });
