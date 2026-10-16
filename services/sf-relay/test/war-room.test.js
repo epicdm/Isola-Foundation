@@ -18,7 +18,7 @@ const EVIDENCE = { known: true, currentTurnVerified: true, escalated: false,
   toolCalls: [{ name: "pl-action-adapter__pl_journey", input: {} }, { name: "pl-action-adapter__pl_next_step", input: {} }],
   toolResults: [{ ok: true }, { ok: false, isError: true }] };
 
-function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread = false, failOwnershipAfter = false, truncateTo = 0, beforePublicPost = null, dropCustomerFromFirstRead = false, stalePageWithoutDraft = false, dropSentFromSecondRead = false, frozenClock = false, duringDraftPost = null, duringModelTurn = null, selfUserId = RELAY_USER, texts = null, pl = false, turnSeq = null, evidenceSeq = null } = {}) {
+function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread = false, failOwnershipAfter = false, truncateTo = 0, beforePublicPost = null, dropCustomerFromFirstRead = false, stalePageWithoutDraft = false, dropSentFromSecondRead = false, frozenClock = false, duringDraftPost = null, duringModelTurn = null, selfUserId = RELAY_USER, texts = null, pl = false, turnSeq = null, evidenceSeq = null, adapterImpl = null } = {}) {
   let reads = 0;
   let t = 1_797_000_000_000;
   const posted = [], statuses = [], logs = [], thread = [];
@@ -63,6 +63,7 @@ function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread
   };
   const relay = createRelay({ scope: SCOPE, ownerUserId: 16, chatwoot, seldon, requireCapability: true, conversationStateKey: "synthetic-state-key-material-long-enough-32",
     plConcierge: pl ? { key: PL_KEY, kid: "uat1", bridgeKey: PL_BRIDGE_KEY, bridgeKid: "ctx1", phoneNumberId: "1023804347491554" } : null,
+    adapter: adapterImpl,
     now: () => (frozenClock ? t : (t += 1000)), logger: (o) => logs.push(o), supervisedHoldMs: holdMs, selfUserId, traceNotes, sleep });
   const conv = { id: 41, status: "pending", meta: { sender: { id: 541 } } };
   const customer = (id = 7001, content = "Hi") => {   // the incoming message is also in Chatwoot's thread, as in production
@@ -620,4 +621,50 @@ test("withStaffGuidance: staff guidance outranks the agent's earlier instruction
   assert.match(w, /comes from staff, not from the customer/);
   assert.ok(w.endsWith("\nhow do I top up?"));
   assert.ok(w.length + GUIDE_MAX_CHARS + 1000 <= 2000 + 700, "framing stays small next to the 2000-char signed-context limit");
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// 2026-10-16 learn loop: an EMPTY agent reply (3 of the 7-day handoffs) gets the deterministic journey menu via the adapter instead of a handoff.
+function adapterDouble(menuResult) {
+  const calls = [];
+  return { calls, async act({ context, action }) { calls.push({ action, signed: typeof context === "string" && context.startsWith("v1.") });
+    if (action === "auto") return { code: "not_handled" };
+    if (action === "menu_fallback") return menuResult;
+    return { code: "invalid_action" }; } };
+}
+const EMPTY = { ok: false, reason: "empty_reply", conversationId: "sf-conv", conversationCapability: "cap" };
+test("EMPTY REPLY: the customer gets the menu (adapter menu_fallback, signed context), no handoff, no relay text", async () => {
+  const a = adapterDouble({ code: "handled", action: "menu", result: { code: "message_sent" } });
+  const f = fixture({ pl: true, turnSeq: [EMPTY], adapterImpl: a });
+  await f.relay.accept(f.customer(7001, "Hi")).done;
+  assert.deepEqual(a.calls.map((c) => c.action), ["auto", "menu_fallback"]);
+  assert.ok(a.calls[1].signed, "the fallback carries the relay-signed context");
+  assert.deepEqual(publicTexts(f), [], "the relay itself posts nothing (the adapter sends the menu)");
+  assert.ok(!f.posted.some((m) => /Relay handoff/.test(m.content)), "no handoff");
+  assert.deepEqual(f.statuses, []);
+  assert.ok(f.logs.some((l) => l.event === "empty_reply_menu_fallback" && l.outcome === "menu_sent"));
+});
+test("EMPTY REPLY CONTROL: adapter cannot send the menu -> the handoff happens exactly as before", async () => {
+  const a = adapterDouble({ code: "unreachable", detail: "http_502" });
+  const f = fixture({ pl: true, turnSeq: [EMPTY], adapterImpl: a });
+  await f.relay.accept(f.customer(7001, "Hi")).done;
+  assert.ok(f.posted.some((m) => m.private && /Relay handoff: agent unavailable \(empty_reply\)/.test(m.content)));
+  assert.ok(f.statuses.includes("open"));
+});
+test("EMPTY REPLY: a person took the conversation meanwhile -> neither menu nor handoff", async () => {
+  const a = adapterDouble({ code: "refused", action: "menu", result: { code: "conversation_not_ai_owned" } });
+  const f = fixture({ pl: true, turnSeq: [EMPTY], adapterImpl: a });
+  await f.relay.accept(f.customer(7001, "Hi")).done;
+  assert.ok(!f.posted.some((m) => /Relay handoff/.test(m.content)));
+  assert.deepEqual(publicTexts(f), []);
+});
+test("EMPTY REPLY CONTROLS: other failures still hand off without a menu; no adapter configured -> handoff as before", async () => {
+  const a = adapterDouble({ code: "handled", action: "menu", result: {} });
+  const f = fixture({ pl: true, turnSeq: [{ ok: false, reason: "llm_error", conversationId: "sf-conv", conversationCapability: "cap" }], adapterImpl: a });
+  await f.relay.accept(f.customer(7001, "Hi")).done;
+  assert.ok(!a.calls.some((c) => c.action === "menu_fallback"), "llm_error is not an empty reply");
+  assert.ok(f.posted.some((m) => /Relay handoff: agent unavailable \(llm_error\)/.test(m.content)));
+  const g = fixture({ pl: true, turnSeq: [EMPTY] });
+  await g.relay.accept(g.customer(7001, "Hi")).done;
+  assert.ok(g.posted.some((m) => /Relay handoff: agent unavailable \(empty_reply\)/.test(m.content)));
 });

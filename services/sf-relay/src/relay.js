@@ -771,6 +771,15 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
 
     if (!turn.ok) {
       log({ event: "agent_unavailable", reason: turn.reason, ...ctx });
+      // 2026-10-16 learn loop: an EMPTY agent reply was 3 of the 7-day handoffs (first-time customers handed off instantly). The customer gets
+      // the deterministic journey menu for this verified message instead; the handoff remains the fallback if the adapter cannot send it.
+      // Not on a staff-guided rewrite: staff are already in the conversation.
+      if (turn.reason === "empty_reply" && !guided && adapter) {
+        const r = await adapterAct(ev, loaded, "menu_fallback");
+        if (r?.code === "handled") { log({ event: "empty_reply_menu_fallback", outcome: "menu_sent", already: r.result?.already === true, ...ctx }); return; }
+        if (r?.code === "refused" && r.result?.code === "conversation_not_ai_owned") { log({ event: "empty_reply_menu_fallback", outcome: "taken_over", ...ctx }); return; }
+        log({ event: "empty_reply_menu_fallback", outcome: "unavailable", code: r?.code ?? "not_called", ...ctx });
+      }
       return handoff(ev, `agent unavailable (${turn.reason})`, { tellCustomer: true });
     }
     if (looksLikeToolMarkup(turn.text)) {
