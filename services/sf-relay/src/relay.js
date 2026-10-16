@@ -775,6 +775,17 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
       // the deterministic journey menu for this verified message instead; the handoff remains the fallback if the adapter cannot send it.
       // Not on a staff-guided rewrite: staff are already in the conversation.
       if (turn.reason === "empty_reply" && !guided && adapter) {
+        // Codex pass 1: an empty reply often follows a tool that ALREADY sent the customer its own message (balance, calls, setup buttons).
+        // Read the turn first: tool delivered -> nothing more (no menu, no handoff); verified and nothing delivered -> the menu; unreadable -> handoff.
+        const insp = typeof seldon.inspectTurn === "function" && turn.conversationId
+          ? await seldon.inspectTurn({ conversationId: turn.conversationId, sessionId: binding.sessionId, userMessage: turnMessage,
+            chatwootConversationId: ev.conversationId, accountId: scope.accountId, inboxId: scope.inboxId }).catch(() => ({ known: false }))
+          : { known: false };
+        if (toolDeliveredOwnMessage(insp)) { log({ event: "empty_reply_menu_fallback", outcome: "tool_already_answered", ...ctx }); return; }
+        if (!(insp?.known === true && insp.currentTurnVerified === true)) {
+          log({ event: "empty_reply_menu_fallback", outcome: "turn_unverified", ...ctx });
+          return handoff(ev, `agent unavailable (${turn.reason})`, { tellCustomer: true });
+        }
         const r = await adapterAct(ev, loaded, "menu_fallback");
         if (r?.code === "handled") { log({ event: "empty_reply_menu_fallback", outcome: "menu_sent", already: r.result?.already === true, ...ctx }); return; }
         if (r?.code === "refused" && r.result?.code === "conversation_not_ai_owned") { log({ event: "empty_reply_menu_fallback", outcome: "taken_over", ...ctx }); return; }

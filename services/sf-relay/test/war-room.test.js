@@ -668,3 +668,24 @@ test("EMPTY REPLY CONTROLS: other failures still hand off without a menu; no ada
   await g.relay.accept(g.customer(7001, "Hi")).done;
   assert.ok(g.posted.some((m) => /Relay handoff: agent unavailable \(empty_reply\)/.test(m.content)));
 });
+
+// Codex pass 1 on the empty-reply fallback: a tool that ALREADY sent its own customer message must not get a menu (or a handoff) on top.
+const DELIVERED_EVIDENCE = { known: true, currentTurnVerified: true, escalated: false,
+  toolCalls: [{ id: "t1", name: "pl-action-adapter__pl_balance", input: {} }],
+  toolResults: [{ toolCallId: "t1", ok: true, output: { isError: false, content: [{ type: "text", text: JSON.stringify({ code: "message_sent", stage: "balance" }) }] } }] };
+test("EMPTY REPLY after a tool already delivered its own message -> NOTHING more: no menu, no handoff", async () => {
+  const a = adapterDouble({ code: "handled", action: "menu", result: { code: "message_sent" } });
+  const f = fixture({ pl: true, turnSeq: [EMPTY], adapterImpl: a, evidenceSeq: [DELIVERED_EVIDENCE] });
+  await f.relay.accept(f.customer(7001, "balance please")).done;
+  assert.ok(!a.calls.some((c) => c.action === "menu_fallback"), "no menu on top of the tool's message");
+  assert.ok(!f.posted.some((m) => /Relay handoff/.test(m.content)), "no handoff either");
+  assert.deepEqual(publicTexts(f), []);
+  assert.ok(f.logs.some((l) => l.event === "empty_reply_menu_fallback" && l.outcome === "tool_already_answered"));
+});
+test("EMPTY REPLY whose turn cannot be verified -> the handoff as before (no menu)", async () => {
+  const a = adapterDouble({ code: "handled", action: "menu", result: {} });
+  const f = fixture({ pl: true, turnSeq: [EMPTY], adapterImpl: a, evidenceSeq: [{ known: false, reason: "unavailable" }] });
+  await f.relay.accept(f.customer(7001, "Hi")).done;
+  assert.ok(!a.calls.some((c) => c.action === "menu_fallback"));
+  assert.ok(f.posted.some((m) => /Relay handoff: agent unavailable \(empty_reply\)/.test(m.content)));
+});
