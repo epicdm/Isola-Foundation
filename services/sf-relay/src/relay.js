@@ -54,13 +54,24 @@ export function claimsHandoff(text) {
   const action = "(?:reply|respond|contact|reach(?:\\s+out)?|call|message|get back|follow up|be in touch|be with you|help|assist)";
   const verb = "(?:connect|transfer|put|bring|send|pass|hand|escalate|forward|notify|alert|assign)";
   const completed = "(?:connected|transferred|escalated|handed\\s+off|passed\\s+(?:you|this)\\s+on|forwarded|notified|alerted|assigned)";
+  // 2026-10-16 (owner's "Hi" was handed off): a sentence that opens with "If" is a conditional OFFER ("If the app isn't
+  // opening, tell me and I'll bring in a teammate"), not a promise. Only the three FUTURE-promise patterns ("someone will…",
+  // "I'll <connect/bring/…>…", "I'll have someone…") skip those sentences; completed, present and "let me" claims still read
+  // the whole text. Narrow on purpose: the sentence must OPEN with a bare "If" (only spaces or a list bullet before it - no
+  // bracket, quote or emoji), close its condition with a comma, and then be exactly ONE offer clause of a known shape:
+  // optional "tell me / let me know ... and", then "I'll / we'll / someone ... will ...", with no further , ; : dash and no
+  // word that makes it unconditional ("but", "either way", "regardless", "anyway", "actually", "no matter", "in any case").
+  // Anything else is read as before (safe = hand off).
+  const conditionalOffer = /^[ \t\-*•]*if\b[^,.!?\n()"“”]*,\s*(?:(?:just\s+)?(?:tell\s+me|let\s+me\s+know|let\s+us\s+know|say\s+so|reply\s+\S+)\s+and\s+)?(?:i|we|someone|somebody|a\s+(?:teammate|colleague|staff\s+member)|someone\s+from\s+our\s+team)(?:'ll|\s+will|\s+can)\s(?:(?!\band\b|\bthen\b)[^,;:—–\n.!?])*[.!?]*\s*$/i;
+  const unconditionalWords = /\b(?:but|either\s+way|regardless|anyway|anyhow|actually|no\s+matter|in\s+any\s+case|whatever\s+happens)\b/i;
+  const unconditional = value.split(/(?<=[.!?\n])\s+/).filter((s) => !(conditionalOffer.test(s) && !unconditionalWords.test(s))).join(" ");
   return new RegExp(`\\b(?:i|we)(?:'ve|\\s+have|\\s+had|\\s+just|\\s+already)\\s+${completed}\\b`, "i").test(value)
     || new RegExp(`\\b(?:your\\s+(?:request|conversation)|this\\s+conversation)\\s+(?:has\\s+been|is\\s+being|was)\\s+(?:${completed}|passed\\s+on)\\b`, "i").test(value)
     || new RegExp(`\\b(?:a|the)\\s+(?:human|person|agent|teammate)\\s+(?:is|has\\s+been|will\\s+be)\\s+(?:taking\\s+over|joining|with\\s+you|replying|responding)\\b`, "i").test(value)
-    || new RegExp(`\\b${person}\\s+(?:will|shall|should|is\\s+going\\s+to)\\s+${action}\\b`, "i").test(value)
+    || new RegExp(`\\b${person}\\s+(?:will|shall|should|is\\s+going\\s+to)\\s+${action}\\b`, "i").test(unconditional)
     || new RegExp(`\\b(?:i|we)(?:'m|'re|\\s+am|\\s+are)\\s+(?:${verb}ing)\\b[^.!?\\n]{0,100}\\b(?:human|person|agent|teammate|colleague|staff member|representative|someone|somebody)\\b`, "i").test(value)
-    || new RegExp(`\\b(?:i|we)(?:'ll|'d|'m|'re|\\s+will|\\s+shall|\\s+am|\\s+are)(?:\\s+going\\s+to)?\\s+(?:${verb})\\b[^.!?\\n]{0,100}\\b(?:human|person|agent|teammate|colleague|staff member|representative|someone|somebody|our team)\\b`, "i").test(value)
-    || new RegExp(`\\b(?:i|we)(?:'ll|'d|'m|'re|\\s+will|\\s+shall|\\s+am|\\s+are)(?:\\s+going\\s+to)?\\s+(?:have|ask|get)\\s+${person}\\b[^.!?\\n]{0,100}\\b${action}\\b`, "i").test(value)
+    || new RegExp(`\\b(?:i|we)(?:'ll|'d|'m|'re|\\s+will|\\s+shall|\\s+am|\\s+are)(?:\\s+going\\s+to)?\\s+(?:${verb})\\b[^.!?\\n]{0,100}\\b(?:human|person|agent|teammate|colleague|staff member|representative|someone|somebody|our team)\\b`, "i").test(unconditional)
+    || new RegExp(`\\b(?:i|we)(?:'ll|'d|'m|'re|\\s+will|\\s+shall|\\s+am|\\s+are)(?:\\s+going\\s+to)?\\s+(?:have|ask|get)\\s+${person}\\b[^.!?\\n]{0,100}\\b${action}\\b`, "i").test(unconditional)
     || new RegExp(`\\b(?:let me|allow me to)\\s+(?:${verb})\\b[^.!?\\n]{0,100}\\b(?:human|person|agent|teammate|colleague|staff member|representative|someone|somebody)\\b`, "i").test(value);
 }
 

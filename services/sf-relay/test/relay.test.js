@@ -429,6 +429,58 @@ test("Lane A phrase battery: offers stay normal, every promised handoff invokes 
   for (const text of normalCustomerMessages) assert.equal(requestsHuman(text), false, `normal query incorrectly escalated: ${text}`);
 });
 
+test("a conditional offer ('If X, tell me and I'll bring in a teammate') is not a promise; promises around it still are", () => {
+  // The exact agent reply that handed off the owner's "Hi" on 2026-10-16 01:52Z (conversation 543, message 6359).
+  const live = "Hi there 👋 Your line is in good shape, so I want to make sure I'm helping with the right thing — what's happening on your side when you open the app? If the app isn't opening at all, tell me and I'll bring in a teammate to sort it with you.";
+  assert.equal(claimsHandoff(live), false, "live conditional offer handed off");
+  for (const text of [
+    "If you'd prefer, someone will call you back.",
+    "If that doesn't work, I'll have a colleague contact you.",
+    "Let me check. If it still fails, we'll connect you with a teammate.",
+  ]) assert.equal(claimsHandoff(text), false, `conditional offer: ${text}`);
+  // CONTROLS: the same words without "If", an unconditional sentence after a conditional one, and completed claims inside one.
+  for (const text of [
+    "Tell me and I'll bring in a teammate to sort it with you.",
+    "If the app isn't opening, that's normal. I'll bring in a teammate to sort it with you.",
+    "If you were wondering, I've escalated this to our team.",
+    "If it helps, your request has been escalated.",
+    "If you're still there, I'm connecting you with a teammate now.",
+    // Codex pass 1 (BLOCK): a leading aside or quote must not mask the main clause; no comma = not a recognised condition.
+    "(If you need help) I'll connect you with a teammate.",
+    "\"(If you need help.)\" I'll bring in a teammate.",
+    "\"If you need help,\" I'll bring in a teammate.",
+    "👉 If you need help, I'll bring in a teammate.",
+    "If you need help I'll connect you with a teammate.",
+    "If you need help, ok.\nI'll bring in a teammate now.",
+    "Sure. if so. I'll bring in a teammate.",
+    "- Done.\n- I'll bring in a teammate to help.",
+    // Codex pass 2 (BLOCK): a second clause after the condition may carry an unconditional promise.
+    "If you need help, ok; actually I'll bring in a teammate either way.",
+    "If you need help, fine, I'll bring in a teammate now anyway.",
+    "If you need help, sure — I'll bring in a teammate regardless.",
+    "Need help?I'll bring in a teammate.",
+    // Codex pass 3 (BLOCK): a conjunction after the comma; the offer is now an allow-shape, not a punctuation blocklist.
+    "If you need help, but either way I'll bring in a teammate.",
+    "If you need help, I'll bring in a teammate either way.",
+    "If you need help, I'll bring in a teammate regardless.",
+    "If you need help, I'll bring in a teammate anyway.",
+    "If you need help, actually I'll bring in a teammate.",
+    "If you need help, we're bringing in a teammate.",
+    // Codex pass 4: no space after the full stop keeps one segment, so the exemption fails CLOSED (hands off) - pinned.
+    "If you need help, I'll bring in a teammate.Regardless, I'll connect you now.",
+    "If you need help, I'll bring in a teammate.I'll connect you with a teammate now.",
+    // Codex pass 5: a second commitment joined after the offer's verb.
+    "If you need help, I'll bring in a teammate and someone will call you tomorrow.",
+    "If you need help, I'll bring in a teammate then someone will call you.",
+  ]) assert.equal(claimsHandoff(text), true, `promise missed: ${text}`);
+  // More offers the narrowed rule must still treat as conditional.
+  for (const text of [
+    "Want a hand with that? If so, I'll bring in a teammate.",
+    "- If the app still won't open, I'll bring in a teammate.",
+    "if it keeps failing, someone from our team will call you.",
+  ]) assert.equal(claimsHandoff(text), false, `conditional offer: ${text}`);
+});
+
 test("agent escalation cannot promise a person when assignment readback has the wrong owner or scope", async () => {
   for (const record of [
     { status: "open", account_id: 3, inbox_id: 16, meta: { sender: { id: 541 }, assignee: { id: 7 } } },
