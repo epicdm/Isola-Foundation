@@ -627,7 +627,7 @@ export function recoveryView(progress, attemptsUsed, failures, paused) {
 export const stallKeyOf = (p) => (p?.stalled && p.reason ? `${p.reason}@${String(p.since ?? 'unknown').slice(0, 24)}` : null)
 /** Pure: the escalation package (stage, evidence, actions attempted, remaining blocker, next human action). No links, tokens or SIP data. */
 export function escalationPackage(p, attempts, reason) {
-  const lines = [`🧭 Personal Line - handed to a person (${reason}).`,
+  const lines = [`🧭 Personal Line - escalation REQUESTED (${reason}). Open until a person accepts it by replying here.`,
     p ? `Stage: ${p.stage} (evidence: ${p.evidence}) for ${p.age_minutes ?? '?'} min. Stall: ${p.reason ?? 'none'}.` : 'Stage: UNKNOWN (the activation record could not be read).',
     `Actions attempted: ${attempts.length ? attempts.map((a) => `${a.action} at ${a.at} -> ${a.outcome}`).join('; ') : 'none'}.`,
     `Remaining blocker: ${p?.reason ? (RECOVERY_PLAYBOOKS[p.reason]?.observe ?? p.reason) : 'unknown stage'}${RECOVERY_PLAYBOOKS[p?.reason]?.missing ? ` (${RECOVERY_PLAYBOOKS[p.reason].missing})` : ''}.`,
@@ -803,12 +803,14 @@ export function makeHandlers(cfg, db, stats, f = fetch) {
     const paused = pause ? (pause.stage === 'declined' ? 'customer_declined' : 'customer_paused') : null
     const key = stallKeyOf(p)
     let rows = []
+    const escRow = key ? (await db.query(`SELECT stage FROM pl_adapter_guidance WHERE wa_hash=$1 AND event='recovery' AND message_id=$2 LIMIT 1`, [h, `esc:${key}`])).rows[0] : null
+    const escalation = escRow ? { state: 'open', stage: String(escRow.stage ?? '').split('|')[0] || 'open' } : null
     if (key) rows = (await db.query(`SELECT message_id, stage, created_at FROM pl_adapter_guidance WHERE wa_hash=$1 AND event='recovery' AND (left(message_id, length($2)) = $2 OR left(message_id, length($3)) = $3) ORDER BY id`, [h, `act:${key}:`, `fail:${key}:`])).rows
     const attempts = rows.filter((r) => r.message_id.startsWith('act:') && String(r.stage ?? '').endsWith('|delivered'))
       .map((r) => ({ action: String(r.stage).split('|')[0], at: new Date(r.created_at).toISOString(), outcome: 'delivered' }))
     const failures = rows.filter((r) => r.message_id.startsWith('fail:'))
       .map((r) => ({ action: String(r.stage ?? '').split('|')[0], at: new Date(r.created_at).toISOString(), outcome: `refused:${String(r.stage ?? '').split('|')[1] ?? ''}` }))
-    return { jr, p, h, key, attempts, failures, view: recoveryView(p, attempts.length, failures.length, paused) }
+    return { jr, p, h, key, attempts, failures, escalation, view: recoveryView(p, attempts.length, failures.length, paused) }
   }
   return {
     async pl_recovery(who) {
@@ -816,7 +818,7 @@ export function makeHandlers(cfg, db, stats, f = fetch) {
       const p = st.p
       return done({ code: 'recovery', ...st.view,
         stage: p?.stage ?? null, evidence: p?.evidence ?? 'unknown', age_minutes: p?.age_minutes ?? null, reason: p?.reason ?? null,
-        coverage: p?.coverage ?? null, actions_attempted: [...st.attempts, ...st.failures],
+        coverage: p?.coverage ?? null, actions_attempted: [...st.attempts, ...st.failures], escalation: st.escalation,
         note: st.view.terminal === 'working_call' ? 'The line has a verified answered call (technical evidence). Setup recovery is complete; ask the customer to confirm it works for them if useful.'
           : st.view.terminal ? 'The customer paused or declined setup help. Do not push setup; help only with what they ask.'
           : st.view.must_escalate ? 'A person is now required: call pl_escalate with escalate_reason. Do not try other repairs.'
@@ -863,7 +865,7 @@ export function makeHandlers(cfg, db, stats, f = fetch) {
       if (!allowed) return refuse('escalation_not_warranted', { must_escalate: !!v.must_escalate, escalate_reason: v.escalate_reason ?? null, note: 'Run the playbook (pl_recovery) first; escalate when it says a person is required or the customer asks for one.' })
       const key = st.key ? `esc:${st.key}` : `esc:msg:${who.messageId}`
       const claim = await db.query(`INSERT INTO pl_adapter_guidance (cw_conversation, wa_hash, message_id, event) VALUES ($1,$2,$3,'recovery') ON CONFLICT DO NOTHING RETURNING id`, [who.conversationId, st.h, key])
-      if (claim.rowCount !== 1) return done({ code: 'already_escalated', note: 'This was ALREADY handed to a person. Reply with nothing more.' })
+      if (claim.rowCount !== 1) return done({ code: 'escalation_already_open', escalation: { state: 'open' }, note: 'A person was ALREADY asked to take this over; it stays open until they accept. Reply with nothing more.' })
       const id = claim.rows[0].id
       if (!(await aiOwned(who.conversationId))) { await db.query(`DELETE FROM pl_adapter_guidance WHERE id=$1`, [id]).catch(() => {}); return refuse('conversation_not_ai_owned') }
       const pkg = escalationPackage(st.p, [...st.attempts, ...st.failures], args.reason)
@@ -874,9 +876,10 @@ export function makeHandlers(cfg, db, stats, f = fetch) {
       const confirmed = opened   // the handoff IS the open status (Chatwoot owns takeover); a missing package note is reported, not hidden
       // Not open = no person holds it: release the claim so a later customer message can hand over again (the customer is told to retry).
       if (!opened) await db.query(`DELETE FROM pl_adapter_guidance WHERE id=$1`, [id]).catch(() => {})
-      else await db.query(`UPDATE pl_adapter_guidance SET stage=$2 WHERE id=$1`, [id, `${noted ? 'escalated' : 'escalated_note_missing'}|${args.reason}`])
+      else await db.query(`UPDATE pl_adapter_guidance SET stage=$2 WHERE id=$1`, [id, `${noted ? 'escalation_open' : 'escalation_open_note_missing'}|${args.reason}`])
       await cwPost(cfg, `/conversations/${who.conversationId}/messages`, { content: confirmed ? HANDOFF_TEXT : NO_HANDOFF_TEXT, message_type: 'outgoing', private: false }, f).catch(() => null)
-      return done({ code: confirmed ? 'escalated' : 'escalation_unconfirmed', handoff_confirmed: confirmed, package_note_posted: noted,
+      // REQUESTED / OPEN, never 'accepted': acceptance is a person's act in Chatwoot (their reply), which this system does not claim.
+      return done({ code: confirmed ? 'escalation_open' : 'escalation_unconfirmed', escalation: { state: confirmed ? 'open' : 'not_opened' }, handoff_confirmed: confirmed, package_note_posted: noted,
         note: 'The handoff line has ALREADY been sent to the customer by the system. Reply with nothing more.' })
     },
     async pl_offer(who) {

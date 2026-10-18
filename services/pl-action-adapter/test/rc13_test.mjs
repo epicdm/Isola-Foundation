@@ -42,6 +42,9 @@ function fakeDb() {
     if (s.startsWith('SELECT count(*)::int AS n FROM pl_adapter_guidance') && s.includes("event='act:my_account'")) { return { rows: [{ n: g.filter((r) => r.h === p[0] && r.e === 'act:my_account' && r.stage === 'my_account_link').length }], rowCount: 1 } }
     if (s.startsWith('INSERT INTO pl_adapter_preference')) { pref.set(p[0], p[1]); return { rows: [], rowCount: 1 } }
     if (s.startsWith('SELECT proactive_stopped')) { return { rows: pref.has(p[0]) ? [{ proactive_stopped: pref.get(p[0]) }] : [], rowCount: pref.has(p[0]) ? 1 : 0 } }
+    // recovery-1: the customer-pause lookup in /v1/proactive (no pause rows in these fixtures). Without it the fake throws and the adapter
+    // correctly HOLDS stall reminders (fail closed), which is the fake's gap, not the system's.
+    if (s.startsWith("SELECT 1 FROM pl_adapter_guidance WHERE wa_hash=$1 AND event='recovery_pause'")) return { rows: [], rowCount: 0 }
     throw new Error('unexpected SQL: ' + s.slice(0, 80))
   } }
 }

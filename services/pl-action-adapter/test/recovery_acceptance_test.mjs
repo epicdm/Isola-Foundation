@@ -1,4 +1,6 @@
-// ACCEPTANCE DEMONSTRATION - agent-led Personal Line activation recovery (owner correction 2026-10-18).
+// ACCEPTANCE DEMONSTRATION - FICTIONAL, MESSAGE-DRIVEN recovery (owner correction 2026-10-18). Every recovery step here is triggered by a
+// fictional customer's message and the agent's tool call in reply. It is NOT unattended customer completion: a silent customer gets only the
+// watcher's existing once-per-verdict reminder, and an account with no setup link is not reached at all (both gaps stand).
 // The agent's REAL path: JSON-RPC tools/call on the adapter's /mcp route over loopback, with a signed relay context and Chatwoot readback of
 // the customer's own message (the identity the live concierge uses), plus the signed /v1/proactive route. plsvc is a STATEFUL fake whose
 // verified `progress` only advances when the (fictional) customer acts; Chatwoot is a stateful fake. FICTIONAL numbers only (1555010xxxx).
@@ -81,6 +83,7 @@ const db = { query: async (sql, p = []) => {
   if (s.startsWith("SELECT 1 FROM pl_adapter_guidance WHERE wa_hash=$1 AND event='recovery_pause' AND created_at > now() - make_interval(secs => $2)")) { const r = G.filter((x) => x.h === p[0] && x.e === 'recovery_pause' && x.created > new Date(Date.now() - p[1] * 1000)); return R(r.length ? [{}] : []) }
   if (s.startsWith("SELECT message_id, stage, created_at FROM pl_adapter_guidance WHERE wa_hash=$1 AND event='recovery' AND (left(message_id, length($2)) = $2 OR left(message_id, length($3)) = $3)")) return R(G.filter((x) => x.h === p[0] && x.e === 'recovery' && (x.m.startsWith(p[1]) || x.m.startsWith(p[2]))).map((x) => ({ message_id: x.m, stage: x.stage, created_at: x.created })))
   if (s.startsWith('SELECT stage FROM pl_adapter_guidance WHERE cw_conversation=$1 AND wa_hash=$2 AND message_id=$3 AND event=$4')) { const r = G.find((x) => x.c === String(p[0]) && x.h === p[1] && x.m === p[2] && x.e === p[3]); return R(r ? [{ stage: r.stage }] : []) }
+  if (s.startsWith("SELECT stage FROM pl_adapter_guidance WHERE wa_hash=$1 AND event='recovery' AND message_id=$2 LIMIT 1")) { const r = G.find((x) => x.h === p[0] && x.e === 'recovery' && x.m === p[1]); return R(r ? [{ stage: r.stage }] : []) }
   if (s.startsWith('SELECT proactive_stopped FROM pl_adapter_preference')) return R([])
   if (s.startsWith("SELECT 1 FROM pl_adapter_guidance WHERE cw_conversation=$1 AND wa_hash=$2 AND message_id=$3 AND stage='proactive_first_call'")) return R([])
   unknownSql.push(s.slice(0, 90)); return R([])
@@ -166,8 +169,9 @@ const publicTo = (c) => c.customerSaw.length
   r = await tool(c, 'pl_recovery')
   t('S2 pl_recovery says escalate, with both attempts listed', `${r.must_escalate}/${r.escalate_reason}/${r.actions_attempted?.length}`, 'true/playbook_exhausted/2')
   r = await tool(c, 'pl_escalate', { reason: 'playbook_exhausted' })
-  t('S2 ESCALATE: handoff confirmed by reading the status back', `${r.code}/${r.handoff_confirmed}/${c.status}`, 'escalated/true/open')
+  t('S2 ESCALATION REQUESTED: open (status read back), never reported as accepted', `${r.code}/${r.escalation?.state}/${r.handoff_confirmed}/${c.status}`, 'escalation_open/open/true/open')
   const pkg = c.messages.filter((m) => m.private).slice(-1)[0]?.content ?? ''
+  t('S2 package says REQUESTED and open until a person accepts', /escalation REQUESTED .*Open until a person accepts/.test(pkg), true)
   t('S2 package: stage + evidence', /Stage: link_issued \(evidence: verified\)/.test(pkg), true)
   t('S2 package: both actions attempted', (pkg.match(/send_setup at /g) ?? []).length, 2)
   t('S2 package: remaining blocker', /Remaining blocker: A setup link was sent, never opened/.test(pkg), true)
@@ -175,7 +179,8 @@ const publicTo = (c) => c.customerSaw.length
   t('S2 package: no link, token or SIP data', /https?:\/\/|sip|password|nonce/i.test(pkg), false)
   t('S2 the customer got the relay\'s own handoff line', c.customerSaw.slice(-1)[0], A.HANDOFF_TEXT)
   r = await tool(c, 'pl_escalate', { reason: 'playbook_exhausted' })
-  t('S2 escalation is once per stall', r.code, 'already_escalated')
+  t('S2 escalation is once per stall (still open)', `${r.code}/${r.escalation?.state}`, 'escalation_already_open/open')
+  t('S2 pl_recovery reports the escalation as OPEN (requested, not accepted)', (await tool(c, 'pl_recovery')).escalation?.state, 'open')
   const after = publicTo(c)
   say(c.wa, 'hello?')
   r = await tool(c, 'pl_recovery_act', { action: 'send_setup' })
@@ -206,7 +211,7 @@ const publicTo = (c) => c.customerSaw.length
   r = await tool(c, 'pl_recovery_act', { action: 'send_setup' })
   t('S4 no customer-side repair attempted', r.code, 'escalation_required')
   r = await tool(c, 'pl_escalate', { reason: 'requires_human' })
-  t('S4 escalated', `${r.code}/${c.status}`, 'escalated/open')
+  t('S4 escalation open', `${r.code}/${c.status}`, 'escalation_open/open')
 }
 
 // ═════ S5 customer pause / decline stops reminders; resume restores; proactive path honours it ═════
@@ -239,7 +244,7 @@ const publicTo = (c) => c.customerSaw.length
   t('S6 escalation before the playbook ran is refused', `${r.code}/${c.status}`, 'escalation_not_warranted/pending')
   say(c.wa, 'can I talk to someone')
   r = await tool(c, 'pl_escalate', { reason: 'customer_requested' })
-  t('S6 the customer asking for a person always escalates', `${r.code}/${c.status}`, 'escalated/open')
+  t('S6 the customer asking for a person always escalates', `${r.code}/${c.status}`, 'escalation_open/open')
 }
 
 // ═════ S7 fail closed: unreadable state, failed handoff ═════
@@ -259,7 +264,7 @@ const publicTo = (c) => c.customerSaw.length
   d.toggleFails = false
   say(d.wa, 'person please')
   r = await tool(d, 'pl_escalate', { reason: 'customer_requested' })
-  t('S7 a later message can hand over (claim released)', `${r.code}/${d.status}`, 'escalated/open')
+  t('S7 a later message can hand over (claim released)', `${r.code}/${d.status}`, 'escalation_open/open')
 }
 
 // ═════ S8 authority: gated for the working concierge, identity-bound, strict arguments ═════
