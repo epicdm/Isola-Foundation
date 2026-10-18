@@ -41,9 +41,6 @@ export function loadConfig(env = process.env) {
     // rc13d (owner 2026-10-11: 'give the agent the facts and let it loose'): PL_DETERMINISTIC_TAPS=0 sends button taps to the AGENT as
     // ordinary messages (it answers with full context); only STOP/START stay deterministic. Default 1 keeps the rc12 behaviour.
     deterministicTaps: env.PL_DETERMINISTIC_TAPS !== '0',
-    // rc13i (R1 slice S-c): the 'My account' menu button posts a one-time portal sign-in link. Default OFF: with PL_MY_ACCOUNT_LINK unset the menu and
-    // every action are byte-for-byte rc13h behaviour. The PL service has its own switch (PL_SF_PORTAL_LINK_ENABLED); both must be on.
-    myAccountLink: env.PL_MY_ACCOUNT_LINK === '1',
     offerTtlS: Number(env.OFFER_TTL_S || 900), provisionPollMs: Number(env.PROVISION_POLL_MS || 13000), provisionAckMs: Number(env.PROVISION_ACK_MS || 2500), ctxSkewS: Number(env.CTX_SKEW_S || 60), timeoutMs: Number(env.UPSTREAM_TIMEOUT_MS || 15000),
     dbUrl: readSecret(need('DB_URL_FILE')),
     tlsKey: env.TLS_KEY_FILE ? fs.readFileSync(env.TLS_KEY_FILE) : null, tlsCert: env.TLS_CERT_FILE ? fs.readFileSync(env.TLS_CERT_FILE) : null,
@@ -158,7 +155,7 @@ const SCHEMAS = {
   pl_explain: { description: 'Deliver the "How it works" explanation as its own message with a Get my number button. Use when the customer asks how it works, taps How it works, or asks what the service is. The text is written by the system; never write or paraphrase it yourself.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
   pl_balance: { description: 'Deliver this customer\'s minutes balance (included minutes left and plan end date, plus wallet credit if any) as its own message with buttons. Use when they ask about minutes, balance, credit or how much is left, or tap Check my balance. The text is written by the system; never write numbers yourself.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
   pl_recent_calls: { description: 'Deliver this customer\'s last few calls (direction, masked number, length, time) as its own message with buttons. Use when they ask about recent calls, call history, or tap Recent calls. The text is written by the system; never write call details yourself.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
-  pl_next_step: { description: 'Deliver the customer\'s NEXT onboarding step as its own message with tap-to-reply buttons: install the app, the one-time activation link (only after they say they installed it), the connection check, and the first-call step. Call it right after the line is created, when the customer taps one of its buttons, or when they ask how to start, whether it works, or for a link. The text is written by the system; never write or paraphrase it yourself.', inputSchema: { type: 'object', properties: { event: { type: 'string', enum: ['status', 'installed', 'resend'] } }, additionalProperties: false } },
+  pl_next_step: { description: 'Deliver the customer\'s NEXT onboarding step as its own message with tap-to-reply buttons: install the app, the one-time activation link (only after they say they installed it), the connection check, and the first-call step. Call it right after the line is created, when the customer taps one of its buttons, or when they ask how to start, whether it works, or for a link. For a customer who already has a line it sends a large "Open my line" button that opens Cloud Softphone with their line (use it whenever they want to open, use or set up the app, or ask for a link to it). The text is written by the system; never write or paraphrase it yourself.', inputSchema: { type: 'object', properties: { event: { type: 'string', enum: ['status', 'installed', 'resend'] } }, additionalProperties: false } },
   pl_status: { description: 'Read this customer\'s line status (number, plan, next step). Read-only.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
   pl_journey: { description: 'Read this customer\'s verified situation: whether they have a line, setup progress, whether the app is connected right now, whether a call has ever gone through, included minutes, plan end, wallet credit, anything needing attention, plus the next-step buttons for their state. Nothing is sent - you write the reply from these facts and the buttons are attached to it. Call it at the start of a conversation, for greetings/help/"what can I do", and whenever you need their current state.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
   pl_guide: { description: 'Read verified facts for one topic, for this customer: how_it_works (what the service is and how setup works), plans (the plan catalogue with prices, minutes and which calls each covers - use it to recommend a plan), calling (how to dial and what calls cost them, given their plan and credit), call_failed (a diagnosis from their live connection, minutes and credit - use it when a call did not go through), check_connection (is the app connected right now). Nothing is sent - you write the reply and the returned buttons are attached to it.', inputSchema: { type: 'object', properties: { topic: { type: 'string', enum: ['how_it_works', 'plans', 'calling', 'call_failed', 'check_connection'] } }, required: ['topic'], additionalProperties: false } },
@@ -190,19 +187,22 @@ export const MENU_BTN = {
   signup: { title: 'Get my number', value: 'menu_signup' },
   manage: { title: 'Manage my line', value: 'menu_manage' },
   how: { title: 'How it works', value: 'menu_how' },
-  account: { title: 'My account', value: 'menu_account' },   // rc13i: only ever OFFERED when cfg.myAccountLink is on
 }
 export const MENU_VALUES = new Set(Object.values(MENU_BTN).map((b) => b.value))
+// Owner 2026-10-14 ("we are selling a calling app, we need to open the app to make a call"): "Open my line" is a delivery, not a
+// chat topic. Like the menu it is ALWAYS deterministic, even with PL_DETERMINISTIC_TAPS=0 - the agent can only write text, so a tap
+// it answered would never open the app.
+export const ALWAYS_DETERMINISTIC_VALUES = new Set([...MENU_VALUES, 'pl_open_line'])
 export const MENU_RE = /^\s*(menu|main menu|options)\s*[.!?]?\s*$/i
 /** The menu for the customer's CURRENT state: one Flow entry (signup or manage), how it works, and a person - always 3 reply buttons. */
-export function composeMenu(j, opts = {}) {
+export function composeMenu(j) {
   const hasLine = j?.has_line === true
   return {
     stage: hasLine ? 'menu_line_holder' : 'menu_no_line',
     text: hasLine
       ? `Here's what I can do for you. Tap *Manage my line* to see your line, check your setup or continue where you left off.`
       : `Here's what I can do for you. Tap *Get my number* to start your free trial in a short form here in WhatsApp.`,
-    choices: [hasLine ? MENU_BTN.manage : MENU_BTN.signup, hasLine && opts.myAccount === true ? MENU_BTN.account : MENU_BTN.how, BTN.human],
+    choices: [hasLine ? MENU_BTN.manage : MENU_BTN.signup, MENU_BTN.how, BTN.human],
   }
 }
 export function composeGuidance(code, data) {
@@ -239,7 +239,7 @@ export function composeGuidance(code, data) {
   if (stage === 'connected') {
     const text = f.inbound_enabled
       ? `✅ *Your line is live.* Your number${did} rings in Cloud Softphone now. Try it — call any Dominica number from the app; you have free minutes to start.${f.missed_call_alerts_enabled ? ' Missed calls come back here on WhatsApp.' : ''}`
-      : `✅ *Cloud Softphone is connected.* You can make calls now — try it: call any Dominica number from the app. This launch offer covers outgoing calling.`
+      : `✅ *Cloud Softphone is connected.* You can make calls now — try it: call any Dominica number from the app. Incoming calls to your number${did} work and are free while your balance is positive. The 60 trial minutes are for outgoing calls to Dominica numbers.`
     return { stage, text, choices: [BTN.balance, BTN.calls, BTN.human] }
   }
   if (stage === 'first_call_done') return { stage, text: `🎉 Your first call went through — welcome to EPIC!`, choices: [BTN.balance, BTN.calls, BTN.human] }
@@ -264,13 +264,19 @@ export const OFFER_CHOICES = [
 export const PROVISIONING_ACK = 'Setting up your free Dominican line! Give me about 30 seconds... ⏳'
 export const IOS_URL = 'https://apps.apple.com/us/app/cloud-softphone/id567475545'
 export const ANDROID_URL = 'https://play.google.com/store/apps/details?id=cz.acrobits.softphone.cloudphone'
+// Owner rule 2026-10-13: every calling answer points to the calling app with the relevant NEXT ACTION; store links only when the app still has to be installed.
+// The links open the app page (Open if installed, Install if not). Journey states where the app is already set up: activated_not_registered, registered_no_call, active, attention.
+export const APP_LINKS_LINE = `Get *Cloud Softphone* (free): iPhone: ${IOS_URL} · Android: ${ANDROID_URL}`
+const APP_INSTALLED_STATES = new Set(['activated_not_registered', 'registered_no_call', 'active', 'attention'])
+export const needsInstall = (state) => !APP_INSTALLED_STATES.has(state)
+const linksFor = (state) => (needsInstall(state) ? ['', APP_LINKS_LINE] : [])
 // "How it works" (lite-concierge howItWorksExplainerBody). Two ADAPTATIONS keep it truthful in this chat: the original also promised "just say call <number> here" and "top up ... in this chat",
 // neither of which exists on this path.
 export function composeExplainer(o) {
   return {
     stage: 'explainer',
     text: [
-      `Here's how *Isola Lite* works:`,
+      `Here's how *EPIC Personal Line* works:`,
       ``,
       `1️⃣ Tap *Get my number* — your free *+1 767* line is created instantly`,
       `2️⃣ Install *Cloud Softphone* (free) and tap *I've installed it* — I set the app up for you, no settings to type in`,
@@ -297,16 +303,11 @@ export function composeBalance(d, choices = [BTN.human]) {
   const plan = known && d.kind === 'included' && d.expires_date_pretty ? `${d.plan_name ? d.plan_name + ' - ' : ''}ends ${d.expires_date_pretty}`
     : known && d.kind === 'legacy' ? 'no plan end date on this line' : UNREAD
   const wallet = d && typeof d.wallet_xcd === 'string' && d.wallet_xcd !== '' ? `EC$${d.wallet_xcd}` : UNREAD
-  const low = known && d.low === true ? `\n\nYour included minutes are running low. Top-ups aren't available in this chat yet - tap *Talk to a person* and we'll help.` : ''
+  const low = known && d.low === true ? `\n\nYour included minutes are running low. You can add credit by card from within your Cloud Softphone app.` : ''
   // A low balance always keeps the person within one tap (the honest route while top-up is unavailable).
   const ch = low && !choices.some((c) => c.value === BTN.human.value) ? [...choices.slice(0, 2), BTN.human] : choices
   return { stage: known ? (d.low ? 'balance_low' : 'balance') : 'balance_unknown',
     text: `Your balance:\n• Included minutes: ${minutes}\n• Plan: ${plan}\n• Wallet credit: ${wallet}${low}`, choices: ch }
-}
-// rc13i: the account-link message. The URL is single use and short lived (the fork enforces both); the wording says only what is true of it.
-export function composeAccountLink(url, expiresAt) {
-  const mins = Math.max(1, Math.round((Date.parse(expiresAt) - Date.now()) / 60000))
-  return { stage: 'my_account_link', text: `\u{1F510} *Your account* - tap the link below to see your line, minutes, plan and wallet credit. It works once, for about ${Number.isFinite(mins) ? Math.min(mins, 10) : 10} minutes. Please don't forward it.\n\n${url}\n\nNeed a new one? Tap *My account* again.`, choices: [MENU_BTN.account, BTN.human] }
 }
 // Recent calls (new customer surface over the existing Magnus CDR read). Numbers arrive already masked; times are shown in Dominica time.
 export function composeCalls(d, choices = [BTN.human]) {
@@ -338,6 +339,9 @@ export const ACT = {
   call_dominica: { title: 'Call Dominica', value: 'pl_call_dm' },
   call_uscan: { title: 'Call US/Canada', value: 'pl_call_us' },
   call_failed: { title: 'A call failed', value: 'pl_call_failed' },
+  // Option B / item K (owner 2026-10-14): one large "Open my line" button (plsvc sends it as a cta_url message; the URL never
+  // passes through this adapter or the model). Replaces the Call Dominica / Call US/Canada pair in Calling help, which looped.
+  open_line: { title: 'Open my line', value: 'pl_open_line' },
   human: BTN.human,
 }
 // Only actions with a working handler can ever be offered. top_up is NOT here: the journey offers it only when the PL service reports
@@ -348,7 +352,7 @@ export const VALUE_TO_ACTION = {
   ...Object.fromEntries(Object.entries(ACT).filter(([k]) => k !== 'human').map(([k, v]) => [v.value, k])),
   check_balance: 'balance', recent_calls: 'recent_calls', check_connection: 'check_connection', greet_start: 'get_number',
   installed_softphone: 'continue_setup', resend_link: 'continue_setup', greet_how: 'how_it_works',
-  menu_signup: 'menu_flow', menu_manage: 'menu_flow', menu_how: 'how_it_works', menu_account: 'my_account',
+  menu_signup: 'menu_flow', menu_manage: 'menu_flow', menu_how: 'how_it_works',
 }
 /** Buttons for a state: its actions minus the one just performed, a person always reachable, at most 3 (reply buttons, no list needed). */
 export function choicesFor(actions, done = null) {
@@ -358,6 +362,14 @@ export function choicesFor(actions, done = null) {
   if (!top.includes('human') && done) top[2] = 'human'
   return [...new Set(top)].map((k) => ACT[k])
 }
+/** A line that is already in Cloud Softphone: "Open my line" first, then balance and calling help (owner 2026-10-14). */
+export function lineHolderChoices(actions) {
+  const a = actions ?? []
+  return choicesFor([...new Set(['open_line', ...['balance', 'calling_help'].filter((k) => a.includes(k)), ...a])])
+}
+// States where the line is set up and connected, so the next thing the customer does is open the app and call.
+export const OPEN_APP_STATES = new Set(['active', 'registered_no_call'])
+export const stateChoices = (j) => (OPEN_APP_STATES.has(j?.state) && j?.has_line !== false ? lineHolderChoices(j?.actions) : choicesFor(j?.actions))
 const did = (f) => (f?.did_pretty ? ` ${f.did_pretty}` : '')
 const ATTENTION_TEXT = {
   minutes_exhausted: () => `You've used all your included minutes.`,
@@ -367,10 +379,10 @@ const ATTENTION_TEXT = {
 }
 export function composeJourney(j) {
   const f = j?.facts ?? {}
-  const ch = choicesFor(j?.actions)
+  const ch = stateChoices(j)
   const stage = `journey_${j?.state ?? 'unknown'}`
   switch (j?.state) {
-    case 'no_line': return { stage, text: `Isola Personal Line gives you your own +1 767 number for calls, in the free Cloud Softphone app - with a free trial to start. What would you like to do?\n\n${VOICE_ONLY_DISCLOSURE}`, choices: ch }
+    case 'no_line': return { stage, text: `EPIC Personal Line gives you your own +1 767 number for calls, in the free Cloud Softphone app - with a free trial to start. What would you like to do?\n\n${VOICE_ONLY_DISCLOSURE}`, choices: ch }
     case 'setup_not_activated': return { stage, text: `Your line${did(f)} is ready. The next step is setting it up in the free Cloud Softphone app - tap *Continue setup* and I'll take you through it.`, choices: ch }
     case 'activated_not_registered': return { stage, text: j.registration_known === false
       ? `Your line${did(f)} has been handed to Cloud Softphone, but I can't see your phone's connection from here right now. Tap *Check connection* to look again.`
@@ -379,24 +391,30 @@ export function composeJourney(j) {
     case 'active': return { stage, text: `✅ Your line${did(f)} is working. What would you like to do?`, choices: ch }
     case 'attention': {
       const why = (j.attention ?? []).map((r) => ATTENTION_TEXT[r]?.(f)).filter(Boolean).join(' ')
-      const pay = j.payment?.topup_available ? '' : ` Top-ups and plan purchases aren't available in this chat yet - tap *Talk to a person* and our team will help.`
+      const pay = j.payment?.topup_available ? '' : ` ${TOPUP_IN_APP}`
       return { stage, text: `Your line${did(f)}: ${why}${pay}`, choices: ch }
     }
     default: return null
   }
 }
+// Card top-up is live (Fiserv charging enabled and a real EC$10 payment credited 2026-10-15) but only from the Isola tab in the app;
+// this chat has no top-up action. Say exactly that - never "not available" (false) and never promise a button that does not exist.
+const TOPUP_IN_APP = `You can add credit by card from within your Cloud Softphone app. Buying a plan or topping up from this chat isn't available yet.`
 const rates = (o) => `Dominica EC$${o.overage_dominica_xcd}/min, US/Canada EC$${o.overage_uscan_xcd}/min`
+const dayWord = (n) => `${n} day${Number(n) === 1 ? '' : 's'}`
 export function composePlans(o, hasLine) {
   const pool = (p) => (p.pool === 'shared' ? 'minutes for Dominica, US & Canada' : 'Dominica minutes')
-  const lines = [`• Free trial - ${o.trial_days} days, ${o.trial_minutes} Dominica minutes, EC$${o.trial_price_xcd}`,
-    ...(o.plans ?? []).map((p) => `• ${p.name} - ${p.days} days, ${p.minutes} ${pool(p)}, EC$${p.price_xcd}`)]
-  const buy = hasLine ? `Buying a plan isn't available in this chat yet - tap *Talk to a person* and our team will help.` : `Paid plans can't be bought in this chat yet - start with the free trial.`
-  return [`*Personal Line plans*`, ``, ...lines, ``, `After your included minutes, calls are charged from wallet credit: ${rates(o)}.`, ``, buy, ``, VOICE_ONLY_DISCLOSURE].join('\n')
+  const lines = [`• Free trial - ${dayWord(o.trial_days)}, ${o.trial_minutes} Dominica minutes, EC$${o.trial_price_xcd}`,
+    ...(o.plans ?? []).map((p) => `• ${p.name} - ${dayWord(p.days)}, ${p.minutes} ${pool(p)}, EC$${p.price_xcd}`)]
+  const buy = hasLine ? TOPUP_IN_APP :`Paid plans and top-ups can't be bought yet - only the free trial is available.`
+  // Only a line holder can hold (legacy) wallet credit; a new customer is never told calls are 'charged from wallet credit' they cannot add.
+  const overage = hasLine ? [``, `If you have wallet credit, calls after your included minutes are charged from it: ${rates(o)}.`] : []
+  return [`*Personal Line plans*`, ``, ...lines, ...overage, ``, buy, ``, VOICE_ONLY_DISCLOSURE].join('\n')
 }
 export function composeExplainerRc12(o) {
-  return [`Here's how *Isola Personal Line* works:`, ``,
+  return [`Here's how *EPIC Personal Line* works:`, ``,
     `1️⃣ Tap *Get my number* - a form opens here in WhatsApp and your +1 767 line is created when you confirm`,
-    `2️⃣ The same form helps you install *Cloud Softphone* (free) and puts your line into it - no settings to type`,
+    `2️⃣ Then tap the buttons in this chat: get the free *Cloud Softphone* app, and *Set up my line* puts your line into it - no settings to type`,
     `3️⃣ Your *${o.trial_days}-day free trial* includes ${o.trial_minutes} minutes of calls to Dominica - call from the app`,
     `4️⃣ Any time: your balance, recent calls and calling help are a tap away in this chat, and a real person is one tap away too`,
     ``, VOICE_ONLY_DISCLOSURE].join('\n')
@@ -428,7 +446,7 @@ export function composeTroubleshoot(st) {
 }
 // rc13: calling guidance per destination, from the balance read (pool = which calls the plan includes; wallet = credit). An unread fact
 // is said plainly, never assumed. Included minutes and wallet credit stay separate sentences.
-export function composeCallGuide(dest, o, bal) {
+export function composeCallGuide(dest, o, bal, state) {
   const known = bal?.known === true
   const left = known && bal.minutes_remaining != null ? ` (${bal.minutes_remaining} left)` : ''
   const wallet = typeof bal?.wallet_xcd === 'string' ? bal.wallet_xcd : null
@@ -437,21 +455,21 @@ export function composeCallGuide(dest, o, bal) {
   const usShared = `Your plan's included minutes cover calls to the US and Canada too${left}.`
   const usWallet = `Your current plan includes Dominica calls only, so calls to the US and Canada cost EC$${o.overage_uscan_xcd} a minute from wallet credit.`
   const noCredit = wallet === '0.00' ? ` With EC$0.00 credit those calls can't connect yet - adding credit isn't available in this chat yet, so tap *Talk to a person* and our team will help.` : walletLine
-  if (dest === 'dominica') return [`*Calling Dominica*`, ``, `Open Cloud Softphone, dial +1 767 and the 7-digit number, then tap call.`, ``, dm + walletLine].join('\n')
+  if (dest === 'dominica') return [`*Calling Dominica*`, ``, `Open Cloud Softphone, dial +1 767 and the 7-digit number, then tap call.`, ``, dm + walletLine, ...linksFor(state)].join('\n')
   if (dest === 'uscan') {
     const cover = !known ? `I couldn't read which calls your plan includes just now - tap *Balance* to check, or ask me again shortly.` : bal.pool === 'shared' ? usShared : usWallet + noCredit
-    return [`*Calling the US or Canada*`, ``, `Open Cloud Softphone, dial +1 and the 10-digit number, then tap call.`, ``, cover].join('\n')
+    return [`*Calling the US or Canada*`, ``, `Open Cloud Softphone, dial +1 and the 10-digit number, then tap call.`, ``, cover, ...linksFor(state)].join('\n')
   }
-  return [`*Making a call*`, ``, `1. Open *Cloud Softphone* on this phone.`, `2. Dial the full number with its country code: +1 767 ... for Dominica, +1 ... for the US or Canada.`, `3. Tap call.`, ``, dm + walletLine].join('\n')
+  return [`*Making a call*`, ``, `1. Open *Cloud Softphone* on this phone.`, `2. Dial the full number with its country code: +1 767 ... for Dominica, +1 ... for the US or Canada.`, `3. Tap call.`, ``, dm + walletLine, ...linksFor(state)].join('\n')
 }
 /** A failed call, diagnosed in order from FRESH facts: registration now -> credit/destination -> app/network -> a person. */
-export function composeCallFailed(fx, bal) {
+export function composeCallFailed(fx, bal, state) {
   const reg = fx?.registration
   const connected = ['registered', 'reachable', 'lagged'].includes(reg)
-  if (!connected && (reg === 'unknown' || !reg)) return { connected, stage: 'call_failed_unknown', text: [`I can't see your phone's connection from here right now, so let's check the basics:`, `• Open Cloud Softphone on this phone and keep it open for a few seconds.`, `• Make sure the phone has internet (Wi-Fi or data).`, ``, `Then tap *Check connection*. If it still fails, tap *Talk to a person*.`].join('\n') }
+  if (!connected && (reg === 'unknown' || !reg)) return { connected, stage: 'call_failed_unknown', text: [`I can't see your phone's connection from here right now, so let's check the basics:`, `• Open Cloud Softphone on this phone and keep it open for a few seconds.`, `• Make sure the phone has internet (Wi-Fi or data).`, ``, `Then tap *Check connection*. If it still fails, tap *Talk to a person*.`, ...linksFor(state)].join('\n') }
   if (!connected) return { connected, stage: 'call_failed_not_connected', text: fx?.first_call_done === true
-    ? [`Right now Cloud Softphone isn't connected to your line - that's why the call didn't go through.`, `• Open Cloud Softphone on this phone and wait a few seconds; it reconnects by itself.`, `• Make sure the phone has internet and that Cloud Softphone may use the microphone and send notifications.`, ``, `Then tap *Check connection*.`].join('\n')
-    : [`Your phone isn't connected to your line yet, so calls can't go out.`, `• Open Cloud Softphone on this phone and keep it open for a few seconds.`, `• If you set it up on a different phone, or a setup link expired, tap *Continue setup* for a fresh link.`].join('\n') }
+    ? [`Right now Cloud Softphone isn't connected to your line - that's why the call didn't go through.`, `• Open Cloud Softphone on this phone and wait a few seconds; it reconnects by itself.`, `• Make sure the phone has internet and that Cloud Softphone may use the microphone and send notifications.`, ``, `Then tap *Check connection*.`, ...linksFor(state)].join('\n')
+    : [`Your phone isn't connected to your line yet, so calls can't go out.`, `• Open Cloud Softphone on this phone and keep it open for a few seconds.`, `• If you set it up on a different phone, or a setup link expired, tap *Continue setup* for a fresh link.`, ...linksFor(state)].join('\n') }
   const known = bal?.known === true
   const wallet = typeof bal?.wallet_xcd === 'string' ? bal.wallet_xcd : null
   if (known && bal.minutes_remaining != null && bal.minutes_remaining <= 0 && wallet === '0.00') return { connected, stage: 'call_failed_no_credit', text: `Your phone is connected, but you have no included minutes left and EC$0.00 wallet credit - so calls can't connect right now. Adding credit isn't available in this chat yet; tap *Talk to a person* and our team will sort it out with you.` }
@@ -469,7 +487,7 @@ export const GUIDE_TOPICS = ['how_it_works', 'plans', 'calling', 'call_failed', 
 // (wallet credit) and the 3-decimal Dominica rate are handed over WITHOUT a `$`; catalogue prices keep EC$ (they are in pricingFacts).
 export const FACTS_NOTE = 'Verified facts for THIS customer. Write ONE short, natural reply in your own words from them - answer what they asked, recommend when useful, ask at most one question. Never invent or round a number. Write catalogue prices exactly as given (EC$...); write wallet credit and the Dominica rate exactly as given (no $ sign). The buttons in `choices` are attached to your reply automatically - you may point to them, never list them as text.'
 // rc13d: the calling app, so the agent can always tell a customer where their line lives and how to get it.
-export const APP_FACTS = { name: 'Cloud Softphone', maker: 'Acrobits', where_the_line_lives: 'calls are made from this app on the customer phone (this launch offer covers outgoing calling: say "Make calls from the free Cloud Softphone app. This launch offer covers outgoing calling." - never promise or advertise that the number rings or that they can receive calls, and never state that incoming calls are unavailable); the setup form puts the line into it with a one-tap link',
+export const APP_FACTS = { name: 'Cloud Softphone', maker: 'Acrobits', where_the_line_lives: 'calls are made from this app on the customer phone (incoming calls to the number work and are free while the customer balance is positive; the 60 free-trial minutes cover OUTGOING Dominica calls only; do not guess anything else about incoming calls - zero balance, trial credit as balance, limits, missed-call alerts, voicemail - say you are not sure and offer a teammate); the setup form puts the line into it with a one-tap link',
   ios_app_store: IOS_URL, android_google_play: ANDROID_URL }
 export const titlesOf = (choices) => (choices ?? []).map((c) => ({ title: c.title, value: c.value }))
 const ecWords = (xcd) => (typeof xcd === 'string' && xcd !== '' ? `${xcd} EC dollars` : null)
@@ -498,7 +516,7 @@ export function catalogueFacts(o) {
 /** What a completed onboarding Flow means, from the VERIFIED journey state - never from the Flow's own reported status. */
 export function composeFlowDone(j) {
   const f = j?.facts ?? {}
-  const ch = choicesFor(j?.actions)
+  const ch = stateChoices(j)
   switch (j?.state) {
     case 'active': return { stage: 'flow_done_active', text: `✅ All set - your line${did(f)} is working. Here's what you can do any time:`, choices: ch }
     case 'attention': return { ...composeJourney(j), stage: 'flow_done_attention' }
@@ -514,11 +532,18 @@ export const START_TEXT = `Updates are back on - we'll message you here about yo
 /** Proactive follow-ups, worded from the CURRENT journey (the verdict only says why we are speaking). */
 export function composeProactive(key, j) {
   const f = j?.facts ?? {}
-  const ch = choicesFor(j?.actions)
+  const ch = stateChoices(j)
   const st = j?.state
   if (key === 'activated' || key === 'first_call') {
-    if (st === 'active' || st === 'attention') return { stage: 'proactive_first_call', covered: ['activated', 'first_call'], text: `🎉 Your first call went through - your line${did(f)} is working. Your balance, recent calls and calling help are one tap away here.`, choices: ch }
-    if (key === 'activated' && st === 'registered_no_call') return { stage: 'proactive_registered', covered: ['activated'], text: `📶 Your phone is now connected to your line${did(f)}. Next step: make your first call from Cloud Softphone.`, choices: ch }
+    if (st === 'active' || st === 'attention') return { stage: 'proactive_first_call', covered: ['activated', 'first_call'], text: `🎉 Your first call went through — nice one! Your line${did(f)} is working like a charm.\n\nYour balance, recent calls and calling help are one tap away here, and a real person is too, any time you need us 🙂`, choices: ch }
+    // Owner 2026-10-14 ("be more helpful, celebrate, say your phone is online right now"). Said ONLY when the journey state is registered_no_call,
+    // i.e. the phone has actually registered - never on a hand-off alone. No claim about incoming calls or what the minutes cover (facts we do not hold here).
+    if (key === 'activated' && st === 'registered_no_call') {
+      const mins = f.minutes_remaining != null && Number.isFinite(Number(f.minutes_remaining)) ? `You have *${f.minutes_remaining} minutes* ready to use.\n\n` : ''
+      return { stage: 'proactive_registered', covered: ['activated'],
+        text: `🎉 Yay — your phone is online right now! Your line${did(f)} is live and ready to go.\n\n${mins}Open Cloud Softphone and make your first call — try a Dominica number: +1 767 and then the 7 digits.\n\nWant a hand? Tap *How to make a call*, or just ask me anything here 🙂`,
+        choices: choicesFor(['how_to_call', 'balance', 'human']) }
+    }
     return null
   }
   if (key === 'stalled:handoff_no_register' && st === 'activated_not_registered') return { stage: 'proactive_stalled', text: `Your line${did(f)} was handed to Cloud Softphone, but your phone hasn't connected yet. Open Cloud Softphone on this phone, then tap *Check connection* - or *Continue setup* for a fresh link.`, choices: ch }
@@ -562,7 +587,31 @@ export function makeHandlers(cfg, db, stats, f = fetch) {
     const o = await pl(cfg, stats, 'offer', who, {}, {}, f)
     return o.code === 'offer' ? o.data : null
   }
-  const NEEDS_LINE = new Set(['my_account', 'balance', 'recent_calls', 'check_connection', 'troubleshoot', 'how_to_call', 'calling_help', 'call_dominica', 'call_uscan', 'call_failed'])
+  /** Ask the PL service to send the setup / "Open my line" buttons as a verified reply to THIS customer message (plan v1.8 items
+   * D/J/K). At most once per customer message (claim row), only while the AI owns the conversation. Returns { ok, out }. */
+  async function deliverSetupButtons(who, eventKey) {
+    const h = waHash(cfg, who.waId)
+    const event = `buttons:${eventKey}`
+    const claim = await db.query(`INSERT INTO pl_adapter_guidance (cw_conversation, wa_hash, message_id, event) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING RETURNING id`, [who.conversationId, h, who.messageId, event])
+    if (claim.rowCount !== 1) return { ok: true, out: done({ code: 'buttons_sent', already: true, note: 'The setup buttons were ALREADY sent for this message. Reply with ONE short friendly sentence only; add nothing else.' }) }
+    const release = () => db.query(`DELETE FROM pl_adapter_guidance WHERE id=$1`, [claim.rows[0].id]).catch(() => {})
+    if (!(await aiOwned(who.conversationId))) { await release(); return { ok: false, sent: 'none', code: 'conversation_not_ai_owned', out: refuse('conversation_not_ai_owned') } }
+    const r = await pl(cfg, stats, 'account/next-step', who, { event: 'resend', deliver: 'buttons' }, {}, f).catch(() => null)
+    if (r?.code !== 'buttons_sent') {
+      // Only an answer that PROVES nothing was sent releases the claim and lets a caller fall back to another message. A timeout or an
+      // unexpected answer may have delivered some buttons already: keep the claim and send nothing more (one send per customer message).
+      // internal_error: in the buttons branch plsvc only returns it when the link mint failed, BEFORE any send (send errors come back as
+      // buttons_unavailable with a count). multi_account: the ambiguous-identity refusal, also before any send.
+      const NOTHING_SENT = new Set(['link_rate_limited', 'activation_paused', 'no_account', 'replay', 'rate_limited', 'invalid_body', 'service_disabled', 'link_not_earned', 'internal_error', 'multi_account'])
+      const code = r?.code && r.code !== 'bad_response' ? r.code : 'service_unavailable'
+      if (r && (NOTHING_SENT.has(r.code) || (r.code === 'buttons_unavailable' && Number(r.data?.buttons ?? 0) === 0))) { await release(); return { ok: false, sent: 'none', code, out: refuse(code) } }
+      return { ok: false, sent: r?.code === 'buttons_unavailable' ? 'partial' : 'unknown', code, out: refuse(code) }
+    }
+    await db.query(`UPDATE pl_adapter_guidance SET stage=$2 WHERE id=$1`, [claim.rows[0].id, r.data?.include_app ? 'setup_buttons' : 'open_line_button'])
+    return { ok: true, out: done({ code: 'buttons_sent', include_app: r.data?.include_app === true,
+      note: 'Large tap buttons have ALREADY been sent to the customer as their own WhatsApp messages (the last one is "Set up my line" or "Open my line"). Do NOT repeat them, write any link, or claim the line is connected. Reply with ONE short friendly sentence pointing them to the button.' }) }
+  }
+  const NEEDS_LINE = new Set(['balance', 'recent_calls', 'check_connection', 'troubleshoot', 'how_to_call', 'calling_help', 'call_dominica', 'call_uscan', 'call_failed', 'open_line'])
   const SETUP_DONE = new Set(['registered_no_call', 'active', 'attention'])
   /** One deterministic action for the verified sender, chosen and worded from the CURRENT journey. Never a model turn. */
   async function runAction(who, action) {
@@ -583,7 +632,7 @@ export function makeHandlers(cfg, db, stats, f = fetch) {
       }
       case 'how_it_works': {
         const o = await offerRead(who); if (!o) return refuse('offer_unavailable')
-        return say({ stage: 'how_it_works', text: composeExplainerRc12(o), choices: j.has_line ? choicesFor(j.actions) : choicesFor(['get_number', 'plans', 'human']) })
+        return say({ stage: 'how_it_works', text: composeExplainerRc12(o), choices: j.has_line ? stateChoices(j) : choicesFor(['get_number', 'plans', 'human']) })
       }
       case 'plans': {
         const o = await offerRead(who); if (!o) return refuse('offer_unavailable')
@@ -598,19 +647,25 @@ export function makeHandlers(cfg, db, stats, f = fetch) {
       }
       case 'calling_help':
         // rc13: ONE question, three answers - never a tutorial wall, never a loop.
-        return say({ stage: 'calling_help_menu', text: `Happy to help with calling. What do you need?`, choices: [ACT.call_dominica, ACT.call_uscan, ACT.call_failed] })
+        return say({ stage: 'calling_help_menu', text: `Happy to help with calling. Calls go out from the free Cloud Softphone app on your phone.${needsInstall(j.state) ? `\n\n${APP_LINKS_LINE}` : ''}\n\nWhat do you need?`, choices: [ACT.open_line, ACT.call_failed, BTN.human] })
+      case 'open_line': {
+        const b = await deliverSetupButtons(who, 'open_line')
+        if (b.ok) return b.out
+        if (b.code === 'link_rate_limited') return say({ stage: 'open_line_rate_limited', text: `I've sent you several setup links in the last hour - please use the most recent one above. If your app is already set up, just open Cloud Softphone from your phone's home screen.`, choices: [BTN.human] })
+        return b.out
+      }
       case 'how_to_call': case 'call_dominica': case 'call_uscan': {
         const o = await offerRead(who); if (!o) return refuse('offer_unavailable')
         const b = await pl(cfg, stats, 'account/balance', who, {}, {}, f).catch(() => null)
         const bal = b?.code === 'balance' ? b.data : null
         const dest = action === 'call_uscan' ? 'uscan' : action === 'call_dominica' ? 'dominica' : 'first'
-        return say({ stage: `howcall_${dest}`, text: composeCallGuide(dest, o, bal), choices: choicesFor(['call_failed', 'balance', 'human']) })
+        return say({ stage: `howcall_${dest}`, text: composeCallGuide(dest, o, bal, j.state), choices: choicesFor(['call_failed', 'balance', 'human']) })
       }
       case 'troubleshoot': case 'call_failed': {
         // rc13: diagnosis from FRESH facts, in the PM's order: registration now -> destination/credit -> app/network -> a person.
         const b = await pl(cfg, stats, 'account/balance', who, {}, {}, f).catch(() => null)
         const bal = b?.code === 'balance' ? b.data : null
-        const d = composeCallFailed(fx, bal)
+        const d = composeCallFailed(fx, bal, j.state)
         return say({ stage: d.stage, text: d.text, choices: d.connected ? choicesFor(['check_connection', 'human']) : fx.first_call_done === true ? choicesFor(['check_connection', 'human']) : choicesFor(['check_connection', 'continue_setup', 'human']) })
       }
       case 'balance': {
@@ -623,29 +678,19 @@ export function makeHandlers(cfg, db, stats, f = fetch) {
         if (r.code !== 'recent_calls') return refuse(r.code === 'bad_response' ? 'service_unavailable' : r.code)
         return say(composeCalls(r.data, choicesFor(j.actions, 'recent_calls')))
       }
-      case 'flow_done': return deliverOwn(who, 'flow_done', async () => { const g = composeFlowDone(j); return g ? { g, extra: { state: j.state } } : { refusal: refuse('nothing_to_say') } })
-      case 'menu': return say(composeMenu(j, { myAccount: cfg.myAccountLink === true }))
-      case 'my_account': {
-        // rc13i (R1 S-c). The link goes ONLY to the verified sender's own WhatsApp conversation, through the same gates as /v1/eligibility
-        // (Chatwoot ownership, STOP, the 23.5 h window, estate consent) checked BEFORE anything is minted; any unreadable source = nothing is
-        // asked of the PL service and the customer is told, honestly, that it is not available. One link per tap (the guidance claim is unique per
-        // customer message), at most 3 per 10 minutes here (the PL service and the fork each enforce their own limits too).
-        if (cfg.myAccountLink !== true) return refuse('feature_disabled')
-        const h = waHash(cfg, who.waId)
-        const recent = await db.query(`SELECT count(*)::int AS n FROM pl_adapter_guidance WHERE wa_hash=$1 AND event='act:my_account' AND stage='my_account_link' AND created_at > now() - interval '10 minutes'`, [h]).then((r) => Number(r.rows[0]?.n ?? 0)).catch(() => null)
-        if (recent === null) return refuse('service_unavailable')
-        if (recent >= 3) return say({ stage: 'my_account_rate_limited', text: `I sent you your account link a moment ago - please use the most recent one in this chat. If it doesn't open, wait a few minutes and tap *My account* again, or tap *Talk to a person*.`, choices: [BTN.human] })
-        const el = await handleEligibility(cfg, db, stats, { wa_id: who.waId, nonce: crypto.randomBytes(16).toString('base64url'), ref: 'myacct' }, f).catch(() => ({ eligible: false, reason: 'unavailable' }))
-        if (el.eligible !== true || String(el.conversation_id) !== String(who.conversationId)) return refuse('not_eligible', { reason: el.reason ?? 'unavailable' })
-        return deliverOwn(who, 'act:my_account', async () => {
-          const r = await pl(cfg, stats, 'account/portal-link', who, {}, {}, f)
-          if (r.code === 'portal_link' && typeof r.data?.url === 'string' && /^https:\/\/[^\s]+$/.test(r.data.url) && typeof r.data.expires_at === 'string') return { g: composeAccountLink(r.data.url, r.data.expires_at), extra: { link_sent: true } }
-          if (r.code === 'no_account') return { g: composeJourney(j) }
-          if (r.code === 'rate_limited') return { g: { stage: 'my_account_rate_limited', text: `I sent you your account link a moment ago - please use the most recent one in this chat. If it doesn't open, wait a few minutes and tap *My account* again, or tap *Talk to a person*.`, choices: [BTN.human] } }
-          // Fail closed and say so: never a guessed link, never silence, never "it's on its way".
-          return { g: { stage: 'my_account_unavailable', text: `I can't open your account page right now. Please try again in a little while, or tap *Talk to a person* and someone will help.`, choices: [MENU_BTN.account, BTN.human] } }
-        })
+      case 'flow_done': {
+        // Option B: the signup Flow closed with a line created but not yet in the app -> the large setup buttons, sent as the reply to
+        // the Flow-completion message. Anything else (or the buttons failing) -> the existing completion message, unchanged.
+        if (j.state === 'setup_not_activated') {
+          const b = await deliverSetupButtons(who, 'flow_done')
+          if (b.ok) return b.out
+          // Unknown outcome (timeout): buttons may have been delivered - never add a second message.
+          if (b.sent === 'unknown' || b.code === 'conversation_not_ai_owned') return b.out
+          // Nothing sent, or the store buttons went out but the setup button did not: the completion text gives the customer a way on.
+        }
+        return deliverOwn(who, 'flow_done', async () => { const g = composeFlowDone(j); return g ? { g, extra: { state: j.state } } : { refusal: refuse('nothing_to_say') } })
       }
+      case 'menu': return say(composeMenu(j))
       case 'menu_flow': {
         // rc13f: the menu's Flow entry always sends the existing published Flow (signup for a new customer; the same Flow opens as
         // "Manage your line" with the customer's own line and live status for a line holder - it creates nothing). A tap sends the Flow
@@ -685,12 +730,12 @@ export function makeHandlers(cfg, db, stats, f = fetch) {
         }
         return done({ code: 'line_exists', offer_key: 'trial', ...pick(d, ['did_pretty', 'did_masked', 'registration', 'softphone_activated', 'first_call_done', 'plan', 'plan_expires_at']), connected, setup_flow_sent: setupFlowSent,
           note: connected && setupFlowSent
-            ? 'This customer ALREADY HAS this Isola line and it is working. Tell them their number (did_pretty) and that their line is active; a form showing their line and status has ALREADY been sent as its own WhatsApp message (its button is "Manage my line"). Do NOT offer a trial, a new number, or ask them to reply 1.'
+            ? 'This customer ALREADY HAS this EPIC line and it is working. Tell them their number (did_pretty) and that their line is active; a form showing their line and status has ALREADY been sent as its own WhatsApp message (its button is "Manage my line"). Do NOT offer a trial, a new number, or ask them to reply 1.'
             : connected
-            ? 'This customer ALREADY HAS this Isola line and it is working. Tell them their number (did_pretty) and that their line is active. Do NOT offer a trial, a new number, or ask them to reply 1.'
+            ? 'This customer ALREADY HAS this EPIC line and it is working. Tell them their number (did_pretty) and that their line is active. Do NOT offer a trial, a new number, or ask them to reply 1.'
             : setupFlowSent
-              ? 'This customer ALREADY HAS this Isola line (did_pretty). A setup form has ALREADY been sent to them as its own WhatsApp message to finish setting up the app. Tell them to open that form (its button is "Manage my line"). Do NOT offer a trial or ask them to reply 1.'
-              : 'This customer ALREADY HAS this Isola line (did_pretty) but the app is not connected yet. Tell them their number and offer to send the setup steps. Do NOT offer a trial or ask them to reply 1.' })
+              ? 'This customer ALREADY HAS this EPIC line (did_pretty). A setup form has ALREADY been sent to them as its own WhatsApp message to finish setting up the app. Tell them to open that form (its button is "Manage my line"). Do NOT offer a trial or ask them to reply 1.'
+              : 'This customer ALREADY HAS this EPIC line (did_pretty) but the app is not connected yet. Tell them their number and offer to send the setup steps. Do NOT offer a trial or ask them to reply 1.' })
       }
       if (st.code === 'no_account' && cfg.flowOnboarding) {
         // New customer: the whole onboarding happens in the native WhatsApp Flow (offer, confirmation, line, app setup). The confirmation
@@ -784,6 +829,16 @@ export function makeHandlers(cfg, db, stats, f = fetch) {
     async pl_next_step(who, args) {
       if (args.event !== undefined && !['status', 'installed', 'resend'].includes(args.event)) return refuse('invalid_arguments')
       if (cfg.flowOnboarding) {
+        // Item K: a customer who already HAS a line gets the large "Open my line" / "Set up my line" button (a fresh one-time setup
+        // link), not the Manage Flow - whose last screen has no link once a call has gone through. New customers still get the Flow.
+        const jr = await journeyRead(who)
+        if (jr.ok && jr.j.has_line === true) {
+          const b = await deliverSetupButtons(who, 'next_step')
+          if (b.ok) return b.out
+          if (b.code === 'link_rate_limited') return done({ code: 'link_rate_limited', note: 'Several setup links were sent in the last hour. Tell the customer to use the most recent one in this chat; if the app is already set up they can simply open Cloud Softphone from the home screen. Do not write a link.' })
+          // Never fall back to the Manage Flow for a line holder: a person may own the conversation, or some buttons may already be out.
+          return b.out
+        }
         const fl = await pl(cfg, stats, 'flows/launch', who, { flow: 'signup' }, {}, f).catch(() => null)
         if (fl?.code === 'flow_sent') return done({ code: 'setup_flow_sent', offer_key: 'trial', existing_line: fl.data?.existing_line === true,
           note: 'The setup form has ALREADY been sent to the customer as its own WhatsApp message - it shows their line, the app install, the setup link, a connection check and their balance. Tell them to open it - its button is "Manage my line" if they already have a line (existing_line true), otherwise "Start signup". Do NOT list steps, links or numbers yourself.' })
@@ -835,7 +890,7 @@ export function makeHandlers(cfg, db, stats, f = fetch) {
       const j = jr.j
       return done({ code: 'facts', topic: 'journey', state: j.state, next_action: j.next_action, has_line: j.has_line === true,
         attention: j.attention ?? [], facts: modelFacts(j), payment: { topup_or_purchase_in_chat: j.payment?.topup_available === true },
-        choices: titlesOf(choicesFor(j.actions)), note: FACTS_NOTE })
+        choices: titlesOf(stateChoices(j)), note: FACTS_NOTE })
     },
     async pl_guide(who, args) {
       const topic = args.topic
@@ -860,9 +915,9 @@ export function makeHandlers(cfg, db, stats, f = fetch) {
       out.facts = { ...modelFacts(j), plan_covers_us_canada: bal?.known === true ? bal.pool === 'shared' : null }
       if (o) out.rates = { dominica_after_included: '13.5 EC cents a minute (from wallet credit)', us_canada_when_not_included: `EC$${o.overage_uscan_xcd} a minute (from wallet credit)` }
       out.dialing = { dominica: '+1 767 then the 7-digit number', us_canada: '+1 then the 10-digit number', app: 'Cloud Softphone on this phone' }
-      if (topic === 'calling' || topic === 'how_to_call' || topic === 'calling_help') out.choices = titlesOf([ACT.call_dominica, ACT.call_uscan, ACT.call_failed])
+      if (topic === 'calling' || topic === 'how_to_call' || topic === 'calling_help') out.choices = titlesOf([ACT.open_line, ACT.call_failed, BTN.human])
       else if (topic === 'call_failed' || topic === 'troubleshoot') {
-        const d = composeCallFailed(fx, bal)
+        const d = composeCallFailed(fx, bal, j.state)
         out.diagnosis = d.stage
         out.choices = titlesOf(d.connected || fx.first_call_done === true ? choicesFor(['check_connection', 'human']) : choicesFor(['check_connection', 'continue_setup', 'human']))
       } else out.choices = titlesOf(choicesFor(j.state === 'registered_no_call' ? ['how_to_call', 'human'] : j.actions))
@@ -981,60 +1036,38 @@ export async function handleProactive(cfg, db, stats, b, f = fetch, nowMs = Date
   return { code: 'sent', covered: g.covered ?? [b.key], stage: g.stage }
 }
 
-// ── rc13h: send-eligibility (plsvc store button -> /v1/eligibility) ─────────────────────────────────────────────────────────────────────
-// ANSWERS ONE QUESTION - "may the PL service put a customer-facing WhatsApp message in front of this verified wa_id right now?" - and
-// sends nothing, writes nothing (no claim row, no Chatwoot post). The authoritative sources are the same ones /v1/proactive uses:
-// Chatwoot conversation ownership (pending only), the adapter STOP preference, the customer's last Chatwoot incoming message (23.5 h),
-// and the estate consent/STOP read (journey.consent). Any source that cannot be read is NOT eligible (fail closed): the answer is
-// {eligible:false, reason:'unavailable'|'window_unknown'|'consent_unknown'|...}, never a guess. Signed by plsvc with the PL concierge
-// key under its OWN purpose label (domain separation from pl-proactive-v1), iat +-120 s, and single-use nonce (replay refused).
-export const ELIGIBILITY_PURPOSE = 'pl-eligibility-v1'
-const ELIG_NONCE = /^[A-Za-z0-9_-]{16,64}$/
-export function verifyEligibility(raw, sig, cfg, nowMs = Date.now()) {
+// ── optional-contact guard (plsvc plan-lifecycle -> /v1/optional-contact) ────────────────────────────────────────────────────────────────
+// READ-ONLY. plsvc asks, before an OPTIONAL lifecycle notice (plan_expiring, plan_lapsed_metered), whether this customer's Chatwoot
+// conversation records a decline or holds a person. Decline = the staff label `no-proactive` (or the existing STOP preference, read only);
+// hold = conversation status `open`. Nothing is posted, written or stamped here, and the 23.5 h customer window is deliberately NOT applied
+// (these are templates). Own purpose label, so a pl-proactive-v1 signature is rejected here and vice versa. Anything unreadable, ambiguous or
+// not found (no contact, no conversation) answers `held` - the notice waits; it is never assumed allowed. Enforcement of the plan itself is not this endpoint's business.
+export const OPTIONAL_CONTACT_PURPOSE = 'pl-optional-contact-v1'
+export const DECLINE_LABEL = 'no-proactive'
+const OPTIONAL_CONTACT_KEYS = new Set(['plan_expiring', 'plan_lapsed_metered'])
+export function verifyOptionalContact(raw, sig, cfg, nowMs = Date.now()) {
   if (typeof sig !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(sig)) return { ok: false, why: 'no_signature' }
-  const mac = crypto.createHmac('sha256', Buffer.from(cfg.plKey, 'utf8')).update(`${ELIGIBILITY_PURPOSE}.${raw}`, 'utf8').digest('base64url')
+  const mac = crypto.createHmac('sha256', Buffer.from(cfg.plKey, 'utf8')).update(`${OPTIONAL_CONTACT_PURPOSE}.${raw}`, 'utf8').digest('base64url')
   if (!eq(mac, sig)) return { ok: false, why: 'bad_signature' }
   let b; try { b = JSON.parse(raw) } catch { return { ok: false, why: 'bad_json' } }
   if (!b || b.kid !== cfg.plKid || !Number.isSafeInteger(b.iat) || Math.abs(Math.floor(nowMs / 1000) - b.iat) > 120) return { ok: false, why: 'stale_or_wrong_key' }
-  if (!WA_ID.test(String(b.wa_id)) || typeof b.nonce !== 'string' || !ELIG_NONCE.test(b.nonce) || (b.ref !== undefined && (typeof b.ref !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(b.ref)))) return { ok: false, why: 'bad_fields' }
+  if (!WA_ID.test(String(b.wa_id)) || !OPTIONAL_CONTACT_KEYS.has(b.key) || typeof b.ref !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(b.ref)) return { ok: false, why: 'bad_fields' }
   return { ok: true, b }
 }
-/** Single-use nonces for the +-120 s validity window (in-memory: the adapter is one replica; a restart re-opens at most the remaining <=120 s, bounded by iat). */
-export function makeNonceCache(ttlMs = 250_000) {
-  const seen = new Map()
-  return { claim(nonce, nowMs = Date.now()) {
-    for (const [k, t] of seen) if (nowMs - t > ttlMs) seen.delete(k)
-    if (seen.has(nonce)) return false
-    seen.set(nonce, nowMs); return true
-  } }
-}
-const NONCES = makeNonceCache()
-export async function handleEligibility(cfg, db, stats, b, f = fetch, nowMs = Date.now()) {
-  const no = (reason, detail, extra = {}) => ({ eligible: false, reason, ...(detail ? { detail } : {}), ...extra })
+export async function handleOptionalContact(cfg, db, b, f = fetch) {
   const fc = await conversationFor(cfg, String(b.wa_id), f).catch(() => ({ ok: false, why: 'chatwoot_unreachable' }))
-  if (!fc.ok) return fc.why === 'chatwoot_unreachable' ? no('unavailable', fc.why) : no('no_conversation', fc.why)
-  const conversationId = fc.conversationId
-  const conv = await cw(cfg, `/conversations/${conversationId}`, f).catch(() => null)
-  if (!conv || typeof conv.status !== 'string') return no('unavailable', 'conversation_unreadable')
-  if (conv.status !== 'pending') return no('human_owned', `status_${conv.status}`, { conversation_id: conversationId })
-  const h = waHash(cfg, String(b.wa_id))
-  let pref; try { pref = (await db.query(`SELECT proactive_stopped FROM pl_adapter_preference WHERE wa_hash=$1`, [h])).rows[0] } catch { return no('unavailable', 'preference_unreadable') }
-  if (pref?.proactive_stopped === true) return no('stopped', 'adapter_stop', { conversation_id: conversationId })
-  const msgs = await cw(cfg, `/conversations/${conversationId}/messages`, f).catch(() => null)
-  if (!Array.isArray(msgs?.payload)) return no('window_unknown', 'messages_unreadable')
-  const lastIn = msgs.payload.filter(isIncomingContactMsg).sort((x, y) => Number(y.created_at) - Number(x.created_at))[0]
-  if (!lastIn || !Number.isFinite(Number(lastIn.created_at))) return no('window_unknown', 'no_incoming_message_on_page')
-  if (Math.floor(nowMs / 1000) - Number(lastIn.created_at) > WINDOW_S) return no('window_closed', 'last_inbound_older_than_window', { conversation_id: conversationId })
-  const who = { waId: String(b.wa_id), conversationId, wamid: /^wamid\.[A-Za-z0-9+/=_-]{8,120}$/.test(String(lastIn.source_id ?? '')) ? String(lastIn.source_id) : `eligibility.${String(b.ref ?? 'x')}`, messageId: `eligibility:${b.nonce}` }
-  // rid 'elig-<conv>' (not 'cw-<conv>'): the PL service treats a 'cw-' assertion as proof of a customer message; this read is NOT one, so it must not refresh that window proxy.
-  const r = await pl(cfg, stats, 'account/journey', who, {}, { rid: `elig-${conversationId}` }, f).catch(() => null)
-  if (r?.code !== 'journey') return no('unavailable', `journey_${r?.code ?? 'unreachable'}`)
-  const consent = r.data?.consent
-  if (consent?.known === true && consent.estate_suppressed === true) return no('stopped', 'estate_suppressed', { conversation_id: conversationId })
-  if (consent?.known !== true) return no('consent_unknown', null, { conversation_id: conversationId })
-  const again = await cw(cfg, `/conversations/${conversationId}`, f).catch(() => null)   // ownership re-read last, closest to the caller's send
-  if (again?.status !== 'pending') return no(again ? 'human_owned' : 'unavailable', `status_${again?.status ?? 'unreadable'}`, { conversation_id: conversationId })
-  return { eligible: true, reason: 'ok', conversation_id: conversationId }
+  // A search miss does not establish that the customer has not declined: no contact, no conversation in this inbox, an ambiguous
+  // match or an unreadable Chatwoot are ALL held. Only a verified, matching conversation can answer allowed.
+  if (!fc.ok) return { code: 'held', detail: fc.why }          // no_contact, no_conversation, contact_ambiguous, chatwoot_unreachable
+  const conv = await cw(cfg, `/conversations/${fc.conversationId}`, f).catch(() => null)
+  if (!conv || !Array.isArray(conv.labels) || typeof conv.status !== 'string') return { code: 'held', detail: 'conversation_unreadable' }
+  if (conv.labels.includes(DECLINE_LABEL)) return { code: 'suppressed', detail: 'label' }
+  let pref
+  try { pref = (await db.query(`SELECT proactive_stopped FROM pl_adapter_preference WHERE wa_hash=$1`, [waHash(cfg, String(b.wa_id))])).rows[0] }
+  catch { return { code: 'held', detail: 'preference_unreadable' } }
+  if (pref?.proactive_stopped === true) return { code: 'suppressed', detail: 'stop_pref' }
+  if (conv.status === 'open') return { code: 'held', detail: 'status_open' }
+  return { code: 'allowed' }
 }
 
 // ── MCP (Streamable HTTP, JSON-RPC 2.0) ─────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -1080,13 +1113,21 @@ export function makeServer(cfg, db, f = fetch) {
     if (!who.ok) return { code: 'identity_unverified', detail: who.why }
     const run = async (action, fn) => { const out = await fn(); return { code: out.ok ? 'handled' : 'refused', action, result: out.result } }
     if (body.action === 'flow_done') return run('flow_done', () => handlers._runAction(who, 'flow_done'))
+    // 2026-10-16: the relay's fallback when the agent produced an EMPTY reply (3 of the 7-day handoffs): the customer gets the deterministic
+    // journey menu for THIS verified message instead of an instant handoff. Same identity, ownership re-read and one-send-per-message as 'menu'.
+    if (body.action === 'menu_fallback') {
+      // STOP / START keep their meaning on this path too (Codex pass 2): a preference is applied, never answered with a menu.
+      if (STOP_RE.test(who.content)) return run('stop', () => handlers._setPreference(who, true))
+      if (START_RE.test(who.content)) return run('start', () => handlers._setPreference(who, false))
+      return run('menu', () => handlers._runAction(who, 'menu'))
+    }
     if (body.action !== 'auto') return { code: 'invalid_action' }
     if (STOP_RE.test(who.content)) return run('stop', () => handlers._setPreference(who, true))
     if (START_RE.test(who.content)) return run('start', () => handlers._setPreference(who, false))
     if (MENU_RE.test(who.content)) return run('menu', () => handlers._runAction(who, 'menu'))
     const tap = resolveTap(who.messages, who.messageId, who.content)
     // rc13f: menu taps (their own values, verified by readback) are always deterministic; every other tap follows PL_DETERMINISTIC_TAPS.
-    if (tap && MENU_VALUES.has(tap.value)) return run(tap.action, () => handlers._runAction(who, tap.action))
+    if (tap && ALWAYS_DETERMINISTIC_VALUES.has(tap.value)) return run(tap.action, () => handlers._runAction(who, tap.action))
     if (cfg.deterministicTaps === false) return { code: 'not_handled' }   // the agent answers taps (rc13d)
     if (!tap) return { code: 'not_handled' }
     return run(tap.action, () => handlers._runAction(who, tap.action))
@@ -1104,14 +1145,13 @@ export function makeServer(cfg, db, f = fetch) {
       try { return send(200, await handleProactive(cfg, db, stats, v.b, f)) }
       catch (e) { console.error('[adapter] proactive error', String(e?.message || e).slice(0, 120)); return send(200, { code: 'failed', detail: 'internal' }) }
     }
-    // rc13h: send-eligibility for the PL service's store button: same key, own purpose label, single-use nonce, answers only (sends nothing).
-    if (rq.method === 'POST' && rq.url === '/v1/eligibility') {
+    // Read-only optional-contact question from plsvc's plan lifecycle: same signed-request model, its own purpose label.
+    if (rq.method === 'POST' && rq.url === '/v1/optional-contact') {
       const raw = await readRaw(rq); if (raw === null) return send(413, { error: 'too_large' })
-      const v = verifyEligibility(raw, rq.headers['x-pl-eligibility-signature'], cfg)
+      const v = verifyOptionalContact(raw, rq.headers['x-pl-optional-contact-signature'], cfg)
       if (!v.ok) return send(401, { error: 'unauthorized', detail: v.why })
-      if (!NONCES.claim(v.b.nonce)) return send(409, { error: 'replayed' })
-      try { return send(200, await handleEligibility(cfg, db, stats, v.b, f)) }
-      catch (e) { console.error('[adapter] eligibility error', String(e?.message || e).slice(0, 120)); return send(200, { eligible: false, reason: 'unavailable', detail: 'internal' }) }
+      try { return send(200, await handleOptionalContact(cfg, db, v.b, f)) }
+      catch (e) { console.error('[adapter] optional-contact error', String(e?.message || e).slice(0, 120)); return send(200, { code: 'held', detail: 'internal' }) }
     }
     if (!eq(rq.headers.authorization || '', `Bearer ${cfg.bearer}`)) return send(401, { error: 'unauthorized' })
     if (cfg.debug && rq.url === '/__stats') return send(200, stats)
