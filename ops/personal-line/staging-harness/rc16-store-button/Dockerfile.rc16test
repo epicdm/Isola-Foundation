@@ -1,0 +1,18 @@
+# rc16 TEST image: the build stage of the repository Dockerfile up to "COPY . ." (identical steps -> shared build cache), with the
+# full dev dependency set (typescript, vitest) and the postinstall prisma client. No env, no secret, no next build. Never deployed.
+FROM node:22-slim AS build
+WORKDIR /app
+
+# openssl is required by Prisma's engine detection on Debian slim.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl ca-certificates \
+ && apt-get clean
+
+# Dependency install first, so a source-only change does not re-resolve npm.
+# --ignore-scripts is deliberately NOT used: `postinstall` runs `prisma
+# generate`, and the generated client is a build output this image needs.
+COPY package.json package-lock.json ./
+COPY prisma ./prisma
+RUN npm ci --no-audit --no-fund
+
+COPY . .

@@ -1,0 +1,28 @@
+target ok: /uplinkstg_uplink-db.1.qn5t8gthpqgri9pq8ev8dausj db=seldonframe org_slug=zzacct2-ops-workspace-2822 mode=ro
+BEGIN
+== identities (written only by the signed ingress)
+personal_line|cmv20v05r003a01lll3hxhgap|d3c44632-dd9e-43db-938b-25341f90bb7d
+personal_line|cmv20njxw003201lltojtuxh9|4678134c-fc00-4ed4-b3bb-be92c1f3f51d
+== contacts
+d3c44632|Personal Line subscriber|personal_line|t|t|1
+4678134c|Personal Line subscriber|personal_line|t|t|1
+796a0b27|Self Entered|manual|t|t|0
+== inbox
+pl.line_created|1|t|applied
+pl.line_created|1|t|applied
+== facts
+cmv20v05r003a01lll3hxhgap|1|{"plan": "trial", "did_masked": "+1 767 *** 5046"}
+cmv20njxw003201lltojtuxh9|1|{"plan": "trial", "did_masked": "+1 767 *** 5045"}
+== workflow_event_log pl.*
+pl.line_created
+pl.line_created
+== portal logins
+portal.login|4
+== integration config (non-secret) + secrets (encrypted)
+{"baseUrl": "http://zzacct2-plsvc:3005/", "connected": true, "eventsKeyId": "ev1", "lastCheckOk": true, "summaryKeyId": "sf1", "lastCheckedAt": "2026-10-11T20:27:51.664Z", "lastCheckDetail": "reachable_key_accepted"}
+personal-line-events|1|107|v1.t|dd47
+personal-line-summary|1|107|v1.U|d6ac
+== other user org untouched by A
+zzacct2-ops-workspace-2822|http://zzacct2-plsvc:3005/
+zzacct2-others-workspace-1259|http://zzacct2-attack-forced-cookie.invalid:3005/
+COMMIT

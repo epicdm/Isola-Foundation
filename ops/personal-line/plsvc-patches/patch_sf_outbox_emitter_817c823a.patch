@@ -1,0 +1,1607 @@
+diff --git a/app/api/cron/sf-outbox/route.ts b/app/api/cron/sf-outbox/route.ts
+new file mode 100644
+index 00000000..679eacab
+--- /dev/null
++++ b/app/api/cron/sf-outbox/route.ts
+@@ -0,0 +1,50 @@
++/**
++ * /api/cron/sf-outbox — the Personal Line -> SeldonFrame outbox deliverer + its operator commands.
++ *
++ *   GET  /api/cron/sf-outbox            one tick: sweep for first calls, then claim + deliver due rows (lock-guarded)
++ *   GET  /api/cron/sf-outbox?counts=1   counters only (pending / delivered / dead); runs nothing
++ *   POST /api/cron/sf-outbox            JSON {"op":"backfill","account":"<id>","limit":25,"dryRun":true|false,"liveReads":true|false}
++ *                                       or   {"op":"requeue","account":"<id>?"}  (dead rows -> pending)
++ *
++ * Auth: x-cron-secret header (CRON_SECRET), the same helper as every cron under app/api/cron/*. Fails closed. No scheduler is
++ * pointed at this route by this change; on production it stays dark until the owner enables the outbox
++ * (PL_SF_OUTBOX_ENABLED=true) AND points a scheduler at it. Backfill is a DRY RUN unless dryRun is explicitly false.
++ */
++import { NextResponse } from 'next/server'
++import { cronAuthorized } from '@/app/lib/cron-auth'
++import { sfOutboxEnabled } from '@/app/lib/pl-concierge/sf-outbox'
++import { outboxCounts, requeueDead, runSfOutboxTick } from '@/app/lib/pl-concierge/sf-outbox-deliver'
++import { backfillAccounts, sweepFirstCalls } from '@/app/lib/pl-concierge/sf-emit'
++
++export const dynamic = 'force-dynamic'
++
++export async function GET(req: Request) {
++  if (!cronAuthorized(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
++  if (new URL(req.url).searchParams.get('counts')) {
++    if (!sfOutboxEnabled()) return NextResponse.json({ enabled: false })
++    return NextResponse.json({ enabled: true, ...(await outboxCounts()) })
++  }
++  const sweep = sfOutboxEnabled() && process.env.PL_SF_FIRST_CALL_SWEEP !== 'false'
++    ? await sweepFirstCalls().catch((e: any) => ({ error: String(e?.message ?? e).slice(0, 120) }))
++    : null
++  const tick = await runSfOutboxTick()
++  return NextResponse.json({ sweep, tick })
++}
++
++export async function POST(req: Request) {
++  if (!cronAuthorized(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
++  if (!sfOutboxEnabled()) return NextResponse.json({ error: 'outbox_disabled' }, { status: 409 })
++  const b: any = await req.json().catch(() => null)
++  if (!b || typeof b !== 'object') return NextResponse.json({ error: 'bad_body' }, { status: 400 })
++  if (b.op === 'backfill') {
++    const r = await backfillAccounts({
++      accountId: typeof b.account === 'string' ? b.account : undefined,
++      limit: typeof b.limit === 'number' ? b.limit : undefined,
++      dryRun: b.dryRun === false ? false : true,
++      liveReads: b.liveReads === false ? false : true,
++    })
++    return NextResponse.json(r)
++  }
++  if (b.op === 'requeue') return NextResponse.json({ requeued: await requeueDead(undefined, typeof b.account === 'string' ? b.account : undefined) })
++  return NextResponse.json({ error: 'unknown_op' }, { status: 400 })
++}
+diff --git a/app/lib/lite-first-call-status.ts b/app/lib/lite-first-call-status.ts
+index 453744ef..1a0f1a57 100644
+--- a/app/lib/lite-first-call-status.ts
++++ b/app/lib/lite-first-call-status.ts
+@@ -39,6 +39,7 @@
+  */
+ import { prisma } from '@/app/lib/prisma'
+ import { getMagnusUserCallsEnriched } from '@/app/lib/magnus'
++import { recordFirstCallObserved } from '@/app/lib/pl-concierge/sf-emit'
+ 
+ const FIRST_CALL_LOOKBACK_LIMIT = 100
+ 
+@@ -98,7 +99,7 @@ async function getFirstCallResult(magnusUserId: string | null): Promise<{ at: st
+   }
+ }
+ 
+-export async function getFirstCallStatus(userId: string): Promise<FirstCallStatus | null> {
++export async function getFirstCallStatus(userId: string, opts: { emit?: boolean } = {}): Promise<FirstCallStatus | null> {
+   const la = await prisma.liteAccount.findUnique({
+     where: { userId },
+     select: { id: true, magnusUserId: true, installSelfReportedAt: true },
+@@ -110,6 +111,10 @@ export async function getFirstCallStatus(userId: string): Promise<FirstCallStatu
+     getFirstCallResult(la.magnusUserId),
+   ])
+ 
++  // Slice 2a item 4: an ANSWERED CDR row seen live is the one authoritative source of pl.first_call. Idempotent per account
++  // and fail-soft (no-op unless PL_SF_OUTBOX_ENABLED=true). `emit:false` is for read-only callers (the backfill dry run).
++  if (firstCall && opts.emit !== false) await recordFirstCallObserved(la.id, firstCall.at)
++
+   // credentialConsumed as a BOOLEAN is not the same claim as "we know when":
+   // re-derive it independently of whether the timestamp resolved, so an old
+   // pre-migration consumption (xmlFetched=true, no xmlFetchedAt) still
+diff --git a/app/lib/lite-provision.ts b/app/lib/lite-provision.ts
+index 2b6065ee..caa4f601 100644
+--- a/app/lib/lite-provision.ts
++++ b/app/lib/lite-provision.ts
+@@ -19,6 +19,8 @@ import { admissionMessage, type AdmissionDoor } from '@/app/lib/lite-admission'
+ import { ownerPhoneWhere } from '@/app/lib/lite-owner-phone'
+ import { grantSignupTrial, readConfirmedSignupTrial, type SignupTrialOutcome } from '@/app/lib/lite-signup-trial'
+ import crypto from 'crypto'
++import { sfOutboxEnabled } from '@/app/lib/pl-concierge/sf-outbox'
++import { emitLineCreated } from '@/app/lib/pl-concierge/sf-emit'
+ import { decryptToken, encryptToken } from '@/app/lib/crypto'
+ 
+ /**
+@@ -561,8 +563,7 @@ async function provisionLineUnlocked(
+ 
+   // Store — sha256 hash + plaintext secret S (the SIP client gets S via the QR).
+   const passwordHash = crypto.createHash('sha256').update(result.sipPassword).digest('hex')
+-  const liteAccount = await prisma.liteAccount.create({
+-    data: {
++  const lineData = {
+       userId,
+       sipUsername:            result.sipUsername,
+       sipPasswordHash:        passwordHash,
+@@ -574,8 +575,16 @@ async function provisionLineUnlocked(
+       magnusSipId:            result.magnusSipId,
+       magnusDidId:            result.magnusDidId,
+       magnusDiddestinationId: result.magnusDiddestinationId,
+-    },
+-  })
++    }
++  // Slice 2a item 4: pl.line_created is enqueued in the SAME transaction as the row that records the confirmed line
++  // (OFF unless PL_SF_OUTBOX_ENABLED=true; a failing enqueue is rolled back to a savepoint and never costs the line).
++  const liteAccount = sfOutboxEnabled()
++    ? await prisma.$transaction(async (tx) => {
++        const created = await tx.liteAccount.create({ data: lineData })
++        await emitLineCreated(tx as any, { id: created.id, did: created.did, createdAt: created.createdAt })
++        return created
++      }, { timeout: 15_000 })
++    : await prisma.liteAccount.create({ data: lineData })
+ 
+   await prisma.liteProvisionAttempt.update({
+     where: { id: attempt.id },
+diff --git a/app/lib/lite-registration-watch.ts b/app/lib/lite-registration-watch.ts
+index 6ea53155..5597f5b1 100644
+--- a/app/lib/lite-registration-watch.ts
++++ b/app/lib/lite-registration-watch.ts
+@@ -43,6 +43,8 @@
+ import { prisma } from '@/app/lib/prisma'
+ import { alertEric, type AlertResult } from '@/app/lib/alert'
+ import { deliverRegistrationFollowup, deliverFirstCallFollowup, type FollowupResult } from '@/app/lib/lite-registration-followups'
++import { sfOutboxEnabled } from '@/app/lib/pl-concierge/sf-outbox'
++import { emitRegistrationFromRead, observeRegistrationForOutbox } from '@/app/lib/pl-concierge/sf-emit'
+ 
+ export const CRON_NAME = 'registration-watch'
+ /** N: a hand-off that has not registered within this is STALLED. */
+@@ -279,16 +281,24 @@ export function activationLinkView(c: ActivationCandidate | undefined): Activati
+ }
+ 
+ async function stamp(liteAccountId: string, rowId: string, m: any, d: WatchDecision, handoffAt: Date | null, now: Date) {
+-  await prisma.liteAccount.update({
+-    where: { id: liteAccountId },
+-    data: {
+-      registrationState: d.state,
+-      registrationReason: d.reason,
+-      registrationHandoffAt: handoffAt,
+-      registrationCheckedAt: now,
+-      ...(d.state === 'activated' ? { registeredAt: d.registeredAt } : {}),
+-    },
+-  })
++  const stampData = {
++    registrationState: d.state,
++    registrationReason: d.reason,
++    registrationHandoffAt: handoffAt,
++    registrationCheckedAt: now,
++    ...(d.state === 'activated' ? { registeredAt: d.registeredAt } : {}),
++  }
++  // Slice 2a item 4: a decision backed by a SUCCESSFUL live read (not 'unknown'; not the funnel stalls that never read the peer,
++  // which have handoffAt null) is mirrored to the SeldonFrame outbox in the SAME transaction as the stamp. OFF unless
++  // PL_SF_OUTBOX_ENABLED=true; an enqueue failure is rolled back to a savepoint and never blocks the stamp.
++  if (sfOutboxEnabled() && handoffAt && d.state !== 'unknown') {
++    await prisma.$transaction(async (tx) => {
++      await tx.liteAccount.update({ where: { id: liteAccountId }, data: stampData })
++      await emitRegistrationFromRead(tx as any, liteAccountId, { state: d.state, registeredAt: d.registeredAt }, now)
++    }, { timeout: 15_000 })
++  } else {
++    await prisma.liteAccount.update({ where: { id: liteAccountId }, data: stampData })
++  }
+   // Per-hand-off history on the activation row itself, additive. `m` is
+   // mutated so a later writer of the same blob (the follow-up stamp) carries
+   // these fields instead of clobbering them.
+@@ -382,6 +392,9 @@ export async function runRegistrationWatchTick(now = Date.now()): Promise<WatchT
+           const heard = !!(m.followups ?? {}).activated
+           const gaveUp = Number((m.followupAttempts ?? {}).activated ?? 0) >= MAX_FOLLOWUP_ATTEMPTS
+           if (heard || gaveUp) {
++            // Slice 2a item 4: this account's stamp is final for the hand-off, so the stamp() hook above never runs again; a LIVE read
++            // that differs from what SeldonFrame was last told (lost / regained registration) is still a fact. OFF unless the outbox is on.
++            if (sfOutboxEnabled()) await observeRegistrationForOutbox(acct.id, acct.sipUsername, now).catch(() => null)
+             // rc12: the next fact after registration is the first successful call (Magnus CDR, answered + duration > 0).
+             if ((process.env.REGISTRATION_FOLLOWUPS ?? 'direct') === 'chatwoot' && !(m.followups ?? {}).first_call
+                 && Number((m.followupAttempts ?? {}).first_call ?? 0) < MAX_FOLLOWUP_ATTEMPTS) {
+diff --git a/app/lib/pl-concierge/sf-emit.ts b/app/lib/pl-concierge/sf-emit.ts
+new file mode 100644
+index 00000000..69372602
+--- /dev/null
++++ b/app/lib/pl-concierge/sf-emit.ts
+@@ -0,0 +1,180 @@
++/**
++ * pl-concierge/sf-emit.ts — WHERE the outbox events come from. Every emitter here has exactly one AUTHORITATIVE source; none
++ * infers one fact from another (an activation link opened is NOT activation; chat is never a source).
++ *
++ *   pl.line_created          provisionLine() committed the liteAccount row after the provider confirmed the line
++ *                            (hook: app/lib/lite-provision.ts, in the SAME transaction as liteAccount.create)
++ *   pl.app_activated         the first LIVE registration read that says registered (hook: lite-registration-watch.ts stamp(),
++ *                            same transaction as the account's registration stamp). Never from a link click.
++ *   pl.registration_changed  a later live read that differs from the last registration fact we told SeldonFrame
++ *                            (same hook). A failed read ('unknown') emits NOTHING — an outage is not "unregistered".
++ *   pl.first_call            an ANSWERED call with duration > 0 in the Magnus CDR (hook: lite-first-call-status.ts, where that
++ *                            CDR read already happens, plus sweepFirstCalls() for lines nobody asked about)
++ *
++ * NOT emitted: pl.signup_started / pl.trial_ending / pl.trial_expired (the receiver rejects them: a lead is the native intake
++ * form; trial facts ride on the backfill's line_created), pl.plan_purchased (no payment provider yet — Fiserv is blocked).
++ */
++import { prisma } from '@/app/lib/prisma'
++import {
++  enqueueSfEvent, enqueueSfEventSafe, maskDid, sfOutboxEnabled, type EnqueueResult, type SfTx,
++} from '@/app/lib/pl-concierge/sf-outbox'
++
++type RegDecision = { state: string; registeredAt: Date | null }
++
++/** Transaction-scoped: called from inside the caller's `prisma.$transaction`. Returns void; never throws (savepoint). */
++export async function emitLineCreated(tx: SfTx, a: { id: string; did: string | null; createdAt: Date }): Promise<EnqueueResult> {
++  return enqueueSfEventSafe(tx, {
++    type: 'pl.line_created', plAccountId: a.id, dedupeKey: `line_created:${a.id}`, occurredAt: a.createdAt,
++    facts: { did_masked: maskDid(a.did) },
++  })
++}
++
++/** The last registration fact already queued/sent for the account (what SeldonFrame currently believes). */
++async function lastRegistrationFact(tx: SfTx, acct: string): Promise<{ hasActivated: boolean; last: 'registered' | 'not_registered' | 'unknown' | null }> {
++  const rows = await tx.$queryRaw<Array<{ type: string; rn: string | null }>>`
++    SELECT type, payload->>'registration_now' AS rn FROM sf_event_outbox
++     WHERE pl_account_id = ${acct} AND type IN ('pl.app_activated', 'pl.registration_changed') ORDER BY version DESC`
++  const last = rows.length ? (rows[0].rn as 'registered' | 'not_registered' | 'unknown') : null
++  return { hasActivated: rows.some(r => r.type === 'pl.app_activated'), last }
++}
++
++/**
++ * Called from stamp() with the decision of a LIVE read. `unknown` (the read failed) and the funnel stalls that never read the
++ * peer (handoffAt null) must not reach here — the caller passes only decisions backed by a successful read.
++ */
++export async function emitRegistrationFromRead(tx: SfTx, acct: string, d: RegDecision, checkedAt: Date): Promise<EnqueueResult | null> {
++  if (d.state === 'unknown') return null
++  const now: 'registered' | 'not_registered' = d.state === 'activated' ? 'registered' : 'not_registered'
++  const { hasActivated, last } = await lastRegistrationFact(tx, acct)
++  if (now === 'registered') {
++    if (last === 'registered') return null
++    const at = d.registeredAt ?? checkedAt
++    if (!hasActivated) {
++      return enqueueSfEventSafe(tx, { type: 'pl.app_activated', plAccountId: acct, dedupeKey: `app_activated:${acct}`, occurredAt: at, facts: { registration_now: 'registered', activated_at: at.toISOString() } })
++    }
++    return enqueueSfEventSafe(tx, { type: 'pl.registration_changed', plAccountId: acct, dedupeKey: `reg:${acct}:registered:${at.getTime()}`, occurredAt: at, facts: { registration_now: 'registered' } })
++  }
++  // not registered: only a CHANGE from a registered belief is a fact worth sending (pending/never-registered is the default state)
++  if (last !== 'registered') return null
++  return enqueueSfEventSafe(tx, { type: 'pl.registration_changed', plAccountId: acct, dedupeKey: `reg:${acct}:not_registered:${checkedAt.getTime()}`, occurredAt: checkedAt, facts: { registration_now: 'not_registered' } })
++}
++
++/**
++ * A LIVE registration read for an account whose registration stamp is already final (the watch tick leaves activated accounts alone).
++ * Enqueues registration_changed only when the read differs from the last registration fact SeldonFrame was told. A failed read
++ * ('unknown') enqueues nothing. Own transaction; the caller swallows errors.
++ */
++export async function observeRegistrationForOutbox(plAccountId: string, sipUsername: string, nowMs: number, db: any = prisma): Promise<EnqueueResult | null> {
++  if (!sfOutboxEnabled()) return null
++  const { readPeerRegistration, REGISTERED } = await import('@/app/lib/lite-registration-watch')
++  const read: any = await readPeerRegistration(sipUsername)
++  if (!read?.ok) return null
++  const now = new Date(nowMs)
++  const d = REGISTERED.has(read.status) ? { state: 'activated', registeredAt: (read.at as Date | null) ?? now } : { state: 'stalled', registeredAt: null }
++  return db.$transaction((tx: any) => emitRegistrationFromRead(tx, plAccountId, d, now), { timeout: 10_000 })
++}
++
++/** The first answered call was observed live in the CDR. Idempotent (one per account, ever). Fail-soft: own transaction. */
++export async function recordFirstCallObserved(plAccountId: string, firstCallAtIso: string, db: any = prisma): Promise<EnqueueResult | null> {
++  if (!sfOutboxEnabled()) return null
++  try {
++    return await db.$transaction((tx: any) => enqueueSfEventSafe(tx, {
++      type: 'pl.first_call', plAccountId, dedupeKey: `first_call:${plAccountId}`, occurredAt: new Date(firstCallAtIso), facts: { first_call_at: new Date(firstCallAtIso).toISOString() },
++    }), { timeout: 10_000 })
++  } catch (e: any) {
++    console.error(`[sf-outbox] first_call enqueue failed account=${plAccountId}: ${String(e?.message ?? e).slice(0, 120)}`)
++    return null
++  }
++}
++
++/**
++ * Lines that have a line_created event, no first_call yet, created in the last 7 days: ask the CDR (via getFirstCallStatus, which
++ * itself calls recordFirstCallObserved). Bounded per tick; one Magnus read each. Returns how many were checked.
++ */
++export async function sweepFirstCalls(limit = 10, db: any = prisma): Promise<{ checked: number; found: number }> {
++  if (!sfOutboxEnabled()) return { checked: 0, found: 0 }
++  const rows: Array<{ pl_account_id: string }> = await db.$queryRaw`
++    SELECT o.pl_account_id FROM sf_event_outbox o
++     WHERE o.type = 'pl.line_created' AND o.created_at > now() - interval '7 days'
++       AND NOT EXISTS (SELECT 1 FROM sf_event_outbox f WHERE f.pl_account_id = o.pl_account_id AND f.type = 'pl.first_call')
++     ORDER BY o.created_at DESC LIMIT ${limit}`
++  const { getFirstCallStatus } = await import('@/app/lib/lite-first-call-status')
++  let found = 0
++  for (const r of rows) {
++    const a = await db.liteAccount.findUnique({ where: { id: r.pl_account_id }, select: { userId: true } }).catch(() => null)
++    if (!a) continue
++    const fc: any = await getFirstCallStatus(a.userId, { emit: false }).catch(() => null)
++    if (fc?.firstCallSucceeded) found++
++  }
++  return { checked: rows.length, found }
++}
++
++// ── BACKFILL: replay CURRENT state as events (also how lines that pre-date the integration get linked) ──────────────────
++export interface BackfillOptions { accountId?: string; limit?: number; dryRun?: boolean; liveReads?: boolean }
++export interface BackfillAccountResult { accountId: string; planned: string[]; enqueued: string[]; already: string[]; error?: string }
++
++/**
++ * Versions are consistent by construction: every event for an account is appended at MAX(version)+1 under the same per-account
++ * lock the live emitters use, and the dedupe keys are the LIVE emitters' keys — so a logical event that already went out is
++ * `already`, never re-sent, and nothing a backfill adds can carry a lower version than a fact SeldonFrame already holds.
++ * Registration: only emitted when the current live read differs from the last registration fact already queued/sent.
++ * DRY RUN by default. Reads (Magnus CDR, peer registration) are live and bounded by `limit`.
++ */
++export async function backfillAccounts(opts: BackfillOptions = {}, db: any = prisma): Promise<{ dryRun: boolean; accounts: BackfillAccountResult[] }> {
++  const dryRun = opts.dryRun !== false
++  const limit = Math.min(Math.max(opts.limit ?? 25, 1), 200)
++  const accts: Array<{ id: string; userId: string; did: string | null; sipUsername: string; createdAt: Date; registeredAt: Date | null }> = await db.liteAccount.findMany({
++    where: { ...(opts.accountId ? { id: opts.accountId } : {}), did: { not: null } },
++    orderBy: { createdAt: 'asc' }, take: limit,
++    select: { id: true, userId: true, did: true, sipUsername: true, createdAt: true, registeredAt: true },
++  })
++  const live = opts.liveReads !== false
++  const out: BackfillAccountResult[] = []
++  for (const a of accts) {
++    const res: BackfillAccountResult = { accountId: a.id, planned: [], enqueued: [], already: [] }
++    try {
++      type Plan = { type: any; key: string; at: Date; facts: Record<string, unknown>; tag: string }
++      const plan: Plan[] = [{ type: 'pl.line_created', key: `line_created:${a.id}`, at: a.createdAt, facts: { did_masked: maskDid(a.did) }, tag: 'line_created' }]
++      let regNow: 'registered' | 'not_registered' | null = null
++      let activatedAt: Date | null = a.registeredAt
++      if (live) {
++        const { readPeerRegistration, REGISTERED } = await import('@/app/lib/lite-registration-watch')
++        const read: any = await readPeerRegistration(a.sipUsername, { fresh: true }).catch(() => null)
++        if (read?.ok) {
++          regNow = REGISTERED.has(read.status) ? 'registered' : 'not_registered'
++          if (regNow === 'registered' && !activatedAt) activatedAt = read.at ?? new Date()
++        }
++      }
++      if (activatedAt) plan.push({ type: 'pl.app_activated', key: `app_activated:${a.id}`, at: activatedAt, facts: { registration_now: 'registered', activated_at: activatedAt.toISOString() }, tag: 'app_activated' })
++      if (live) {
++        const { getFirstCallStatus } = await import('@/app/lib/lite-first-call-status')
++        const fc: any = await getFirstCallStatus(a.userId, { emit: false }).catch(() => null)
++        if (fc?.firstCallSucceeded && fc.firstCallAt) plan.push({ type: 'pl.first_call', key: `first_call:${a.id}`, at: new Date(fc.firstCallAt), facts: { first_call_at: fc.firstCallAt }, tag: 'first_call' })
++      }
++      res.planned = plan.map(p => p.tag)
++      if (!dryRun) {
++        await db.$transaction(async (tx: any) => {
++          for (const p of plan) {
++            const r = await enqueueSfEvent(tx, { type: p.type, plAccountId: a.id, dedupeKey: p.key, occurredAt: p.at, facts: p.facts })
++            if (r.enqueued) res.enqueued.push(p.tag)
++            else if ((r as { reason?: string }).reason === 'duplicate') res.already.push(p.tag)
++            else throw new Error(`${p.tag}:${(r as { reason?: string }).reason}${(r as { detail?: string }).detail ? ':' + (r as { detail?: string }).detail : ''}`)
++          }
++          // current registration, only when it differs from what SeldonFrame was already told
++          if (regNow) {
++            const { last } = await lastRegistrationFact(tx, a.id)
++            if (regNow !== (last ?? 'not_registered')) {
++              const at = new Date()
++              const r = await enqueueSfEvent(tx, { type: 'pl.registration_changed', plAccountId: a.id, dedupeKey: `reg:${a.id}:${regNow}:bf:${at.getTime()}`, occurredAt: at, facts: { registration_now: regNow } })
++              if (r.enqueued) { res.planned.push('registration_changed'); res.enqueued.push('registration_changed') }
++            }
++          }
++        }, { timeout: 20_000 })
++      }
++    } catch (e: any) {
++      res.error = String(e?.message ?? e).slice(0, 160)
++    }
++    out.push(res)
++  }
++  return { dryRun, accounts: out }
++}
+diff --git a/app/lib/pl-concierge/sf-outbox-deliver.ts b/app/lib/pl-concierge/sf-outbox-deliver.ts
+new file mode 100644
+index 00000000..8db8a52b
+--- /dev/null
++++ b/app/lib/pl-concierge/sf-outbox-deliver.ts
+@@ -0,0 +1,200 @@
++/**
++ * pl-concierge/sf-outbox-deliver.ts — the DELIVERER: a lock-guarded tick that signs each due outbox row and POSTs it to the
++ * SeldonFrame personal-line webhook (config: readSfEventsConfig). It never runs inside the engine's request path.
++ *
++ * Properties (each proven in test/pl-sf-outbox*.test.ts):
++ *   - LOCK + LEASE: the claim step runs in a short transaction behind pg_try_advisory_xact_lock and leases the rows it takes
++ *     (next_attempt_at pushed out, attempts+1) with FOR UPDATE SKIP LOCKED. Two replicas / overlapping ticks cannot claim the
++ *     same row, so nothing is sent twice by the sender; the receiver's event_id inbox is the second line of defence.
++ *   - ORDER: a row is not claimed while an EARLIER version of the same account is still undelivered and not dead — events of
++ *     one account go out in version order. (A dead row stops blocking; a later fact is not held hostage by a permanent refusal.)
++ *   - 2xx (duplicate-event 200 included) => delivered_at. 5xx / 408 / 425 / 429 / timeout / network => pending, exponential
++ *     backoff with jitter (backoffMs). Other 4xx => dead_at + last_error, visible; `requeueDead` puts them back.
++ *   - FRESH SIGNATURE per attempt (a retry that reuses an expired timestamp would walk into a 401 — CLAUDE.md law 10).
++ *   - wa_id is resolved at delivery from the account (the contract needs it; the outbox does not copy it).
++ */
++import { prisma } from '@/app/lib/prisma'
++import {
++  backoffMs, buildIngressBody, classifyHttp, ingressHeaders, readSfEventsConfig, sfOutboxEnabled,
++  SF_MAX_ATTEMPTS, type SfEventsConfig, type Verdict,
++} from '@/app/lib/pl-concierge/sf-outbox'
++
++export const SF_TICK_NAME = 'sf-outbox'
++const TICK_LOCK_KEY = 'pl-sf-outbox-tick'
++const LEASE_MS = 90_000
++const REQUEST_TIMEOUT_MS = 5_000
++const BATCH = 10
++const MAX_ROUNDS = 6
++const TICK_BUDGET_MS = 25_000
++
++export interface ClaimedRow {
++  eventId: string
++  type: string
++  plAccountId: string
++  version: number
++  occurredAt: Date
++  payload: Record<string, unknown>
++  attempts: number
++}
++
++export interface OutboxStore {
++  /** null = another tick holds the lock. */
++  claim(now: Date, limit: number, leaseMs: number): Promise<ClaimedRow[] | null>
++  markDelivered(eventId: string, status: number, now: Date): Promise<void>
++  markRetry(eventId: string, status: number | null, error: string, nextAt: Date): Promise<void>
++  markDead(eventId: string, status: number | null, error: string, now: Date): Promise<void>
++  resolveWaId(plAccountId: string): Promise<string | null>
++}
++
++export interface TickDeps {
++  store: OutboxStore
++  fetchImpl: typeof fetch
++  config: SfEventsConfig
++  now: () => number
++  random: () => number
++}
++
++export interface TickResult {
++  ran: boolean
++  skipped?: 'disabled' | 'not_configured' | 'locked'
++  misconfig?: string[]
++  claimed: number
++  delivered: number
++  duplicates: number
++  staleKept: number
++  retried: number
++  dead: number
++  deadErrors: string[]
++}
++
++const emptyResult = (): TickResult => ({ ran: true, claimed: 0, delivered: 0, duplicates: 0, staleKept: 0, retried: 0, dead: 0, deadErrors: [] })
++
++export async function deliverOne(row: ClaimedRow, d: TickDeps, out: TickResult): Promise<void> {
++  const { store, config } = d
++  const nowMs = d.now()
++  const waId = await store.resolveWaId(row.plAccountId).catch(() => null)
++  if (!waId) { out.dead++; out.deadErrors.push('no_wa_id'); await store.markDead(row.eventId, null, 'no_wa_id', new Date(nowMs)); return }
++  const body = buildIngressBody({ eventId: row.eventId, type: row.type, plAccountId: row.plAccountId, version: row.version, occurredAt: row.occurredAt, facts: row.payload }, waId)
++  if (!body) { out.dead++; out.deadErrors.push('unbuildable_body'); await store.markDead(row.eventId, null, 'unbuildable_body', new Date(nowMs)); return }
++  let verdict: Verdict
++  let status: number | null = null
++  try {
++    const res = await d.fetchImpl(config.url!, {
++      method: 'POST',
++      headers: ingressHeaders(config.kid, config.key!, Math.floor(nowMs / 1000), body),
++      body,
++      cache: 'no-store',
++      redirect: 'manual',
++      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
++    })
++    status = res.status
++    const text = await res.text().catch(() => '')
++    verdict = classifyHttp(res.status, text.slice(0, 2000))
++  } catch (e: any) {
++    verdict = classifyHttp(null, null, e?.name === 'TimeoutError' || e?.name === 'AbortError' ? 'timeout' : 'network_error')
++  }
++  if (verdict.kind === 'delivered') {
++    out.delivered++
++    if (verdict.note === 'duplicate') out.duplicates++
++    if (verdict.note === 'stale_kept') out.staleKept++
++    await store.markDelivered(row.eventId, status ?? 200, new Date(d.now()))
++  } else if (verdict.kind === 'retry' && row.attempts < SF_MAX_ATTEMPTS) {
++    out.retried++
++    await store.markRetry(row.eventId, status, verdict.error, new Date(d.now() + backoffMs(row.attempts, d.random())))
++  } else {
++    const err = verdict.kind === 'retry' ? `max_attempts_exceeded:${verdict.error}` : verdict.error
++    out.dead++; out.deadErrors.push(err)
++    await store.markDead(row.eventId, status, err, new Date(d.now()))
++  }
++}
++
++/** One tick: claim -> deliver -> claim again (an account's later versions unblock as earlier ones land) within a time budget. */
++export async function runSfOutboxTickWith(d: TickDeps, env: NodeJS.ProcessEnv = process.env): Promise<TickResult> {
++  if (!sfOutboxEnabled(env)) return { ...emptyResult(), ran: false, skipped: 'disabled' }
++  if (!d.config.url || !d.config.key) return { ...emptyResult(), ran: false, skipped: 'not_configured', misconfig: d.config.misconfig }
++  const out = emptyResult()
++  const started = d.now()
++  for (let round = 0; round < MAX_ROUNDS && d.now() - started < TICK_BUDGET_MS; round++) {
++    const rows = await d.store.claim(new Date(d.now()), BATCH, LEASE_MS)
++    if (rows === null) { if (round === 0) return { ...out, ran: false, skipped: 'locked' }; break }
++    if (rows.length === 0) break
++    out.claimed += rows.length
++    for (const r of rows) await deliverOne(r, d, out)
++  }
++  return out
++}
++
++// ── the Postgres store (raw SQL; zero reliance on the generated model for writes) ─────────────────────────────────────────
++export function prismaOutboxStore(db: any = prisma): OutboxStore {
++  return {
++    async claim(now, limit, leaseMs) {
++      const leaseUntil = new Date(now.getTime() + leaseMs)
++      return db.$transaction(async (tx: any) => {
++        const got: Array<{ got: boolean }> = await tx.$queryRaw`SELECT pg_try_advisory_xact_lock(hashtextextended(${TICK_LOCK_KEY}, 0)) AS got`
++        if (!got[0]?.got) return null
++        const rows: Array<any> = await tx.$queryRaw`
++          WITH due AS (
++            SELECT o.event_id FROM sf_event_outbox o
++             WHERE o.delivered_at IS NULL AND o.dead_at IS NULL AND o.next_attempt_at <= ${now.toISOString()}::timestamptz AT TIME ZONE 'UTC'
++               AND NOT EXISTS (SELECT 1 FROM sf_event_outbox p
++                                WHERE p.pl_account_id = o.pl_account_id AND p.version < o.version
++                                  AND p.delivered_at IS NULL AND p.dead_at IS NULL)
++             ORDER BY o.pl_account_id, o.version
++             LIMIT ${limit} FOR UPDATE SKIP LOCKED)
++          UPDATE sf_event_outbox t SET attempts = t.attempts + 1, next_attempt_at = ${leaseUntil.toISOString()}::timestamptz AT TIME ZONE 'UTC'
++            FROM due WHERE t.event_id = due.event_id
++          RETURNING t.event_id::text AS event_id, t.type, t.pl_account_id, t.version, t.occurred_at, t.payload, t.attempts`
++        return rows.map(r => ({
++          eventId: String(r.event_id), type: String(r.type), plAccountId: String(r.pl_account_id), version: Number(r.version),
++          // occurred_at is timestamp WITHOUT tz holding UTC: re-read it as UTC whatever the driver's local zone is.
++          occurredAt: new Date(r.occurred_at instanceof Date ? r.occurred_at.getTime() : Date.parse(String(r.occurred_at) + 'Z')),
++          payload: (r.payload ?? {}) as Record<string, unknown>, attempts: Number(r.attempts),
++        })).sort((a, b) => a.plAccountId.localeCompare(b.plAccountId) || a.version - b.version)
++      }, { timeout: 15_000, maxWait: 5_000 })
++    },
++    async markDelivered(id, status, now) {
++      await db.$executeRaw`UPDATE sf_event_outbox SET delivered_at = ${now.toISOString()}::timestamptz AT TIME ZONE 'UTC', last_status = ${status}, last_error = NULL WHERE event_id = ${id}::uuid AND delivered_at IS NULL`
++    },
++    async markRetry(id, status, error, nextAt) {
++      await db.$executeRaw`UPDATE sf_event_outbox SET next_attempt_at = ${nextAt.toISOString()}::timestamptz AT TIME ZONE 'UTC', last_status = ${status}, last_error = ${error} WHERE event_id = ${id}::uuid AND delivered_at IS NULL`
++    },
++    async markDead(id, status, error, now) {
++      await db.$executeRaw`UPDATE sf_event_outbox SET dead_at = ${now.toISOString()}::timestamptz AT TIME ZONE 'UTC', last_status = ${status}, last_error = ${error} WHERE event_id = ${id}::uuid AND delivered_at IS NULL`
++    },
++    async resolveWaId(plAccountId) {
++      const a = await db.liteAccount.findUnique({ where: { id: plAccountId }, select: { ownerPhone: true } })
++      const digits = String(a?.ownerPhone ?? '').replace(/\D/g, '')
++      return /^[1-9][0-9]{6,15}$/.test(digits) ? digits : null
++    },
++  }
++}
++
++/** Production entry (the cron route): real clock, real fetch, config from env / Swarm secret file. Records a heartbeat. */
++export async function runSfOutboxTick(env: NodeJS.ProcessEnv = process.env): Promise<TickResult> {
++  const r = await runSfOutboxTickWith({ store: prismaOutboxStore(), fetchImpl: fetch, config: readSfEventsConfig(env), now: Date.now, random: Math.random }, env)
++  if (r.ran) {
++    const ok = r.dead === 0
++    await prisma.cronHeartbeat.upsert({
++      where: { name: SF_TICK_NAME },
++      create: { name: SF_TICK_NAME, lastRunAt: new Date(), lastRunOk: ok, lastError: ok ? null : `${r.dead} event(s) dead-lettered: ${[...new Set(r.deadErrors)].join(',').slice(0, 200)}`, runCount: 1 },
++      update: { lastRunAt: new Date(), lastRunOk: ok, lastError: ok ? null : `${r.dead} event(s) dead-lettered: ${[...new Set(r.deadErrors)].join(',').slice(0, 200)}`, runCount: { increment: 1 } },
++    }).catch(() => null)
++  }
++  return r
++}
++
++/** Operator repair: dead rows back to pending (optionally one account). Returns how many. */
++export async function requeueDead(db: any = prisma, plAccountId?: string): Promise<number> {
++  return plAccountId
++    ? db.$executeRaw`UPDATE sf_event_outbox SET dead_at = NULL, next_attempt_at = now(), last_error = 'requeued' WHERE dead_at IS NOT NULL AND delivered_at IS NULL AND pl_account_id = ${plAccountId}`
++    : db.$executeRaw`UPDATE sf_event_outbox SET dead_at = NULL, next_attempt_at = now(), last_error = 'requeued' WHERE dead_at IS NOT NULL AND delivered_at IS NULL`
++}
++
++/** Read-only counters for the operator (no payloads, no phones). */
++export async function outboxCounts(db: any = prisma): Promise<{ pending: number; delivered: number; dead: number }> {
++  const r: Array<any> = await db.$queryRaw`SELECT
++    count(*) FILTER (WHERE delivered_at IS NULL AND dead_at IS NULL)::int AS pending,
++    count(*) FILTER (WHERE delivered_at IS NOT NULL)::int AS delivered,
++    count(*) FILTER (WHERE dead_at IS NOT NULL AND delivered_at IS NULL)::int AS dead FROM sf_event_outbox`
++  return { pending: Number(r[0]?.pending ?? 0), delivered: Number(r[0]?.delivered ?? 0), dead: Number(r[0]?.dead ?? 0) }
++}
+diff --git a/app/lib/pl-concierge/sf-outbox.ts b/app/lib/pl-concierge/sf-outbox.ts
+new file mode 100644
+index 00000000..4b048c15
+--- /dev/null
++++ b/app/lib/pl-concierge/sf-outbox.ts
+@@ -0,0 +1,231 @@
++/**
++ * pl-concierge/sf-outbox.ts — the Personal Line -> SeldonFrame journey-event OUTBOX: types, pure helpers, signing and the
++ * transactional ENQUEUE (slice 2a item 4; contract: Isola-Foundation ops/personal-line/specs/pl-journey-events-contract-v1.md;
++ * receiver: epicdm/isola-seldonframe lib/personal-line/events.ts + signing.ts — this file matches them exactly).
++ *
++ * SHAPE OF THE GUARANTEE
++ *   - An event row is written IN THE SAME TRANSACTION as the engine change that causes it (`enqueueSfEvent(tx, …)` takes the
++ *     caller's interactive-transaction client). A rolled-back engine change leaves no outbox row; a committed one always has it.
++ *   - ENQUEUE NEVER BLOCKS THE ENGINE: `enqueueSfEventSafe` runs under a SAVEPOINT, so a failing insert (table missing, bad
++ *     fact) is rolled back to the savepoint and logged loudly — the engine change still commits and the backfill repairs the gap.
++ *   - IDEMPOTENT: `dedupe_key` is the logical identity of an event; `event_id` is a pure function of it, so the same logical
++ *     event is the same uuid forever and the receiver's inbox (org, provider, event_id) dedupes a redelivery.
++ *   - VERSION is monotonic per account: MAX(version)+1 under a per-account advisory lock taken in the enqueueing transaction.
++ *   - OFF BY DEFAULT: nothing is written unless PL_SF_OUTBOX_ENABLED=true, so shipping this code before the migration is
++ *     applied cannot break provisioning.
++ *
++ * TYPES. The contract's receiver accepts exactly: pl.line_created, pl.app_activated, pl.registration_changed, pl.first_call,
++ * pl.plan_purchased. The wider list (signup_started, trial_ending, trial_expired) is DEFINED here because the PM list names it,
++ * but the receiver answers 422 for them (a lead is the native intake form; a trial is a plan fact carried by line_created /
++ * backfill) and NOTHING emits them. pl.plan_purchased is defined and has no emitter (no payment provider: Fiserv is blocked).
++ */
++import { createHash, createHmac } from 'node:crypto'
++import { readFileSync } from 'node:fs'
++import { MIN_KEY_BYTES } from '@/app/lib/pl-concierge/assertion'
++
++export const SF_EVENT_TYPES = [
++  'pl.signup_started', 'pl.line_created', 'pl.app_activated', 'pl.registration_changed',
++  'pl.first_call', 'pl.trial_ending', 'pl.trial_expired', 'pl.plan_purchased',
++] as const
++export type SfEventType = (typeof SF_EVENT_TYPES)[number]
++/** What this service may enqueue. Every one has exactly one authoritative source (see sf-emit.ts). */
++export const SF_EMITTABLE_TYPES = ['pl.line_created', 'pl.app_activated', 'pl.registration_changed', 'pl.first_call'] as const
++export type SfEmittableType = (typeof SF_EMITTABLE_TYPES)[number]
++/** What the SeldonFrame receiver accepts today (events.ts PL_EVENT_TYPES). */
++export const SF_RECEIVER_TYPES: readonly string[] = ['pl.line_created', 'pl.app_activated', 'pl.registration_changed', 'pl.first_call', 'pl.plan_purchased']
++
++export type SfRegistrationNow = 'registered' | 'not_registered' | 'unknown'
++export interface SfFacts {
++  plan?: string
++  trial_end?: string
++  registration_now?: SfRegistrationNow
++  activated_at?: string
++  first_call_at?: string
++  did_masked?: string
++}
++const FACT_KEYS = ['plan', 'trial_end', 'registration_now', 'activated_at', 'first_call_at', 'did_masked'] as const
++
++const isIso = (v: unknown) => typeof v === 'string' && v.length <= 40 && Number.isFinite(Date.parse(v))
++const ACCOUNT_RE = /^[A-Za-z0-9_-]{1,64}$/
++
++export function sfOutboxEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
++  return (env.PL_SF_OUTBOX_ENABLED ?? '').trim().toLowerCase() === 'true'
++}
++
++/** Pure: the same logical event is the same uuid. (Not an RFC 4122 v5 — a sha256-derived value with the version/variant bits set.) */
++export function eventIdFor(dedupeKey: string): string {
++  const h = createHash('sha256').update(`pl-sf-event-v1:${dedupeKey}`, 'utf8').digest()
++  h[6] = (h[6] & 0x0f) | 0x50
++  h[8] = (h[8] & 0x3f) | 0x80
++  const x = h.subarray(0, 16).toString('hex')
++  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`
++}
++
++/** `+1767…5099` -> `+1 767 *** 5099` shaped for the receiver's did_masked pattern (^[+0-9 *]{4,24}$). Never the full number. */
++export function maskDid(did: string | null | undefined): string | undefined {
++  const d = String(did ?? '').replace(/\D/g, '')
++  if (d.length < 8) return undefined
++  return `+${d.slice(0, d.length - 7)} *** ${d.slice(-4)}`
++}
++
++/** Pure: facts as the contract allows — only known keys, typed; returns the cleaned object or the reason it is invalid. */
++export function cleanFacts(type: SfEventType, raw: Record<string, unknown>): { ok: true; facts: SfFacts } | { ok: false; why: string } {
++  const f: Record<string, unknown> = {}
++  for (const k of FACT_KEYS) if (raw[k] !== undefined && raw[k] !== null) f[k] = raw[k]
++  if (f.plan !== undefined && (typeof f.plan !== 'string' || !/^[a-z0-9_]{1,32}$/.test(f.plan))) return { ok: false, why: 'bad_plan' }
++  for (const k of ['trial_end', 'activated_at', 'first_call_at'] as const) if (f[k] !== undefined && !isIso(f[k])) return { ok: false, why: `bad_${k}` }
++  if (f.registration_now !== undefined && !['registered', 'not_registered', 'unknown'].includes(f.registration_now as string)) return { ok: false, why: 'bad_registration_now' }
++  if (f.did_masked !== undefined && (typeof f.did_masked !== 'string' || !/^[+0-9 *]{4,24}$/.test(f.did_masked))) return { ok: false, why: 'bad_did_masked' }
++  // Each type must carry the proof fact its single source establishes (the receiver refuses it otherwise).
++  if (type === 'pl.app_activated' && (f.registration_now !== 'registered' || !isIso(f.activated_at))) return { ok: false, why: 'app_activated_needs_registered_and_activated_at' }
++  if (type === 'pl.registration_changed' && f.registration_now === undefined) return { ok: false, why: 'registration_changed_needs_registration_now' }
++  if (type === 'pl.first_call' && !isIso(f.first_call_at)) return { ok: false, why: 'first_call_needs_first_call_at' }
++  return { ok: true, facts: f as SfFacts }
++}
++
++// ── signing + body (exactly the receiver's signing.ts / events.ts) ────────────────────────────────────────────────────────
++export function signIngress(key: string, ts: number, rawBody: string): string {
++  return createHmac('sha256', Buffer.from(key, 'utf8')).update(`${ts}.${rawBody}`, 'utf8').digest('base64url')
++}
++
++export interface SfEventRow {
++  eventId: string
++  type: string
++  plAccountId: string
++  version: number
++  occurredAt: Date
++  facts: Record<string, unknown>
++}
++
++/** The exact JSON the receiver parses (strict keys; <= 4096 bytes). Returns null when it cannot be a valid body. */
++export function buildIngressBody(row: SfEventRow, waId: string): string | null {
++  if (!/^[1-9][0-9]{6,15}$/.test(waId)) return null
++  if (!ACCOUNT_RE.test(row.plAccountId)) return null
++  const facts: Record<string, unknown> = {}
++  for (const k of FACT_KEYS) if (row.facts[k] !== undefined && row.facts[k] !== null) facts[k] = row.facts[k]
++  const body = JSON.stringify({
++    event_id: row.eventId, type: row.type, occurred_at: row.occurredAt.toISOString(), version: row.version,
++    pl_account_id: row.plAccountId, wa_id: waId, facts,
++  })
++  return Buffer.byteLength(body, 'utf8') <= 4096 ? body : null
++}
++
++export function ingressHeaders(kid: string, key: string, ts: number, rawBody: string): Record<string, string> {
++  return { 'content-type': 'application/json', 'x-pl-sf-kid': kid, 'x-pl-sf-ts': String(ts), 'x-pl-sf-sig': signIngress(key, ts, rawBody) }
++}
++
++// ── delivery config (names only; the key is a Swarm secret FILE, never printed) ──────────────────────────────────────────
++export interface SfEventsConfig { url: string | null; kid: string; key: string | null; misconfig: string[] }
++
++/**
++ * PL_SF_EVENTS_URL       full webhook URL incl. the workspace id: https://<fork>/api/webhooks/personal-line/<workspaceId>
++ * PL_SF_EVENTS_KID       key id (default "sf1"); must equal the kid the workspace's integration was saved with
++ * PL_SF_EVENTS_KEY(_FILE) the workspace's "personal-line-events" secret (>= 32 bytes); the FILE form is the Swarm-secret pattern
++ */
++export function readSfEventsConfig(env: NodeJS.ProcessEnv = process.env, readFile: (p: string) => string = p => readFileSync(p, 'utf8')): SfEventsConfig {
++  const kid = (env.PL_SF_EVENTS_KID ?? 'sf1').trim()
++  let key = env.PL_SF_EVENTS_KEY ?? ''
++  if (!key && env.PL_SF_EVENTS_KEY_FILE) {
++    try { key = readFile(env.PL_SF_EVENTS_KEY_FILE).trim() } catch { key = '' }
++  }
++  const misconfig: string[] = []
++  let url: string | null = null
++  try {
++    const u = new URL(env.PL_SF_EVENTS_URL ?? '')
++    if (u.protocol === 'https:' || u.protocol === 'http:') url = u.toString()
++    else misconfig.push('PL_SF_EVENTS_URL')
++  } catch { misconfig.push('PL_SF_EVENTS_URL') }
++  if (!/^[a-z0-9]{1,16}$/.test(kid)) misconfig.push('PL_SF_EVENTS_KID')
++  if (Buffer.byteLength(key, 'utf8') < MIN_KEY_BYTES) misconfig.push('PL_SF_EVENTS_KEY')
++  return { url: misconfig.length === 0 ? url : null, kid, key: misconfig.length === 0 ? key : null, misconfig }
++}
++
++// ── retry policy ──────────────────────────────────────────────────────────────────────────────────────────────────────────
++export const SF_BASE_BACKOFF_MS = 30_000
++export const SF_MAX_BACKOFF_MS = 6 * 3_600_000
++export const SF_MAX_ATTEMPTS = 15
++
++/** Pure: exponential from 30 s, capped at 6 h, with jitter in [0.5, 1.0] of the step. `attempts` = tries made so far (>= 1). */
++export function backoffMs(attempts: number, rand: number): number {
++  const step = Math.min(SF_MAX_BACKOFF_MS, SF_BASE_BACKOFF_MS * 2 ** Math.max(0, attempts - 1))
++  return Math.round(step * (0.5 + 0.5 * Math.min(1, Math.max(0, rand))))
++}
++
++export type Verdict = { kind: 'delivered'; note: string } | { kind: 'retry'; error: string } | { kind: 'dead'; error: string }
++
++/**
++ * Pure: what an HTTP outcome means. A 2xx is delivered — a duplicate-event 200 included (the receiver answers 200 {status:'duplicate'}
++ * and an older version 200 with factsApplied=false: both are the receiver having the event). Timeouts, network errors, 408/425/429 and
++ * 5xx (the receiver's 503 "not configured" included) are retried. Every other 4xx is a permanent refusal: dead-lettered, visible.
++ */
++export function classifyHttp(status: number | null, bodyText: string | null, netError?: string): Verdict {
++  if (status === null) return { kind: 'retry', error: netError ?? 'network_error' }
++  if (status >= 200 && status < 300) {
++    let note = 'delivered'
++    try { const j = JSON.parse(bodyText ?? '{}'); if (j?.status === 'duplicate') note = 'duplicate'; else if (j?.factsApplied === false) note = 'stale_kept' } catch { /* body is informational */ }
++    return { kind: 'delivered', note }
++  }
++  let code = ''
++  try { const j = JSON.parse(bodyText ?? '{}'); if (typeof j?.error === 'string' && /^[a-z_]{1,48}$/.test(j.error)) code = `:${j.error}` } catch { /* ignore */ }
++  const err = `http_${status}${code}`
++  if (status === 408 || status === 425 || status === 429 || status >= 500) return { kind: 'retry', error: err }
++  return { kind: 'dead', error: err }
++}
++
++// ── transactional enqueue ─────────────────────────────────────────────────────────────────────────────────────────────────
++/** The slice of a Prisma interactive-transaction client this module needs (raw tagged templates only). */
++export interface SfTx {
++  $executeRaw(strings: TemplateStringsArray, ...values: unknown[]): Promise<number>
++  $queryRaw<T = unknown>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T>
++}
++
++export interface EnqueueInput {
++  type: SfEmittableType
++  plAccountId: string
++  /** The logical identity of this event; the same key is the same event forever. */
++  dedupeKey: string
++  occurredAt: Date
++  facts: Record<string, unknown>
++}
++export type EnqueueResult = { enqueued: true; eventId: string; version: number } | { enqueued: false; eventId: string; reason: 'duplicate' | 'disabled' | 'invalid' | 'error'; detail?: string }
++
++export async function enqueueSfEvent(tx: SfTx, input: EnqueueInput, env: NodeJS.ProcessEnv = process.env): Promise<EnqueueResult> {
++  const eventId = eventIdFor(input.dedupeKey)
++  if (!sfOutboxEnabled(env)) return { enqueued: false, eventId, reason: 'disabled' }
++  if (!(SF_EMITTABLE_TYPES as readonly string[]).includes(input.type)) return { enqueued: false, eventId, reason: 'invalid', detail: 'type_not_emittable' }
++  if (!ACCOUNT_RE.test(input.plAccountId) || !input.dedupeKey || input.dedupeKey.length > 200) return { enqueued: false, eventId, reason: 'invalid', detail: 'bad_identity' }
++  const c = cleanFacts(input.type, input.facts)
++  if (c.ok === false) return { enqueued: false, eventId, reason: 'invalid', detail: (c as { ok: false; why: string }).why }
++  const occurredIso = input.occurredAt.toISOString()
++  const payload = JSON.stringify((c as { ok: true; facts: SfFacts }).facts)
++  // Serialise version assignment per account for the rest of THIS transaction (xact-scoped: released on commit/rollback).
++  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'sf-outbox:' + input.plAccountId}, 0))`
++  const rows = await tx.$queryRaw<Array<{ event_id: string; version: number }>>`
++    INSERT INTO sf_event_outbox (event_id, dedupe_key, type, pl_account_id, version, occurred_at, payload)
++    SELECT ${eventId}::uuid, ${input.dedupeKey}, ${input.type}, ${input.plAccountId}, COALESCE(MAX(version), 0) + 1,
++           (${occurredIso}::timestamptz AT TIME ZONE 'UTC'), ${payload}::jsonb
++      FROM sf_event_outbox WHERE pl_account_id = ${input.plAccountId}
++    ON CONFLICT (dedupe_key) DO NOTHING
++    RETURNING event_id, version`
++  if (rows.length === 1) return { enqueued: true, eventId, version: Number(rows[0].version) }
++  return { enqueued: false, eventId, reason: 'duplicate' }
++}
++
++/**
++ * Enqueue under a SAVEPOINT: if the insert fails for any reason (the table is not there yet, a constraint, a driver error) the
++ * transaction is rolled back to the savepoint — the caller's engine change is untouched and still commits — and the failure is
++ * logged loudly (no secret, no phone). The outbox is repaired by the backfill; it must never cost a customer their line.
++ */
++export async function enqueueSfEventSafe(tx: SfTx, input: EnqueueInput, env: NodeJS.ProcessEnv = process.env): Promise<EnqueueResult> {
++  if (!sfOutboxEnabled(env)) return { enqueued: false, eventId: eventIdFor(input.dedupeKey), reason: 'disabled' }
++  await tx.$executeRaw`SAVEPOINT sf_outbox_sp`
++  try {
++    const r = await enqueueSfEvent(tx, input, env)
++    await tx.$executeRaw`RELEASE SAVEPOINT sf_outbox_sp`
++    return r
++  } catch (e: any) {
++    await tx.$executeRaw`ROLLBACK TO SAVEPOINT sf_outbox_sp`.catch(() => 0)
++    console.error(`[sf-outbox] ENQUEUE FAILED type=${input.type} account=${input.plAccountId}: ${String(e?.message ?? e).slice(0, 160)} — engine change kept; run the backfill to repair`)
++    return { enqueued: false, eventId: eventIdFor(input.dedupeKey), reason: 'error', detail: String(e?.message ?? e).slice(0, 160) }
++  }
++}
+diff --git a/prisma/migrations/20261011230000_add_sf_event_outbox/migration.sql b/prisma/migrations/20261011230000_add_sf_event_outbox/migration.sql
+new file mode 100644
+index 00000000..f316f113
+--- /dev/null
++++ b/prisma/migrations/20261011230000_add_sf_event_outbox/migration.sql
+@@ -0,0 +1,31 @@
++-- Personal Line -> SeldonFrame journey-event OUTBOX (slice 2a item 4; ops/personal-line/specs/pl-journey-events-contract-v1.md).
++-- ADDITIVE ONLY: one new table + indexes. No existing table is touched. Zero rows on creation.
++-- One row per outbound lifecycle event, written IN THE SAME TRANSACTION as the engine change that causes it.
++-- Production apply is a separate, owner-gated deploy step (`prisma migrate deploy`).
++--   event_id      deterministic uuid derived from dedupe_key (same logical event => same id, so the receiver's inbox dedupes)
++--   dedupe_key    the logical identity of the event ("line_created:<acct>", "app_activated:<acct>", ...); UNIQUE => idempotent enqueue
++--   version       monotonic per pl_account_id (assigned under a per-account advisory lock inside the enqueueing transaction)
++--   payload       the contract `facts` object only; wa_id is resolved at delivery from the account, never copied here
++--   attempts / next_attempt_at   retry bookkeeping (a claim also leases the row by pushing next_attempt_at)
++--   delivered_at  set on a 2xx (a duplicate-event 200 included); dead_at + last_error = permanent failure, visible, requeue-able
++CREATE TABLE "sf_event_outbox" (
++    "event_id" UUID NOT NULL,
++    "dedupe_key" TEXT NOT NULL,
++    "type" TEXT NOT NULL,
++    "pl_account_id" TEXT NOT NULL,
++    "version" INTEGER NOT NULL,
++    "occurred_at" TIMESTAMP(3) NOT NULL,
++    "payload" JSONB NOT NULL,
++    "attempts" INTEGER NOT NULL DEFAULT 0,
++    "next_attempt_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "delivered_at" TIMESTAMP(3),
++    "dead_at" TIMESTAMP(3),
++    "last_status" INTEGER,
++    "last_error" TEXT,
++    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    CONSTRAINT "sf_event_outbox_pkey" PRIMARY KEY ("event_id")
++);
++CREATE UNIQUE INDEX "sf_event_outbox_dedupe_key_key" ON "sf_event_outbox"("dedupe_key");
++CREATE UNIQUE INDEX "sf_event_outbox_pl_account_id_version_key" ON "sf_event_outbox"("pl_account_id", "version");
++CREATE INDEX "sf_event_outbox_delivered_at_dead_at_next_attempt_at_idx" ON "sf_event_outbox"("delivered_at", "dead_at", "next_attempt_at");
++CREATE INDEX "sf_event_outbox_type_created_at_idx" ON "sf_event_outbox"("type", "created_at");
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 49f48a64..3a4ef161 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -2373,3 +2373,30 @@ model PlConciergeAudit {
+   @@index([createdAt])
+   @@map("pl_concierge_audit")
+ }
++
++/// Personal Line -> SeldonFrame journey-event outbox (slice 2a item 4). One row per outbound lifecycle event, enqueued in the
++/// SAME transaction as the engine change that causes it (app/lib/pl-concierge/sf-outbox.ts). Delivered by a lock-guarded tick
++/// (sf-outbox-deliver.ts). `version` is monotonic per account (assigned under a per-account advisory lock). Written and claimed
++/// with raw SQL (INSERT ... ON CONFLICT DO NOTHING; UPDATE ... FOR UPDATE SKIP LOCKED RETURNING), so the model exists for
++/// migration/diff and for reads. Migration: 20261011230000_add_sf_event_outbox.
++model SfEventOutbox {
++  eventId       String    @id @map("event_id") @db.Uuid
++  dedupeKey     String    @unique @map("dedupe_key")
++  type          String
++  plAccountId   String    @map("pl_account_id")
++  version       Int
++  occurredAt    DateTime  @map("occurred_at")
++  payload       Json
++  attempts      Int       @default(0)
++  nextAttemptAt DateTime  @default(now()) @map("next_attempt_at")
++  deliveredAt   DateTime? @map("delivered_at")
++  deadAt        DateTime? @map("dead_at")
++  lastStatus    Int?      @map("last_status")
++  lastError     String?   @map("last_error")
++  createdAt     DateTime  @default(now()) @map("created_at")
++
++  @@unique([plAccountId, version])
++  @@index([deliveredAt, deadAt, nextAttemptAt])
++  @@index([type, createdAt])
++  @@map("sf_event_outbox")
++}
+diff --git a/test/pl-sf-outbox-cron-route.test.ts b/test/pl-sf-outbox-cron-route.test.ts
+new file mode 100644
+index 00000000..47fce87d
+--- /dev/null
++++ b/test/pl-sf-outbox-cron-route.test.ts
+@@ -0,0 +1,58 @@
++/**
++ * /api/cron/sf-outbox auth + command routing. Every refusal runs the SAME harness as its positive twin and proves the work was NOT
++ * done (Laws 19/28). The tick, sweep and backfill are mocked at the module boundary; their behaviour is proven elsewhere.
++ */
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
++
++const T = vi.hoisted(() => ({
++  tick: vi.fn(async () => ({ ran: true, delivered: 1 })), sweep: vi.fn(async () => ({ checked: 0, found: 0 })),
++  backfill: vi.fn(async (o: any) => ({ dryRun: o.dryRun, accounts: [] })), requeue: vi.fn(async () => 2), counts: vi.fn(async () => ({ pending: 1, delivered: 2, dead: 0 })),
++}))
++vi.mock('@/app/lib/pl-concierge/sf-outbox-deliver', () => ({ runSfOutboxTick: T.tick, requeueDead: T.requeue, outboxCounts: T.counts }))
++vi.mock('@/app/lib/pl-concierge/sf-emit', () => ({ sweepFirstCalls: T.sweep, backfillAccounts: T.backfill }))
++
++const SECRET = ['unit', 'cron', 'secret', '0123456789abcdef'].join('-')
++const U = 'http://127.0.0.1:3005/api/cron/sf-outbox'
++const req = (method: string, headers: Record<string, string> = {}, body?: unknown, qs = '') =>
++  new Request(U + qs, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined })
++
++beforeEach(() => { vi.clearAllMocks(); vi.stubEnv('CRON_SECRET', SECRET); vi.stubEnv('PL_SF_OUTBOX_ENABLED', 'true') })
++afterEach(() => { vi.unstubAllEnvs() })
++
++describe('sf-outbox cron route', () => {
++  it('POSITIVE: the x-cron-secret header runs sweep + tick (200)', async () => {
++    const { GET } = await import('@/app/api/cron/sf-outbox/route')
++    const res = await GET(req('GET', { 'x-cron-secret': SECRET }))
++    expect(res.status).toBe(200); expect(T.tick).toHaveBeenCalledTimes(1); expect(T.sweep).toHaveBeenCalledTimes(1)
++  })
++  it('refused, nothing run: no credential / wrong header — GET and POST', async () => {
++    const { GET, POST } = await import('@/app/api/cron/sf-outbox/route')
++    for (const h of [{}, { 'x-cron-secret': 'nope' }]) {
++      expect((await GET(req('GET', h))).status).toBe(401)
++      expect((await POST(req('POST', h, { op: 'backfill' }))).status).toBe(401)
++    }
++    expect(T.tick).not.toHaveBeenCalled(); expect(T.backfill).not.toHaveBeenCalled(); expect(T.requeue).not.toHaveBeenCalled()
++  })
++  it('counts=1 runs nothing (control: the tick ran in the first test)', async () => {
++    const { GET } = await import('@/app/api/cron/sf-outbox/route')
++    const res = await GET(req('GET', { 'x-cron-secret': SECRET }, undefined, '?counts=1'))
++    expect(await res.json()).toEqual({ enabled: true, pending: 1, delivered: 2, dead: 0 }); expect(T.tick).not.toHaveBeenCalled()
++  })
++  it('backfill is a DRY RUN unless dryRun is exactly false', async () => {
++    const { POST } = await import('@/app/api/cron/sf-outbox/route')
++    await POST(req('POST', { 'x-cron-secret': SECRET }, { op: 'backfill', account: 'accA' }))
++    expect(T.backfill).toHaveBeenLastCalledWith(expect.objectContaining({ accountId: 'accA', dryRun: true }))
++    await POST(req('POST', { 'x-cron-secret': SECRET }, { op: 'backfill', account: 'accA', dryRun: 'false' }))
++    expect(T.backfill).toHaveBeenLastCalledWith(expect.objectContaining({ dryRun: true }))
++    await POST(req('POST', { 'x-cron-secret': SECRET }, { op: 'backfill', account: 'accA', dryRun: false }))
++    expect(T.backfill).toHaveBeenLastCalledWith(expect.objectContaining({ dryRun: false }))
++  })
++  it('requeue works; unknown op 400; disabled outbox 409 and nothing runs', async () => {
++    const { POST } = await import('@/app/api/cron/sf-outbox/route')
++    expect(await (await POST(req('POST', { 'x-cron-secret': SECRET }, { op: 'requeue' }))).json()).toEqual({ requeued: 2 })
++    expect((await POST(req('POST', { 'x-cron-secret': SECRET }, { op: 'wat' }))).status).toBe(400)
++    vi.stubEnv('PL_SF_OUTBOX_ENABLED', 'false')
++    T.requeue.mockClear()
++    expect((await POST(req('POST', { 'x-cron-secret': SECRET }, { op: 'requeue' }))).status).toBe(409); expect(T.requeue).not.toHaveBeenCalled()
++  })
++})
+diff --git a/test/pl-sf-outbox.realpg.test.ts b/test/pl-sf-outbox.realpg.test.ts
+new file mode 100644
+index 00000000..c1c7c79b
+--- /dev/null
++++ b/test/pl-sf-outbox.realpg.test.ts
+@@ -0,0 +1,329 @@
++/**
++ * The Personal Line -> SeldonFrame outbox on a REAL Postgres through the REAL Prisma client + @prisma/adapter-pg (the combination
++ * the mocked suites cannot see: transaction atomicity, ON CONFLICT, advisory locks, FOR UPDATE SKIP LOCKED, SAVEPOINT).
++ *
++ * Runs only when LOCK_TEST_PG_URL points at a THROWAWAY local database (127.0.0.1/localhost, db name lockvoid*); anything else is
++ * refused. The schema is built from prisma/schema.prisma; THIS change's table is then (re)created from the REVIEWED migration file
++ * itself, which is also the proof that the migration applies cleanly. Never run against any other database.
++ */
++import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
++import { readFileSync } from 'node:fs'
++import path from 'node:path'
++
++const URL_ = vi.hoisted(() => {
++  const u = process.env.LOCK_TEST_PG_URL || ''
++  let ok = false
++  try { const x = new URL(u); ok = /^(127\.0\.0\.1|localhost)$/.test(x.hostname) && /^\/lockvoid/.test(x.pathname) } catch { ok = false }
++  if (u && !ok) throw new Error('LOCK_TEST_PG_URL must be a THROWAWAY local database (127.0.0.1/localhost, db name lockvoid*) — refusing')
++  if (ok) { process.env.DATABASE_URL = u; process.env.POSTGRES_PRISMA_URL = u }
++  return ok ? u : ''
++})
++vi.unmock('@/app/lib/prisma')
++const MAG = vi.hoisted(() => ({ seq: Math.floor(Math.random() * 5000) }))
++// A local AMI-listener stand-in for the registration watch (the module reads AMI_LISTENER_URL once, at import).
++const PEER = vi.hoisted(() => { process.env.AMI_LISTENER_URL = 'http://127.0.0.1:39017'; process.env.REGISTRATION_SOURCE = 'listener'; return { status: 'unregistered' as string, httpCode: 200 } })
++vi.mock('@/app/lib/runtime-flags', () => ({ getRuntimeFlag: () => false, getRuntimeNumber: (_k: string, d: number) => d, getRuntimeList: (_k: string, d: string[]) => d }))
++vi.mock('@/app/lib/magnus', () => ({
++  // provisionLine's two-phase path: the candidate DID, sip username and password are minted first, then the provider call echoes them back.
++  findNextFreeDIDCandidate: async () => { const n = ++MAG.seq; return { success: true as const, did: `1767817${String(n % 10000).padStart(4, '0')}` } },
++  mintFreeSipUsername: async () => `lt_sf_${Date.now().toString(36)}_${++MAG.seq}`,
++  generatePassword: (len = 24) => 'p'.repeat(len),
++  provisionTenantLine: async (_u: string, _e: unknown, did: string, _o: unknown, _p: unknown, resume: { sipUsername: string; sipPassword: string }) => {
++    const n = ++MAG.seq
++    return { success: true, sipUsername: resume.sipUsername, sipPassword: resume.sipPassword, did, magnusUserId: `7${n}`, magnusSipId: '2', magnusDidId: '3', magnusDiddestinationId: '4' }
++  },
++  setDIDForwardToCell: async () => ({ success: true }), setDIDRoutingToSIP: async () => ({ success: true }),
++  getMagnusUserCallsEnriched: async () => [],
++}))
++vi.mock('@/app/lib/lite-admission-gate', () => ({ admitProvisioning: async () => ({ decision: 'admit', reason: 'admitted', alertOperator: false, customerMessage: null }) }))
++vi.mock('@/app/lib/lite-odoo-partner', () => ({ ensureOdooPartnerForLine: async () => ({ outcome: 'skipped_test_identity' }) }))
++vi.mock('@/app/lib/lite-callback-trial', () => ({ grantCallbackTrial: async () => ({ ok: false, alreadyGranted: false, error: 'grants_paused' }) }))
++vi.mock('@/app/lib/lite-seat-bind', () => ({ bindPersonalLineSeatWithRetry: async () => ({ ok: true, attempts: 1 }), recordSeatBindOutcome: async () => {} }))
++vi.mock('@/app/lib/lite-signup-trial', () => ({ grantSignupTrial: async () => ({ outcome: 'skipped', reason: 'realpg-smoke' }), readConfirmedSignupTrial: async () => null }))
++vi.mock('@/app/lib/lite-minutes', () => ({ grantWelcomeMinutes: async () => ({ ok: true, alreadyGranted: false }) }))
++vi.mock('@/app/lib/whatsapp', () => ({ sendWhatsAppTemplate: async () => undefined }))
++vi.mock('@/app/lib/alert', () => ({ alertEric: async () => ({ delivered: true }) }))
++vi.mock('@/app/lib/lite-registration-followups', () => ({ deliverRegistrationFollowup: async () => ({ ok: true }), deliverFirstCallFollowup: async () => ({ ok: true }) }))
++
++import { PrismaClient } from '@prisma/client'
++import { PrismaPg } from '@prisma/adapter-pg'
++import { prisma } from '../app/lib/prisma'
++import { enqueueSfEvent, enqueueSfEventSafe, eventIdFor, signIngress } from '../app/lib/pl-concierge/sf-outbox'
++import { prismaOutboxStore, requeueDead, outboxCounts, runSfOutboxTickWith } from '../app/lib/pl-concierge/sf-outbox-deliver'
++import { emitRegistrationFromRead, recordFirstCallObserved, backfillAccounts } from '../app/lib/pl-concierge/sf-emit'
++import { provisionLine } from '../app/lib/lite-provision'
++import { createServer } from 'node:http'
++import { runRegistrationWatchTick } from '../app/lib/lite-registration-watch'
++import { observeRegistrationForOutbox } from '../app/lib/pl-concierge/sf-emit'
++
++const run = Date.now().toString(36)
++const KEY = 'realpg-events-key-0123456789abcdef-012345'
++const ON = { PL_SF_OUTBOX_ENABLED: 'true' } as unknown as NodeJS.ProcessEnv
++const iso = (n = 0) => new Date(Date.UTC(2026, 9, 11, 12, 0, n))
++const rows = async (acct: string) => (await prisma.$queryRawUnsafe(`SELECT type, version, dedupe_key, delivered_at, dead_at, attempts, payload FROM sf_event_outbox WHERE pl_account_id = $1 ORDER BY version`, acct)) as any[]
++
++describe.skipIf(!URL_)('REAL Postgres: the SeldonFrame lifecycle outbox', () => {
++  let a: PrismaClient, b: PrismaClient
++  const peerServer = createServer((req, res) => { if (PEER.httpCode !== 200) { res.writeHead(PEER.httpCode); return res.end('x') } res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ status: PEER.status, listenerConnected: true, at: new Date().toISOString(), address: '203.0.113.7:5060', source: 'event' })) })
++  beforeAll(async () => {
++    const db = ((await prisma.$queryRawUnsafe('SELECT current_database() AS d')) as any[])[0].d
++    if (!/^lockvoid/.test(db)) throw new Error(`refusing: connected to ${db}`)
++    // the table comes from the REVIEWED MIGRATION FILE (drop first: the schema-built copy is replaced by the file under test)
++    await prisma.$executeRawUnsafe('DROP TABLE IF EXISTS sf_event_outbox')
++    const sql = readFileSync(path.join(__dirname, '..', 'prisma', 'migrations', '20261011230000_add_sf_event_outbox', 'migration.sql'), 'utf8')
++    for (const stmt of sql.split(/;\s*\n/).map(s => s.replace(/--.*$/gm, '').trim()).filter(Boolean)) await prisma.$executeRawUnsafe(stmt)
++    await prisma.$executeRawUnsafe('CREATE TABLE IF NOT EXISTS zz_engine_probe (id text PRIMARY KEY)')
++    process.env.PL_SF_OUTBOX_ENABLED = 'true'   // the emitters read the real env; individual tests flip it where they need the OFF control
++    await new Promise<void>(r => peerServer.listen(39017, '127.0.0.1', () => r()))
++    a = new PrismaClient({ adapter: new PrismaPg({ connectionString: URL_, max: 4 }) })
++    b = new PrismaClient({ adapter: new PrismaPg({ connectionString: URL_, max: 4 }) })
++  })
++  afterAll(async () => { await a?.$disconnect(); await b?.$disconnect(); peerServer.close() })
++
++  it('the migration file applies and the table starts empty with the unique constraints', async () => {
++    const r = (await prisma.$queryRawUnsafe(`SELECT count(*)::int AS n FROM sf_event_outbox`)) as any[]
++    expect(r[0].n).toBe(0)
++    const idx = ((await prisma.$queryRawUnsafe(`SELECT indexname FROM pg_indexes WHERE tablename='sf_event_outbox'`)) as any[]).map(x => x.indexname)
++    expect(idx).toEqual(expect.arrayContaining(['sf_event_outbox_pkey', 'sf_event_outbox_dedupe_key_key', 'sf_event_outbox_pl_account_id_version_key']))
++  })
++
++  it('ATOMICITY: a ROLLED-BACK engine change leaves NO outbox row; the committed twin leaves both (same harness)', async () => {
++    const acct = `atom-${run}`
++    await expect(prisma.$transaction(async (tx: any) => {
++      await tx.$executeRaw`INSERT INTO zz_engine_probe (id) VALUES (${acct + '-rb'})`
++      const r = await enqueueSfEvent(tx, { type: 'pl.line_created', plAccountId: acct, dedupeKey: `line_created:${acct}-rb`, occurredAt: iso(), facts: { did_masked: '+1767 *** 5001' } }, ON)
++      expect(r.enqueued).toBe(true)         // it WAS written inside the transaction...
++      throw new Error('engine change fails after the enqueue')
++    })).rejects.toThrow('engine change fails')
++    expect(await rows(acct)).toHaveLength(0)                                                              // ...and is gone with the rollback
++    expect(((await prisma.$queryRawUnsafe(`SELECT count(*)::int n FROM zz_engine_probe WHERE id=$1`, acct + '-rb')) as any[])[0].n).toBe(0)
++    await prisma.$transaction(async (tx: any) => {
++      await tx.$executeRaw`INSERT INTO zz_engine_probe (id) VALUES (${acct + '-ok'})`
++      await enqueueSfEvent(tx, { type: 'pl.line_created', plAccountId: acct, dedupeKey: `line_created:${acct}`, occurredAt: iso(), facts: { did_masked: '+1767 *** 5001' } }, ON)
++    })
++    expect(await rows(acct)).toHaveLength(1)
++    expect(((await prisma.$queryRawUnsafe(`SELECT count(*)::int n FROM zz_engine_probe WHERE id=$1`, acct + '-ok')) as any[])[0].n).toBe(1)
++  })
++
++  it('IDEMPOTENT: the same logical event twice (two transactions) is ONE row, same event_id; a different key is a second row (control)', async () => {
++    const acct = `idem-${run}`
++    const inp = { type: 'pl.line_created' as const, plAccountId: acct, dedupeKey: `line_created:${acct}`, occurredAt: iso(), facts: {} }
++    const r1: any = await prisma.$transaction((tx: any) => enqueueSfEvent(tx, inp, ON))
++    const r2: any = await prisma.$transaction((tx: any) => enqueueSfEvent(tx, inp, ON))
++    expect(r1).toMatchObject({ enqueued: true, version: 1 }); expect(r2).toMatchObject({ enqueued: false, reason: 'duplicate' })
++    expect(r2.eventId).toBe(r1.eventId); expect(r1.eventId).toBe(eventIdFor(inp.dedupeKey))
++    expect(await rows(acct)).toHaveLength(1)
++    const r3: any = await prisma.$transaction((tx: any) => enqueueSfEvent(tx, { ...inp, type: 'pl.first_call', dedupeKey: `first_call:${acct}`, facts: { first_call_at: iso(5).toISOString() } }, ON))
++    expect(r3).toMatchObject({ enqueued: true, version: 2 }); expect(await rows(acct)).toHaveLength(2)
++  })
++
++  it('VERSIONS are monotonic per account under CONCURRENCY (12 transactions, two clients): 1..12 with no gap or duplicate; another account starts at 1 (control)', async () => {
++    const acct = `ver-${run}`
++    const mk = (i: number) => (i % 2 ? a : b).$transaction((tx: any) => enqueueSfEvent(tx, { type: 'pl.registration_changed', plAccountId: acct, dedupeKey: `reg:${acct}:${i}`, occurredAt: iso(i), facts: { registration_now: i % 2 ? 'registered' : 'not_registered' } }, ON))
++    const res: any[] = await Promise.all(Array.from({ length: 12 }, (_, i) => mk(i)))
++    expect(res.every(r => r.enqueued)).toBe(true)
++    expect(res.map(r => r.version).sort((x, y) => x - y)).toEqual(Array.from({ length: 12 }, (_, i) => i + 1))
++    const other: any = await prisma.$transaction((tx: any) => enqueueSfEvent(tx, { type: 'pl.line_created', plAccountId: `${acct}-other`, dedupeKey: `line_created:${acct}-other`, occurredAt: iso(), facts: {} }, ON))
++    expect(other.version).toBe(1)
++  })
++
++  it('SAVEPOINT: an enqueue that fails INSIDE Postgres (aborted statement) is rolled back to the savepoint; the engine write in the SAME transaction still commits (control: without the savepoint the transaction would be dead)', async () => {
++    const acct = `sp-${run}`
++    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
++    await prisma.$transaction(async (tx: any) => {
++      await tx.$executeRaw`INSERT INTO zz_engine_probe (id) VALUES (${acct})`
++      const broken = { $executeRaw: tx.$executeRaw.bind(tx), $queryRaw: async (s: TemplateStringsArray, ...v: unknown[]) => { if (s.join('').includes('INSERT INTO sf_event_outbox')) await tx.$queryRaw`SELECT 1/0`; return tx.$queryRaw(s, ...v) } }
++      const r = await enqueueSfEventSafe(broken as any, { type: 'pl.line_created', plAccountId: acct, dedupeKey: `line_created:${acct}`, occurredAt: iso(), facts: {} }, ON)
++      expect(r).toMatchObject({ enqueued: false, reason: 'error' })
++      await tx.$executeRaw`INSERT INTO zz_engine_probe (id) VALUES (${acct + '-after'})`        // the transaction is still usable
++    })
++    log.mockRestore()
++    expect(((await prisma.$queryRawUnsafe(`SELECT count(*)::int n FROM zz_engine_probe WHERE id IN ($1,$2)`, acct, acct + '-after')) as any[])[0].n).toBe(2)
++    expect(await rows(acct)).toHaveLength(0)
++    // CONTROL: the same failure with NO savepoint kills the transaction and takes the engine write down with it
++    await expect(prisma.$transaction(async (tx: any) => {
++      await tx.$executeRaw`INSERT INTO zz_engine_probe (id) VALUES (${acct + '-nosp'})`
++      await tx.$queryRaw`SELECT 1/0`
++    })).rejects.toThrow()
++    expect(((await prisma.$queryRawUnsafe(`SELECT count(*)::int n FROM zz_engine_probe WHERE id=$1`, acct + '-nosp')) as any[])[0].n).toBe(0)
++  })
++
++  it('CLAIM: ordered per account (v2 is not claimed while v1 is undelivered and not dead), leased, and a dead earlier row stops blocking', async () => {
++    const acct = `claim-${run}`
++    for (const [i, t] of [[1, 'pl.line_created'], [2, 'pl.first_call']] as const) {
++      await prisma.$transaction((tx: any) => enqueueSfEvent(tx, { type: t, plAccountId: acct, dedupeKey: `${t}:${acct}`, occurredAt: iso(i), facts: t === 'pl.first_call' ? { first_call_at: iso(i).toISOString() } : {} }, ON))
++    }
++    const store = prismaOutboxStore(prisma)
++    const mine = (rs: any[] | null) => (rs ?? []).filter(r => r.plAccountId === acct)
++    const c1 = mine(await store.claim(new Date(), 50, 60_000))
++    expect(c1.map(r => r.version)).toEqual([1]); expect(c1[0].attempts).toBe(1)                          // v2 held back
++    expect(mine(await store.claim(new Date(), 50, 60_000))).toHaveLength(0)                             // leased: not claimed again, v2 still held
++    await store.markDead(c1[0].eventId, 422, 'http_422:invalid_event', new Date())                      // v1 dies
++    expect(mine(await store.claim(new Date(), 50, 60_000)).map(r => r.version)).toEqual([2])             // v2 no longer blocked
++    const dead = (await rows(acct)).find(r => r.version === 1)
++    expect(dead.dead_at).not.toBeNull()
++    expect(await requeueDead(prisma, acct)).toBe(1)
++    expect((await rows(acct)).find(r => r.version === 1).dead_at).toBeNull()
++  })
++
++  it('LOCK: while one transaction holds the tick lock a second claim returns null (skipped), and works once released; no row is claimed twice by two concurrent claims', async () => {
++    const acct = `lock-${run}`
++    for (let i = 1; i <= 6; i++) await prisma.$transaction((tx: any) => enqueueSfEvent(tx, { type: 'pl.registration_changed', plAccountId: `${acct}-${i}`, dedupeKey: `reg:${acct}:${i}`, occurredAt: iso(i), facts: { registration_now: 'registered' } }, ON))
++    let release!: () => void
++    const held = new Promise<void>(res => { release = res })
++    let locked!: () => void
++    const gotLock = new Promise<void>(res => { locked = res })
++    const holder = a.$transaction(async (tx: any) => {
++      const g = await tx.$queryRaw`SELECT pg_try_advisory_xact_lock(hashtextextended(${'pl-sf-outbox-tick'}, 0)) AS got`
++      expect(g[0].got).toBe(true); locked(); await held
++    }, { timeout: 30_000 })
++    await gotLock
++    expect(await prismaOutboxStore(b).claim(new Date(), 50, 60_000)).toBeNull()                          // lock held elsewhere
++    release(); await holder
++    const [x, y] = await Promise.all([prismaOutboxStore(a).claim(new Date(), 50, 60_000), prismaOutboxStore(b).claim(new Date(), 50, 60_000)])
++    const ids = [...(x ?? []), ...(y ?? [])].filter(r => r.plAccountId.startsWith(acct)).map(r => r.eventId)
++    expect(new Set(ids).size).toBe(ids.length)                                                          // never the same row twice
++    expect(ids.length).toBe(6)                                                                          // and all six were claimed by exactly one of them
++  })
++
++  it('TWO CONCURRENT TICKS deliver each event exactly once (fake receiver counts POSTs per event_id)', async () => {
++    const acct = `tick-${run}`
++    for (let i = 1; i <= 5; i++) await prisma.$transaction((tx: any) => enqueueSfEvent(tx, { type: 'pl.first_call', plAccountId: `${acct}-${i}`, dedupeKey: `first_call:${acct}-${i}`, occurredAt: iso(i), facts: { first_call_at: iso(i).toISOString() } }, ON))
++    const posts = new Map<string, number>()
++    const f = async (_u: string, init: any) => { const id = JSON.parse(init.body).event_id; posts.set(id, (posts.get(id) ?? 0) + 1); await new Promise(r => setTimeout(r, 40)); return new Response('{"ok":true,"status":"processed","factsApplied":true}', { status: 200 }) }
++    const mkDeps = (db: any) => ({ store: { ...prismaOutboxStore(db), resolveWaId: async () => '17675550101' }, fetchImpl: f as any, config: { url: 'http://fork.invalid/x', kid: 'sf1', key: KEY, misconfig: [] }, now: Date.now, random: () => 1 })
++    const [r1, r2] = await Promise.all([runSfOutboxTickWith(mkDeps(a), ON), runSfOutboxTickWith(mkDeps(b), ON)])
++    const mine = [...posts.entries()].filter(([id]) => (['1', '2', '3', '4', '5'].map(i => eventIdFor(`first_call:${acct}-${i}`))).includes(id))
++    expect(mine).toHaveLength(5); expect(mine.every(([, n]) => n === 1)).toBe(true)
++    expect(r1.delivered + r2.delivered).toBeGreaterThanOrEqual(5)
++    const c = await outboxCounts(prisma); expect(c.delivered).toBeGreaterThanOrEqual(5)
++    void signIngress
++  })
++
++  it('REGISTRATION hook semantics against real rows: activated -> app_activated; repeat -> nothing; lost -> registration_changed(not_registered); back -> registration_changed(registered); unknown -> nothing; never-registered pending -> nothing (control for each)', async () => {
++    const acct = `reg-${run}`
++    const emit = (state: string, at?: Date, when = new Date()) => prisma.$transaction((tx: any) => emitRegistrationFromRead(tx, acct, { state, registeredAt: at ?? null }, when))
++    expect(await emit('pending')).toBeNull()                                                            // never registered: pending is the default, not news
++    expect(await emit('unknown')).toBeNull()                                                            // a failed read is not a fact
++    expect(await emit('stalled', undefined, iso(1))).toBeNull()                                         // still never registered
++    expect(await rows(acct)).toHaveLength(0)
++    expect((await emit('activated', iso(10), iso(10)) as any).enqueued).toBe(true)
++    expect(await emit('activated', iso(10), iso(11))).toBeNull()                                         // already told
++    expect((await emit('stalled', undefined, iso(20)) as any).enqueued).toBe(true)                      // lost registration
++    expect(await emit('stalled', undefined, iso(21))).toBeNull()                                         // not a new change
++    expect((await emit('activated', iso(30), iso(30)) as any).enqueued).toBe(true)                      // back
++    const r = await rows(acct)
++    expect(r.map(x => [x.type, x.payload.registration_now])).toEqual([['pl.app_activated', 'registered'], ['pl.registration_changed', 'not_registered'], ['pl.registration_changed', 'registered']])
++    expect(r.map(x => x.version)).toEqual([1, 2, 3])
++    expect(r[0].payload.activated_at).toBe(iso(10).toISOString())
++  })
++
++  it('FIRST CALL: observed twice (and a different time the second time) -> exactly one pl.first_call', async () => {
++    const acct = `fc-${run}`
++    const save = process.env.PL_SF_OUTBOX_ENABLED; process.env.PL_SF_OUTBOX_ENABLED = 'true'
++    try {
++      expect((await recordFirstCallObserved(acct, iso(5).toISOString(), prisma) as any).enqueued).toBe(true)
++      expect(await recordFirstCallObserved(acct, iso(500).toISOString(), prisma)).toMatchObject({ enqueued: false, reason: 'duplicate' })
++      expect((await rows(acct)).filter(x => x.type === 'pl.first_call')).toHaveLength(1)
++    } finally { process.env.PL_SF_OUTBOX_ENABLED = save }
++  })
++
++  it('PROVISION HOOK: provisionLine creates the account AND pl.line_created in one transaction when enabled; writes nothing when disabled (control)', async () => {
++    const save = process.env.PL_SF_OUTBOX_ENABLED
++    try {
++      process.env.PL_SF_OUTBOX_ENABLED = 'true'
++      const phone = `1767555${String(Date.now()).slice(-4)}`
++      const uid = `u-sf-on-${run}`
++      const r: any = await provisionLine(uid, phone, 'concierge')
++      expect(r.status).toBe(200)
++      const acc = await prisma.liteAccount.findUnique({ where: { userId: uid } })
++      expect(acc).not.toBeNull()
++      const ev = await rows(acc!.id)
++      expect(ev).toHaveLength(1); expect(ev[0]).toMatchObject({ type: 'pl.line_created', version: 1, dedupe_key: `line_created:${acc!.id}` })
++      expect(JSON.stringify(ev[0].payload)).not.toContain(String(acc!.did))                              // masked, never the full number
++      process.env.PL_SF_OUTBOX_ENABLED = 'false'
++      const uid2 = `u-sf-off-${run}`
++      const r2: any = await provisionLine(uid2, `1767556${String(Date.now()).slice(-4)}`, 'concierge')
++      expect(r2.status).toBe(200)
++      const acc2 = await prisma.liteAccount.findUnique({ where: { userId: uid2 } })
++      expect(acc2).not.toBeNull(); expect(await rows(acc2!.id)).toHaveLength(0)
++    } finally { process.env.PL_SF_OUTBOX_ENABLED = save }
++  })
++
++  it('PROVISION NEVER BLOCKED: with the outbox ON but the table GONE (migration not applied), the line is still created (savepoint), nothing queued', async () => {
++    const save = process.env.PL_SF_OUTBOX_ENABLED
++    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
++    await prisma.$executeRawUnsafe('ALTER TABLE sf_event_outbox RENAME TO sf_event_outbox_hidden')
++    try {
++      process.env.PL_SF_OUTBOX_ENABLED = 'true'
++      const uid = `u-sf-notable-${run}`
++      const r: any = await provisionLine(uid, `1767557${String(Date.now()).slice(-4)}`, 'concierge')
++      expect(r.status).toBe(200)
++      expect(await prisma.liteAccount.findUnique({ where: { userId: uid } })).not.toBeNull()
++      expect(log.mock.calls.some(c => String(c[0]).includes('ENQUEUE FAILED'))).toBe(true)
++    } finally {
++      await prisma.$executeRawUnsafe('ALTER TABLE sf_event_outbox_hidden RENAME TO sf_event_outbox')
++      process.env.PL_SF_OUTBOX_ENABLED = save; log.mockRestore()
++    }
++  })
++
++  it('WATCH TICK, real stamp(): a registered peer stamps the account AND queues pl.app_activated in ONE transaction; an unreadable listener queues nothing and changes nothing (control)', async () => {
++    const uid = `u-sf-tick-${run}`
++    process.env.PL_SF_OUTBOX_ENABLED = 'false'
++    await provisionLine(uid, `1767559${String(Date.now()).slice(-4)}`, 'concierge')
++    process.env.PL_SF_OUTBOX_ENABLED = 'true'
++    const acc = (await prisma.liteAccount.findUnique({ where: { userId: uid } }))!
++    // the hand-off fixture: an activation row the watch reads (agent FK bypassed for this synthetic row in the throwaway DB)
++    await prisma.$transaction(async (tx: any) => {
++      await tx.$executeRaw`SET LOCAL session_replication_role = replica`
++      await tx.agentActivity.create({ data: { agentId: 'zz-agent', type: 'lite_activation', summary: `nonce${run}`.padEnd(24, '0'), metadata: { nonce: 'n', liteAccountId: acc.id, verified: true, xmlFetched: true, xmlFetchedAt: Date.now() - 30_000, nonceExpiresAt: Date.now() + 600_000 } } })
++    })
++    PEER.httpCode = 500
++    const t0 = await runRegistrationWatchTick()
++    expect(t0.watched).toBeGreaterThanOrEqual(1)
++    expect((await prisma.liteAccount.findUnique({ where: { id: acc.id } }))!.registrationState).toBe('unknown')   // unreadable: stamped unknown...
++    expect(await rows(acc.id)).toHaveLength(0)                                                                      // ...and NOTHING queued (an outage is not a fact)
++    PEER.httpCode = 200; PEER.status = 'registered'
++    await runRegistrationWatchTick()
++    const after = (await prisma.liteAccount.findUnique({ where: { id: acc.id } }))!
++    expect(after.registrationState).toBe('activated'); expect(after.registeredAt).not.toBeNull()
++    const ev = await rows(acc.id)
++    expect(ev.map(e => e.type)).toEqual(['pl.app_activated']); expect(ev[0].payload).toMatchObject({ registration_now: 'registered' })
++    await runRegistrationWatchTick()                                                                                // same state again: no second event
++    expect(await rows(acc.id)).toHaveLength(1)
++    // registration lost, observed by the live read the watch makes for an already-final account
++    PEER.status = 'unregistered'
++    await observeRegistrationForOutbox(acc.id, acc.sipUsername, Date.now(), prisma)
++    expect((await rows(acc.id)).map(e => [e.type, e.payload.registration_now])).toEqual([['pl.app_activated', 'registered'], ['pl.registration_changed', 'not_registered']])
++    await observeRegistrationForOutbox(acc.id, acc.sipUsername, Date.now(), prisma)                                 // unchanged -> nothing
++    PEER.httpCode = 500
++    await observeRegistrationForOutbox(acc.id, acc.sipUsername, Date.now(), prisma)                                 // unreadable -> nothing
++    expect(await rows(acc.id)).toHaveLength(2)
++    PEER.httpCode = 200; PEER.status = 'reachable'
++    await observeRegistrationForOutbox(acc.id, acc.sipUsername, Date.now(), prisma)                                 // regained -> a new change
++    expect((await rows(acc.id)).map(e => [e.type, e.payload.registration_now, e.version])).toEqual([['pl.app_activated', 'registered', 1], ['pl.registration_changed', 'not_registered', 2], ['pl.registration_changed', 'registered', 3]])
++  })
++
++  it('BACKFILL: dry run writes nothing; the real run enqueues line_created (+app_activated if the account registered) once; a second run is all "already"; versions continue after live rows (never lower)', async () => {
++    const save = process.env.PL_SF_OUTBOX_ENABLED; process.env.PL_SF_OUTBOX_ENABLED = 'true'
++    try {
++      const uid = `u-sf-bf-${run}`
++      process.env.PL_SF_OUTBOX_ENABLED = 'false'
++      await provisionLine(uid, `1767558${String(Date.now()).slice(-4)}`, 'concierge')        // a line that PRE-DATES the integration
++      process.env.PL_SF_OUTBOX_ENABLED = 'true'
++      const acc = (await prisma.liteAccount.findUnique({ where: { userId: uid } }))!
++      await prisma.liteAccount.update({ where: { id: acc.id }, data: { registeredAt: iso(40), registrationState: 'activated' } })
++      expect(await rows(acc.id)).toHaveLength(0)
++      const dry = await backfillAccounts({ accountId: acc.id, liveReads: false }, prisma)
++      expect(dry.dryRun).toBe(true); expect(dry.accounts[0].planned).toEqual(['line_created', 'app_activated']); expect(await rows(acc.id)).toHaveLength(0)
++      const real = await backfillAccounts({ accountId: acc.id, liveReads: false, dryRun: false }, prisma)
++      expect(real.accounts[0]).toMatchObject({ enqueued: ['line_created', 'app_activated'], already: [] })
++      const again = await backfillAccounts({ accountId: acc.id, liveReads: false, dryRun: false }, prisma)
++      expect(again.accounts[0]).toMatchObject({ enqueued: [], already: ['line_created', 'app_activated'] })
++      expect((await rows(acc.id)).map(r => [r.type, r.version])).toEqual([['pl.line_created', 1], ['pl.app_activated', 2]])
++      // a LIVE event after the backfill continues the sequence
++      await prisma.$transaction((tx: any) => enqueueSfEvent(tx, { type: 'pl.first_call', plAccountId: acc.id, dedupeKey: `first_call:${acc.id}`, occurredAt: iso(50), facts: { first_call_at: iso(50).toISOString() } }, ON))
++      expect((await rows(acc.id)).map(r => r.version)).toEqual([1, 2, 3])
++    } finally { process.env.PL_SF_OUTBOX_ENABLED = save }
++  })
++})
+diff --git a/test/pl-sf-outbox.test.ts b/test/pl-sf-outbox.test.ts
+new file mode 100644
+index 00000000..a6d34ac7
+--- /dev/null
++++ b/test/pl-sf-outbox.test.ts
+@@ -0,0 +1,313 @@
++/**
++ * Personal Line -> SeldonFrame lifecycle outbox (slice 2a item 4): pure behaviour + the deliverer against an in-memory store and a
++ * fake receiver. Every refusal / "did not happen" assertion runs in the same harness as a positive twin (Laws 19, 28).
++ * The SQL (transactional atomicity, idempotent enqueue, version monotonicity, claim lock/lease/order, savepoint) is proven on a
++ * REAL Postgres in pl-sf-outbox.realpg.test.ts; the wire contract against the real SeldonFrame receiver is proven on staging.
++ */
++import { describe, it, expect, vi } from 'vitest'
++import { createHmac } from 'node:crypto'
++import {
++  backoffMs, buildIngressBody, classifyHttp, cleanFacts, enqueueSfEvent, enqueueSfEventSafe, eventIdFor, ingressHeaders, maskDid,
++  readSfEventsConfig, sfOutboxEnabled, signIngress, SF_EMITTABLE_TYPES, SF_EVENT_TYPES, SF_MAX_ATTEMPTS, SF_RECEIVER_TYPES, type SfTx,
++} from '@/app/lib/pl-concierge/sf-outbox'
++import { runSfOutboxTickWith, type ClaimedRow, type OutboxStore, type TickDeps } from '@/app/lib/pl-concierge/sf-outbox-deliver'
++
++const KEY = 'unit-events-key-0123456789abcdef-0123456789'
++const ON = { PL_SF_OUTBOX_ENABLED: 'true' } as unknown as NodeJS.ProcessEnv
++const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
++
++describe('signing: byte-for-byte the SeldonFrame receiver (lib/personal-line/signing.ts signIngress)', () => {
++  const body = '{"event_id":"2d1f6b0e-6a0e-5f43-8f4d-0c5a8a3b9d11","type":"pl.line_created","occurred_at":"2026-10-11T12:00:00.000Z","version":1,"pl_account_id":"accA","wa_id":"17675550101","facts":{"did_masked":"+1 767 *** 5001"}}'
++  it('HMAC-SHA256 over "<ts>.<raw body>", base64url — independently recomputed here', () => {
++    const want = createHmac('sha256', Buffer.from(KEY, 'utf8')).update(`1800000000.${body}`, 'utf8').digest('base64url')
++    expect(signIngress(KEY, 1_800_000_000, body)).toBe(want)
++    expect(want).toMatch(/^[A-Za-z0-9_-]{43}$/)
++  })
++  it('CROSS-REPO VECTOR (value produced by the receiver\'s own signIngress on deepseek, see Port evidence)', () => {
++    expect(signIngress(KEY, 1_800_000_000, body)).toBe('rmvlNY1vxVwleKiduMiE93T7VWgtaI4O53DBuDQtM8g')
++  })
++  it('a different ts, key or body changes the MAC (control: the vector is not constant)', () => {
++    const a = signIngress(KEY, 1_800_000_000, body)
++    expect(signIngress(KEY, 1_800_000_001, body)).not.toBe(a)
++    expect(signIngress(KEY + 'x', 1_800_000_000, body)).not.toBe(a)
++    expect(signIngress(KEY, 1_800_000_000, body + ' ')).not.toBe(a)
++  })
++  it('headers: kid, ts (unix seconds), sig — the three the receiver reads', () => {
++    const h = ingressHeaders('sf1', KEY, 1_800_000_000, body)
++    expect(Object.keys(h).sort()).toEqual(['content-type', 'x-pl-sf-kid', 'x-pl-sf-sig', 'x-pl-sf-ts'])
++    expect(h['x-pl-sf-ts']).toMatch(/^\d{9,11}$/)
++  })
++})
++
++describe('event identity, facts and body', () => {
++  it('event_id is a pure function of the dedupe key and uuid-shaped (the receiver\'s regex); different keys differ', () => {
++    expect(eventIdFor('line_created:accA')).toBe(eventIdFor('line_created:accA'))
++    expect(eventIdFor('line_created:accA')).toMatch(UUID)
++    expect(eventIdFor('line_created:accB')).not.toBe(eventIdFor('line_created:accA'))
++  })
++  it('type lists: eight defined; four emittable; plan_purchased defined with NO emitter; every emittable type is one the receiver accepts', () => {
++    expect(SF_EVENT_TYPES).toHaveLength(8)
++    expect([...SF_EMITTABLE_TYPES].sort()).toEqual(['pl.app_activated', 'pl.first_call', 'pl.line_created', 'pl.registration_changed'])
++    expect(SF_EVENT_TYPES).toContain('pl.plan_purchased')
++    expect((SF_EMITTABLE_TYPES as readonly string[]).includes('pl.plan_purchased')).toBe(false)
++    for (const t of SF_EMITTABLE_TYPES) expect(SF_RECEIVER_TYPES).toContain(t)
++  })
++  it('cleanFacts: each type must carry its proof fact (the receiver refuses it otherwise); control: the proven shapes pass', () => {
++    const iso = '2026-10-11T12:00:00.000Z'
++    expect(cleanFacts('pl.app_activated', { registration_now: 'registered' })).toEqual({ ok: false, why: 'app_activated_needs_registered_and_activated_at' })
++    expect(cleanFacts('pl.app_activated', { registration_now: 'not_registered', activated_at: iso }).ok).toBe(false)
++    expect(cleanFacts('pl.app_activated', { registration_now: 'registered', activated_at: iso }).ok).toBe(true)
++    expect(cleanFacts('pl.first_call', {}).ok).toBe(false)
++    expect(cleanFacts('pl.first_call', { first_call_at: iso }).ok).toBe(true)
++    expect(cleanFacts('pl.registration_changed', {}).ok).toBe(false)
++    expect(cleanFacts('pl.registration_changed', { registration_now: 'not_registered' }).ok).toBe(true)
++    expect(cleanFacts('pl.line_created', { did_masked: '+1 767 *** 5001' }).ok).toBe(true)
++    expect(cleanFacts('pl.line_created', { did_masked: '17678185001 <script>' }).ok).toBe(false)
++    expect(cleanFacts('pl.line_created', { plan: 'Trial Plan' }).ok).toBe(false)
++  })
++  it('cleanFacts drops unknown keys and nulls (an unknown key would make the receiver refuse the whole event)', () => {
++    const r = cleanFacts('pl.line_created', { did_masked: '+1 767 *** 5001', password: 'x', plan: null })
++    expect(r.ok && r.facts).toEqual({ did_masked: '+1 767 *** 5001' })
++  })
++  it('maskDid never carries the full number', () => {
++    expect(maskDid('17678185001')).toBe('+1767 *** 5001')
++    expect(maskDid('17678185001')).not.toContain('8185')
++    expect(maskDid('17678185001')).toMatch(/^[+0-9 *]{4,24}$/)
++    expect(maskDid(null)).toBeUndefined()
++  })
++  it('ingress body: exactly the receiver\'s seven keys, wa_id digits, <= 4096 bytes; refuses a bad wa_id / account (control: good one builds)', () => {
++    const row = { eventId: eventIdFor('k'), type: 'pl.first_call', plAccountId: 'accA', version: 3, occurredAt: new Date('2026-10-11T12:00:00Z'), facts: { first_call_at: '2026-10-11T12:00:00.000Z', junk: 1 } }
++    const b = JSON.parse(buildIngressBody(row, '17675550101')!)
++    expect(Object.keys(b)).toEqual(['event_id', 'type', 'occurred_at', 'version', 'pl_account_id', 'wa_id', 'facts'])
++    expect(b.facts).toEqual({ first_call_at: '2026-10-11T12:00:00.000Z' })
++    expect(buildIngressBody(row, '+17675550101')).toBeNull()
++    expect(buildIngressBody(row, '0123')).toBeNull()
++    expect(buildIngressBody({ ...row, plAccountId: 'a b' }, '17675550101')).toBeNull()
++  })
++})
++
++describe('config: names only, key from a Swarm secret file, fail closed', () => {
++  const env = { PL_SF_EVENTS_URL: 'http://uplink-stg:3000/api/webhooks/personal-line/11111111-1111-4111-8111-111111111111', PL_SF_EVENTS_KEY_FILE: '/run/secrets/k' } as any
++  it('reads the key from the file; positive', () => {
++    const c = readSfEventsConfig(env, () => KEY + '\n')
++    expect(c.misconfig).toEqual([]); expect(c.key).toBe(KEY); expect(c.kid).toBe('sf1'); expect(c.url).toContain('/api/webhooks/personal-line/')
++  })
++  it('missing / short key, unreadable file, bad URL, bad kid => misconfig and NO usable url/key', () => {
++    expect(readSfEventsConfig(env, () => 'short').misconfig).toContain('PL_SF_EVENTS_KEY')
++    expect(readSfEventsConfig(env, () => { throw new Error('ENOENT') }).key).toBeNull()
++    expect(readSfEventsConfig({ ...env, PL_SF_EVENTS_URL: 'ftp://x' }, () => KEY).misconfig).toContain('PL_SF_EVENTS_URL')
++    expect(readSfEventsConfig({ ...env, PL_SF_EVENTS_URL: undefined }, () => KEY).url).toBeNull()
++    expect(readSfEventsConfig({ ...env, PL_SF_EVENTS_KID: 'BAD KID' }, () => KEY).misconfig).toContain('PL_SF_EVENTS_KID')
++  })
++  it('the outbox flag is OFF unless exactly "true"', () => {
++    expect(sfOutboxEnabled({} as any)).toBe(false); expect(sfOutboxEnabled({ PL_SF_OUTBOX_ENABLED: '1' } as any)).toBe(false)
++    expect(sfOutboxEnabled(ON)).toBe(true)
++  })
++})
++
++describe('retry schedule', () => {
++  it('exponential from 30 s, doubling, capped at 6 h (rand=1 => the full step)', () => {
++    expect([1, 2, 3, 4, 5].map(a => backoffMs(a, 1))).toEqual([30_000, 60_000, 120_000, 240_000, 480_000])
++    expect(backoffMs(12, 1)).toBe(6 * 3_600_000)
++    expect(backoffMs(40, 1)).toBe(6 * 3_600_000)
++  })
++  it('jitter spans [0.5, 1.0] of the step (rand=0 => half; control: rand=1 => full)', () => {
++    expect(backoffMs(3, 0)).toBe(60_000); expect(backoffMs(3, 1)).toBe(120_000); expect(backoffMs(3, 0.5)).toBe(90_000)
++  })
++})
++
++describe('HTTP verdicts', () => {
++  it.each([[200, '{"ok":true,"status":"processed","factsApplied":true}', 'delivered', 'delivered'],
++    [200, '{"ok":true,"status":"duplicate"}', 'delivered', 'duplicate'],
++    [200, '{"ok":true,"status":"processed","factsApplied":false}', 'delivered', 'stale_kept']])('%i %s => delivered/%s', (s, b, kind, note) => {
++    expect(classifyHttp(s, b)).toEqual({ kind, note })
++  })
++  it.each([[500], [502], [503], [429], [408], [425]])('%i => retry (pending)', s => { expect(classifyHttp(s, '{"error":"personal_line_not_configured"}').kind).toBe('retry') })
++  it.each([[401, 'invalid_signature'], [422, 'invalid_event'], [409, 'identity_conflict'], [404, null]])('%i => dead letter, visible reason', (s, e) => {
++    const v = classifyHttp(s, e ? `{"error":"${e}"}` : '') as any
++    expect(v.kind).toBe('dead'); expect(v.error).toBe(`http_${s}${e ? ':' + e : ''}`)
++  })
++  it('network error / timeout (no status) => retry', () => { expect(classifyHttp(null, null, 'timeout')).toEqual({ kind: 'retry', error: 'timeout' }) })
++})
++
++describe('enqueue: in the caller\'s transaction, gated, validated, under a savepoint', () => {
++  function fakeTx(opts: { failInsert?: boolean } = {}) {
++    const stmts: string[] = []
++    const tx: SfTx = {
++      async $executeRaw(s: TemplateStringsArray) { stmts.push(s.join('?').replace(/\s+/g, ' ').trim()); return 0 },
++      async $queryRaw(s: TemplateStringsArray) { const t = s.join('?').replace(/\s+/g, ' ').trim(); stmts.push(t); if (opts.failInsert) throw new Error('relation "sf_event_outbox" does not exist'); return [{ event_id: 'x', version: 1 }] as any },
++    }
++    return { tx, stmts }
++  }
++  const input = { type: 'pl.line_created' as const, plAccountId: 'accA', dedupeKey: 'line_created:accA', occurredAt: new Date('2026-10-11T12:00:00Z'), facts: { did_masked: '+1 767 *** 5001' } }
++  it('POSITIVE: enabled -> takes the per-account xact lock, then inserts ON CONFLICT DO NOTHING, on the CALLER\'S tx', async () => {
++    const { tx, stmts } = fakeTx()
++    const r = await enqueueSfEvent(tx, input, ON)
++    expect(r).toMatchObject({ enqueued: true, version: 1, eventId: eventIdFor('line_created:accA') })
++    expect(stmts[0]).toContain('pg_advisory_xact_lock'); expect(stmts[1]).toContain('INSERT INTO sf_event_outbox'); expect(stmts[1]).toContain('ON CONFLICT (dedupe_key) DO NOTHING')
++  })
++  it('disabled (default) -> zero statements (control: the same input is written when enabled, above)', async () => {
++    const { tx, stmts } = fakeTx()
++    expect(await enqueueSfEvent(tx, input, {} as any)).toMatchObject({ enqueued: false, reason: 'disabled' }); expect(stmts).toEqual([])
++    expect(await enqueueSfEventSafe(tx, input, {} as any)).toMatchObject({ reason: 'disabled' }); expect(stmts).toEqual([])
++  })
++  it('refuses types with no emitter (plan_purchased, signup_started, trial_*) and invalid facts — zero statements; control: line_created passes', async () => {
++    for (const type of ['pl.plan_purchased', 'pl.signup_started', 'pl.trial_ending', 'pl.trial_expired']) {
++      const { tx, stmts } = fakeTx()
++      expect(await enqueueSfEvent(tx, { ...input, type: type as any }, ON)).toMatchObject({ enqueued: false, reason: 'invalid', detail: 'type_not_emittable' }); expect(stmts).toEqual([])
++    }
++    const { tx, stmts } = fakeTx()
++    expect(await enqueueSfEvent(tx, { ...input, type: 'pl.first_call', facts: {} }, ON)).toMatchObject({ reason: 'invalid' }); expect(stmts).toEqual([])
++    expect((await enqueueSfEvent(fakeTx().tx, input, ON)).enqueued).toBe(true)
++  })
++  it('SAFE variant wraps in a SAVEPOINT and RELEASEs on success', async () => {
++    const { tx, stmts } = fakeTx()
++    await enqueueSfEventSafe(tx, input, ON)
++    expect(stmts[0]).toBe('SAVEPOINT sf_outbox_sp'); expect(stmts[stmts.length - 1]).toBe('RELEASE SAVEPOINT sf_outbox_sp')
++  })
++  it('SAFE variant: a failing insert rolls back TO THE SAVEPOINT, does not throw, logs without secrets — the engine change is not lost', async () => {
++    const { tx, stmts } = fakeTx({ failInsert: true })
++    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
++    const r = await enqueueSfEventSafe(tx, input, ON)
++    expect(r).toMatchObject({ enqueued: false, reason: 'error' })
++    expect(stmts).toContain('ROLLBACK TO SAVEPOINT sf_outbox_sp'); expect(stmts).not.toContain('RELEASE SAVEPOINT sf_outbox_sp')
++    expect(String(log.mock.calls[0][0])).toContain('ENQUEUE FAILED'); log.mockRestore()
++    // control: the same call on a healthy tx does enqueue
++    expect((await enqueueSfEventSafe(fakeTx().tx, input, ON)).enqueued).toBe(true)
++  })
++})
++
++// ── the deliverer ────────────────────────────────────────────────────────────────────────────────────────────────────────
++type Row = ClaimedRow & { delivered?: Date; dead?: string; retryAt?: Date; lastError?: string; lastStatus?: number | null }
++function memStore(rows: Row[], phones: Record<string, string | null> = {}, held = { locked: false }): OutboxStore & { rows: Row[] } {
++  return {
++    rows,
++    async claim(now, limit) {
++      if (held.locked) return null
++      const due = rows.filter(r => !r.delivered && !r.dead && (!r.retryAt || r.retryAt <= now)).slice(0, limit)
++      for (const r of due) { r.attempts++; r.retryAt = new Date(now.getTime() + 90_000) }
++      return due.map(r => ({ ...r }))
++    },
++    async markDelivered(id, status, now) { const r = rows.find(x => x.eventId === id)!; r.delivered = now; r.lastStatus = status; r.lastError = undefined },
++    async markRetry(id, status, error, nextAt) { const r = rows.find(x => x.eventId === id)!; r.retryAt = nextAt; r.lastStatus = status; r.lastError = error },
++    async markDead(id, status, error, now) { const r = rows.find(x => x.eventId === id)!; r.dead = error; r.lastStatus = status; r.lastError = error; void now },
++    async resolveWaId(acct) { return acct in phones ? phones[acct] : '17675550101' },
++  }
++}
++const mkRow = (n: number, type = 'pl.line_created', acct = 'accA', over: Partial<ClaimedRow> = {}): Row => ({
++  eventId: eventIdFor(`k${n}`), type, plAccountId: acct, version: n, occurredAt: new Date('2026-10-11T12:00:00Z'), attempts: 0,
++  payload: type === 'pl.first_call' ? { first_call_at: '2026-10-11T12:00:00.000Z' } : { did_masked: '+1 767 *** 5001' }, ...over,
++})
++function deps(store: OutboxStore, fetchImpl: any, over: Partial<TickDeps> = {}): TickDeps {
++  let t = 1_800_000_000_000
++  return { store, fetchImpl, config: { url: 'http://fork.invalid/api/webhooks/personal-line/11111111-1111-4111-8111-111111111111', kid: 'sf1', key: KEY, misconfig: [] }, now: () => (t += 10), random: () => 1, ...over }
++}
++const ok = (b: unknown = { ok: true, status: 'processed', factsApplied: true }) => async () => new Response(JSON.stringify(b), { status: 200 })
++
++describe('deliverer', () => {
++  it('POSITIVE: a due row is signed + POSTed to the configured URL and marked delivered (2xx)', async () => {
++    const s = memStore([mkRow(1)])
++    const calls: any[] = []
++    const r = await runSfOutboxTickWith(deps(s, async (u: string, init: any) => { calls.push({ u, init }); return new Response('{"ok":true,"status":"processed","factsApplied":true}', { status: 200 }) }), ON)
++    expect(r).toMatchObject({ ran: true, claimed: 1, delivered: 1, retried: 0, dead: 0 })
++    expect(s.rows[0].delivered).toBeInstanceOf(Date)
++    expect(calls).toHaveLength(1); expect(calls[0].u).toContain('/api/webhooks/personal-line/')
++    const body = calls[0].init.body as string
++    const h = calls[0].init.headers
++    expect(h['x-pl-sf-sig']).toBe(signIngress(KEY, Number(h['x-pl-sf-ts']), body))
++    expect(JSON.parse(body)).toMatchObject({ event_id: s.rows[0].eventId, type: 'pl.line_created', version: 1, pl_account_id: 'accA', wa_id: '17675550101' })
++    expect(calls[0].init.redirect).toBe('manual')
++  })
++  it('duplicate-event 200 is DELIVERED (counted as a duplicate), never retried', async () => {
++    const s = memStore([mkRow(1)])
++    const r = await runSfOutboxTickWith(deps(s, ok({ ok: true, status: 'duplicate' })), ON)
++    expect(r).toMatchObject({ delivered: 1, duplicates: 1, retried: 0, dead: 0 }); expect(s.rows[0].delivered).toBeDefined()
++  })
++  it('5xx and timeout leave the row PENDING with a backoff (not delivered, not dead); each is a different failure shape, one tick each', async () => {
++    for (const f of [async () => new Response('x', { status: 503 }), async () => { throw Object.assign(new Error('t'), { name: 'TimeoutError' }) }, async () => { throw new Error('ECONNREFUSED') }]) {
++      const s = memStore([mkRow(1)])
++      const r = await runSfOutboxTickWith(deps(s, f), ON)
++      expect(r).toMatchObject({ retried: 1, delivered: 0, dead: 0 })
++      expect(s.rows[0].delivered).toBeUndefined(); expect(s.rows[0].dead).toBeUndefined()
++      expect(s.rows[0].retryAt!.getTime()).toBeGreaterThan(1_800_000_000_000 + 29_000)   // attempt 1 -> ~30 s (rand=1)
++    }
++  })
++  it('permanent 4xx (422 / 401 / 409) dead-letter VISIBLY with the reason; positive twin: the same row delivers when the receiver says 200', async () => {
++    for (const [st, err] of [[422, 'invalid_event'], [401, 'invalid_signature'], [409, 'identity_conflict']] as const) {
++      const s = memStore([mkRow(1)])
++      const r = await runSfOutboxTickWith(deps(s, async () => new Response(JSON.stringify({ ok: false, error: err }), { status: st })), ON)
++      expect(r).toMatchObject({ dead: 1, delivered: 0, retried: 0, deadErrors: [`http_${st}:${err}`] })
++      expect(s.rows[0].dead).toBe(`http_${st}:${err}`); expect(s.rows[0].delivered).toBeUndefined()
++    }
++    const s = memStore([mkRow(1)])
++    expect((await runSfOutboxTickWith(deps(s, ok()), ON)).dead).toBe(0)
++  })
++  it('a retried row is not re-attempted before its backoff elapses and IS delivered after the receiver returns; no duplicate sends', async () => {
++    const s = memStore([mkRow(1)])
++    let up = false, posts = 0
++    let clock = 1_800_000_000_000
++    const d = deps(s, async () => { posts++; return up ? new Response('{"ok":true,"status":"processed","factsApplied":true}', { status: 200 }) : new Response('{"ok":false}', { status: 503 }) }, { now: () => clock })
++    expect((await runSfOutboxTickWith(d, ON)).retried).toBe(1)
++    expect(posts).toBe(1)
++    expect((await runSfOutboxTickWith(d, ON)).claimed).toBe(0)       // inside the backoff window: nothing claimed, nothing sent
++    expect(posts).toBe(1)
++    up = true; clock += 61_000
++    const r = await runSfOutboxTickWith(d, ON)
++    expect(r).toMatchObject({ claimed: 1, delivered: 1 }); expect(posts).toBe(2)
++    expect((await runSfOutboxTickWith(d, ON)).claimed).toBe(0); expect(posts).toBe(2)   // delivered rows are never sent again
++  })
++  it('after SF_MAX_ATTEMPTS failures a retryable error dead-letters as max_attempts_exceeded; one attempt earlier it is still pending', async () => {
++    const f = async () => new Response('x', { status: 500 })
++    const s1 = memStore([mkRow(1, 'pl.line_created', 'accA', { attempts: SF_MAX_ATTEMPTS - 2 })])   // claim -> attempts = MAX-1
++    expect((await runSfOutboxTickWith(deps(s1, f), ON)).retried).toBe(1)
++    const s2 = memStore([mkRow(1, 'pl.line_created', 'accA', { attempts: SF_MAX_ATTEMPTS - 1 })])   // claim -> attempts = MAX
++    const r = await runSfOutboxTickWith(deps(s2, f), ON)
++    expect(r.dead).toBe(1); expect(s2.rows[0].dead).toBe('max_attempts_exceeded:http_500')
++  })
++  it('a fresh signature per attempt: the retry carries a NEW timestamp and a valid MAC (an expired reused ts would be a 401)', async () => {
++    const s = memStore([mkRow(1)])
++    const seen: Array<{ ts: string; sig: string; body: string }> = []
++    let clock = 1_800_000_000_000
++    const d = deps(s, async (_u: string, init: any) => { seen.push({ ts: init.headers['x-pl-sf-ts'], sig: init.headers['x-pl-sf-sig'], body: init.body }); return new Response('x', { status: 503 }) }, { now: () => clock })
++    await runSfOutboxTickWith(d, ON); clock += 120_000; await runSfOutboxTickWith(d, ON)
++    expect(seen).toHaveLength(2); expect(seen[1].ts).not.toBe(seen[0].ts)
++    for (const x of seen) expect(x.sig).toBe(signIngress(KEY, Number(x.ts), x.body))
++    expect(seen[0].body).toBe(seen[1].body)   // same event, same id, same version
++  })
++  it('no wa_id for the account -> dead-lettered "no_wa_id", receiver NOT called (control: accA with a phone is called)', async () => {
++    const calls: string[] = []
++    const f = async (u: string) => { calls.push(u); return new Response('{"ok":true}', { status: 200 }) }
++    const s = memStore([mkRow(1, 'pl.line_created', 'accNoPhone'), mkRow(1, 'pl.line_created', 'accA')], { accNoPhone: null })
++    const r = await runSfOutboxTickWith(deps(s, f), ON)
++    expect(r).toMatchObject({ delivered: 1, dead: 1, deadErrors: ['no_wa_id'] }); expect(calls).toHaveLength(1)
++  })
++  it('LOCK HELD by another tick: nothing claimed, nothing sent, reported as skipped=locked (control: free lock sends)', async () => {
++    let posts = 0
++    const f = async () => { posts++; return new Response('{"ok":true}', { status: 200 }) }
++    const held = { locked: true }
++    const s = memStore([mkRow(1)], {}, held)
++    expect(await runSfOutboxTickWith(deps(s, f), ON)).toMatchObject({ ran: false, skipped: 'locked', claimed: 0 }); expect(posts).toBe(0)
++    held.locked = false
++    expect((await runSfOutboxTickWith(deps(s, f), ON)).delivered).toBe(1); expect(posts).toBe(1)
++  })
++  it('disabled flag or missing config: no claim, no request (control: configured+enabled sends)', async () => {
++    let posts = 0
++    const f = async () => { posts++; return new Response('{"ok":true}', { status: 200 }) }
++    const s = memStore([mkRow(1)])
++    expect(await runSfOutboxTickWith(deps(s, f), {} as any)).toMatchObject({ ran: false, skipped: 'disabled' })
++    expect(await runSfOutboxTickWith(deps(s, f, { config: { url: null, kid: 'sf1', key: null, misconfig: ['PL_SF_EVENTS_KEY'] } }), ON)).toMatchObject({ ran: false, skipped: 'not_configured', misconfig: ['PL_SF_EVENTS_KEY'] })
++    expect(posts).toBe(0); expect(s.rows[0].attempts).toBe(0)
++    expect((await runSfOutboxTickWith(deps(s, f), ON)).delivered).toBe(1)
++  })
++  it('a later version of the same account goes out in the SAME tick once the earlier one lands (multi-round claim)', async () => {
++    const s = memStore([mkRow(1), mkRow(2, 'pl.first_call')])
++    const order: number[] = []
++    const store: OutboxStore = { ...s, async claim(now, limit) {   // mimic the SQL's "no earlier undelivered version" rule
++      const cand = s.rows.filter(r => !r.delivered && !r.dead && (!r.retryAt || r.retryAt <= now) && !s.rows.some(p => p.plAccountId === r.plAccountId && p.version < r.version && !p.delivered && !p.dead)).slice(0, limit)
++      for (const r of cand) { r.attempts++; r.retryAt = new Date(now.getTime() + 90_000) }
++      return cand.map(r => ({ ...r }))
++    } }
++    const r = await runSfOutboxTickWith(deps(store, async (_u: string, init: any) => { order.push(JSON.parse(init.body).version); return new Response('{"ok":true,"status":"processed","factsApplied":true}', { status: 200 }) }), ON)
++    expect(order).toEqual([1, 2]); expect(r.delivered).toBe(2)
++  })
++})
