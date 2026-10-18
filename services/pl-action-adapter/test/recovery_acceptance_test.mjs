@@ -281,6 +281,50 @@ const publicTo = (c) => c.customerSaw.length
   t('S8 an action outside the enum is refused', (await tool(c, 'pl_recovery_act', { action: 'reset_sip_password' })).code, 'action_not_in_playbook')
 }
 
+// ═════ S9 TEST-ROUTE INSTANCE: instance-scoped tool + sender allowlists (owner 2026-10-18: no global flag under a test-account description) ═════
+{ const TOOLS = new Set(['pl_journey', 'pl_guide', 'pl_recovery', 'pl_recovery_pause', 'pl_recovery_resume', 'pl_escalate'])
+  const tester = customer('15550100590', 7090, 590, P('link_issued', 'link_not_opened'))
+  const stranger = customer('15550100591', 7091, 591, P('link_issued', 'link_not_opened'))
+  const TR = await listen(A.makeServer({ ...base, recoveryTools: true, toolsAllowlist: TOOLS, senderAllowlist: new Set([tester.wa]) }, db, f).server)
+  say(tester.wa, 'hi'); say(stranger.wa, 'hi')
+  const listed = ((await rpc(TR, 'tools/list', {})).result?.tools ?? []).map((x) => x.name).sort()
+  t('S9 only the allowlisted tools are listed on the test-route instance', listed.join(','), [...TOOLS].sort().join(','))
+  t('S9 sending tools are NOT offered there (pl_next_step / pl_present_offer / pl_provision / pl_recovery_act)', ['pl_next_step', 'pl_present_offer', 'pl_provision', 'pl_recovery_act'].some((n) => listed.includes(n)), false)
+  const before = stranger.plCalls.length, seen = publicTo(stranger)
+  let r = await tool(stranger, 'pl_recovery', {}, { url: TR })
+  t('S9 REAL CUSTOMER EXCLUDED: a verified sender not on the allowlist is refused', r.code, 'sender_not_allowlisted')
+  t('S9 ...and nothing was read from plsvc or sent to them', `${stranger.plCalls.length - before}/${publicTo(stranger) - seen}`, '0/0')
+  r = await tool(tester, 'pl_recovery', {}, { url: TR })
+  t('S9 POSITIVE CONTROL: the allowlisted tester is served', `${r.code}/${r.reason}`, 'recovery/link_not_opened')
+  t('S9 a sending action is not callable on the test route', (await tool(tester, 'pl_recovery_act', { action: 'send_setup' }, { url: TR })).code, 'unknown_tool')
+  // Every signed /v1/* endpoint is refused on the test-route instance, with a CORRECT signature (so the refusal is the route rule, not a bad
+  // signature); the positive twin: the SAME signed proactive request is accepted by the production instance (ON).
+  const sigFor = (purpose, raw) => crypto.createHmac('sha256', Buffer.from(KEY, 'utf8')).update(`${purpose}.${raw}`, 'utf8').digest('base64url')
+  const pro = JSON.stringify({ kid: 'k1', wa_id: tester.wa, key: 'stalled:link_not_opened', ref: 'rowS9', iat: nowS(), nonce: crypto.randomBytes(16).toString('base64url') })
+  const sentBefore = publicTo(tester)
+  const proTR = await fetch(TR + '/v1/proactive', { method: 'POST', headers: { 'content-type': 'application/json', 'x-pl-proactive-signature': sigFor('pl-proactive-v1', pro) }, body: pro })
+  t('S9 /v1/proactive (correctly signed) is refused on the test route', `${proTR.status}/${(await proTR.json()).error}`, '403/route_endpoints_disabled')
+  t('S9 ...and the tester received nothing from it', publicTo(tester) - sentBefore, 0)
+  for (const [path, hdr, purpose] of [['/v1/staff', 'x-pl-staff-signature', 'pl-staff-v1'], ['/v1/optional-contact', 'x-pl-optional-contact-signature', 'pl-optional-contact-v1']]) {
+    const raw = JSON.stringify({ kid: 'k1', wa_id: tester.wa, action: 'mirror', key: 'plan_expiring', ref: 'rS9', text: 'x', iat: nowS(), nonce: crypto.randomBytes(16).toString('base64url') })
+    const r9 = await fetch(TR + path, { method: 'POST', headers: { 'content-type': 'application/json', [hdr]: sigFor(purpose, raw) }, body: raw })
+    t(`S9 ${path} is refused on the test route`, `${r9.status}/${(await r9.json()).error}`, '403/route_endpoints_disabled')
+  }
+  for (const path of ['/v1/action', '/v1/eligibility']) {
+    const r9 = await fetch(TR + path, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${base.bearer}` }, body: '{}' })
+    t(`S9 ${path} is refused on the test route`, `${r9.status}/${(await r9.json()).error}`, '403/route_endpoints_disabled')
+  }
+  const proON = JSON.stringify({ kid: 'k1', wa_id: tester.wa, key: 'stalled:link_not_opened', ref: 'rowS9p', iat: nowS(), nonce: crypto.randomBytes(16).toString('base64url') })
+  const onR = await fetch(ON + '/v1/proactive', { method: 'POST', headers: { 'content-type': 'application/json', 'x-pl-proactive-signature': sigFor('pl-proactive-v1', proON) }, body: proON })
+  t('S9 POSITIVE TWIN: the same signed proactive request IS accepted by the production instance (status 200)', onR.status, 200)
+  const prodList = ((await rpc(ON, 'tools/list', {})).result?.tools ?? []).map((x) => x.name)
+  t('S9 CONTROL: the instance WITHOUT lists still lists every tool (production behaviour unchanged)', prodList.includes('pl_next_step') && prodList.includes('pl_present_offer') && prodList.includes('pl_recovery_act'), true)
+  const PL = typeof A.parseList === 'function' ? A.parseList : null
+  t('S9 parseList: unset -> null (no restriction)', PL ? PL('', /x/) : 'parseList missing', null)
+  let threw = false; try { if (!PL) throw 0; PL('15550100590,not-a-number', /^[1-9][0-9]{6,15}$/) } catch (e) { threw = e !== 0 }
+  t('S9 parseList: one malformed entry fails CLOSED (boot error), never a silently shorter list', threw, true)
+}
+
 // ═════ run-wide proofs ═════
 const privatePosts = cwLog.filter((x) => x.method === 'POST' && /\/messages$/.test(x.p) && x.body?.private)
 t('P1 CONTROL the run posted private packages', privatePosts.length >= 4, true)

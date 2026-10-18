@@ -21,6 +21,15 @@ const WA_ID = /^[1-9][0-9]{6,15}$/
 const b64u = (b) => Buffer.from(b).toString('base64url')
 const sha256hex = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex')
 const readSecret = (p) => fs.readFileSync(p, 'utf8').replace(/\r?\n$/, '')
+/** Comma list -> Set of entries matching `re`, or null when unset/empty. A malformed entry fails the whole list CLOSED (boot error). */
+export function parseList(raw, re) {
+  const s = String(raw ?? '').trim()
+  if (!s) return null
+  const items = s.split(',').map((x) => x.trim()).filter(Boolean)
+  const bad = items.filter((x) => !re.test(x))
+  if (bad.length) throw new Error(`invalid list entry (${bad.length} malformed)`)
+  return new Set(items)
+}
 const eq = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y) }
 
 export function loadConfig(env = process.env) {
@@ -42,6 +51,12 @@ export function loadConfig(env = process.env) {
     // Activation recovery loop tools (owner correction 2026-10-18). OFF unless PL_RECOVERY_TOOLS=1: the working concierge never sees them;
     // they are for the Clawith target runtime at cutover. The customer-pause hold on stall reminders is always on (it only ever holds).
     recoveryTools: env.PL_RECOVERY_TOOLS === '1',
+    // INSTANCE-SCOPED test-route controls (owner 2026-10-18: no globally scoped flag under a test-account description). Both unset on the
+    // production instance = existing behaviour. On a separate test-route instance (its own inbox, agent identity and context key):
+    //  ADAPTER_TOOLS_ALLOWLIST  only these tools are listed/callable, and the deterministic /v1/action send path is refused;
+    //  ADAPTER_SENDER_ALLOWLIST only these VERIFIED senders (WhatsApp ids) are served; anyone else writing to the test number is refused.
+    toolsAllowlist: (() => { const s = parseList(env.ADAPTER_TOOLS_ALLOWLIST, /^[a-z_]{2,40}$/); if (s) for (const n of s) if (!SCHEMAS[n]) throw new Error(`ADAPTER_TOOLS_ALLOWLIST names an unknown tool: ${n}`); return s })(),
+    senderAllowlist: parseList(env.ADAPTER_SENDER_ALLOWLIST, WA_ID),
     // Optional Chatwoot team for pl_escalate (set to the SAME escalation target the relay's native handoff uses). Unset = open queue only.
     recoveryEscalationTeamId: /^\d{1,10}$/.test(env.PL_RECOVERY_ESCALATION_TEAM_ID ?? '') ? Number(env.PL_RECOVERY_ESCALATION_TEAM_ID) : null,
     // Onboarding through the native WhatsApp Flow (owner 2026-10-10). Default ON; PL_FLOW_ONBOARDING=0 restores the chat offer + '1' path.
@@ -1384,6 +1399,7 @@ export function makeServer(cfg, db, f = fetch) {
     if (method === 'initialize') return { jsonrpc: '2.0', id, result: { protocolVersion: params?.protocolVersion || '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'pl-action-adapter', version: '1' } } }
     if (method === 'notifications/initialized') return null
     const exposed = (name) => !!SCHEMAS[name] && !NEVER_EXPOSED.has(name) && (cfg.accountTools || !ACCOUNT_TOOLS.has(name)) && (cfg.recoveryTools || !RECOVERY_TOOLS.has(name))
+      && (!cfg.toolsAllowlist || cfg.toolsAllowlist.has(name))
     if (method === 'tools/list') return { jsonrpc: '2.0', id, result: { tools: Object.entries(SCHEMAS).filter(([name]) => exposed(name)).map(([name, s]) => ({ name, ...s })) } }
     if (method !== 'tools/call') return rpcErr(id, -32601, 'method not found')
     const name = params?.name, args = params?.arguments ?? {}
@@ -1396,6 +1412,8 @@ export function makeServer(cfg, db, f = fetch) {
     let who
     try { who = await resolveSender(cfg, v.claims, f) } catch (e) { return toolResult(id, false, { code: 'identity_unverified', detail: e?.code || 'chatwoot_unreachable' }) }
     if (!who.ok) return toolResult(id, false, { code: 'identity_unverified', detail: who.why })
+    // Test-route instance: a verified sender who is not on the allowlist is refused (nothing read, nothing sent). Unset = everyone (production).
+    if (cfg.senderAllowlist && !cfg.senderAllowlist.has(String(who.waId))) return toolResult(id, false, { code: 'sender_not_allowlisted' })
     try {
       const out = await handlers[name](who, args)
       // rc2 envelope contract (Codex native validator): provision/status/link results also carry the customer-visible fields under `data`; pl_present_offer stays FLAT (the relay reads customer_message at the top level).
@@ -1439,6 +1457,10 @@ export function makeServer(cfg, db, f = fetch) {
     if (rq.url === '/health') return send(200, { ok: true })
     if (!sourceAllowed(rq.socket.remoteAddress, cfg.sourceCidrs)) return send(403, { error: 'source_not_allowed' })     // network restriction in addition to the bearer
     // rc12: the PL service's proactive follow-ups authenticate with their own signature (plsvc holds the PL key, not this bearer).
+    // Test-route instance (tools allowlisted): ONLY /mcp is served. Every signed /v1/* endpoint (proactive reminders, staff notes, optional-
+    // contact, eligibility, deterministic actions) belongs to the production instance; refusing them here closes every send path that does
+    // not pass the sender allowlist (Codex delta review 2026-10-18, High).
+    if (cfg.toolsAllowlist && String(rq.url || '').startsWith('/v1/')) return send(403, { error: 'route_endpoints_disabled' })
     if (rq.method === 'POST' && rq.url === '/v1/proactive') {
       const raw = await readRaw(rq); if (raw === null) return send(413, { error: 'too_large' })
       const v = verifyProactive(raw, rq.headers['x-pl-proactive-signature'], cfg)
