@@ -18,6 +18,11 @@ Talks to the Personal Line service (plsvc) and Chatwoot; called by the relay and
 | Env | `PL_DETERMINISTIC_TAPS=0` (taps go to the agent) |
 
 ## Releases
+- **test-route-scoping** (built 2026-10-18, NOT deployed; on top of the deployed `dc979d15`; Codex-reviewed). Instance-scoped, all unset on production
+  (= deployed behaviour): `ADAPTER_TOOLS_ALLOWLIST` (only the listed tools are listed/callable; unknown names fail at boot; with it set the instance
+  serves ONLY `/mcp` - every `/v1/*` endpoint answers 403 `route_endpoints_disabled`) and `ADAPTER_SENDER_ALLOWLIST` (only the listed VERIFIED
+  senders are served; others get `sender_not_allowlisted` before any read or send; a malformed entry fails at boot). For a SEPARATE test-route
+  instance (inbox 18), never for the production instance. Tests: `node test/recovery_acceptance_test.mjs` -> 80/80 (S9 = the test-route instance).
 - **recovery-1** (built 2026-10-18, NOT deployed; file sha256 `dc979d15` (was `f791e482`) on top of running `77fa62cd`; Codex-reviewed). Everything new is OFF by default.
   (1) `POST /v1/staff` (signed, purpose `pl-staff-v1`): private stall card / mirror note in the customer's Chatwoot conversation; idempotent per ref;
   ambiguous posts keep their claim; labels re-read before the replace-only write. (2) Agent-led activation recovery (owner correction 2026-10-18):
