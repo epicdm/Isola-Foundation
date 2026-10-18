@@ -4,6 +4,11 @@ MCP tool server for the Personal Line concierge agent (Uplink agent `28a55c69`):
 pl_next_step, pl_provision, pl_balance, pl_recent_calls, pl_status, deterministic taps/STOP/START, proactive messages.
 Talks to the Personal Line service (plsvc) and Chatwoot; called by the relay and by Uplink over MCP.
 
+> **2026-10-18 lineage (commit what runs):** production now runs the adapter on **host04** (`uplink_pl-action-adapter`, bind-mounted
+> `/home/epicadmin/pladapter/pl-action-adapter.mjs`), file sha256 **`77fa62cd`** = the optional-contact guard release deployed 2026-10-17
+> 06:01Z (Port `ev-laneA-optional-contact-guard-DEPLOYED-adapter-and-plsvc-probes-pass-two-ticks-verified-2026-10-17`). This commit
+> records that file byte-for-byte; the table below is the 2026-10-11 history and is kept as written.
+
 | | Value (2026-10-11) |
 |---|---|
 | Service | `pl-action-adapter` (Swarm, host03; image `node:22-slim` pinned by digest) |
