@@ -32,10 +32,18 @@ export function loadConfig(env = process.env) {
     plBase: need('PL_BASE_URL').replace(/\/+$/, ''), plKid: need('PL_KID'), plKey: readSecret(need('PL_KEY_FILE')), plPnid: need('PL_PNID'),
     cwBase: need('CHATWOOT_BASE_URL').replace(/\/+$/, ''), cwAccount: Number(env.CHATWOOT_ACCOUNT_ID || 2), cwInbox: Number(env.CHATWOOT_INBOX_ID || 11),
     cwToken: readSecret(need('CHATWOOT_API_TOKEN_FILE')),
+    // Staff routing (support packet 2026-10-18): optional Chatwoot agent ids. Unset = the stall card and labels only, no assignment.
+    stallOwnerAgentId: /^\d{1,10}$/.test(env.PL_STALL_OWNER_AGENT_ID ?? '') ? Number(env.PL_STALL_OWNER_AGENT_ID) : null,
+    stallEscalationAgentId: /^\d{1,10}$/.test(env.PL_STALL_ESCALATION_AGENT_ID ?? '') ? Number(env.PL_STALL_ESCALATION_AGENT_ID) : null,
     workspaceId: need('EXPECTED_WORKSPACE_ID'), agentId: need('EXPECTED_AGENT_ID'), agentSlug: need('EXPECTED_AGENT_SLUG'),
     directOffer: env.STAGING_DIRECT_OFFER === '1',
     // The account tools (explain/balance/recent calls) are exposed to the model only when enabled: they go live together with the skill that uses them, after a paid eval.
     accountTools: env.PL_ACCOUNT_TOOLS === '1',
+    // Activation recovery loop tools (owner correction 2026-10-18). OFF unless PL_RECOVERY_TOOLS=1: the working concierge never sees them;
+    // they are for the Clawith target runtime at cutover. The customer-pause hold on stall reminders is always on (it only ever holds).
+    recoveryTools: env.PL_RECOVERY_TOOLS === '1',
+    // Optional Chatwoot team for pl_escalate (set to the SAME escalation target the relay's native handoff uses). Unset = open queue only.
+    recoveryEscalationTeamId: /^\d{1,10}$/.test(env.PL_RECOVERY_ESCALATION_TEAM_ID ?? '') ? Number(env.PL_RECOVERY_ESCALATION_TEAM_ID) : null,
     // Onboarding through the native WhatsApp Flow (owner 2026-10-10). Default ON; PL_FLOW_ONBOARDING=0 restores the chat offer + '1' path.
     flowOnboarding: env.PL_FLOW_ONBOARDING !== '0',
     // rc13d (owner 2026-10-11: 'give the agent the facts and let it loose'): PL_DETERMINISTIC_TAPS=0 sends button taps to the AGENT as
@@ -160,6 +168,12 @@ const SCHEMAS = {
   pl_journey: { description: 'Read this customer\'s verified situation: whether they have a line, setup progress, whether the app is connected right now, whether a call has ever gone through, included minutes, plan end, wallet credit, anything needing attention, plus the next-step buttons for their state. Nothing is sent - you write the reply from these facts and the buttons are attached to it. Call it at the start of a conversation, for greetings/help/"what can I do", and whenever you need their current state.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
   pl_guide: { description: 'Read verified facts for one topic, for this customer: how_it_works (what the service is and how setup works), plans (the plan catalogue with prices, minutes and which calls each covers - use it to recommend a plan), calling (how to dial and what calls cost them, given their plan and credit), call_failed (a diagnosis from their live connection, minutes and credit - use it when a call did not go through), check_connection (is the app connected right now). Nothing is sent - you write the reply and the returned buttons are attached to it.', inputSchema: { type: 'object', properties: { topic: { type: 'string', enum: ['how_it_works', 'plans', 'calling', 'call_failed', 'check_connection'] } }, required: ['topic'], additionalProperties: false } },
   pl_setup_link: { description: 'Get a setup link for this customer\'s softphone or app sign-in.', inputSchema: { type: 'object', properties: { kind: { type: 'string', enum: ['softphone_activation', 'app_signin'] } }, required: ['kind'], additionalProperties: false } },
+  // ── activation recovery loop (owner correction 2026-10-18: Personal Line is an AGENT-LED online service). Exposed only with PL_RECOVERY_TOOLS=1.
+  pl_recovery: { description: 'Read this customer\'s VERIFIED activation stage and the ONE authorised recovery playbook for it: what is observed, the single action you may run, what the customer must do, what proves success, attempts used/left, and whether a person is now required. Nothing is sent. Call it before any recovery action and again after the customer acts, to verify progress. Never invent a repair outside the playbook.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  pl_recovery_act: { description: 'Run the playbook\'s authorised recovery action for this customer\'s CURRENT stall (send_setup = fresh setup button; check_connection = live connection check with the fix steps; diagnose_call = why calls are not connecting, from live facts). Refused if it is not the playbook action, the attempt limit is reached, the customer paused, or a person holds the conversation. The message is written and sent by the system; reply with one short sentence only.', inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['send_setup', 'check_connection', 'diagnose_call'] } }, required: ['action'], additionalProperties: false } },
+  pl_recovery_pause: { description: 'Record that the customer, in THIS message, asked to stop or pause the setup help (paused = later, declined = not interested). Automated setup reminders stop for them until they ask to continue. Use only when the customer clearly said so.', inputSchema: { type: 'object', properties: { kind: { type: 'string', enum: ['paused', 'declined'] } }, required: ['kind'], additionalProperties: false } },
+  pl_recovery_resume: { description: 'Record that the customer, in THIS message, asked to continue setup after having paused or declined. Use only when they clearly asked to continue.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  pl_escalate: { description: 'Hand this customer to a person in Chatwoot, with the stage, evidence, the recovery actions already tried, the remaining blocker and the next human action. Allowed when pl_recovery says a person is required, when the playbook is exhausted, or when the customer asks for a person. The system posts the handoff line to the customer; after it, automated replies stop. Reply with nothing more.', inputSchema: { type: 'object', properties: { reason: { type: 'string', enum: ['requires_human', 'playbook_exhausted', 'customer_requested'] } }, required: ['reason'], additionalProperties: false } },
 }
 const ENVELOPE_DATA_TOOLS = new Set(['pl_provision', 'pl_status', 'pl_setup_link'])
 const refuse = (code, extra = {}) => ({ ok: false, result: { code, ...extra } })
@@ -381,6 +395,17 @@ export function composeJourney(j) {
   const f = j?.facts ?? {}
   const ch = stateChoices(j)
   const stage = `journey_${j?.state ?? 'unknown'}`
+  // Stage-aware wording (support packet 2026-10-18) from the service's account-bound `progress`, ONLY where its evidence is verified.
+  // Same stage label and choices (dedupe and buttons unchanged); never claims an install, a registration or a call it cannot see.
+  const p = j?.progress
+  if (p && p.evidence === 'verified') {
+    if (j?.state === 'setup_not_activated' && p.stage === 'link_issued')
+      return { stage, text: `Your line${did(f)} is ready. I sent you a setup link, and it hasn't been opened yet - tap *Continue setup* to carry on (an old link may have expired; this gives you a fresh one).`, choices: ch }
+    if (j?.state === 'setup_not_activated' && (p.stage === 'link_opened' || p.stage === 'code_verified'))
+      return { stage, text: `Your line${did(f)} is ready. You opened your setup link but the setup didn't finish - tap *Continue setup* and I'll take you through the rest.`, choices: ch }
+    if (j?.state === 'registered_no_call' && p.stage === 'call_attempts_failing')
+      return { stage, text: `📶 Your line${did(f)} is connected in Cloud Softphone, but your recent call attempts didn't connect. Make sure Cloud Softphone is open and you have data or Wi-Fi, then try again.`, choices: ch }
+  }
   switch (j?.state) {
     case 'no_line': return { stage, text: `EPIC Personal Line gives you your own +1 767 number for calls, in the free Cloud Softphone app - with a free trial to start. What would you like to do?\n\n${VOICE_ONLY_DISCLOSURE}`, choices: ch }
     case 'setup_not_activated': return { stage, text: `Your line${did(f)} is ready. The next step is setting it up in the free Cloud Softphone app - tap *Continue setup* and I'll take you through it.`, choices: ch }
@@ -551,6 +576,66 @@ export function composeProactive(key, j) {
   return null
 }
 
+// ── activation recovery loop (owner correction 2026-10-18) ──────────────────────────────────────────────────────────────────────────────
+// Detect the VERIFIED stage (plsvc /account/journey `progress`, the authoritative backend) -> one next step -> run ONE authorised playbook
+// action -> verify progress -> repeat until a working call, a customer pause/decline, or a human escalation accepted in Chatwoot.
+// Every action reuses an existing deterministic sender (one send per customer message, only while the AI owns the conversation, identity
+// from the signed relay context). Nothing here can repair the voice server, credit, plans or SIP: those are human (see `missing`).
+export const RECOVERY_TOOLS = new Set(['pl_recovery', 'pl_recovery_act', 'pl_recovery_pause', 'pl_recovery_resume', 'pl_escalate'])
+export const RECOVERY_PAUSE_S = 7 * 24 * 3600
+// Same customer-facing words as the relay's native handoff (services/sf-relay/src/relay.js HANDOFF_TEXT / NO_HANDOFF_TEXT).
+export const HANDOFF_TEXT = "I'll bring in a teammate to help with this — they'll reply right here as soon as they can."
+export const NO_HANDOFF_TEXT = "I could not reach a teammate just now. Please message us again in a little while."
+export const RECOVERY_FAIL_MAX = 2
+const LINK_PLAYBOOK = (observe) => ({ observe, actions: ['send_setup'], max: 2,
+  customer: 'Tap the new "Set up my line" button on this phone (Cloud Softphone installed first).',
+  success: 'progress.stage moves to handed_off (or later): the line was handed to Cloud Softphone',
+  escalate_when: '2 fresh setup buttons sent and the stage has not moved, or the service refuses the link' })
+export const RECOVERY_PLAYBOOKS = {
+  no_link_issued: LINK_PLAYBOOK('A line exists but no setup link was ever issued.'),
+  link_not_opened: LINK_PLAYBOOK('A setup link was sent, never opened, and has expired.'),
+  link_opened_not_completed: LINK_PLAYBOOK('A setup link was opened (or its opening was not tracked) but setup did not finish, and it expired.'),
+  no_handoff: LINK_PLAYBOOK('The customer verified on the setup page but the line was never handed to Cloud Softphone.'),
+  handoff_no_register: { observe: 'The line was handed to Cloud Softphone but the phone has not connected.', actions: ['check_connection', 'send_setup'], max: 3,
+    customer: 'Open Cloud Softphone on this phone with internet; if it shows no line, tap the fresh "Set up my line" button.',
+    success: 'progress.stage = registered (a SIP registration observed by the registration watcher)',
+    escalate_when: '3 attempts and still not connected' },
+  calls_not_connecting: { observe: 'The phone is connected but call attempts are failing (CDR).', actions: ['diagnose_call'], max: 2,
+    customer: 'Follow the diagnosis (number format, credit/plan, keep the app open) and try the call again.',
+    success: 'progress.stage = first_call_ok: an ANSWERED call in the CDR (technical evidence; customer confirmation is separate)',
+    escalate_when: '2 diagnoses and calls still fail' },
+  peer_absent_from_conf: { observe: 'The SIP peer for this line is missing on the voice server.', actions: [], max: 0, requires_human: true,
+    customer: 'Nothing - this cannot be fixed from the customer\'s phone.', success: 'progress.stage leaves peer_absent after a person repairs the SIP row',
+    escalate_when: 'immediately', missing: 'repairing the voice-server SIP peer (Magnus) is not an authorised agent tool' },
+}
+/** Pure: the playbook view for a progress record (null progress = the authoritative read failed: fail closed, a person decides). */
+export function recoveryView(progress, attemptsUsed, failures, paused) {
+  if (!progress || typeof progress !== 'object') return { terminal: null, must_escalate: true, escalate_reason: 'requires_human', why: 'progress_unknown' }
+  if (progress.stage === 'first_call_ok') return { terminal: 'working_call', must_escalate: false }
+  if (paused) return { terminal: paused, must_escalate: false }
+  if (!progress.stalled || !progress.reason) {
+    // Not stalled: the normal next step is the right help (pl_next_step / pl_journey); registration unreadable is an instrument problem.
+    return { terminal: null, playbook: null, must_escalate: false, guidance: progress.customer_guidance ?? null, evidence: progress.evidence }
+  }
+  const pb = RECOVERY_PLAYBOOKS[progress.reason]
+  if (!pb) return { terminal: null, must_escalate: true, escalate_reason: 'requires_human', why: `no_playbook:${progress.reason}` }
+  const exhausted = attemptsUsed >= pb.max || failures >= RECOVERY_FAIL_MAX
+  return { terminal: null, playbook: { reason: progress.reason, ...pb, attempts_used: attemptsUsed, attempts_left: Math.max(0, pb.max - attemptsUsed), failures },
+    must_escalate: !!pb.requires_human || exhausted, escalate_reason: pb.requires_human ? 'requires_human' : exhausted ? 'playbook_exhausted' : null }
+}
+/** The stall a ledger row belongs to: the reason + when the stage began (stable while the stall lasts; a new stall = a new key). */
+export const stallKeyOf = (p) => (p?.stalled && p.reason ? `${p.reason}@${String(p.since ?? 'unknown').slice(0, 24)}` : null)
+/** Pure: the escalation package (stage, evidence, actions attempted, remaining blocker, next human action). No links, tokens or SIP data. */
+export function escalationPackage(p, attempts, reason) {
+  const lines = [`🧭 Personal Line - handed to a person (${reason}).`,
+    p ? `Stage: ${p.stage} (evidence: ${p.evidence}) for ${p.age_minutes ?? '?'} min. Stall: ${p.reason ?? 'none'}.` : 'Stage: UNKNOWN (the activation record could not be read).',
+    `Actions attempted: ${attempts.length ? attempts.map((a) => `${a.action} at ${a.at} -> ${a.outcome}`).join('; ') : 'none'}.`,
+    `Remaining blocker: ${p?.reason ? (RECOVERY_PLAYBOOKS[p.reason]?.observe ?? p.reason) : 'unknown stage'}${RECOVERY_PLAYBOOKS[p?.reason]?.missing ? ` (${RECOVERY_PLAYBOOKS[p.reason].missing})` : ''}.`,
+    `Next human action: ${p?.staff_next_action ?? 'Read the account in the operator view; do not guess its stage.'}`,
+    `Automated replies have stopped (conversation open). Mark it pending to hand back to the assistant.`]
+  return redactForNote(lines.join('\n'))
+}
+
 export function makeHandlers(cfg, db, stats, f = fetch) {
   // One customer message + one event = ONE delivered message (the model can call a tool twice in a turn). Never claims a message that was not posted.
   async function deliverOwn(who, event, build) {
@@ -709,7 +794,91 @@ export function makeHandlers(cfg, db, stats, f = fetch) {
     return deliverOwn(who, stopped ? 'stop' : 'start', async () => ({ g: { stage: stopped ? 'proactive_stopped' : 'proactive_started', text: stopped ? STOP_TEXT : START_TEXT, choices: [BTN.human] } }))
   }
   const ok = (c) => c === 'offer' || c === 'line_status' || c === 'line_created' || c === 'line_exists' || c === 'link_minted' || c === 'no_account' || c === 'provisioning'
+  // ── recovery loop state: progress from plsvc (authoritative) + this customer's ledger rows in pl_adapter_guidance ──
+  async function recoveryState(who) {
+    const jr = await journeyRead(who)
+    const p = jr.ok ? (jr.j?.progress ?? null) : null
+    const h = waHash(cfg, who.waId)
+    const pause = (await db.query(`SELECT stage FROM pl_adapter_guidance WHERE wa_hash=$1 AND event='recovery_pause' AND created_at > now() - make_interval(secs => $2) ORDER BY id DESC LIMIT 1`, [h, RECOVERY_PAUSE_S])).rows[0]
+    const paused = pause ? (pause.stage === 'declined' ? 'customer_declined' : 'customer_paused') : null
+    const key = stallKeyOf(p)
+    let rows = []
+    if (key) rows = (await db.query(`SELECT message_id, stage, created_at FROM pl_adapter_guidance WHERE wa_hash=$1 AND event='recovery' AND (left(message_id, length($2)) = $2 OR left(message_id, length($3)) = $3) ORDER BY id`, [h, `act:${key}:`, `fail:${key}:`])).rows
+    const attempts = rows.filter((r) => r.message_id.startsWith('act:') && String(r.stage ?? '').endsWith('|delivered'))
+      .map((r) => ({ action: String(r.stage).split('|')[0], at: new Date(r.created_at).toISOString(), outcome: 'delivered' }))
+    const failures = rows.filter((r) => r.message_id.startsWith('fail:'))
+      .map((r) => ({ action: String(r.stage ?? '').split('|')[0], at: new Date(r.created_at).toISOString(), outcome: `refused:${String(r.stage ?? '').split('|')[1] ?? ''}` }))
+    return { jr, p, h, key, attempts, failures, view: recoveryView(p, attempts.length, failures.length, paused) }
+  }
   return {
+    async pl_recovery(who) {
+      const st = await recoveryState(who)
+      const p = st.p
+      return done({ code: 'recovery', ...st.view,
+        stage: p?.stage ?? null, evidence: p?.evidence ?? 'unknown', age_minutes: p?.age_minutes ?? null, reason: p?.reason ?? null,
+        coverage: p?.coverage ?? null, actions_attempted: [...st.attempts, ...st.failures],
+        note: st.view.terminal === 'working_call' ? 'The line has a verified answered call (technical evidence). Setup recovery is complete; ask the customer to confirm it works for them if useful.'
+          : st.view.terminal ? 'The customer paused or declined setup help. Do not push setup; help only with what they ask.'
+          : st.view.must_escalate ? 'A person is now required: call pl_escalate with escalate_reason. Do not try other repairs.'
+          : st.view.playbook ? 'Give the customer the playbook\'s ONE next step by calling pl_recovery_act with one of playbook.actions; after they act, call pl_recovery again to verify.'
+          : 'Not stalled: give the normal next step (pl_journey / pl_next_step).' })
+    },
+    async pl_recovery_act(who, args) {
+      const st = await recoveryState(who)
+      if (!st.jr.ok) return refuse('progress_unknown', { must_escalate: true })
+      const v = st.view
+      if (v.terminal) return refuse(v.terminal === 'working_call' ? 'already_working' : v.terminal, { terminal: v.terminal })
+      if (!v.playbook) return refuse('no_stall', { guidance: v.guidance ?? null })
+      if (v.must_escalate) return refuse('escalation_required', { escalate_reason: v.escalate_reason, attempts_used: v.playbook.attempts_used })
+      if (!v.playbook.actions.includes(args.action)) return refuse('action_not_in_playbook', { allowed: v.playbook.actions })
+      const claim = await db.query(`INSERT INTO pl_adapter_guidance (cw_conversation, wa_hash, message_id, event) VALUES ($1,$2,$3,'recovery') ON CONFLICT DO NOTHING RETURNING id`, [who.conversationId, st.h, `act:${st.key}:${who.messageId}`])
+      if (claim.rowCount !== 1) return done({ code: 'already_acted', note: 'A recovery action was ALREADY taken for this customer message. Reply with ONE short sentence only.' })
+      const id = claim.rows[0].id
+      const out = args.action === 'send_setup' ? (await deliverSetupButtons(who, 'recovery')).out
+        : await runAction(who, args.action === 'check_connection' ? 'check_connection' : 'call_failed')
+      if (out.ok) {
+        await db.query(`UPDATE pl_adapter_guidance SET stage=$2 WHERE id=$1`, [id, `${args.action}|delivered`])
+        return done({ ...out.result, recovery: { action: args.action, attempts_used: v.playbook.attempts_used + 1, attempts_left: Math.max(0, v.playbook.attempts_left - 1), success: v.playbook.success, verify: 'After the customer acts, call pl_recovery to verify progress.' } })
+      }
+      await db.query(`DELETE FROM pl_adapter_guidance WHERE id=$1`, [id]).catch(() => {})
+      const code = out.result?.code ?? 'service_unavailable'
+      // Not a failed repair: a person holds the conversation, or a short rate limit. Nothing is counted.
+      if (code === 'conversation_not_ai_owned' || code === 'link_rate_limited' || code === 'rate_limited') return out
+      await db.query(`INSERT INTO pl_adapter_guidance (cw_conversation, wa_hash, message_id, event, stage) VALUES ($1,$2,$3,'recovery',$4) ON CONFLICT DO NOTHING`, [who.conversationId, st.h, `fail:${st.key}:${who.messageId}`, `${args.action}|${String(code).slice(0, 40)}`])
+      return out
+    },
+    async pl_recovery_pause(who, args) {
+      if (args.kind !== 'paused' && args.kind !== 'declined') return refuse('invalid_arguments')
+      await db.query(`INSERT INTO pl_adapter_guidance (cw_conversation, wa_hash, message_id, event, stage) VALUES ($1,$2,$3,'recovery_pause',$4) ON CONFLICT DO NOTHING`, [who.conversationId, waHash(cfg, who.waId), `pause:${who.messageId}`, args.kind])
+      return done({ code: 'recovery_paused', kind: args.kind, note: 'Setup reminders are stopped for this customer until they ask to continue. Acknowledge briefly; do not push setup.' })
+    },
+    async pl_recovery_resume(who) {
+      const r = await db.query(`DELETE FROM pl_adapter_guidance WHERE wa_hash=$1 AND event='recovery_pause'`, [waHash(cfg, who.waId)])
+      return done({ code: 'recovery_resumed', cleared: r.rowCount ?? 0, note: 'Setup help is back on. Call pl_recovery for the current step.' })
+    },
+    async pl_escalate(who, args) {
+      const st = await recoveryState(who)
+      const v = st.view
+      const allowed = args.reason === 'customer_requested' || (v.must_escalate && v.escalate_reason === args.reason)
+      if (!allowed) return refuse('escalation_not_warranted', { must_escalate: !!v.must_escalate, escalate_reason: v.escalate_reason ?? null, note: 'Run the playbook (pl_recovery) first; escalate when it says a person is required or the customer asks for one.' })
+      const key = st.key ? `esc:${st.key}` : `esc:msg:${who.messageId}`
+      const claim = await db.query(`INSERT INTO pl_adapter_guidance (cw_conversation, wa_hash, message_id, event) VALUES ($1,$2,$3,'recovery') ON CONFLICT DO NOTHING RETURNING id`, [who.conversationId, st.h, key])
+      if (claim.rowCount !== 1) return done({ code: 'already_escalated', note: 'This was ALREADY handed to a person. Reply with nothing more.' })
+      const id = claim.rows[0].id
+      if (!(await aiOwned(who.conversationId))) { await db.query(`DELETE FROM pl_adapter_guidance WHERE id=$1`, [id]).catch(() => {}); return refuse('conversation_not_ai_owned') }
+      const pkg = escalationPackage(st.p, [...st.attempts, ...st.failures], args.reason)
+      const noted = await cwPost(cfg, `/conversations/${who.conversationId}/messages`, { content: pkg, message_type: 'outgoing', private: true }, f).then((m) => !!m?.id).catch(() => false)
+      await cwPost(cfg, `/conversations/${who.conversationId}/toggle_status`, { status: 'open' }, f).catch(() => null)
+      if (cfg.recoveryEscalationTeamId) await cwPost(cfg, `/conversations/${who.conversationId}/assignments`, { team_id: cfg.recoveryEscalationTeamId }, f).catch(() => null)
+      const opened = (await cw(cfg, `/conversations/${who.conversationId}`, f).catch(() => null))?.status === 'open'   // read back: the banner is not the state
+      const confirmed = opened   // the handoff IS the open status (Chatwoot owns takeover); a missing package note is reported, not hidden
+      // Not open = no person holds it: release the claim so a later customer message can hand over again (the customer is told to retry).
+      if (!opened) await db.query(`DELETE FROM pl_adapter_guidance WHERE id=$1`, [id]).catch(() => {})
+      else await db.query(`UPDATE pl_adapter_guidance SET stage=$2 WHERE id=$1`, [id, `${noted ? 'escalated' : 'escalated_note_missing'}|${args.reason}`])
+      await cwPost(cfg, `/conversations/${who.conversationId}/messages`, { content: confirmed ? HANDOFF_TEXT : NO_HANDOFF_TEXT, message_type: 'outgoing', private: false }, f).catch(() => null)
+      return done({ code: confirmed ? 'escalated' : 'escalation_unconfirmed', handoff_confirmed: confirmed, package_note_posted: noted,
+        note: 'The handoff line has ALREADY been sent to the customer by the system. Reply with nothing more.' })
+    },
     async pl_offer(who) {
       const r = await pl(cfg, stats, 'offer', who, {}, {}, f)
       return r.code === 'offer' ? done({ code: 'offer', ...pick(r.data, ['trial_days', 'trial_minutes', 'trial_pool', 'trial_price_xcd', 'plans', 'overage_dominica_xcd', 'overage_uscan_xcd', 'voice_only']) }) : refuse(r.code)
@@ -1008,6 +1177,12 @@ export async function handleProactive(cfg, db, stats, b, f = fetch, nowMs = Date
   if (conv.status !== 'pending') return { code: 'held', detail: `status_${conv.status}` }
   const pref = (await db.query(`SELECT proactive_stopped FROM pl_adapter_preference WHERE wa_hash=$1`, [h])).rows[0]
   if (pref?.proactive_stopped === true) return { code: 'stopped' }
+  // The customer paused or declined setup help (pl_recovery_pause): no automated stall reminder. A read failure holds (never assumed fine).
+  if (String(b.key).startsWith('stalled:')) {
+    const paused = await db.query(`SELECT 1 FROM pl_adapter_guidance WHERE wa_hash=$1 AND event='recovery_pause' AND created_at > now() - make_interval(secs => $2) LIMIT 1`, [h, RECOVERY_PAUSE_S]).then((r) => r.rowCount > 0, () => null)
+    if (paused === null) return { code: 'held', detail: 'pause_unreadable' }
+    if (paused) return { code: 'stopped', detail: 'customer_paused' }
+  }
   const msgs = await cw(cfg, `/conversations/${conversationId}/messages`, f).catch(() => null)
   const list = Array.isArray(msgs?.payload) ? msgs.payload : []
   const lastIn = list.filter(isIncomingContactMsg).sort((x, y) => Number(y.created_at) - Number(x.created_at))[0]
@@ -1070,6 +1245,129 @@ export async function handleOptionalContact(cfg, db, b, f = fetch) {
   return { code: 'allowed' }
 }
 
+// ── staff routing + mirror (plsvc registration watch -> /v1/staff), support packet 2026-10-18 (case 574) ───────────────────────────────────
+// A stalled activation reaches a PERSON: one private stall card per (stall, activation link), the label pl-stall-open and, when configured,
+// a named assignee (an assignee is not a hold: the conversation stays pending/AI-owned until a person opens it). A person ACCEPTS by replying,
+// adding a private note or adding the label pl-stall-accepted (opening alone is not acceptance). Not accepted within the window -> ONE escalation
+// card (label pl-stall-escalated, optional escalation assignee); acceptance is checked again on later ticks, never escalated twice. 'mirror'
+// copies a message the PL service sent outside this thread as a PRIVATE note (never sent to WhatsApp), once per message, links and token-like
+// strings removed. Everything here is a private note or a label: nothing reaches the customer. Own purpose label (pl-staff-v1).
+export const STAFF_PURPOSE = 'pl-staff-v1'
+export const STALL_OPEN_LABEL = 'pl-stall-open'
+export const STALL_ACCEPTED_LABEL = 'pl-stall-accepted'
+export const STALL_ESCALATED_LABEL = 'pl-stall-escalated'
+const STAFF_ACTIONS = new Set(['route', 'check', 'mirror'])
+export function verifyStaff(raw, sig, cfg, nowMs = Date.now()) {
+  if (typeof sig !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(sig)) return { ok: false, why: 'no_signature' }
+  const mac = crypto.createHmac('sha256', Buffer.from(cfg.plKey, 'utf8')).update(`${STAFF_PURPOSE}.${raw}`, 'utf8').digest('base64url')
+  if (!eq(mac, sig)) return { ok: false, why: 'bad_signature' }
+  let b; try { b = JSON.parse(raw) } catch { return { ok: false, why: 'bad_json' } }
+  if (!b || b.kid !== cfg.plKid || !Number.isSafeInteger(b.iat) || Math.abs(Math.floor(nowMs / 1000) - b.iat) > 120) return { ok: false, why: 'stale_or_wrong_key' }
+  if (!WA_ID.test(String(b.wa_id)) || !STAFF_ACTIONS.has(b.action) || typeof b.ref !== 'string' || !/^[A-Za-z0-9:._-]{1,128}$/.test(b.ref)) return { ok: false, why: 'bad_fields' }
+  if ((b.action === 'route' || b.action === 'mirror') && (typeof b.text !== 'string' || !b.text.trim() || b.text.length > 4000)) return { ok: false, why: 'bad_fields' }
+  if (b.action === 'check' && (!Number.isSafeInteger(b.ack_window_s) || b.ack_window_s < 60 || b.ack_window_s > 86400 || typeof b.escalate_text !== 'string' || !b.escalate_text.trim() || b.escalate_text.length > 4000)) return { ok: false, why: 'bad_fields' }
+  return { ok: true, b }
+}
+/** Links and token-like strings never reach a note (setup links carry a credential nonce in the path). */
+export function redactForNote(text) {
+  return String(text ?? '')
+    .replace(/\b(?:https?:\/\/|www\.)\S+/gi, '[link removed]')
+    .replace(/[A-Za-z0-9_-]{24,}/g, '[redacted]')
+    .slice(0, 1500)
+}
+async function addLabels(cfg, conversationId, conv, add, f, remove = []) {
+  // Chatwoot's labels endpoint REPLACES the set (no atomic add), so re-read the labels immediately before writing: a label a person changed
+  // while the note was being posted is kept (Codex re-review 2026-10-18). Residual race: one round trip. Unreadable -> the earlier snapshot.
+  const fresh = await cw(cfg, `/conversations/${conversationId}`, f).catch(() => null)
+  const cur = Array.isArray(fresh?.labels) ? fresh.labels : Array.isArray(conv?.labels) ? conv.labels : []
+  const next = [...new Set([...cur.filter((l) => !remove.includes(l)), ...add])]
+  if (next.length === cur.length && next.every((l) => cur.includes(l))) return
+  await cwPost(cfg, `/conversations/${conversationId}/labels`, { labels: next }, f).catch(() => null)   // a label failure never blocks the note
+}
+async function assign(cfg, conversationId, assigneeId, f) {
+  if (!assigneeId) return
+  await cwPost(cfg, `/conversations/${conversationId}/assignments`, { assignee_id: assigneeId }, f).catch(() => null)
+}
+/**
+ * Pure: has a PERSON taken up the stall since the card? Only an explicit act counts: the label pl-stall-accepted, or a staff reply / private
+ * note posted AFTER the card. Status 'open' alone does NOT (Codex delta review 2026-10-18): a conversation left open by nobody would
+ * otherwise silence the stall - and an open conversation already stops automated customer sends, so nothing is lost by escalating.
+ * `selfSenderId` = the adapter's own Chatwoot user (its notes and messages never count). `noteId` null = the card's id is not recorded
+ * (post unconfirmed): only the label can then prove acceptance, so the stall escalates toward a person rather than being assumed handled.
+ */
+export function stallAccepted(conv, messages, noteId, selfSenderId) {
+  if (Array.isArray(conv?.labels) && conv.labels.includes(STALL_ACCEPTED_LABEL)) return { accepted: true, by: 'label' }
+  if (noteId == null || !selfSenderId) return { accepted: false }
+  const after = (messages ?? []).filter((m) => Number(m.id) > Number(noteId))
+  const human = after.find((m) => (m.message_type === 1 || m.message_type === 'outgoing')
+    && String(m.sender_type ?? m.sender?.type ?? '').toLowerCase() === 'user'
+    && String(m.sender?.id ?? m.sender_id ?? '') !== String(selfSenderId))
+  return human ? { accepted: true, by: human.private ? 'staff_note' : 'staff_reply' } : { accepted: false }
+}
+export async function handleStaff(cfg, db, b, f = fetch, nowMs = Date.now()) {
+  const fc = await conversationFor(cfg, String(b.wa_id), f).catch(() => ({ ok: false, why: 'chatwoot_unreachable' }))
+  if (!fc.ok) return { code: fc.why === 'chatwoot_unreachable' ? 'failed' : 'no_conversation', detail: fc.why }
+  const conversationId = fc.conversationId
+  const conv = await cw(cfg, `/conversations/${conversationId}`, f).catch(() => null)
+  if (!conv) return { code: 'failed', detail: 'conversation_unreadable' }
+  const h = waHash(cfg, String(b.wa_id))
+  const claim = async (key) => (await db.query(`INSERT INTO pl_adapter_guidance (cw_conversation, wa_hash, message_id, event) VALUES ($1,$2,$3,'staff') ON CONFLICT DO NOTHING RETURNING id`, [conversationId, h, key])).rows[0]?.id ?? null
+  const release = (id) => db.query(`DELETE FROM pl_adapter_guidance WHERE id=$1`, [id]).catch(() => {})
+  // Post one private note under a claim. Outcomes (Codex delta review 2026-10-18, idempotency):
+  //  'posted'      - Chatwoot returned the message; its id + our sender id recorded (a record failure keeps the claim: never re-posted).
+  //  'refused'     - Chatwoot answered with an HTTP error: nothing was posted, the claim is RELEASED so a later attempt may post.
+  //  'unconfirmed' - timeout / network / no id: it MAY have posted, so the claim is KEPT (a retry never posts a second copy).
+  const note = async (id, content, stage) => {
+    let posted
+    try { posted = await cwPost(cfg, `/conversations/${conversationId}/messages`, { content, message_type: 'outgoing', private: true }, f) }
+    catch (e) {
+      if (/^chatwoot_4\d\d$/.test(String(e?.code ?? ''))) { await release(id); return 'refused' }   // a 4xx created nothing; a 5xx may have
+      await db.query(`UPDATE pl_adapter_guidance SET stage=$2 WHERE id=$1`, [id, `${stage}_unconfirmed|`]).catch(() => {})
+      return 'unconfirmed'
+    }
+    if (!posted?.id) { await db.query(`UPDATE pl_adapter_guidance SET stage=$2 WHERE id=$1`, [id, `${stage}_unconfirmed|`]).catch(() => {}); return 'unconfirmed' }
+    await db.query(`UPDATE pl_adapter_guidance SET stage=$2, posted_msg_id=$3 WHERE id=$1`, [id, `${stage}|${posted.sender?.id ?? ''}`, String(posted.id)]).catch(() => {})
+    return 'posted'
+  }
+  if (b.action === 'mirror') {
+    const id = await claim(`mirror:${b.ref}`); if (!id) return { code: 'duplicate' }
+    const n = await note(id, `📤 Sent to the customer by the PL service (outside this thread):\n${redactForNote(b.text)}`, 'mirror')
+    return n === 'posted' ? { code: 'sent' } : { code: 'failed', detail: n === 'refused' ? 'note_not_posted' : 'post_unconfirmed' }
+  }
+  if (b.action === 'route') {
+    const id = await claim(`stall:${b.ref}`); if (!id) return { code: 'duplicate' }
+    const n = await note(id, redactForNote(b.text), 'stall_card')
+    if (n === 'refused') return { code: 'failed', detail: 'note_not_posted' }
+    // posted, or unconfirmed: the claim stands either way, so plsvc tracks it and the check path still escalates on the adapter's clock.
+    // The labels are conversation-wide: a NEW stall clears the previous stall's accepted/escalated marks, so an old acceptance never
+    // silently accepts this one (every check re-reads the conversation's labels).
+    await addLabels(cfg, conversationId, conv, [STALL_OPEN_LABEL], f, [STALL_ACCEPTED_LABEL, STALL_ESCALATED_LABEL])
+    if (!conv?.meta?.assignee?.id) await assign(cfg, conversationId, cfg.stallOwnerAgentId, f)
+    return n === 'posted' ? { code: 'routed' } : { code: 'routed', detail: 'post_unconfirmed' }
+  }
+  // check: acceptance since the card; escalate ONCE after the window. A claimed card whose id was not recorded (unconfirmed post, or the
+  // record write failed) is still a routed stall: it is checked on the label only and escalates on time - never 'not_routed' (no re-route loop).
+  const row = (await db.query(`SELECT posted_msg_id, stage, created_at FROM pl_adapter_guidance WHERE cw_conversation=$1 AND wa_hash=$2 AND message_id=$3 AND event='staff'`, [conversationId, h, `stall:${b.ref}`])).rows[0]
+  if (!row) return { code: 'not_routed' }
+  const selfId = String(row.stage ?? '').split('|')[1] || null
+  let messages = []
+  if (row.posted_msg_id && selfId) {
+    const msgs = await cw(cfg, `/conversations/${conversationId}/messages`, f).catch(() => null)
+    if (!msgs) return { code: 'failed', detail: 'messages_unreadable' }
+    messages = Array.isArray(msgs?.payload) ? msgs.payload : []
+  }
+  const acc = stallAccepted(conv, messages, row.posted_msg_id ?? null, selfId)
+  if (acc.accepted) return { code: 'accepted', by: acc.by }
+  const routedS = Math.floor(new Date(row.created_at).getTime() / 1000)
+  if (Math.floor(nowMs / 1000) - routedS < b.ack_window_s) return { code: 'waiting' }
+  const id = await claim(`escalate:${b.ref}`); if (!id) return { code: 'escalated_waiting' }
+  const n = await note(id, redactForNote(b.escalate_text), 'escalation_card')
+  if (n === 'refused') return { code: 'failed', detail: 'note_not_posted' }
+  await addLabels(cfg, conversationId, conv, [STALL_ESCALATED_LABEL], f)
+  await assign(cfg, conversationId, cfg.stallEscalationAgentId, f)
+  return n === 'posted' ? { code: 'escalated' } : { code: 'escalated', detail: 'post_unconfirmed' }
+}
+
 // ── MCP (Streamable HTTP, JSON-RPC 2.0) ─────────────────────────────────────────────────────────────────────────────────────────────────────
 const ACCOUNT_TOOLS = new Set(['pl_explain', 'pl_balance', 'pl_recent_calls', 'pl_journey', 'pl_guide'])
 const NEVER_EXPOSED = new Set(['pl_explain'])   // its 'Get my number' button would depend on a model turn; onboarding starts from the Flow
@@ -1082,7 +1380,7 @@ export function makeServer(cfg, db, f = fetch) {
     const { method, params, id } = req
     if (method === 'initialize') return { jsonrpc: '2.0', id, result: { protocolVersion: params?.protocolVersion || '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'pl-action-adapter', version: '1' } } }
     if (method === 'notifications/initialized') return null
-    const exposed = (name) => !!SCHEMAS[name] && !NEVER_EXPOSED.has(name) && (cfg.accountTools || !ACCOUNT_TOOLS.has(name))
+    const exposed = (name) => !!SCHEMAS[name] && !NEVER_EXPOSED.has(name) && (cfg.accountTools || !ACCOUNT_TOOLS.has(name)) && (cfg.recoveryTools || !RECOVERY_TOOLS.has(name))
     if (method === 'tools/list') return { jsonrpc: '2.0', id, result: { tools: Object.entries(SCHEMAS).filter(([name]) => exposed(name)).map(([name, s]) => ({ name, ...s })) } }
     if (method !== 'tools/call') return rpcErr(id, -32601, 'method not found')
     const name = params?.name, args = params?.arguments ?? {}
@@ -1152,6 +1450,14 @@ export function makeServer(cfg, db, f = fetch) {
       if (!v.ok) return send(401, { error: 'unauthorized', detail: v.why })
       try { return send(200, await handleOptionalContact(cfg, db, v.b, f)) }
       catch (e) { console.error('[adapter] optional-contact error', String(e?.message || e).slice(0, 120)); return send(200, { code: 'held', detail: 'internal' }) }
+    }
+    // Staff routing / mirror from plsvc's registration watch: private notes and labels only; own purpose label.
+    if (rq.method === 'POST' && rq.url === '/v1/staff') {
+      const raw = await readRaw(rq); if (raw === null) return send(413, { error: 'too_large' })
+      const v = verifyStaff(raw, rq.headers['x-pl-staff-signature'], cfg)
+      if (!v.ok) return send(401, { error: 'unauthorized', detail: v.why })
+      try { return send(200, await handleStaff(cfg, db, v.b, f)) }
+      catch (e) { console.error('[adapter] staff error', String(e?.message || e).slice(0, 120)); return send(200, { code: 'failed', detail: 'internal' }) }
     }
     if (!eq(rq.headers.authorization || '', `Bearer ${cfg.bearer}`)) return send(401, { error: 'unauthorized' })
     if (cfg.debug && rq.url === '/__stats') return send(200, stats)
