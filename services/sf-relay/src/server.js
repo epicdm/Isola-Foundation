@@ -190,6 +190,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const chatwoot = chatwootClient({ baseUrl: need("CHATWOOT_BASE_URL"), accountId, token: botToken });
   const selfUserId = supervisedHoldMs > 0 ? await resolveSelfUserId(chatwoot, logger) : null;
   const relay = createRelay({
+    channelMetaMessageId: env.RELAY_CHANNEL_META_MESSAGE_ID === "1",
     supervisedHoldMs: selfUserId ? supervisedHoldMs : 0,
     selfUserId,
     traceNotes,

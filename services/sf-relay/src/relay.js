@@ -338,7 +338,7 @@ export function traceLine(inspection, items, text) {
   return `Agent trace: ${tools.length ? tools.join(", ") : "no tools"} · reply ${String(text ?? "").length} chars · ${Array.isArray(items) ? items.length : 0} button(s)`;
 }
 
-export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatwoot, seldon, requireCapability = false, conversationStateKey = null, plConcierge = null, adapter = null, presence = null, presenceRefreshMs = 20_000, presenceMaxRefresh = 4, timers = { setInterval, clearInterval }, logger = () => {}, now = () => Date.now(), dedupTtlMs = 3_600_000, supervisedHoldMs: requestedHoldMs = 0, selfUserId = null, traceNotes = false, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+export function createRelay({ channelMetaMessageId = false, scope, ownerUserId, escalationTeamId = null, chatwoot, seldon, requireCapability = false, conversationStateKey = null, plConcierge = null, adapter = null, presence = null, presenceRefreshMs = 20_000, presenceMaxRefresh = 4, timers = { setInterval, clearInterval }, logger = () => {}, now = () => Date.now(), dedupTtlMs = 3_600_000, supervisedHoldMs: requestedHoldMs = 0, selfUserId = null, traceNotes = false, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
   if (adapter && (!plConcierge || typeof adapter.act !== "function")) throw new Error("adapter_actions_require_pl_concierge");
   if (requireCapability && (!conversationStateKey || !scope?.workspaceId || !scope?.agentId || !scope?.agentSlug)) {
     throw new Error("conversation_capability_configuration_incomplete");
@@ -353,6 +353,9 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
     || typeof chatwoot.getContact !== "function")) {
     throw new Error("pl_concierge_assertion_configuration_incomplete");
   }
+  // Patch B (default OFF, byte-identical when off): the Clawith gateway's trusted identity needs the Chatwoot message id in channel_meta. Test relay only.
+  const channelMetaFor = (ev) => ({ source: "chatwoot", account_id: scope.accountId, inbox_id: scope.inboxId, conversation_id: ev.conversationId,
+    ...(channelMetaMessageId === true ? { message_id: String(ev.messageId) } : {}) });
   const seen = new Map(); // messageId -> first-seen ms (in-memory: UAT; a restart can at worst re-answer one message)
   const chains = new Map(); // conversationId -> promise tail, so one conversation runs one turn at a time
   const sfConversation = new Map(); // chatwoot conversation id -> seldonframe conversation id
@@ -675,7 +678,7 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
       conversationId: binding.conversationId,
       sessionId: binding.sessionId,
       conversationCapability: binding.conversationCapability,
-      channelMeta: { source: "chatwoot", account_id: scope.accountId, inbox_id: scope.inboxId, conversation_id: ev.conversationId },
+      channelMeta: channelMetaFor(ev),
       relayContext,
     });
 
@@ -697,7 +700,7 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
         message: ev.content,
         conversationId: null,
         sessionId: retrySessionId,
-        channelMeta: { source: "chatwoot", account_id: scope.accountId, inbox_id: scope.inboxId, conversation_id: ev.conversationId },
+        channelMeta: channelMetaFor(ev),
         relayContext: retryContext,
       });
       const retryAccepted = Boolean(turn.conversationId && turn.conversationCapability);
@@ -749,7 +752,7 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
         message: turnMessage,
         conversationId: null,
         sessionId: rotatedSessionId,
-        channelMeta: { source: "chatwoot", account_id: scope.accountId, inbox_id: scope.inboxId, conversation_id: ev.conversationId },
+        channelMeta: channelMetaFor(ev),
         relayContext: rotatedContext,
       });
       const accepted = Boolean(turn.conversationId && turn.conversationCapability);
@@ -1011,7 +1014,7 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
         conversationId: binding.conversationId,
         sessionId: binding.sessionId,
         conversationCapability: binding.conversationCapability,
-        channelMeta: { source: "chatwoot", account_id: scope.accountId, inbox_id: scope.inboxId, conversation_id: ev.conversationId },
+        channelMeta: channelMetaFor(ev),
         relayContext: guidedContext,
       });
       if (!turn.ok && turn.error === "PUBLIC_CHAT_CONVERSATION_LIMIT") {
