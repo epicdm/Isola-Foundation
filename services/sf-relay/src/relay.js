@@ -23,7 +23,7 @@
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { bindingMatchesScope, CONVERSATION_BINDING_ATTRIBUTE, openConversationBinding, sealConversationBinding } from "./conversation-binding.js";
-import { mintPlAssertion, mintRelayContext, resolveChatwootWhatsAppSource } from "./pl-concierge-assertion.js";
+import { mintPlAssertion, mintRelayContext, PL_CONCIERGE_DEFAULT_INBOX_ID, resolveChatwootWhatsAppSource } from "./pl-concierge-assertion.js";
 
 export const HANDOFF_TEXT = "I'll bring in a teammate to help with this — they'll reply right here as soon as they can.";
 
@@ -348,7 +348,8 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
     || typeof plConcierge.bridgeKey !== "string" || Buffer.byteLength(plConcierge.bridgeKey, "utf8") < 32
     || !/^[a-z0-9]{1,16}$/.test(plConcierge.bridgeKid ?? "")
     || !/^[0-9]{5,20}$/.test(plConcierge.phoneNumberId ?? "")
-    || scope?.accountId !== 2 || scope?.inboxId !== 11
+    || (plConcierge.inboxId !== undefined && (!Number.isSafeInteger(plConcierge.inboxId) || plConcierge.inboxId <= 0))
+    || scope?.accountId !== 2 || scope?.inboxId !== (plConcierge.inboxId ?? PL_CONCIERGE_DEFAULT_INBOX_ID)
     || typeof chatwoot.getContact !== "function")) {
     throw new Error("pl_concierge_assertion_configuration_incomplete");
   }
@@ -516,6 +517,7 @@ export function createRelay({ scope, ownerUserId, escalationTeamId = null, chatw
       kid: plConcierge.bridgeKid,
       accountId: scope.accountId,
       inboxId: scope.inboxId,
+      allowedInboxId: plConcierge.inboxId ?? PL_CONCIERGE_DEFAULT_INBOX_ID,
       workspaceId: scope.workspaceId,
       agentId: scope.agentId,
       agentSlug: scope.agentSlug,

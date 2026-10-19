@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { createRelay, verifySignature } from "./relay.js";
 import { adapterClient, chatwootClient, seldonClient, waPresenceClient } from "./clients.js";
+import { parsePlConciergeInboxId, plConciergeIdentityValid, PL_CONCIERGE_DEFAULT_INBOX_ID } from "./pl-concierge-assertion.js";
 
 const MAX_BODY = 256 * 1024;
 const PATH = "/v1/chatwoot/agent-bot";
@@ -120,15 +121,23 @@ export function parseSupervisedHoldMs(raw, logger = () => {}) {
   return n;
 }
 
-export function validatePlAssertionConfig({ enabled, accountId, inboxId, key, kid, bridgeKey, bridgeKid, phoneNumberId, sfToken }) {
+/**
+ * allowedInboxId is PL_CONCIERGE_INBOX_ID (default 11). The relay's own CHATWOOT_INBOX_ID must equal it, so one setting can never
+ * widen the other. The identity (workspace, UUID agent, slug) and the capability path are checked here so a deployment that could
+ * only ever send context-less turns refuses to boot instead.
+ */
+export function validatePlAssertionConfig({ enabled, accountId, inboxId, allowedInboxId = PL_CONCIERGE_DEFAULT_INBOX_ID, key, kid, bridgeKey, bridgeKid, phoneNumberId, sfToken, identity, requireCapability }) {
   if (!enabled) return;
-  if (accountId !== 2 || inboxId !== 11) throw new Error("pl_concierge_assertions_are_scoped_to_account2_inbox11");
+  if (!Number.isSafeInteger(allowedInboxId) || allowedInboxId <= 0) throw new Error("PL_CONCIERGE_INBOX_ID_invalid");
+  if (accountId !== 2 || inboxId !== allowedInboxId) throw new Error(`pl_concierge_assertions_are_scoped_to_account2_inbox${allowedInboxId}`);
   if (typeof key !== "string" || Buffer.byteLength(key, "utf8") < 32) throw new Error("PL_CONCIERGE_ASSERTION_KEY_FILE_required");
   if (typeof kid !== "string" || !/^[a-z0-9]{1,16}$/.test(kid)) throw new Error("PL_CONCIERGE_ASSERTION_KID_invalid");
   if (typeof bridgeKey !== "string" || Buffer.byteLength(bridgeKey, "utf8") < 32) throw new Error("PL_CONCIERGE_CONTEXT_KEY_FILE_required");
   if (typeof bridgeKid !== "string" || !/^[a-z0-9]{1,16}$/.test(bridgeKid)) throw new Error("PL_CONCIERGE_CONTEXT_KID_invalid");
   if (typeof phoneNumberId !== "string" || !/^[0-9]{5,20}$/.test(phoneNumberId)) throw new Error("PL_CONCIERGE_PHONE_NUMBER_ID_invalid");
   if (!sfToken) throw new Error("SF_TOKEN_FILE_required_for_pl_offer_readback");
+  if (requireCapability !== true) throw new Error("PL_CONCIERGE_ASSERTIONS_require_SF_REQUIRE_CONVERSATION_CAPABILITY");
+  if (!plConciergeIdentityValid(identity ?? {})) throw new Error("PL_CONCIERGE_identity_invalid_SF_WORKSPACE_ID_SF_AGENT_ID_SF_AGENT_SLUG");
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -158,7 +167,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const plContextKey = plAssertionsEnabled ? readSecretFile(need("PL_CONCIERGE_CONTEXT_KEY_FILE")) : null;
   const plContextKid = plAssertionsEnabled ? need("PL_CONCIERGE_CONTEXT_KID") : null;
   const plPhoneNumberId = plAssertionsEnabled ? need("PL_CONCIERGE_PHONE_NUMBER_ID") : null;
-  validatePlAssertionConfig({ enabled: plAssertionsEnabled, accountId, inboxId, key: plAssertionKey, kid: plKid, bridgeKey: plContextKey, bridgeKid: plContextKid, phoneNumberId: plPhoneNumberId, sfToken });
+  const plInboxId = plAssertionsEnabled ? parsePlConciergeInboxId(env.PL_CONCIERGE_INBOX_ID) : null;
+  validatePlAssertionConfig({ enabled: plAssertionsEnabled, accountId, inboxId, allowedInboxId: plInboxId, key: plAssertionKey, kid: plKid, bridgeKey: plContextKey, bridgeKid: plContextKid, phoneNumberId: plPhoneNumberId, sfToken, identity: { workspaceId, agentId, agentSlug }, requireCapability });
   const ownerUserId = Number(env.CHATWOOT_OWNER_USER_ID);
   const escalationTeamId = env.CHATWOOT_ESCALATION_TEAM_ID ? Number(env.CHATWOOT_ESCALATION_TEAM_ID) : null;
   if (escalationTeamId !== null && (!Number.isSafeInteger(escalationTeamId) || escalationTeamId <= 0)) {
@@ -190,13 +200,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     escalationTeamId,
     requireCapability,
     conversationStateKey,
-    plConcierge: plAssertionsEnabled ? { key: plAssertionKey, kid: plKid, bridgeKey: plContextKey, bridgeKid: plContextKid, phoneNumberId: plPhoneNumberId } : null,
+    plConcierge: plAssertionsEnabled ? { key: plAssertionKey, kid: plKid, bridgeKey: plContextKey, bridgeKid: plContextKid, phoneNumberId: plPhoneNumberId, inboxId: plInboxId } : null,
     chatwoot,
     seldon: seldonClient({ baseUrl: need("SF_BASE_URL"), slug: agentSlug, workspaceId, agentId, token: sfToken }),
     logger,
   });
   const port = Number(env.PORT ?? 3000);
   createServer(createHandler({ secret, relay, logger })).listen(port, () =>
-    logger({ event: "boot", port, accountId, inboxId, escalationReadback: escalationReadback === "1" && sfToken !== null, adapterActions: adapter !== null, presence: presence !== null, supervisedHoldMs: selfUserId ? supervisedHoldMs : 0, selfUserIdKnown: selfUserId !== null, traceNotes }),
+    logger({ event: "boot", port, accountId, inboxId, plInboxId, escalationReadback: escalationReadback === "1" && sfToken !== null, adapterActions: adapter !== null, presence: presence !== null, supervisedHoldMs: selfUserId ? supervisedHoldMs : 0, selfUserIdKnown: selfUserId !== null, traceNotes }),
   );
 }

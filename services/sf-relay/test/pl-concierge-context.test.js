@@ -176,7 +176,8 @@ test("assertion key configuration is scoped to account 2 inbox 11 and fails clos
   assert.throws(() => validatePlAssertionConfig({ enabled: true, accountId: 2, inboxId: 11, key: "short", kid: "uat1", phoneNumberId: "1023804347491554" }), /KEY_FILE_required/);
   assert.throws(() => validatePlAssertionConfig({ enabled: true, accountId: 2, inboxId: 11, key: KEY, kid: "uat1", phoneNumberId: "1023804347491554" }), /CONTEXT_KEY_FILE_required/);
   assert.throws(() => validatePlAssertionConfig({ enabled: true, accountId: 2, inboxId: 11, key: KEY, kid: "uat1", bridgeKey: BRIDGE_KEY, bridgeKid: "ctx1", phoneNumberId: "1023804347491554" }), /SF_TOKEN_FILE_required_for_pl_offer_readback/);
-  assert.doesNotThrow(() => validatePlAssertionConfig({ enabled: true, accountId: 2, inboxId: 11, key: KEY, kid: "uat1", bridgeKey: BRIDGE_KEY, bridgeKid: "ctx1", phoneNumberId: "1023804347491554", sfToken: "synthetic-readback-token" }));
+  // 2026-10-19 (option A): a complete config now also names the capability path and the UUID identity it binds.
+  assert.doesNotThrow(() => validatePlAssertionConfig({ enabled: true, accountId: 2, inboxId: 11, key: KEY, kid: "uat1", bridgeKey: BRIDGE_KEY, bridgeKid: "ctx1", phoneNumberId: "1023804347491554", sfToken: "synthetic-readback-token", identity: { workspaceId: SCOPE.workspaceId, agentId: SCOPE.agentId, agentSlug: SCOPE.agentSlug }, requireCapability: true }));
 });
 
 test("Seldon readback exposes only the latest assistant tool results when workspace, agent, visitor and Chatwoot scope match", async () => {

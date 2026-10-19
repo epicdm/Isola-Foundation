@@ -71,10 +71,27 @@ const b64url = (value) => Buffer.from(value, "utf8").toString("base64url");
 /** Short-lived relay-to-native-runtime envelope; it is never stored in Chatwoot or returned to the visitor. */
 const AGENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-export function mintRelayContext({ key, kid, accountId, inboxId, workspaceId, agentId, agentSlug, sessionId, uplinkConversationId = null, chatwootConversationId, chatwootMessageId, message, originalMessage = null, plAssertion, nowSec, nonce = randomBytes(16).toString("base64url") }) {
+/** The one inbox the PL concierge assertion/context scope covers unless the deployment names another (PL_CONCIERGE_INBOX_ID). */
+export const PL_CONCIERGE_DEFAULT_INBOX_ID = 11;
+
+/** Unset/empty = the default inbox 11; otherwise a positive whole number; anything else refuses to boot. */
+export function parsePlConciergeInboxId(raw) {
+  if (raw === undefined || raw === null || String(raw) === "") return PL_CONCIERGE_DEFAULT_INBOX_ID;
+  if (!/^[1-9][0-9]{0,8}$/.test(String(raw))) throw new Error("PL_CONCIERGE_INBOX_ID_invalid");
+  return Number(raw);
+}
+
+/** The identity a relay context binds (same rules as mintRelayContext), checked once at boot so a bad binding never reaches a turn. */
+export function plConciergeIdentityValid({ workspaceId, agentId, agentSlug }) {
+  return typeof workspaceId === "string" && workspaceId.length >= 16 && typeof agentId === "string" && AGENT_ID.test(agentId)
+    && typeof agentSlug === "string" && agentSlug.length >= 1 && agentSlug.length <= 128;
+}
+
+export function mintRelayContext({ key, kid, accountId, inboxId, allowedInboxId = PL_CONCIERGE_DEFAULT_INBOX_ID, workspaceId, agentId, agentSlug, sessionId, uplinkConversationId = null, chatwootConversationId, chatwootMessageId, message, originalMessage = null, plAssertion, nowSec, nonce = randomBytes(16).toString("base64url") }) {
   if (typeof key !== "string" || Buffer.byteLength(key, "utf8") < 32) throw new Error("relay_context_key_invalid");
   if (typeof kid !== "string" || !CONTEXT_KID.test(kid)) throw new Error("relay_context_kid_invalid");
-  if (!Number.isSafeInteger(accountId) || accountId !== 2 || !Number.isSafeInteger(inboxId) || inboxId !== 11) throw new Error("relay_context_scope_invalid");
+  if (!Number.isSafeInteger(allowedInboxId) || allowedInboxId <= 0
+    || !Number.isSafeInteger(accountId) || accountId !== 2 || !Number.isSafeInteger(inboxId) || inboxId !== allowedInboxId) throw new Error("relay_context_scope_invalid");
   if (typeof workspaceId !== "string" || workspaceId.length < 16 || typeof agentId !== "string" || !AGENT_ID.test(agentId)
     || typeof agentSlug !== "string" || agentSlug.length < 1 || agentSlug.length > 128) throw new Error("relay_context_agent_invalid");
   if (typeof sessionId !== "string" || sessionId.length < 8 || sessionId.length > 128) throw new Error("relay_context_session_invalid");
