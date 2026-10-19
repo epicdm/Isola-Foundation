@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mintRelayContext, parsePlConciergeInboxId, PL_CONCIERGE_DEFAULT_INBOX_ID, verifyRelayContext } from "../src/pl-concierge-assertion.js";
 import { createRelay } from "../src/relay.js";
+import { seldonClient } from "../src/clients.js";
 import { validatePlAssertionConfig } from "../src/server.js";
 
 const KEY = "synthetic-pl-assertion-key-material-32-bytes-minimum";
@@ -39,9 +40,15 @@ function fixture({ scopeInbox, plInbox, trafficInbox = scopeInbox, recordInbox =
     async postMessage(id, content, opts) { posted.push({ content, private: opts.private }); },
     async toggleStatus() {}, async assignOwner() {}, async assignTeam() {},
   };
+  // The turn goes through the REAL seldonClient, so the test sees the bytes on the wire (the x-isola-relay-context header).
+  const requests = [];
+  const wire = seldonClient({ baseUrl: "http://gateway.test", slug: IDENTITY.agentSlug, fetchImpl: async (url, init) => {
+    requests.push({ url, headers: init.headers, body: JSON.parse(init.body) });
+    return new Response(JSON.stringify({ message: "Your line is waiting for the setup link to be opened.", conversation_id: "sf-conv", conversation_capability: "visitor-bound-capability" }), { status: 200, headers: { "content-type": "application/json" } });
+  } });
   const seldon = {
-    turnInputs: [],
-    async turn(input) { seldon.turnInputs.push(input); return { ok: true, text: "Your line is waiting for the setup link to be opened.", conversationId: "sf-conv", conversationCapability: "visitor-bound-capability" }; },
+    turnInputs: [], requests,
+    async turn(input) { seldon.turnInputs.push(input); return wire.turn(input); },
     async escalation() { return { known: true, escalated: false }; },
     async inspectTurn() { return { known: true, currentTurnVerified: true, escalated: false, toolCalls: [], toolResults: [] }; },
   };
@@ -81,8 +88,15 @@ test("default: an explicit inboxId 11 behaves exactly like the unset default (sa
   const a = fixture({ scopeInbox: 11, plInbox: undefined, ctxKid: "ctx1", ctxKey: PROD_CTX_KEY, pnid: PROD_PNID });
   const b = fixture({ scopeInbox: 11, plInbox: 11, ctxKid: "ctx1", ctxKey: PROD_CTX_KEY, pnid: PROD_PNID });
   await run(a); await run(b);
+  // Only the random nonces differ (the clock is fixed): every other context claim AND every PL assertion claim is identical.
+  const ca = claimsOf(a.seldon.turnInputs[0].relayContext), cb = claimsOf(b.seldon.turnInputs[0].relayContext);
   const strip = (c) => { const { nonce, plAssertion, ...rest } = c; return rest; };
-  assert.deepEqual(strip(claimsOf(b.seldon.turnInputs[0].relayContext)), strip(claimsOf(a.seldon.turnInputs[0].relayContext)));
+  const stripPl = (c) => { const { nonce, ...rest } = plClaimsOf(c.plAssertion); return rest; };
+  assert.deepEqual(strip(cb), strip(ca));
+  assert.deepEqual(stripPl(cb), stripPl(ca));
+  assert.deepEqual(Object.keys(cb).sort(), Object.keys(ca).sort());
+  assert.deepEqual(Object.keys(plClaimsOf(cb.plAssertion)).sort(), Object.keys(plClaimsOf(ca.plAssertion)).sort());
+  assert.equal(a.seldon.requests[0].headers["x-isola-relay-context"], a.seldon.turnInputs[0].relayContext);
 });
 
 test("default boot check: production-shaped config passes; the old inbox-12 refusal still names inbox 11", () => {
@@ -98,7 +112,14 @@ test("inbox 18: with PL_CONCIERGE_INBOX_ID=18 the relay mints a context bound to
   assert.equal(f.seldon.turnInputs.length, 1);
   const input = f.seldon.turnInputs[0];
   assert.deepEqual(input.channelMeta, { source: "chatwoot", account_id: 2, inbox_id: 18, conversation_id: 41 });
-  const claims = claimsOf(input.relayContext);
+  // On the wire: exactly one turn request, carrying the context in the x-isola-relay-context HEADER (not channel_meta).
+  assert.equal(f.seldon.requests.length, 1);
+  const req = f.seldon.requests[0];
+  assert.equal(req.url, `http://gateway.test/api/v1/public/agent/${IDENTITY.agentSlug}/turn`);
+  assert.equal(req.headers["x-isola-relay-context"], input.relayContext);
+  assert.deepEqual(req.body.channel_meta, { source: "chatwoot", account_id: 2, inbox_id: 18, conversation_id: 41 });
+  assert.equal(JSON.stringify(req.body).includes(input.relayContext), false);
+  const claims = claimsOf(req.headers["x-isola-relay-context"]);
   assert.equal(claims.kid, "ctxtest1");
   assert.equal(claims.inboxId, 18);
   const ok = verifyRelayContext(input.relayContext, { keys: { ctxtest1: TEST_CTX_KEY }, nowSec: NOW / 1000, expected: expectedFor(18, input, claims) });
