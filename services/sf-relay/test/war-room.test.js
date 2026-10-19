@@ -18,7 +18,7 @@ const EVIDENCE = { known: true, currentTurnVerified: true, escalated: false,
   toolCalls: [{ name: "pl-action-adapter__pl_journey", input: {} }, { name: "pl-action-adapter__pl_next_step", input: {} }],
   toolResults: [{ ok: true }, { ok: false, isError: true }] };
 
-function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread = false, failOwnershipAfter = false, truncateTo = 0, beforePublicPost = null, dropCustomerFromFirstRead = false, stalePageWithoutDraft = false, dropSentFromSecondRead = false, frozenClock = false, duringDraftPost = null, duringModelTurn = null, selfUserId = RELAY_USER, texts = null, pl = false, turnSeq = null, evidenceSeq = null, adapterImpl = null } = {}) {
+function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread = false, failOwnershipAfter = false, truncateTo = 0, beforePublicPost = null, dropCustomerFromFirstRead = false, stalePageWithoutDraft = false, dropSentFromSecondRead = false, frozenClock = false, duringDraftPost = null, duringModelTurn = null, selfUserId = RELAY_USER, texts = null, pl = false, turnSeq = null, evidenceSeq = null, adapterImpl = null, metaId = false } = {}) {
   let reads = 0;
   let t = 1_797_000_000_000;
   const posted = [], statuses = [], logs = [], thread = [];
@@ -61,7 +61,7 @@ function fixture({ holdMs = 0, traceNotes = false, failDraft = false, failThread
     async escalation() { return { known: true, escalated: false }; },
     async inspectTurn() { return structuredClone(evidenceSeq ? evidenceSeq[Math.min(seldon.turns, evidenceSeq.length) - 1] : EVIDENCE); },
   };
-  const relay = createRelay({ scope: SCOPE, ownerUserId: 16, chatwoot, seldon, requireCapability: true, conversationStateKey: "synthetic-state-key-material-long-enough-32",
+  const relay = createRelay({ channelMetaMessageId: metaId, scope: SCOPE, ownerUserId: 16, chatwoot, seldon, requireCapability: true, conversationStateKey: "synthetic-state-key-material-long-enough-32",
     plConcierge: pl ? { key: PL_KEY, kid: "uat1", bridgeKey: PL_BRIDGE_KEY, bridgeKid: "ctx1", phoneNumberId: "1023804347491554" } : null,
     adapter: adapterImpl,
     now: () => (frozenClock ? t : (t += 1000)), logger: (o) => logs.push(o), supervisedHoldMs: holdMs, selfUserId, traceNotes, sleep });
@@ -395,6 +395,23 @@ test("STEER: @agent on the webhook during the hold -> draft discarded, the agent
   assert.equal(guided.conversationCapability, "cap");
   assert.ok(!f.logs.some((l) => JSON.stringify(l).includes("Add credit")), "guidance text is never logged");
   assert.ok(f.logs.some((l) => l.event === "guided_rewrite" && l.round === 1));
+});
+
+// Patch B (2026-10-19): the guided-rewrite call site sends the CUSTOMER message's id (the message being answered), never the staff note's id.
+test("STEER + patch B: with message_id enabled, the guided rewrite carries the customer message's id, equal to its signed context; CONTROL off = deployed shape", async () => {
+  for (const metaId of [true, false]) {
+    const f = fixture({ holdMs: 10000, texts: [MODEL_TEXT, REWRITE], pl: true, metaId });
+    await steeredRun(f, [async () => { f.relay.accept(f.staffMsg(8301, "@agent tell him top-up is in the Cloud Softphone app, Add credit")); }, null]);
+    assert.equal(f.seldon.turns, 2, "the guided rewrite was actually sent");
+    const base = { source: "chatwoot", account_id: 2, inbox_id: 11, conversation_id: 41 };
+    for (const input of f.seldon.turnInputs) {
+      assert.deepEqual(input.channelMeta, metaId ? { ...base, message_id: "7001" } : base, `metaId=${metaId}`);
+    }
+    if (metaId) {
+      const guided = f.seldon.turnInputs[1];
+      assert.equal(JSON.parse(Buffer.from(guided.relayContext.split(".")[1], "base64url").toString("utf8")).chatwootMessageId, "7001");
+    }
+  }
 });
 
 test("STEER CONTROL: an ordinary staff private note (not @agent, not @hold) during the hold changes nothing - one turn, the first draft is sent", async () => {
