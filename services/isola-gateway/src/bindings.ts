@@ -19,6 +19,9 @@
  * NocoBase-backed one without touching the handler.
  */
 
+import { normalisePhone } from "./allowlist.js";
+import { KNOWN_INTERNAL_TEMPLATE_IDS, isKnownInternalTemplateId } from "./templates.js";
+
 export type Exposure = "PUBLIC" | "INTERNAL";
 export type BindingStatus = "active" | "retired";
 
@@ -63,6 +66,23 @@ export interface Binding {
    * Meaningless on a PUBLIC binding and ignored there.
    */
   allowedSenders: readonly string[];
+  /**
+   * OPTIONAL PER-SENDER TEMPLATE ROUTING, INTERNAL bindings only.
+   *
+   * Keyed by the NORMALISED DIGITS of a verified sender (see `normalisePhone`),
+   * valued by a template id from `KNOWN_INTERNAL_TEMPLATE_IDS`. A verified
+   * sender with an entry is served by that template; everyone else on the
+   * allowlist by `templateId`. Configured as
+   *
+   *     "senderTemplates": { "+1 767 555 0100": "isola-owner-manager@v1" }
+   *
+   * and normalised at parse time. Every key must also be on `allowedSenders`:
+   * an override can only choose WHICH template an admitted sender reaches,
+   * never admit anyone. Absent means no overrides, which is today's behaviour.
+   *
+   * Implements dec-internal-manager-owner-instruction-authority-and-alerts-2026-09-23.
+   */
+  senderTemplates?: Readonly<Record<string, string>>;
   status: BindingStatus;
   /**
    * Lifecycle as supplied by the runtime projection, kept verbatim.
@@ -364,6 +384,73 @@ function optionalLabels(
 }
 
 /**
+ * Parse `senderTemplates`. Every failure is a BOOT REFUSAL: unlike an empty
+ * allowlist, a malformed override has no safe reading — silently dropping it
+ * would route the owner to the staff template and look like it worked.
+ *
+ * Error strings name the entry by POSITION, never by number: the keys are
+ * staff personal phone numbers.
+ */
+function optionalSenderTemplates(
+  record: Record<string, unknown>,
+  index: number,
+  exposureRaw: unknown,
+  allowedSenders: readonly string[],
+  errors: string[],
+): Readonly<Record<string, string>> | undefined {
+  const value = record["senderTemplates"];
+  if (value === undefined || value === null) return undefined;
+  const refuse = (why: string): undefined => {
+    errors.push(`binding[${index}]: "senderTemplates" ${why}`);
+    return undefined;
+  };
+  if (!isRecord(value)) {
+    return refuse("must be a JSON object mapping a sender number to a template id");
+  }
+  if (exposureRaw !== "INTERNAL") {
+    return refuse(
+      "is only valid on an INTERNAL binding — it keys on a sender verified by the allowlist, and a PUBLIC line verifies nobody",
+    );
+  }
+  const allowed = new Set(
+    allowedSenders.map((s) => normalisePhone(s)).filter((s): s is string => s !== null),
+  );
+  const out = Object.create(null) as Record<string, string>;
+  let bad = false;
+  Object.entries(value).forEach(([rawKey, templateId], position) => {
+    const where = `binding[${index}]: "senderTemplates" entry #${position}`;
+    const digits = normalisePhone(rawKey);
+    if (digits === null) {
+      errors.push(`${where} key is not a phone number`);
+      bad = true;
+      return;
+    }
+    if (Object.prototype.hasOwnProperty.call(out, digits)) {
+      errors.push(`${where} names the same number as an earlier entry`);
+      bad = true;
+      return;
+    }
+    if (!allowed.has(digits)) {
+      errors.push(
+        `${where} names a sender who is not on "allowedSenders" — an override may route an admitted sender, never admit one`,
+      );
+      bad = true;
+      return;
+    }
+    if (!isKnownInternalTemplateId(templateId)) {
+      errors.push(
+        `${where} is not a known INTERNAL template id (known: ${KNOWN_INTERNAL_TEMPLATE_IDS.join(", ")})`,
+      );
+      bad = true;
+      return;
+    }
+    out[digits] = templateId;
+  });
+  if (bad || Object.keys(out).length === 0) return undefined;
+  return Object.freeze(out);
+}
+
+/**
  * Parse and strictly validate `GATEWAY_BINDINGS_JSON`.
  *
  * Error strings name the field and the array index — never a value, so a bad
@@ -439,6 +526,14 @@ export function parseBindings(raw: string | null | undefined): BindingParseResul
         allowedSenders = allowedRaw as string[];
       }
     }
+    const senderTemplates = optionalSenderTemplates(
+      entry,
+      index,
+      exposureRaw,
+      allowedSenders,
+      errors,
+    );
+
     // An INTERNAL binding with an empty list is NOT a parse error: it is the
     // safe half-configured state and must be shippable. It must not be SILENT,
     // though — the boot line reports exposure and allowlist size per binding,
@@ -496,6 +591,7 @@ export function parseBindings(raw: string | null | undefined): BindingParseResul
       ...(chatwootBaseUrl === undefined ? {} : { chatwootBaseUrl }),
       ...(escalationTeamId === undefined ? {} : { escalationTeamId }),
       ...(labels === undefined ? {} : { labels }),
+      ...(senderTemplates === undefined ? {} : { senderTemplates }),
     });
   });
 
@@ -563,6 +659,11 @@ export function redactBinding(binding: Binding): Record<string, unknown> {
     // directory.
     allowedSendersCount: binding.allowedSenders.length,
     allowedSenders: binding.allowedSenders.map(maskSender),
+    // Per-sender routing, masked the same way. An operator must be able to
+    // answer "who reaches the owner template?" from deployed state.
+    senderTemplates: Object.entries(binding.senderTemplates ?? {}).map(
+      ([sender, templateId]) => ({ sender: maskSender(sender), templateId }),
+    ),
   };
 }
 

@@ -4,7 +4,10 @@
  */
 import type { Exposure } from "./registry.js";
 import { hostOf, parseAllowlist } from "./egress.js";
-import { templateModelHosts } from "./registry.js";
+import { allTemplates, templateModelHosts } from "./registry.js";
+
+/** Floor for PRINCIPAL_SIGNING_KEY / PRINCIPAL_USER_KEY: a 128-bit hex string. */
+export const MIN_PRINCIPAL_KEY_CHARS = 32;
 import type { RateOverrides } from "./money.js";
 import { DEFAULT_HANDOFF, type HandoffPolicy } from "./callbacks.js";
 import { isIssueStatus } from "./paperclip.js";
@@ -31,6 +34,21 @@ export interface RuntimeConfig {
   secretsNext: Readonly<Record<Exposure, string | null>>;
   modelBaseUrl: string;
   modelApiKey: string | null;
+  /**
+   * `PRINCIPAL_SIGNING_KEY` — the HMAC key the internal gateway signs a verified
+   * principal with (src/principal.ts). Held ONLY by that gateway and this
+   * service; deliberately NOT a runtime credential, so holding
+   * RUNTIME_SECRET_INTERNAL does not let a caller mint an owner principal.
+   * Required at boot while any template `requiresPrincipal` (see bootErrors).
+   * Never logged, never returned.
+   */
+  principalSigningKey: string | null;
+  /**
+   * `PRINCIPAL_USER_KEY` — optional dedicated key for the brain-facing `user`
+   * id. Absent: a key is derived from the signing key by HKDF with a distinct
+   * info string. Never logged, never returned.
+   */
+  principalUserKey: string | null;
   /** Env override for the model name; `null` means "use the template's model". */
   modelNameOverride: string | null;
   modelTimeoutMs: number;
@@ -271,6 +289,8 @@ export function loadConfig(env: EnvRecord): RuntimeConfig {
     }),
     modelBaseUrl,
     modelApiKey: str(env, "MODEL_API_KEY"),
+    principalSigningKey: str(env, "PRINCIPAL_SIGNING_KEY"),
+    principalUserKey: str(env, "PRINCIPAL_USER_KEY"),
     modelNameOverride: str(env, "MODEL_NAME"),
     modelTimeoutMs: int(env, "RUNTIME_MODEL_TIMEOUT_MS", DEFAULT_MODEL_TIMEOUT_MS),
     paperclipBaseUrl,
@@ -423,6 +443,42 @@ export function bootErrors(config: RuntimeConfig): string[] {
         `RUNTIME_SECRET_${cls}_NEXT collides with a ${other} credential. One token would satisfy both exposure classes and the boundary would not exist.`,
       );
     }
+  }
+
+  // ── PRINCIPAL SIGNING ────────────────────────────────────────────────────
+  //
+  // A template that `requiresPrincipal` can only ever be served a principal the
+  // gateway SIGNED. Without the key there is no way to verify one, so the rule
+  // "refuse an unverified principal" would have no mechanism behind it — and a
+  // rule with no mechanism is a wish. Refuse to boot instead.
+  const needsPrincipal = allTemplates().filter((t) => t.requiresPrincipal === true);
+  if (needsPrincipal.length > 0) {
+    const key = config.principalSigningKey;
+    if (key === null) {
+      errors.push(
+        `PRINCIPAL_SIGNING_KEY is unset, but ${needsPrincipal.map((t) => t.id).join(", ")} requires a signed principal. Without the key no principal can be verified; refusing to start rather than serve that template unauthenticated.`,
+      );
+    } else {
+      if (key.length < MIN_PRINCIPAL_KEY_CHARS) {
+        errors.push(
+          `PRINCIPAL_SIGNING_KEY is shorter than ${MIN_PRINCIPAL_KEY_CHARS} characters.`,
+        );
+      }
+      const credentials = [
+        config.secrets.INTERNAL,
+        config.secrets.PUBLIC,
+        config.secretsNext.INTERNAL,
+        config.secretsNext.PUBLIC,
+      ];
+      if (credentials.includes(key)) {
+        errors.push(
+          "PRINCIPAL_SIGNING_KEY equals a RUNTIME_SECRET_* credential. Then every holder of that credential could sign an owner principal, which is exactly what the key exists to prevent.",
+        );
+      }
+    }
+  }
+  if (config.principalUserKey !== null && config.principalUserKey.length < MIN_PRINCIPAL_KEY_CHARS) {
+    errors.push(`PRINCIPAL_USER_KEY is shorter than ${MIN_PRINCIPAL_KEY_CHARS} characters.`);
   }
 
   return errors;

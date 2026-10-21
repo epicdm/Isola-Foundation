@@ -104,7 +104,9 @@ logger.info({
   boundInboxes: bindings.map((b) => {
     const base = `${b.chatwootAccountId}/${b.chatwootInboxId} -> ${b.tenantId} (${b.status})`;
     return b.exposure === "INTERNAL"
-      ? `${base} [INTERNAL, ${b.allowedSenders.length} allowed]`
+      ? `${base} [INTERNAL, ${b.allowedSenders.length} allowed, ${
+          Object.keys(b.senderTemplates ?? {}).length
+        } sender template override(s)]`
       : base;
   }),
   replayWindowSec: config.replayWindowSec,

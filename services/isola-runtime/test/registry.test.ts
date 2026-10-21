@@ -15,6 +15,8 @@ describe("registry shape", () => {
       "epic-staff-operations-coordinator@v1",
       "isola-ai-sales-front-desk-agent@v1",
       "isola-internal-manager@v1",
+      // dec-internal-manager-owner-instruction-authority-and-alerts-2026-09-23
+      "isola-owner-manager@v1",
     ]);
     expect(healthTemplateSummary()).toEqual([
       {
@@ -24,6 +26,7 @@ describe("registry shape", () => {
       },
       { id: "isola-ai-sales-front-desk-agent@v1", version: "v1", exposure: "PUBLIC" },
       { id: "isola-internal-manager@v1", version: "v1", exposure: "INTERNAL" },
+      { id: "isola-owner-manager@v1", version: "v1", exposure: "INTERNAL" },
     ]);
   });
 
@@ -72,7 +75,10 @@ describe("registry shape", () => {
 
   it("a template that DOES declare a brain names its credential by env var, never inline", () => {
     const overridden = allTemplates().filter((t) => t.modelBaseUrl !== undefined);
-    expect(overridden.map((t) => t.id)).toEqual(["isola-internal-manager@v1"]);
+    expect(overridden.map((t) => t.id)).toEqual([
+      "isola-internal-manager@v1",
+      "isola-owner-manager@v1",
+    ]);
     for (const t of overridden) {
       expect(t.modelApiKeyEnv, "a template is checked into git — no inline secret").toBeTruthy();
       // Nothing that looks like a credential may appear in a template.

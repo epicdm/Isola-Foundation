@@ -32,6 +32,7 @@ export const placeholder = (label: string): string =>
 
 export const INTERNAL_SECRET = placeholder("internal");
 export const PUBLIC_SECRET = placeholder("public");
+export const PRINCIPAL_SIGNING_KEY = placeholder("principal-signing");
 
 export const INTERNAL_TEMPLATE = "epic-staff-operations-coordinator@v1";
 export const PUBLIC_TEMPLATE = "isola-ai-sales-front-desk-agent@v1";
@@ -53,6 +54,9 @@ export const BASE_ENV: EnvRecord = {
   // A harness that supplied a permissive default would have hidden exactly the
   // behaviour these tests now depend on.
   RUNTIME_BUDGET_FALLBACK_CENTS: "5000",
+  // REQUIRED while isola-owner-manager@v1 is registered (it requiresPrincipal):
+  // without it bootErrors refuses to start. Shared with the tests that sign.
+  PRINCIPAL_SIGNING_KEY: PRINCIPAL_SIGNING_KEY,
 };
 
 export function envConfig(overrides: EnvRecord = {}): RuntimeConfig {
