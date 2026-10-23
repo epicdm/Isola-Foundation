@@ -5,14 +5,14 @@ pl_next_step, pl_provision, pl_balance, pl_recent_calls, pl_status, deterministi
 Talks to the Personal Line service (plsvc) and Chatwoot; called by the relay and by Uplink over MCP.
 
 > **2026-10-18 lineage (commit what runs):** production now runs the adapter on **host04** (`uplink_pl-action-adapter`, bind-mounted
-> `/home/epicadmin/pladapter/pl-action-adapter.mjs`), file sha256 **`77fa62cd`** = the optional-contact guard release deployed 2026-10-17
+> `<host-bind-mount-dir>/pl-action-adapter.mjs`), file sha256 **`77fa62cd`** = the optional-contact guard release deployed 2026-10-17
 > 06:01Z (Port `ev-laneA-optional-contact-guard-DEPLOYED-adapter-and-plsvc-probes-pass-two-ticks-verified-2026-10-17`). This commit
 > records that file byte-for-byte; the table below is the 2026-10-11 history and is kept as written.
 
 | | Value (2026-10-11) |
 |---|---|
 | Service | `pl-action-adapter` (Swarm, host03; image `node:22-slim` pinned by digest) |
-| Code | bind-mounted file `/home/epicadmin/pladapter/pl-action-adapter.mjs` → `/adapter/pl-action-adapter.mjs` |
+| Code | bind-mounted file `<host-bind-mount-dir>/pl-action-adapter.mjs` → `/adapter/pl-action-adapter.mjs` |
 | File hash | PRODUCTION runs rc13f sha256 `bfd6a3dc` (deployed 2026-10-11 ~16:33Z; rollback `.rc13e.bak` = 83f0be53). This directory holds **rc13h sha256 `b04ccf50` (built, tested, staged on `plstg_zzrc16g_adapter`, NOT deployed to production)** = rc13g (launch-scope wording, commit dd77102, `008c7845`) + `POST /v1/eligibility`. Deploy only with the rest of the rc16 release, and **BEFORE plsvc rc16g** (plsvc rc16g refuses every store button, fail closed, while the adapter lacks this endpoint). |
 | Tests | `node test/rc13_test.mjs <abs path to pl-action-adapter.mjs>` → 198/198 (fixtures: `fixtures/plfix.mjs`, `fixtures/mock-ext-rc13.mjs`) |
 | Env | `PL_DETERMINISTIC_TAPS=0` (taps go to the agent) |
