@@ -31,10 +31,13 @@ function fakeDb() {
   return { g, pref, async query(sql, p = []) {
     const s = sql.replace(/\s+/g, ' ').trim()
     if (s.startsWith('INSERT INTO pl_adapter_guidance')) {
-      const ev = s.includes("'provision_ack'") ? 'provision_ack' : s.includes("'proactive'") ? 'proactive' : p[3]
+      const ev = s.includes("'provision_ack'") ? 'provision_ack' : s.includes("'proactive'") ? 'proactive' : s.includes("'status'") ? 'status' : p[3]
       if (g.some((r) => r.c === p[0] && r.h === p[1] && r.m === p[2] && r.e === ev)) return { rows: [], rowCount: 0 }
-      const r = { id: ++seq, c: p[0], h: p[1], m: p[2], e: ev, stage: null, posted: null }; g.push(r); return { rows: [{ id: r.id }], rowCount: 1 }
+      const r = { id: ++seq, c: p[0], h: p[1], m: p[2], e: ev, stage: null, posted: null, t: new Date() }; g.push(r); return { rows: [{ id: r.id }], rowCount: 1 }
     }
+    // 2026-10-23 onboarding status card: its UPDATE (literal stage) and the history read it composes from
+    if (s.startsWith("UPDATE pl_adapter_guidance SET stage='status_note'")) { const r = g.find((x) => x.id === p[0]); if (r) { r.stage = 'status_note'; r.posted = p[1] } return { rows: [], rowCount: r ? 1 : 0 } }
+    if (s.startsWith('SELECT event, stage, message_id, created_at FROM pl_adapter_guidance WHERE cw_conversation=$1 AND wa_hash=$2 AND (event IN')) { const rows = g.filter((x) => x.c === p[0] && x.h === p[1] && x.e !== 'status').reverse().map((x) => ({ event: x.e, stage: x.stage, message_id: x.m, created_at: x.t })); return { rows, rowCount: rows.length } }
     if (s.startsWith('UPDATE pl_adapter_guidance SET stage')) { const r = g.find((x) => x.id === p[0]); if (r) { r.stage = p[1]; r.posted = p[2] } return { rows: [], rowCount: r ? 1 : 0 } }
     if (s === RELEASE_SQL) { const i = g.findIndex((x) => x.id === p[0]); if (i >= 0) g.splice(i, 1); return { rows: [], rowCount: i >= 0 ? 1 : 0 } }
     if (s.startsWith('SELECT stage FROM pl_adapter_guidance')) { const r = g.find((x) => x.c === p[0] && x.h === p[1] && x.m === p[2] && x.e === p[3]); return { rows: r ? [{ stage: r.stage }] : [], rowCount: r ? 1 : 0 } }
@@ -84,7 +87,11 @@ function world({ j = J.active, status = 'pending', messages = [], lastInboundAgo
   return { posts, calls, db, h, cfg, f, st }
 }
 const who = (mid = 'm1') => ({ waId: WA, wamid: 'wamid.T1234567890', conversationId: '77', messageId: mid, content: '' })
-const lastPost = (w) => w.posts[w.posts.length - 1]
+// customer-facing post (the 2026-10-23 staff status card is a PRIVATE note and is asserted separately)
+const lastPost = (w) => [...w.posts].reverse().find((x) => x.private !== true)
+const pubCount = (w) => w.posts.filter((x) => x.private !== true).length   // customer-facing messages only
+const lastAny = (w) => w.posts[w.posts.length - 1]
+const privateNotes = (w) => w.posts.filter((x) => x.private === true)
 const postTitles = (p) => (p?.content_attributes?.items ?? []).map((i) => i.title)
 
 // 1. journey message + buttons per state (owner's examples)
@@ -190,21 +197,21 @@ async function proactive(w, key, ref = 'row1', over = {}) { const { body, sig } 
 { const w = world({ j: J.registered_no_call }); const r = await proactive(w, 'activated'); const p = lastPost(w)
   check('proactive activated @ registered_no_call: sent, first-call nudge with the state buttons', r.code === 'sent' && /now connected to your line/.test(p.content) && same(postTitles(p), EXPECT.registered_no_call)) }
 { const w = world({ j: J.active }); const r = await proactive(w, 'activated'); check('proactive activated @ active: ONE first-call message, covers first_call', r.code === 'sent' && same(r.covered, ['activated', 'first_call']) && /first call went through/.test(lastPost(w).content))
-  const r2 = await proactive(w, 'first_call'); check('...then first_call for the same hand-off -> duplicate, nothing posted', r2.code === 'duplicate' && w.posts.length === 1) }
-{ const w = world({ j: J.active }); await proactive(w, 'activated'); const r2 = await proactive(w, 'activated'); check('same verdict twice -> duplicate (one message)', r2.code === 'duplicate' && w.posts.length === 1) }
-{ const w = world({ j: J.active }); const r = await proactive(w, 'stalled:handoff_no_register'); check('stale stall verdict after the customer moved on -> superseded_by_state, nothing sent', r.code === 'superseded_by_state' && w.posts.length === 0) }
-{ const w = world({ j: J.activated_not_registered }); const r = await proactive(w, 'stalled:handoff_no_register'); check('CONTROL stall verdict while still not registered -> sent', r.code === 'sent' && w.posts.length === 1) }
+  const r2 = await proactive(w, 'first_call'); check('...then first_call for the same hand-off -> duplicate, nothing posted', r2.code === 'duplicate' && pubCount(w) === 1) }
+{ const w = world({ j: J.active }); await proactive(w, 'activated'); const r2 = await proactive(w, 'activated'); check('same verdict twice -> duplicate (one message)', r2.code === 'duplicate' && pubCount(w) === 1) }
+{ const w = world({ j: J.active }); const r = await proactive(w, 'stalled:handoff_no_register'); check('stale stall verdict after the customer moved on -> superseded_by_state, nothing sent', r.code === 'superseded_by_state' && pubCount(w) === 0) }
+{ const w = world({ j: J.activated_not_registered }); const r = await proactive(w, 'stalled:handoff_no_register'); check('CONTROL stall verdict while still not registered -> sent', r.code === 'sent' && pubCount(w) === 1) }
 { const w = world({ j: J.setup_not_activated }); const r = await proactive(w, 'stalled:link_not_opened'); check('link expired @ setup_not_activated -> sent with Continue setup', r.code === 'sent' && postTitles(lastPost(w))[0] === 'Continue setup') }
-{ const w = world({ j: J.active, status: 'open' }); const r = await proactive(w, 'first_call'); check('person holds the conversation -> held, nothing posted', r.code === 'held' && w.posts.length === 0) }
-{ const w = world({ j: J.active, lastInboundAgoS: 25 * 3600 }); const r = await proactive(w, 'first_call'); check('outside the 24 h window -> outside_window, nothing posted', r.code === 'outside_window' && w.posts.length === 0) }
+{ const w = world({ j: J.active, status: 'open' }); const r = await proactive(w, 'first_call'); check('person holds the conversation -> held, nothing posted', r.code === 'held' && pubCount(w) === 0) }
+{ const w = world({ j: J.active, lastInboundAgoS: 25 * 3600 }); const r = await proactive(w, 'first_call'); check('outside the 24 h window -> outside_window, nothing posted', r.code === 'outside_window' && pubCount(w) === 0) }
 { const w = world({ j: J.active, lastInboundAgoS: 3600 }); const r = await proactive(w, 'first_call'); check('CONTROL inside the window -> sent', r.code === 'sent') }
 { const w = world({ j: J.active }); await w.h._setPreference({ ...who('stop1') }, true); const p = lastPost(w)
   check('STOP: confirmation says no more automatic updates, chat still open', /won't get any more automatic updates/.test(p.content))
-  const r = await proactive(w, 'first_call'); check('after STOP -> proactive stopped, nothing more posted', r.code === 'stopped' && w.posts.length === 1)
+  const r = await proactive(w, 'first_call'); check('after STOP -> proactive stopped, nothing more posted', r.code === 'stopped' && pubCount(w) === 1)
   await w.h._setPreference({ ...who('start1') }, false); const r2 = await proactive(w, 'first_call'); check('after START -> proactive sent again', r2.code === 'sent') }
-{ const w = world({ j: J.active }); const r = await proactive(w, 'stalled:peer_absent_from_conf'); check('peer absent -> PRIVATE staff note only', r.code === 'sent' && lastPost(w).private === true) }
-{ const w = world({ j: { ...J.active, consent: { estate_suppressed: true, known: true } } }); const r = await proactive(w, 'first_call'); check('estate STOP (Meta STOP / doNotContact / revoked opt-in) -> stopped, nothing posted', r.code === 'stopped' && r.detail === 'estate_suppressed' && w.posts.length === 0) }
-{ const w = world({ j: { ...J.active, consent: { estate_suppressed: false, known: false } } }); const r = await proactive(w, 'first_call'); check('consent unreadable -> HELD (retried later), never assumed, nothing posted', r.code === 'held' && r.detail === 'consent_unknown' && w.posts.length === 0) }
+{ const w = world({ j: J.active }); const r = await proactive(w, 'stalled:peer_absent_from_conf'); check('peer absent -> PRIVATE staff note only', r.code === 'sent' && lastAny(w).private === true) }
+{ const w = world({ j: { ...J.active, consent: { estate_suppressed: true, known: true } } }); const r = await proactive(w, 'first_call'); check('estate STOP (Meta STOP / doNotContact / revoked opt-in) -> stopped, nothing posted', r.code === 'stopped' && r.detail === 'estate_suppressed' && pubCount(w) === 0) }
+{ const w = world({ j: { ...J.active, consent: { estate_suppressed: false, known: false } } }); const r = await proactive(w, 'first_call'); check('consent unreadable -> HELD (retried later), never assumed, nothing posted', r.code === 'held' && r.detail === 'consent_unknown' && pubCount(w) === 0) }
 { const w = world({ j: J.active, contactSearch: [] }); const r = await proactive(w, 'first_call'); check('no Chatwoot contact for the number -> no_conversation', r.code === 'no_conversation') }
 { const w = world({ j: J.active }); const { body } = req(w.cfg, 'first_call'); check('forged signature -> refused', !A.verifyProactive(body, 'x'.repeat(43), w.cfg).ok)
   const old = req(w.cfg, 'first_call', 'r', { iat: Math.floor(Date.now() / 1000) - 600 }); check('stale request (iat 10 min old) -> refused', !A.verifyProactive(old.body, old.sig, w.cfg).ok)

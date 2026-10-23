@@ -69,13 +69,16 @@ const db = { query: async (sql, p = []) => {
   if (s.startsWith('INSERT INTO pl_adapter_guidance (cw_conversation, wa_hash, message_id, event) VALUES ($1,$2,$3,$4)')
     || s.startsWith("INSERT INTO pl_adapter_guidance (cw_conversation, wa_hash, message_id, event) VALUES ($1,$2,$3,'recovery')")
     || s.startsWith("INSERT INTO pl_adapter_guidance (cw_conversation, wa_hash, message_id, event) VALUES ($1,$2,$3,'proactive')")
+    || s.startsWith("INSERT INTO pl_adapter_guidance (cw_conversation, wa_hash, message_id, event) VALUES ($1,$2,$3,'status')")
     || s.startsWith('INSERT INTO pl_adapter_guidance (cw_conversation, wa_hash, message_id, event, stage)')) {
-    const ev = s.includes("'recovery_pause'") ? 'recovery_pause' : s.includes("'recovery'") ? 'recovery' : s.includes("'proactive'") ? 'proactive' : p[3]
+    const ev = s.includes("'recovery_pause'") ? 'recovery_pause' : s.includes("'recovery'") ? 'recovery' : s.includes("'proactive'") ? 'proactive' : s.includes("'status'") ? 'status' : p[3]
     const stage = s.includes('event, stage)') ? p[3] : null
     if (G.some((r) => r.c === String(p[0]) && r.h === p[1] && r.m === p[2] && r.e === ev)) return R([])
     const r = { id: gid++, c: String(p[0]), h: p[1], m: p[2], e: ev, stage, created: new Date() }; G.push(r)
     return s.includes('RETURNING id') ? R([{ id: r.id }]) : R([{}])
   }
+  if (s.startsWith("UPDATE pl_adapter_guidance SET stage='status_note'")) { const r = G.find((x) => x.id === p[0]); if (r) r.stage = 'status_note'; return R(r ? [{}] : []) }
+  if (s.startsWith('SELECT event, stage, message_id, created_at FROM pl_adapter_guidance WHERE cw_conversation=$1 AND wa_hash=$2 AND (event IN')) return R(G.filter((x) => x.c === String(p[0]) && x.h === p[1] && x.e !== 'status').reverse().map((x) => ({ event: x.e, stage: x.stage, message_id: x.m, created_at: x.created })))
   if (s.startsWith('UPDATE pl_adapter_guidance SET stage=$2, posted_msg_id=$3 WHERE id=$1') || s.startsWith('UPDATE pl_adapter_guidance SET stage=$2 WHERE id=$1')) { const r = G.find((x) => x.id === p[0]); if (r) r.stage = p[1]; return R(r ? [{}] : []) }
   if (s === 'DELETE FROM pl_adapter_guidance WHERE id=$1') { const i = G.findIndex((x) => x.id === p[0]); if (i >= 0) G.splice(i, 1); return R(i >= 0 ? [{}] : []) }
   if (s === "DELETE FROM pl_adapter_guidance WHERE wa_hash=$1 AND event='recovery_pause'") { const n = G.filter((x) => x.h === p[0] && x.e === 'recovery_pause').length; for (let i = G.length - 1; i >= 0; i--) if (G[i].h === p[0] && G[i].e === 'recovery_pause') G.splice(i, 1); return { rows: [], rowCount: n } }

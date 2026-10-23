@@ -42,6 +42,9 @@ export function loadConfig(env = process.env) {
     // Activation recovery loop tools (owner correction 2026-10-18). OFF unless PL_RECOVERY_TOOLS=1: the working concierge never sees them;
     // they are for the Clawith target runtime at cutover. The customer-pause hold on stall reminders is always on (it only ever holds).
     recoveryTools: env.PL_RECOVERY_TOOLS === '1',
+    // 2026-10-23: the two onboarding labels are written with Chatwoot's labels endpoint, which OVERWRITES the conversation's whole label set (documented; there is no atomic add/remove),
+    // so a staff label added in the same round trip can be lost. OFF unless PL_ONBOARDING_LABELS=1; the private status note does not depend on it.
+    onboardingLabels: env.PL_ONBOARDING_LABELS === '1',
     // Optional Chatwoot team for pl_escalate (set to the SAME escalation target the relay's native handoff uses). Unset = open queue only.
     recoveryEscalationTeamId: /^\d{1,10}$/.test(env.PL_RECOVERY_ESCALATION_TEAM_ID ?? '') ? Number(env.PL_RECOVERY_ESCALATION_TEAM_ID) : null,
     // Onboarding through the native WhatsApp Flow (owner 2026-10-10). Default ON; PL_FLOW_ONBOARDING=0 restores the chat offer + '1' path.
@@ -601,7 +604,8 @@ export const RECOVERY_PLAYBOOKS = {
   no_link_issued: LINK_PLAYBOOK('A line exists but no setup link was ever issued.'),
   link_not_opened: LINK_PLAYBOOK('A setup link was sent, never opened, and has expired.'),
   link_opened_not_completed: LINK_PLAYBOOK('A setup link was opened (or its opening was not tracked) but setup did not finish, and it expired.'),
-  no_handoff: LINK_PLAYBOOK('The customer verified on the setup page but the line was never handed to Cloud Softphone.'),
+  // 2026-10-23: an in-chat link is marked verified when it is CREATED (verifiedBy chat_verified), so 'verified' here proves nothing the customer did.
+  no_handoff: LINK_PLAYBOOK('The setup link expired and the line was never handed to Cloud Softphone; whether the customer opened the link is not recorded.'),
   handoff_no_register: { observe: 'The line was handed to Cloud Softphone but the phone has not connected.', actions: ['check_connection', 'send_setup'], max: 3,
     customer: 'Open Cloud Softphone on this phone with internet; if it shows no line, tap the fresh "Set up my line" button.',
     success: 'progress.stage = registered (a SIP registration observed by the registration watcher)',
@@ -642,6 +646,131 @@ export function escalationPackage(p, attempts, reason) {
   return redactForNote(lines.join('\n'))
 }
 
+// ── onboarding status card for staff (2026-10-23, owner: make PL onboarding status understandable in Uplink) ──────────────────────────
+// ONE private Chatwoot note per event that says, in the order a person needs it, what is KNOWN and what is NOT: form completion, line provisioning,
+// setup-message ACCEPTANCE (never delivery/read), activation (hand-off to the app), link expiry, phone registration at the check time, the last
+// automated action, human-help state and who must act next. It reads only what the PL service journey and this adapter's own log already hold:
+// no new store, no new customer message, no link or credential. Two labels make the state filterable in the Uplink inbox; nothing else is touched.
+export const ONBOARDING_AWAITING_LABEL = 'pl-awaiting-customer'
+export const ONBOARDING_FAULT_LABEL = 'pl-technical-fault'
+const CONNECTED_REG = ['registered', 'reachable', 'lagged']
+const atZ = (ms) => (Number.isFinite(ms) ? `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')}Z` : 'unknown time')
+const rowMs = (r) => { const t = r?.created_at instanceof Date ? r.created_at.getTime() : Date.parse(r?.created_at); return Number.isFinite(t) ? t : NaN }
+const ONBOARDING_MSG = { proactive_link_expired: 'link-expired reminder to the customer', proactive_stalled: 'connection reminder to the customer', proactive_registered: 'connected message to the customer', proactive_first_call: 'first-call message to the customer' }
+/** Pure. One guidance row -> what the card may say about it. A customer send counts as ACCEPTED only when its row carries the stage written AFTER the post succeeded. */
+export function describeOnboardingAction(r) {
+  const ev = String(r?.event ?? ''), stage = r?.stage ?? null, at = rowMs(r)
+  if (ev === 'recovery') {
+    if (String(stage ?? '').startsWith('escalation')) return null              // the human-help line covers it
+    if (String(r.message_id ?? '').startsWith('fail:')) return { what: 'recovery step FAILED (nothing was sent)', failed: true, at }
+    return { what: 'recovery step to the customer', ok: /\|delivered$/.test(String(stage ?? '')), at }
+  }
+  if (ev === 'proactive') return stage === 'staff_note' ? { what: 'private staff note posted', private: true, at } : { what: ONBOARDING_MSG[stage] ?? 'reminder to the customer', ok: stage != null, at }
+  if (ev.startsWith('buttons:')) return { what: 'setup buttons to the customer', ok: ['setup_buttons', 'open_line_button'].includes(stage), at }
+  return { what: 'reply to the customer', ok: stage != null, at }                // flow_done and act:* rows (deliverOwn writes the stage after the post)
+}
+/** Pure. `hist` = this conversation's guidance rows, newest first (null = unreadable). trigger.kind: 'flow_done' | 'stalled' | 'peer_absent'. */
+export function composeOnboardingStatus({ j, hist, trigger = {}, nowMs = Date.now() }) {
+  const f = j?.facts ?? {}
+  const st = j?.state
+  const connected = CONNECTED_REG.includes(f.registration)
+  const rows = Array.isArray(hist) ? hist : []
+  const L = [`📋 Personal Line onboarding status (automated, staff only) - as of ${atZ(nowMs)}`, `Source: PL service journey read at that time + this adapter's send log. A value with no source below is marked unknown.`]
+  if (trigger.kind === 'flow_done') L.push(`1. Signup form: completed according to the form's own report (customer response received).`)
+  L.push(j?.has_line === true ? `2. Line provisioned: YES (${f.did_masked ?? 'number on file'}).` : `2. Line provisioned: NO account or line found at this check.`)
+  const btn = rows.find((r) => String(r.event).startsWith('buttons:'))
+  if (btn && ['setup_buttons', 'open_line_button'].includes(btn.stage)) L.push(`3. Setup message: buttons ACCEPTED by the WhatsApp API at ${atZ(rowMs(btn))}. Delivered/read: not recorded.`)
+  else if (btn) L.push(`3. Setup message: a send was attempted at ${atZ(rowMs(btn))}; acceptance was not confirmed.`)
+  else L.push(Array.isArray(hist) ? `3. Setup message: no send recorded in this adapter's log.` : `3. Setup message: send history unreadable (unknown).`)
+  if (st === 'setup_not_activated') L.push(`4. Activation: NOT complete - no hand-off to Cloud Softphone is recorded.`)
+  else if (st === 'activated_not_registered') L.push(`4. Activation: line handed to Cloud Softphone (recorded); the phone has not connected yet.`)
+  else if (['registered_no_call', 'active', 'attention'].includes(st)) L.push(`4. Activation: complete (the phone has registered).`)
+  else if (st === 'no_line') L.push(`4. Activation: not started (no line).`)
+  else L.push(`4. Activation: unknown (journey state unavailable).`)
+  if (trigger.kind === 'stalled' && ['stalled:no_handoff', 'stalled:link_not_opened'].includes(trigger.key)) L.push(`5. Setup link: EXPIRED without a hand-off (registration watch). Whether the customer opened it is not recorded.`)
+  else if (st === 'setup_not_activated') L.push(`5. Setup link: expiry not checked in this note; whether it was opened is not recorded.`)
+  const regUnknown = f.registration == null || f.registration === 'unknown' || j?.registration_known === false || !j
+  L.push(connected ? `6. Phone registration: connected at the check above.` : regUnknown ? `6. Phone registration: unknown (not readable at the check above).` : `6. Phone registration: ABSENT at the check above (a later check may differ).`)
+  const act = rows.map(describeOnboardingAction).find((x) => x)
+  if (!Array.isArray(hist)) L.push(`7. Last automated action: history unreadable (unknown).`)
+  else if (!act) L.push(`7. Last automated action: none recorded.`)
+  else if (act.private) L.push(`7. Last automated action: ${act.what} at ${atZ(act.at)}.`)
+  else if (act.failed) L.push(`7. Last automated action: ${act.what} at ${atZ(act.at)}.`)
+  else L.push(act.ok ? `7. Last automated action: ${act.what} at ${atZ(act.at)} (accepted by the API; delivery/read not recorded).` : `7. Last automated action: ${act.what} attempted at ${atZ(act.at)}; acceptance was not confirmed.`)
+  L.push(st === 'active' ? `8. Working service: YES - an answered call is on record.` : `8. Working service: NOT claimed - needs phone registration and an answered call${st === 'registered_no_call' ? ' (phone connected, no answered call yet)' : ''}.`)
+  const esc = rows.find((r) => r.event === 'recovery' && String(r.stage ?? '').startsWith('escalation_open'))
+  L.push(esc ? `9. Human help: REQUESTED at ${atZ(rowMs(esc))}. Whether a person has accepted it is NOT tracked in this note - check the thread for a staff reply or the label pl-stall-accepted.` : `9. Human help: none requested.`)
+  let next
+  if (trigger.kind === 'peer_absent') next = `TECHNICAL FAULT - the SIP peer for this line is missing on the voice server. Staff/telecom action required; the customer cannot fix it.`
+  else if (esc) next = `HUMAN HELP REQUESTED - confirm in the thread that a person has accepted it (staff reply or label pl-stall-accepted); until then it is still waiting for a person.`
+  else if (st === 'active') next = `None - line working.`
+  else if (['registered_no_call', 'attention'].includes(st)) next = `None required - monitor; customer can make a first call.`
+  else if (['setup_not_activated', 'activated_not_registered'].includes(st)) next = `AWAITING CUSTOMER - they can tap Continue setup. Staff need not act unless the customer replies or asks for help. No assignee is implied.`
+  else next = `Check the account in the operator view; do not guess its stage.`
+  L.push(`Next: ${next}`)
+  const labels = trigger.kind === 'peer_absent' ? { add: [ONBOARDING_FAULT_LABEL], remove: [ONBOARDING_AWAITING_LABEL] }
+    : (!esc && ['setup_not_activated', 'activated_not_registered'].includes(st)) ? { add: [ONBOARDING_AWAITING_LABEL], remove: [ONBOARDING_FAULT_LABEL] }
+    : { add: [], remove: [ONBOARDING_AWAITING_LABEL, ONBOARDING_FAULT_LABEL] }
+  return { text: redactForNote(L.join('\n')).slice(0, 1500), labels }
+}
+/** Apply the two onboarding labels ONLY when the conversation's current label set was read (the endpoint replaces the set), and only if something changes. Never throws. */
+async function applyOnboardingLabels(cfg, f, conversationId, labels) {
+  if (!cfg.onboardingLabels) return   // default OFF: the labels endpoint overwrites the set (see loadConfig)
+  try {
+    const conv = await cw(cfg, `/conversations/${conversationId}`, f).catch(() => null)
+    if (Array.isArray(conv?.labels) && (labels.add.some((l) => !conv.labels.includes(l)) || labels.remove.some((l) => conv.labels.includes(l)))) await addLabels(cfg, conversationId, conv, labels.add, f, labels.remove, true)
+  } catch { /* labels are additive; the note stands */ }
+}
+/** Label-only refresh (no note) for paths that do not post a card, so a held / out-of-window / stopped verdict cannot leave a stale label. Never throws. */
+export async function syncOnboardingLabels(cfg, f, { conversationId, j, trigger = {}, nowMs = Date.now() }) {
+  if (!cfg.onboardingLabels) return
+  try { await applyOnboardingLabels(cfg, f, conversationId, composeOnboardingStatus({ j, hist: [], trigger, nowMs }).labels) } catch { /* never throws */ }
+}
+/**
+ * Post the status card once per `claimKey` (idempotent: a repeated completion event or tick posts nothing). Private note only; two labels only.
+ * Never throws and never changes what the caller returns: a failure releases the claim so a later event can retry. Labels are touched only when the
+ * conversation's current labels were READ (the labels endpoint replaces the set; an unreadable set is never overwritten).
+ */
+export async function postOnboardingStatus(cfg, db, f, { conversationId, h, j, trigger, claimKey, nowMs = Date.now() }) {
+  let id = null
+  try {
+    id = (await db.query(`INSERT INTO pl_adapter_guidance (cw_conversation, wa_hash, message_id, event) VALUES ($1,$2,$3,'status') ON CONFLICT DO NOTHING RETURNING id`, [conversationId, h, claimKey])).rows[0]?.id ?? null
+    if (!id) return { code: 'duplicate' }
+    let hist = null
+    try { hist = (await db.query(`SELECT event, stage, message_id, created_at FROM pl_adapter_guidance WHERE cw_conversation=$1 AND wa_hash=$2 AND (event IN ('buttons:flow_done','buttons:recovery','buttons:next_step','buttons:open_line','proactive','recovery','flow_done') OR event LIKE 'act:%') ORDER BY id DESC LIMIT 50`, [conversationId, h])).rows } catch { hist = null }
+    const { text, labels } = composeOnboardingStatus({ j, hist, trigger, nowMs })
+    const posted = await cwPost(cfg, `/conversations/${conversationId}/messages`, { content: text, message_type: 'outgoing', private: true }, f).catch(() => null)
+    if (!posted?.id) { await db.query(`DELETE FROM pl_adapter_guidance WHERE id=$1`, [id]).catch(() => {}); return { code: 'failed' } }
+    await db.query(`UPDATE pl_adapter_guidance SET stage='status_note', posted_msg_id=$2 WHERE id=$1`, [id, String(posted.id)]).catch(() => {})
+    await applyOnboardingLabels(cfg, f, conversationId, labels)
+    return { code: 'posted' }
+  } catch {
+    if (id) await db.query(`DELETE FROM pl_adapter_guidance WHERE id=$1`, [id]).catch(() => {})
+    return { code: 'failed' }
+  }
+}
+
+// The status card is additive and NEVER on the caller's clock. The relay (20 s) and plsvc (20 s) abort the call that carries a flow_done / proactive event, and the relay answers an
+// aborted flow_done with a PUBLIC fallback message even though the setup buttons were already delivered - so even a bounded wait adds latency that can turn a 16-20 s success into
+// a duplicate customer message (Codex-independent finding, PM 2026-10-23). The card is therefore started and DETACHED: the caller's answer never waits for it. Failures are swallowed
+// inside postOnboardingStatus; a cap (statusLimits.maxPending, slots reclaimed after maxAgeMs) keeps a stuck Chatwoot from piling up work (a dropped card is cosmetic and staff-only).
+// A slot is also released after statusLimits.maxAgeMs even if the work never settles (Codex review 2026-10-23: a stuck request must not consume the cap for the life of the process).
+export const statusLimits = { maxPending: 50, maxAgeMs: 60_000 }
+const pendingStatus = new Set()
+export const statusStats = { started: 0, dropped: 0 }
+export function detachStatus(startPromise) {
+  try {
+    if (pendingStatus.size >= statusLimits.maxPending) { statusStats.dropped++; return }
+    statusStats.started++
+    let timer = null
+    const t = Promise.resolve().then(startPromise).catch(() => {}).finally(() => { clearTimeout(timer); pendingStatus.delete(t) })
+    pendingStatus.add(t)
+    timer = setTimeout(() => pendingStatus.delete(t), statusLimits.maxAgeMs)
+    timer.unref?.()
+  } catch { /* never throws */ }
+}
+/** Tests / graceful shutdown only: resolves when every detached card has finished (never used on a request path). */
+export const settleStatus = () => Promise.allSettled([...pendingStatus])
 export function makeHandlers(cfg, db, stats, f = fetch) {
   // One customer message + one event = ONE delivered message (the model can call a tool twice in a turn). Never claims a message that was not posted.
   async function deliverOwn(who, event, build) {
@@ -772,14 +901,19 @@ export function makeHandlers(cfg, db, stats, f = fetch) {
       case 'flow_done': {
         // Option B: the signup Flow closed with a line created but not yet in the app -> the large setup buttons, sent as the reply to
         // the Flow-completion message. Anything else (or the buttons failing) -> the existing completion message, unchanged.
+        // 2026-10-23: every outcome now carries the journey state it was chosen from (the buttons branch used to omit it, so the relay's staff note
+        // read "verified state: unknown" on a success), and ONE private status card says what is and is not known. Neither changes what the customer receives.
+        const status = () => detachStatus(() => postOnboardingStatus(cfg, db, f, { conversationId: who.conversationId, h: waHash(cfg, who.waId), j, trigger: { kind: 'flow_done' }, claimKey: `flow_done:${who.messageId}` }))
+        const withState = async (out) => { if (out?.ok) { status(); return { ...out, result: { ...out.result, state: j.state } } } return out }
         if (j.state === 'setup_not_activated') {
           const b = await deliverSetupButtons(who, 'flow_done')
-          if (b.ok) return b.out
+          if (b.ok) return withState(b.out)
           // Unknown outcome (timeout): buttons may have been delivered - never add a second message.
-          if (b.sent === 'unknown' || b.code === 'conversation_not_ai_owned') return b.out
+          if (b.sent === 'unknown') { status(); return { ...b.out, result: { ...b.out.result, state: j.state } } }
+          if (b.code === 'conversation_not_ai_owned') return b.out
           // Nothing sent, or the store buttons went out but the setup button did not: the completion text gives the customer a way on.
         }
-        return deliverOwn(who, 'flow_done', async () => { const g = composeFlowDone(j); return g ? { g, extra: { state: j.state } } : { refusal: refuse('nothing_to_say') } })
+        return withState(await deliverOwn(who, 'flow_done', async () => { const g = composeFlowDone(j); return g ? { g, extra: { state: j.state } } : { refusal: refuse('nothing_to_say') } }))
       }
       case 'menu': return say(composeMenu(j))
       case 'menu_flow': {
@@ -1166,10 +1300,24 @@ async function conversationFor(cfg, waId, f) {
   if (!mine.length) return { ok: false, why: 'no_conversation' }
   return { ok: true, conversationId: String(mine[0].id) }
 }
+/** Verdict outcomes that send nothing. The journey is still read so the two onboarding labels cannot go stale (e.g. a phone that connected while the 24 h window was closed). */
+const PROACTIVE_NO_SEND = new Set(['held', 'outside_window', 'stopped', 'superseded_by_state'])
 export async function handleProactive(cfg, db, stats, b, f = fetch, nowMs = Date.now()) {
+  const ctx = {}
+  const res = await handleProactiveCore(cfg, db, stats, b, f, nowMs, ctx)
+  if (cfg.onboardingLabels && PROACTIVE_NO_SEND.has(res?.code) && ctx.conversationId && b.key !== 'stalled:peer_absent_from_conf') {
+    try {
+      const jr = await pl(cfg, stats, 'account/journey', { waId: String(b.wa_id), conversationId: ctx.conversationId, wamid: `proactive.${b.ref}`, messageId: `proactive:${b.key}:${b.ref}` }, {}, {}, f)
+      if (jr.code === 'journey') detachStatus(() => syncOnboardingLabels(cfg, f, { conversationId: ctx.conversationId, j: jr.data, trigger: String(b.key).startsWith('stalled:') ? { kind: 'stalled', key: b.key } : { kind: 'event', key: b.key }, nowMs }))
+    } catch { /* the verdict's own outcome is returned unchanged */ }
+  }
+  return res
+}
+async function handleProactiveCore(cfg, db, stats, b, f, nowMs, ctx) {
   const fc = await conversationFor(cfg, String(b.wa_id), f).catch(() => ({ ok: false, why: 'chatwoot_unreachable' }))
   if (!fc.ok) return { code: fc.why === 'chatwoot_unreachable' ? 'failed' : 'no_conversation', detail: fc.why }
   const conversationId = fc.conversationId
+  ctx.conversationId = conversationId
   const conv = await cw(cfg, `/conversations/${conversationId}`, f).catch(() => null)
   if (!conv) return { code: 'failed', detail: 'conversation_unreadable' }
   const h = waHash(cfg, String(b.wa_id))
@@ -1181,6 +1329,8 @@ export async function handleProactive(cfg, db, stats, b, f = fetch, nowMs = Date
     const posted = await cwPost(cfg, `/conversations/${conversationId}/messages`, { content: STAFF_NOTE_PEER_ABSENT, message_type: 'outgoing', private: true }, f).catch(() => null)
     if (!posted?.id) { await db.query(`DELETE FROM pl_adapter_guidance WHERE id=$1`, [id]).catch(() => {}); return { code: 'failed', detail: 'note_not_posted' } }
     await db.query(`UPDATE pl_adapter_guidance SET stage='staff_note', posted_msg_id=$2 WHERE id=$1`, [id, String(posted.id)])
+    // 2026-10-23: the note above already says it; only the technical-fault label is added (no second note, no extra journey read), so staff can filter it from a customer who simply has not acted.
+    detachStatus(() => syncOnboardingLabels(cfg, f, { conversationId, trigger: { kind: 'peer_absent', key: b.key } }))
     return { code: 'sent' }
   }
   if (conv.status !== 'pending') return { code: 'held', detail: `status_${conv.status}` }
@@ -1217,6 +1367,8 @@ export async function handleProactive(cfg, db, stats, b, f = fetch, nowMs = Date
     content_attributes: { items: g.choices.map((c) => ({ title: c.title, value: c.value })) } }, f).catch(() => null)
   if (!posted?.id) { await release(); return { code: 'failed', detail: 'send_failed' } }
   await db.query(`UPDATE pl_adapter_guidance SET stage=$2, posted_msg_id=$3 WHERE id=$1`, [id, g.stage, String(posted.id)])
+  // 2026-10-23: refresh the staff status card after an automated customer message (also clears the awaiting label once the phone has connected).
+  detachStatus(() => postOnboardingStatus(cfg, db, f, { conversationId, h, j: r.data, trigger: String(b.key).startsWith('stalled:') ? { kind: 'stalled', key: b.key } : { kind: 'event', key: b.key }, claimKey: `status:${b.key}:${b.ref}`, nowMs }))
   return { code: 'sent', covered: g.covered ?? [b.key], stage: g.stage }
 }
 
@@ -1284,10 +1436,11 @@ export function redactForNote(text) {
     .replace(/[A-Za-z0-9_-]{24,}/g, '[redacted]')
     .slice(0, 1500)
 }
-async function addLabels(cfg, conversationId, conv, add, f, remove = []) {
+async function addLabels(cfg, conversationId, conv, add, f, remove = [], strict = false) {
   // Chatwoot's labels endpoint REPLACES the set (no atomic add), so re-read the labels immediately before writing: a label a person changed
   // while the note was being posted is kept (Codex re-review 2026-10-18). Residual race: one round trip. Unreadable -> the earlier snapshot.
   const fresh = await cw(cfg, `/conversations/${conversationId}`, f).catch(() => null)
+  if (strict && !Array.isArray(fresh?.labels)) return   // onboarding labels: an unreadable current set is never overwritten from an older snapshot
   const cur = Array.isArray(fresh?.labels) ? fresh.labels : Array.isArray(conv?.labels) ? conv.labels : []
   const next = [...new Set([...cur.filter((l) => !remove.includes(l)), ...add])]
   if (next.length === cur.length && next.every((l) => cur.includes(l))) return
